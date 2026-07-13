@@ -1,0 +1,13 @@
+from typing import Protocol
+
+from app.schemas.messages import RobotStateMessage, VRFrame
+
+
+class RecorderSink(Protocol):
+    async def write_vr_frame(self, frame: VRFrame, server_mono_ns: int) -> None: ...
+
+    async def write_robot_state(self, state: RobotStateMessage, server_mono_ns: int) -> None: ...
+
+    async def write_event(self, event: object, server_mono_ns: int) -> None: ...
+
+    async def write_camera_frame(self, frame: object) -> None: ...
