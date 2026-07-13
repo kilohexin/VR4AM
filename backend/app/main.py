@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -33,14 +34,36 @@ def create_app() -> FastAPI:
         app.state.control = control
         app.state.recorder = control.recorder
         app.state.teleop_sender_tasks = set()
-        await backend.connect()
-        await control.connect()
-        await control.start()
+        app.state.teleop_owner = None
+        app.state.teleop_owner_lock = asyncio.Lock()
+        backend_connect_started = False
+        backend_connected = False
+        primary_error: BaseException | None = None
+        cleanup_error: BaseException | None = None
         try:
+            backend_connect_started = True
+            await backend.connect()
+            backend_connected = True
+            await control.connect()
+            await control.start()
             yield
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
-            await control.stop()
-            await backend.disconnect()
+            if backend_connected:
+                try:
+                    await control.stop()
+                except BaseException as error:
+                    cleanup_error = error
+            if backend_connect_started:
+                try:
+                    await backend.disconnect()
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+            if primary_error is None and cleanup_error is not None:
+                raise cleanup_error
 
     app = FastAPI(lifespan=lifespan)
     app.include_router(health_router)
