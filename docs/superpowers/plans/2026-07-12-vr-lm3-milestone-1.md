@@ -615,7 +615,7 @@ class TeleopStateMachine:
 
     @property
     def can_arm(self) -> bool:
-        return self.mode in {TeleopMode.READY, TeleopMode.DISARMED} and self._grip_released
+        return self.mode == TeleopMode.READY and self._grip_released
 
     def connect(self) -> None:
         self.mode = TeleopMode.READY
@@ -628,7 +628,9 @@ class TeleopStateMachine:
     def observe_grip(self, pressed: bool) -> None:
         if not pressed:
             self._grip_released = True
-            if self.mode == TeleopMode.ACTIVE:
+            if self.mode == TeleopMode.DISARMED:
+                self.mode = TeleopMode.READY
+            elif self.mode == TeleopMode.ACTIVE:
                 self.mode = TeleopMode.HOLD
         elif self.mode in {TeleopMode.ARMED, TeleopMode.HOLD}:
             self.mode = TeleopMode.ACTIVE
