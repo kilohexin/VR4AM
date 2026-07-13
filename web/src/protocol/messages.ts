@@ -120,6 +120,10 @@ function isUnitInterval(value: unknown): value is number {
   return isFiniteNumber(value) && value >= 0 && value <= 1;
 }
 
+function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
 function isTupleOfFiniteNumbers(value: unknown, length: number): value is number[] {
   return Array.isArray(value) && value.length === length && value.every(isFiniteNumber);
 }
@@ -186,8 +190,8 @@ export function isVRFrame(value: unknown): value is VRFrame {
     value.v === PROTOCOL_VERSION &&
     value.type === 'vr_frame' &&
     typeof value.session_id === 'string' &&
-    value.session_id.length >= 1 &&
-    value.session_id.length <= 64 &&
+    codePointLength(value.session_id) >= 1 &&
+    codePointLength(value.session_id) <= 64 &&
     isNonNegativeInteger(value.seq) &&
     isNonNegativeNumber(value.client_mono_ms) &&
     typeof value.tracking_valid === 'boolean' &&
@@ -233,8 +237,8 @@ export function isClientControlMessage(value: unknown): value is ClientControlMe
     value.v !== PROTOCOL_VERSION ||
     !isEnumValue(CONTROL_TYPES, value.type) ||
     typeof value.request_id !== 'string' ||
-    value.request_id.length < 1 ||
-    value.request_id.length > 64
+    codePointLength(value.request_id) < 1 ||
+    codePointLength(value.request_id) > 64
   ) {
     return false;
   }

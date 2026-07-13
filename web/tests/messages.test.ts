@@ -87,4 +87,17 @@ describe('protocol guards', () => {
     expect(isRobotStateMessage({...robotFixture, server_mono_ns: -1})).toBe(false);
     expect(isClientControlMessage({v: 1, type: 'hello', request_id: ''})).toBe(false);
   });
+
+  it('counts session and request identifier limits by Unicode code points', () => {
+    const fortyEmoji = '😀'.repeat(40);
+    const sixtyFiveEmoji = '😀'.repeat(65);
+
+    expect(isVRFrame({...vrFixture, session_id: fortyEmoji})).toBe(true);
+    expect(isVRFrame({...vrFixture, session_id: sixtyFiveEmoji})).toBe(false);
+    expect(isVRFrame({...vrFixture, session_id: ''})).toBe(false);
+
+    expect(isClientControlMessage({v: 1, type: 'hello', request_id: fortyEmoji})).toBe(true);
+    expect(isClientControlMessage({v: 1, type: 'hello', request_id: sixtyFiveEmoji})).toBe(false);
+    expect(isClientControlMessage({v: 1, type: 'hello', request_id: ''})).toBe(false);
+  });
 });
