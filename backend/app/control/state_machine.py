@@ -11,6 +11,8 @@ class TeleopStateMachine:
         return self.mode == TeleopMode.READY and self._grip_released
 
     def connect(self) -> None:
+        if self.mode != TeleopMode.DISCONNECTED:
+            raise RuntimeError("connect_requires_disconnected")
         self.mode = TeleopMode.READY
         self._grip_released = False
 

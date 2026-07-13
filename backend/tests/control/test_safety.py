@@ -34,6 +34,21 @@ def test_linear_and_angular_speed_limits_apply_on_same_tick() -> None:
     assert Rotation.from_quat(actual.q).magnitude() == pytest.approx(0.012)
 
 
+@pytest.mark.parametrize("invalid_dt", [0.0, -0.02, float("nan"), float("inf")])
+def test_rejects_invalid_dt_without_polluting_velocity_state(invalid_dt: float) -> None:
+    limiter = SafetyLimiter()
+    previous = Pose(p=(0, 0, 0), q=IDENTITY)
+    requested = Pose(p=(1, 0, 0), q=tuple(Rotation.from_rotvec([0, 0, 1]).as_quat()))
+
+    with pytest.raises(ValueError, match="dt_must_be_positive_finite"):
+        limiter.limit(previous, requested, invalid_dt)
+
+    actual = limiter.limit(previous, requested, 0.02)
+    expected = SafetyLimiter().limit(previous, requested, 0.02)
+    assert actual.p == pytest.approx(expected.p)
+    assert abs(sum(a * b for a, b in zip(actual.q, expected.q, strict=True))) == pytest.approx(1.0)
+
+
 def test_rejects_anchor_envelope_violation() -> None:
     limiter = SafetyLimiter(anchor=(0, 0, 0))
     with pytest.raises(SafetyViolation, match="workspace_violation") as exc_info:

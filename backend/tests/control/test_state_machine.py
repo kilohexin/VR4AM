@@ -67,6 +67,17 @@ def test_disconnect_never_preserves_armed_state() -> None:
         machine.arm()
 
 
+def test_connect_cannot_bypass_disarmed_recovery() -> None:
+    machine = TeleopStateMachine()
+    arm_machine(machine)
+    machine.disarm()
+
+    with pytest.raises(RuntimeError, match="connect_requires_disconnected"):
+        machine.connect()
+
+    assert machine.mode == TeleopMode.DISARMED
+
+
 def test_disarmed_state_cannot_be_armed_directly() -> None:
     machine = TeleopStateMachine()
     arm_machine(machine)

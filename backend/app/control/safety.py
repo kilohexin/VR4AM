@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -37,6 +39,9 @@ class SafetyLimiter:
         self.angular_velocity[:] = 0
 
     def limit(self, previous: Pose, requested: Pose, dt: float) -> Pose:
+        if not math.isfinite(dt) or dt <= 0:
+            raise ValueError("dt_must_be_positive_finite")
+
         target = np.asarray(requested.p, dtype=float)
         if self.anchor is not None and np.any(np.abs(target - self.anchor) > self.envelope):
             raise SafetyViolation("workspace_violation")
