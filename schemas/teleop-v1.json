@@ -1,69 +1,18 @@
 ﻿{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
-    "VRFrame": {
-      "$defs": {
-        "ControllerState": {
-          "additionalProperties": false,
-          "properties": {
-            "p": {
-              "maxItems": 3,
-              "minItems": 3,
-              "prefixItems": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "number"
-                }
-              ],
-              "title": "P",
-              "type": "array"
-            },
-            "q": {
-              "maxItems": 4,
-              "minItems": 4,
-              "prefixItems": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "number"
-                }
-              ],
-              "title": "Q",
-              "type": "array"
-            },
-            "grip": {
-              "title": "Grip",
-              "type": "boolean"
-            },
-            "trigger": {
-              "maximum": 1.0,
-              "minimum": 0.0,
-              "title": "Trigger",
-              "type": "number"
-            }
-          },
-          "required": [
-            "p",
-            "q",
-            "grip",
-            "trigger"
-          ],
-          "title": "ControllerState",
-          "type": "object"
-        }
-      },
+    "BackendState": {
+      "enum": [
+        "DISCONNECTED",
+        "IDLE",
+        "MOVING",
+        "HOLD",
+        "FAULT"
+      ],
+      "title": "BackendState",
+      "type": "string"
+    },
+    "ClientControlMessage": {
       "additionalProperties": false,
       "properties": {
         "v": {
@@ -72,132 +21,152 @@
           "type": "integer"
         },
         "type": {
-          "const": "vr_frame",
+          "enum": [
+            "hello",
+            "arm_request",
+            "disarm",
+            "ping"
+          ],
           "title": "Type",
           "type": "string"
         },
-        "session_id": {
+        "request_id": {
           "maxLength": 64,
           "minLength": 1,
-          "title": "Session Id",
+          "title": "Request Id",
           "type": "string"
-        },
-        "seq": {
-          "minimum": 0,
-          "title": "Seq",
-          "type": "integer"
         },
         "client_mono_ms": {
-          "minimum": 0,
-          "title": "Client Mono Ms",
-          "type": "number"
-        },
-        "tracking_valid": {
-          "title": "Tracking Valid",
-          "type": "boolean"
-        },
-        "visibility": {
-          "enum": [
-            "visible",
-            "visible-blurred",
-            "hidden"
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Visibility",
-          "type": "string"
-        },
-        "right": {
-          "$ref": "#/$defs/ControllerState"
+          "default": null,
+          "title": "Client Mono Ms"
         }
       },
       "required": [
         "v",
         "type",
-        "session_id",
-        "seq",
-        "client_mono_ms",
-        "tracking_valid",
-        "visibility",
-        "right"
+        "request_id"
       ],
-      "title": "VRFrame",
+      "title": "ClientControlMessage",
+      "type": "object"
+    },
+    "ControllerState": {
+      "additionalProperties": false,
+      "properties": {
+        "p": {
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "P",
+          "type": "array"
+        },
+        "q": {
+          "maxItems": 4,
+          "minItems": 4,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Q",
+          "type": "array"
+        },
+        "grip": {
+          "title": "Grip",
+          "type": "boolean"
+        },
+        "trigger": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Trigger",
+          "type": "number"
+        }
+      },
+      "required": [
+        "p",
+        "q",
+        "grip",
+        "trigger"
+      ],
+      "title": "ControllerState",
+      "type": "object"
+    },
+    "Pose": {
+      "additionalProperties": false,
+      "properties": {
+        "p": {
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "P",
+          "type": "array"
+        },
+        "q": {
+          "maxItems": 4,
+          "minItems": 4,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Q",
+          "type": "array"
+        }
+      },
+      "required": [
+        "p",
+        "q"
+      ],
+      "title": "Pose",
       "type": "object"
     },
     "RobotStateMessage": {
-      "$defs": {
-        "BackendState": {
-          "enum": [
-            "DISCONNECTED",
-            "IDLE",
-            "MOVING",
-            "HOLD",
-            "FAULT"
-          ],
-          "title": "BackendState",
-          "type": "string"
-        },
-        "Pose": {
-          "additionalProperties": false,
-          "properties": {
-            "p": {
-              "maxItems": 3,
-              "minItems": 3,
-              "prefixItems": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "number"
-                }
-              ],
-              "title": "P",
-              "type": "array"
-            },
-            "q": {
-              "maxItems": 4,
-              "minItems": 4,
-              "prefixItems": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "number"
-                }
-              ],
-              "title": "Q",
-              "type": "array"
-            }
-          },
-          "required": [
-            "p",
-            "q"
-          ],
-          "title": "Pose",
-          "type": "object"
-        },
-        "TeleopMode": {
-          "enum": [
-            "DISCONNECTED",
-            "READY",
-            "ARMED",
-            "ACTIVE",
-            "HOLD",
-            "STALE",
-            "FAULT",
-            "DISARMED"
-          ],
-          "title": "TeleopMode",
-          "type": "string"
-        }
-      },
       "additionalProperties": false,
       "properties": {
         "v": {
@@ -308,7 +277,21 @@
       "title": "RobotStateMessage",
       "type": "object"
     },
-    "ClientControlMessage": {
+    "TeleopMode": {
+      "enum": [
+        "DISCONNECTED",
+        "READY",
+        "ARMED",
+        "ACTIVE",
+        "HOLD",
+        "STALE",
+        "FAULT",
+        "DISARMED"
+      ],
+      "title": "TeleopMode",
+      "type": "string"
+    },
+    "VRFrame": {
       "additionalProperties": false,
       "properties": {
         "v": {
@@ -317,41 +300,54 @@
           "type": "integer"
         },
         "type": {
-          "enum": [
-            "hello",
-            "arm_request",
-            "disarm",
-            "ping"
-          ],
+          "const": "vr_frame",
           "title": "Type",
           "type": "string"
         },
-        "request_id": {
+        "session_id": {
           "maxLength": 64,
           "minLength": 1,
-          "title": "Request Id",
+          "title": "Session Id",
           "type": "string"
         },
+        "seq": {
+          "minimum": 0,
+          "title": "Seq",
+          "type": "integer"
+        },
         "client_mono_ms": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
+          "minimum": 0,
+          "title": "Client Mono Ms",
+          "type": "number"
+        },
+        "tracking_valid": {
+          "title": "Tracking Valid",
+          "type": "boolean"
+        },
+        "visibility": {
+          "enum": [
+            "visible",
+            "visible-blurred",
+            "hidden"
           ],
-          "default": null,
-          "title": "Client Mono Ms"
+          "title": "Visibility",
+          "type": "string"
+        },
+        "right": {
+          "$ref": "#/$defs/ControllerState"
         }
       },
       "required": [
         "v",
         "type",
-        "request_id"
+        "session_id",
+        "seq",
+        "client_mono_ms",
+        "tracking_valid",
+        "visibility",
+        "right"
       ],
-      "title": "ClientControlMessage",
+      "title": "VRFrame",
       "type": "object"
     }
   }

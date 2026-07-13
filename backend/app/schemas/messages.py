@@ -13,7 +13,7 @@ JointVector = tuple[float, float, float, float, float, float]
 
 
 class StrictMessage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 def _finite(values: tuple[float, ...], name: str) -> tuple[float, ...]:
