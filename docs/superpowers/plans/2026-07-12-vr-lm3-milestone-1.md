@@ -1346,7 +1346,7 @@ Reset this filter to the actual TCP every time a new Grip anchor is captured. Ap
 
 - [ ] **Step 5: Implement RobotControl tick semantics**
 
-`tick()` must: reject missing/hidden/untracked frames; compute age from received PC timestamp; stop at 100 ms; observe Grip; capture anchor on `ARMED/HOLD -> ACTIVE`; clear and stop on `ACTIVE -> HOLD`; map and limit only after the anchor frame; command gripper only for delta `>0.02` or 100 ms; publish state with current mode and sample age. `run()` uses absolute deadlines and two-overrun shutdown. `stop()` is idempotent and calls backend stop with SHUTDOWN.
+`tick()` must: reject missing/hidden/untracked frames; compute age from received PC timestamp; stop at 100 ms; observe Grip; capture anchor on `ARMED/HOLD -> ACTIVE`; clear and stop on `ACTIVE -> HOLD`; map and limit only after the anchor frame; command the newest gripper value at no more than 10 Hz and only when its delta from the last sent value is `>0.02`; never queue historical values; publish state with current mode and sample age. `run()` uses absolute deadlines; lateness relative to the absolute deadline greater than 40 ms counts as an overrun, and two consecutive overruns fault and stop. `stop()` is idempotent and calls backend stop with SHUTDOWN.
 
 Use this exact ordering in `tick()`:
 
@@ -1372,7 +1372,7 @@ elif self.machine.mode == TeleopMode.ACTIVE and received.frame.seq != self.ancho
 self.last_seq = received.frame.seq
 ```
 
-`state_message()` reads the backend state; when machine mode is STALE or FAULT and backend state is no longer MOVING, it calls `machine.stop_complete()`. It then returns a copy with RobotControl's current `mode`, latest `ack_seq`, and sample age. This is the only STALE/FAULT to DISARMED completion path.
+`state_message()` reads the backend state and returns a copy with RobotControl's current `mode`, latest `ack_seq`, and sample age. `STALE` or `FAULT` must be returned in at least one 20 Hz state message before a stopped backend may call `machine.stop_complete()` and transition to `DISARMED`. This is the only STALE/FAULT to DISARMED completion path.
 
 - [ ] **Step 6: Run control tests and commit**
 
