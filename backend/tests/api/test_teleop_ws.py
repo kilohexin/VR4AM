@@ -380,3 +380,84 @@ async def test_simultaneous_receiver_and_sender_failures_choose_receiver_primary
         context.get("message") == "Task exception was never retrieved"
         for context in loop_contexts
     )
+
+
+@pytest.mark.asyncio
+async def test_external_session_cancellation_stays_primary_over_peer_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import teleop_ws
+
+    receiver_ready = asyncio.Event()
+    sender_ready = asyncio.Event()
+    receiver_cancelled = asyncio.Event()
+    sender_cancelled = asyncio.Event()
+    loop_contexts: list[dict[str, object]] = []
+
+    async def receiver_with_failing_cleanup(*args) -> None:
+        receiver_ready.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            receiver_cancelled.set()
+            raise RuntimeError("cleanup_peer_failed")
+
+    async def cancellable_sender(*args) -> None:
+        sender_ready.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            sender_cancelled.set()
+            raise
+
+    class FakeControl:
+        mode = TeleopMode.READY
+
+        def __init__(self) -> None:
+            self.on_disconnect = AsyncMock()
+
+    class FakeWebSocket:
+        def __init__(self, control: FakeControl) -> None:
+            self.app = SimpleNamespace(
+                state=SimpleNamespace(
+                    control=control,
+                    latest=object(),
+                    teleop_sender_tasks=set(),
+                    teleop_owner=None,
+                    teleop_owner_lock=asyncio.Lock(),
+                )
+            )
+
+        async def accept(self) -> None:
+            return None
+
+    monkeypatch.setattr(teleop_ws, "_receive_messages", receiver_with_failing_cleanup)
+    monkeypatch.setattr(teleop_ws, "_delayed_state_sender", cancellable_sender)
+    control = FakeControl()
+    websocket = FakeWebSocket(control)
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: loop_contexts.append(context))
+    try:
+        session = asyncio.create_task(teleop_ws.teleop_websocket(websocket))
+        await receiver_ready.wait()
+        await sender_ready.wait()
+        session.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await session
+
+        assert receiver_cancelled.is_set()
+        assert sender_cancelled.is_set()
+        assert control.on_disconnect.await_count == 1
+        assert websocket.app.state.teleop_owner is None
+        assert websocket.app.state.teleop_sender_tasks == set()
+        del session
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert not any(
+        context.get("message") == "Task exception was never retrieved"
+        for context in loop_contexts
+    )

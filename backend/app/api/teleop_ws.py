@@ -114,9 +114,10 @@ async def _run_coupled_session(
     sender_tasks.add(sender)
     wait_error: BaseException | None = None
     try:
-        await asyncio.wait(
-            {receiver, sender}, return_when=asyncio.FIRST_COMPLETED
-        )
+        with anyio.CancelScope(shield=True):
+            await asyncio.wait(
+                {receiver, sender}, return_when=asyncio.FIRST_COMPLETED
+            )
     except BaseException as error:
         wait_error = error
     finally:
@@ -132,15 +133,13 @@ async def _run_coupled_session(
                 )
         finally:
             sender_tasks.discard(sender)
+    if wait_error is not None:
+        raise wait_error
     for result in results:
         if isinstance(result, (asyncio.CancelledError, WebSocketDisconnect)):
             continue
         if isinstance(result, BaseException):
             raise result
-    if wait_error is not None and not isinstance(
-        wait_error, (asyncio.CancelledError, WebSocketDisconnect)
-    ):
-        raise wait_error
 
 
 @router.websocket("/ws/v1/teleop")
