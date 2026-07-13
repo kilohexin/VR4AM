@@ -8,6 +8,7 @@ from app.robots.base import BackendCommandError, StopReason
 from app.robots.lebai_adapter import RealLebaiAdapter
 from app.robots.sim_adapter import SimRobotAdapter
 from app.schemas.messages import BackendState
+from app.sim.ik import IKError
 from app.sim.kinematics import forward_pose
 
 
@@ -27,6 +28,34 @@ async def test_sim_adapter_accepts_tcp_and_gripper_commands() -> None:
         assert state.actual_tcp == target
     finally:
         await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_code",
+    ["ik_unreachable", "ik_singular", "joint_safety_window"],
+)
+async def test_sim_adapter_translates_ik_errors_without_mutating_command(
+    monkeypatch, error_code: str
+) -> None:
+    import app.robots.sim_adapter as sim_adapter_module
+
+    adapter = SimRobotAdapter()
+    original_target = adapter.robot.q + 0.1
+    adapter.robot.set_target_q(original_target)
+    adapter.command_id = 7
+    target = forward_pose(adapter.model.home_q, adapter.model)
+
+    def fail_ik(*args, **kwargs):
+        raise IKError(error_code)
+
+    monkeypatch.setattr(sim_adapter_module, "solve_ik", fail_ik)
+
+    with pytest.raises(BackendCommandError, match=f"^{error_code}$"):
+        await adapter.command_tcp(target, command_id=99)
+
+    assert adapter.robot.target_q == pytest.approx(original_target)
+    assert adapter.command_id == 7
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ class VirtualRobot:
         self.target_q = None
 
     def step(self, dt: float) -> None:
+        previous_qd = self.qd.copy()
         if self.target_q is None:
             desired_qd = np.zeros(6, dtype=float)
         else:
@@ -50,6 +51,11 @@ class VirtualRobot:
         )
         self.q += self.qd * dt
 
-        if self.target_q is not None and np.max(np.abs(self.target_q - self.q)) < 1e-4:
+        can_stop_within_acceleration_limit = np.max(np.abs(previous_qd)) <= max_velocity_change
+        if (
+            self.target_q is not None
+            and np.max(np.abs(self.target_q - self.q)) < 1e-4
+            and can_stop_within_acceleration_limit
+        ):
             self.q = self.target_q.copy()
             self.qd[:] = 0.0

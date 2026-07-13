@@ -6,9 +6,9 @@ import time
 
 import numpy as np
 
-from app.robots.base import StopReason
+from app.robots.base import BackendCommandError, StopReason
 from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
-from app.sim.ik import solve_ik
+from app.sim.ik import IKError, solve_ik
 from app.sim.kinematics import forward_pose
 from app.sim.lm3_model import LM3Model
 from app.sim.virtual_robot import VirtualRobot
@@ -53,7 +53,10 @@ class SimRobotAdapter:
 
     async def command_tcp(self, target: Pose, command_id: int) -> None:
         async with self._lock:
-            result = solve_ik(target, self.robot.q, self.model)
+            try:
+                result = solve_ik(target, self.robot.q, self.model)
+            except IKError as exc:
+                raise BackendCommandError(str(exc)) from exc
             self.robot.set_target_q(result.q)
             self.command_id = command_id
 

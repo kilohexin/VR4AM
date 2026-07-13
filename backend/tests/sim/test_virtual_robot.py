@@ -34,6 +34,33 @@ def test_virtual_robot_respects_speed_and_acceleration_limits() -> None:
         previous_qd = qd.copy()
 
 
+def test_retarget_and_final_convergence_remain_acceleration_limited() -> None:
+    model = LM3Model()
+    robot = VirtualRobot(model)
+    dt = 0.02
+    max_acceleration = model.max_joint_accel_radps2 + 1e-12
+    robot.set_target_q(np.asarray(model.home_q) + 1.0)
+
+    for _ in range(24):
+        previous_qd = robot.qd.copy()
+        robot.step(dt)
+        assert np.max(np.abs((robot.qd - previous_qd) / dt)) <= max_acceleration
+
+    assert robot.qd == pytest.approx([0.48] * 6)
+    next_limited_qd = robot.qd - model.max_joint_accel_radps2 * dt
+    retarget = robot.q + next_limited_qd * dt
+    robot.set_target_q(retarget)
+
+    for _ in range(1000):
+        previous_qd = robot.qd.copy()
+        robot.step(dt)
+        assert np.max(np.abs((robot.qd - previous_qd) / dt)) <= max_acceleration
+        if np.max(np.abs(robot.q - retarget)) < 1e-12 and np.all(robot.qd == 0.0):
+            break
+    else:
+        pytest.fail("virtual robot did not converge after retargeting")
+
+
 def test_virtual_robot_is_deterministic_for_the_same_steps() -> None:
     model = LM3Model()
     first = VirtualRobot(model)
