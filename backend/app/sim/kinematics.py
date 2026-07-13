@@ -1,4 +1,6 @@
+import math
 from collections.abc import Sequence
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -14,8 +16,11 @@ def _mdh(theta: float, d: float, a: float, alpha: float) -> np.ndarray:
 def forward_matrix(q: Sequence[float], model: LM3Model) -> np.ndarray:
     if len(q) != 6:
         raise ValueError("LM3 requires six joints")
+    joint_values = tuple(float(value) for value in q)
+    if not all(math.isfinite(value) for value in joint_values):
+        raise ValueError("LM3 joint values must be finite")
     transform = np.eye(4)
-    for theta, d, a, alpha in zip(q, model.d_m, model.a_prev_m, model.alpha_prev_rad):
+    for theta, d, a, alpha in zip(joint_values, model.d_m, model.a_prev_m, model.alpha_prev_rad):
         transform = transform @ _mdh(float(theta), d, a, alpha)
     tcp = np.eye(4)
     tcp[:3, 3] = model.tcp_offset_m
