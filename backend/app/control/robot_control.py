@@ -87,6 +87,7 @@ class RobotControl:
 
     async def connect(self) -> None:
         self.machine.connect()
+        self._clear_stop_episode()
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
@@ -103,6 +104,8 @@ class RobotControl:
         self.machine.arm()
 
     async def disarm(self) -> None:
+        if self.machine.mode in {TeleopMode.STALE, TeleopMode.FAULT}:
+            return
         if self.machine.mode == TeleopMode.ACTIVE:
             self.mapper.clear()
         await self.backend.stop(StopReason.GRIP_RELEASED)
@@ -111,6 +114,7 @@ class RobotControl:
     async def on_disconnect(self) -> None:
         await self.backend.stop(StopReason.DISCONNECT)
         self.mapper.clear()
+        self._clear_stop_episode()
         self.machine.disconnect()
 
     async def stop(self) -> None:
@@ -269,3 +273,8 @@ class RobotControl:
             self._fault = fault
             await self.backend.stop(StopReason.FAULT)
         self._pending_stop_completion = True
+
+    def _clear_stop_episode(self) -> None:
+        self._pending_stop_completion = False
+        self._hard_stop_completion = False
+        self._fault = None

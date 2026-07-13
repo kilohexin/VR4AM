@@ -300,6 +300,70 @@ async def test_hard_stale_preserves_fault_until_fault_is_published() -> None:
 
 
 @pytest.mark.asyncio
+async def test_disarm_cannot_bypass_unpublished_stale_mode() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    clock.advance_ms(100)
+    await control.tick()
+    assert control.mode == TeleopMode.STALE
+
+    await control.disarm()
+
+    assert control.mode == TeleopMode.STALE
+    assert backend.stops == [StopReason.STALE]
+    stale_state = await control.state_message()
+    assert stale_state.mode == TeleopMode.STALE
+    assert control.mode == TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_disarm_cannot_bypass_unpublished_fault_mode() -> None:
+    control, latest, backend, clock = make_control()
+    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    latest.publish(frame(3, True, p=(0, 1.2, -0.31)), clock.now_ns())
+    await control.tick()
+    assert control.mode == TeleopMode.FAULT
+
+    await control.disarm()
+
+    assert control.mode == TeleopMode.FAULT
+    assert backend.stops[-1] == StopReason.FAULT
+    fault_state = await control.state_message()
+    assert fault_state.mode == TeleopMode.FAULT
+    assert control.mode == TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_disconnect_clears_old_hard_stop_episode_before_new_soft_stale() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    backend.robot_state = BackendState.MOVING
+    latest.publish(frame(1, False, session_id="old"), clock.now_ns())
+    clock.advance_ms(251)
+    await control.tick()
+    assert control.mode == TeleopMode.STALE
+
+    await control.on_disconnect()
+    await control.connect()
+    latest.publish(frame(1, False, session_id="new"), clock.now_ns())
+    await control.tick()
+    clock.advance_ms(100)
+    await control.tick()
+
+    new_stale_state = await control.state_message()
+    assert new_stale_state.mode == TeleopMode.STALE
+    assert control.mode == TeleopMode.STALE
+    backend.robot_state = BackendState.IDLE
+    second_stale_state = await control.state_message()
+    assert second_stale_state.mode == TeleopMode.STALE
+    assert control.mode == TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
 async def test_reconnect_requires_release_and_explicit_arm() -> None:
     control, latest, backend, clock = make_control()
     await connect_release_arm(control, latest, clock)
