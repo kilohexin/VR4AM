@@ -21,10 +21,19 @@
 - Cross-process pose messages use metres and quaternion `[x,y,z,w]`; Lebai Z-Y-X Euler values do not cross the WebSocket.
 - PC `time.monotonic_ns()` is the authoritative clock.
 - GLB is visual only; Python theoretical LM3 modified-DH kinematics is authoritative for simulation state.
-- The simulator uses a session safety window `q_ref 卤 蟺`, maximum joint speed `0.5 rad/s`, and acceleration `1.0 rad/s虏`; these are not hardware limits.
+- The simulator uses a session safety window `q_ref ± π`, maximum joint speed `0.5 rad/s`, and acceleration `1.0 rad/s²`; these are not hardware limits.
 - Milestone 1 contains no Cannon-es, physical object grasping, camera capture, dataset writer, MR passthrough, or real robot motion.
 - User-facing UI and errors are Chinese.
 - Use TDD for every behavior task and commit after every task.
+
+## Approved Implementation Clarifications (2026-07-13)
+
+- An overrun is measured as lateness relative to the absolute monotonic deadline, not as raw iteration execution time. Two consecutive overruns greater than `40 ms` close the command gate and stop with `FAULT`; publish `FAULT` at least once, then transition to `DISARMED` after stop completion.
+- Recovery is strictly `DISARMED -> READY -> ARMED`: a valid `grip=false` frame unlocks `READY`, and a new explicit `arm_request` is required for `ARMED`. Direct `DISARMED -> ARMED` is forbidden.
+- `STALE` must be observable in at least one 20 Hz state message before the stopped backend can complete the transition to `DISARMED`.
+- Gripper commands have a hard `10 Hz` ceiling. Accumulate the newest value and send it in an eligible 100 ms window only when its delta from the last command exceeds `0.02`; never queue historical gripper commands.
+- The Locked File Structure is the baseline layout. A later task's explicit `Create:` entry is an approved extension to it.
+- Corrupted symbols are interpreted as `q_ref ± π`, `home_q ± 0.35`, and `rad/s²`. The gripper uses the reference `Take 001` animation frames `0–20`. User-facing strings must be readable Chinese, never mojibake.
 
 ## Locked File Structure
 
@@ -958,7 +967,7 @@ def solve_ik(target: Pose, seed_q: Sequence[float], model: LM3Model, max_iterati
 
 - [ ] **Step 4: Generate deterministic reachability fixture and test it**
 
-Create `scripts/generate_reachability_fixture.py` in the implementation task with NumPy RNG seed `42`, sample 1000 joint vectors within `home_q 卤 0.35`, run FK, and write pose plus a seed perturbed by at most `0.05 rad` to `schemas/fixtures/sim-reachability-v1.json`. Add a parametrized test that loads all entries, calls `solve_ik`, counts successes, and asserts `successes >= 990`.
+Create `scripts/generate_reachability_fixture.py` in the implementation task with NumPy RNG seed `42`, sample 1000 joint vectors within `home_q ± 0.35`, run FK, and write pose plus a seed perturbed by at most `0.05 rad` to `schemas/fixtures/sim-reachability-v1.json`. Add a parametrized test that loads all entries, calls `solve_ik`, counts successes, and asserts `successes >= 990`.
 
 Exact generator body:
 
@@ -1595,8 +1604,8 @@ Create `web/tests/robotModel.test.ts`:
 import * as THREE from 'three'; import {expect,it} from 'vitest';
 import {createRobotModelForTest} from '../src/robot/robotModel';
 function scene(count=6){const root=new THREE.Group();for(let i=1;i<=count;i++){const n=new THREE.Group();n.name=`Joint${i}`;root.add(n)}return root}
-it('requires all six joints',()=>expect(()=>createRobotModelForTest(scene(5))).toThrow('缂哄皯鍏宠妭鑺傜偣: Joint6'));
-it('requires six joint values',()=>expect(()=>createRobotModelForTest(scene()).setJointAngles([0,1])).toThrow('闇€瑕?6 涓叧鑺傝'));
+it('requires all six joints',()=>expect(()=>createRobotModelForTest(scene(5))).toThrow('缺少关节节点: Joint6'));
+it('requires six joint values',()=>expect(()=>createRobotModelForTest(scene()).setJointAngles([0,1])).toThrow('需要 6 个关节角'));
 it('applies finite joint angles',()=>{const model=createRobotModelForTest(scene());model.setJointAngles([0.1,0.2,0.3,0.4,0.5,0.6]);expect(model.group.getObjectByName('Joint1')?.rotation.y).toBeCloseTo(0.1)});
 ```
 
@@ -1615,7 +1624,7 @@ Expected: FAIL on missing module.
 
 - [ ] **Step 3: Implement robotModel by adapting the reviewed reference**
 
-Reuse the reference node mapping exactly: `Joint1:y`, `Joint2:z`, `Joint3:z`, `Joint4:z`, `Joint5:y`, `Joint6:z`; preserve original rotations before applying state. Require all six nodes and throw a Chinese error listing missing names. Reuse the `Take 001` animation and frames 0鈥?0 for normalized gripper. Do not import kinematics into the renderer.
+Reuse the reference node mapping exactly: `Joint1:y`, `Joint2:z`, `Joint3:z`, `Joint4:z`, `Joint5:y`, `Joint6:z`; preserve original rotations before applying state. Require all six nodes and throw a Chinese error listing missing names. Reuse the `Take 001` animation and frames 0–20 for normalized gripper. Do not import kinematics into the renderer.
 
 - [ ] **Step 4: Implement state interpolation**
 
@@ -1647,7 +1656,7 @@ git commit -m "feat: render LM3 simulator state"
 
 **Interfaces:**
 - Produces: `SimulationScene.start()`, `applyRobotState()`, `dispose()`
-- Produces: explicit UI actions `瑙ｉ攣浠跨湡`, `鍋滄`, `杩涘叆 VR`
+- Produces: explicit UI actions `解锁仿真`, `停止`, `进入 VR`
 - Consumes: TeleopSocket and RobotStateBuffer
 
 - [ ] **Step 1: Write failing UI safety tests**
