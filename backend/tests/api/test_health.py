@@ -7,13 +7,19 @@ import warnings
 import pytest
 from starlette.exceptions import StarletteDeprecationWarning
 
+STARLETTE_HTTPX_WARNING_TEXT = (
+    "Using `httpx` with `starlette.testclient` is deprecated; "
+    "install `httpx2` instead."
+)
+STARLETTE_HTTPX_WARNING_PATTERN = (
+    r"\AUsing `httpx` with `starlette\.testclient` is deprecated; "
+    r"install `httpx2` instead\.\Z"
+)
+
 with warnings.catch_warnings():
     warnings.filterwarnings(
         "ignore",
-        message=(
-            r"Using `httpx` with `starlette\.testclient` is deprecated; "
-            r"install `httpx2` instead\."
-        ),
+        message=STARLETTE_HTTPX_WARNING_PATTERN,
         category=StarletteDeprecationWarning,
     )
     from fastapi.testclient import TestClient
@@ -94,6 +100,26 @@ def test_health_is_simulator_only() -> None:
             "backend": "SIMULATOR",
             "real_robot_enabled": False,
         }
+
+
+def test_starlette_warning_filter_does_not_hide_extended_message() -> None:
+    extended = f"{STARLETTE_HTTPX_WARNING_TEXT} extra context"
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.filterwarnings(
+            "ignore",
+            message=STARLETTE_HTTPX_WARNING_PATTERN,
+            category=StarletteDeprecationWarning,
+        )
+        warnings.warn(
+            STARLETTE_HTTPX_WARNING_TEXT,
+            StarletteDeprecationWarning,
+            stacklevel=1,
+        )
+        warnings.warn(extended, StarletteDeprecationWarning, stacklevel=1)
+
+    assert [str(item.message) for item in caught] == [extended]
 
 
 def test_non_simulator_backend_is_rejected_without_sdk_or_network(

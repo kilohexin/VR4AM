@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import warnings
 from pathlib import Path
@@ -8,13 +9,15 @@ from unittest.mock import AsyncMock
 import pytest
 from starlette.exceptions import StarletteDeprecationWarning
 
+STARLETTE_HTTPX_WARNING_PATTERN = (
+    r"\AUsing `httpx` with `starlette\.testclient` is deprecated; "
+    r"install `httpx2` instead\.\Z"
+)
+
 with warnings.catch_warnings():
     warnings.filterwarnings(
         "ignore",
-        message=(
-            r"Using `httpx` with `starlette\.testclient` is deprecated; "
-            r"install `httpx2` instead\."
-        ),
+        message=STARLETTE_HTTPX_WARNING_PATTERN,
         category=StarletteDeprecationWarning,
     )
     from fastapi.testclient import TestClient
@@ -275,7 +278,9 @@ async def test_sender_failure_cancels_receiver_and_propagates_after_owner_cleanu
         mode = TeleopMode.READY
 
         def __init__(self) -> None:
-            self.on_disconnect = AsyncMock()
+            self.on_disconnect = AsyncMock(
+                side_effect=RuntimeError("disconnect_cleanup_failed")
+            )
 
         async def state_message(self) -> None:
             raise RuntimeError("sender_failed")
@@ -317,4 +322,61 @@ async def test_sender_failure_cancels_receiver_and_propagates_after_owner_cleanu
 
     assert receive_cancelled.is_set()
     assert control.on_disconnect.await_count == 1
+    assert websocket.app.state.teleop_owner is None
     assert websocket.app.state.teleop_sender_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_receiver_and_sender_failures_choose_receiver_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import teleop_ws
+
+    receiver_ready = asyncio.Event()
+    sender_ready = asyncio.Event()
+    release = asyncio.Event()
+    loop_contexts: list[dict[str, object]] = []
+
+    async def fail_receiver(*args) -> None:
+        receiver_ready.set()
+        await release.wait()
+        raise RuntimeError("receiver_failed")
+
+    async def fail_sender(*args) -> None:
+        sender_ready.set()
+        await release.wait()
+        raise RuntimeError("sender_failed")
+
+    monkeypatch.setattr(teleop_ws, "_receive_messages", fail_receiver)
+    monkeypatch.setattr(teleop_ws, "_delayed_state_sender", fail_sender)
+    sender_tasks: set[asyncio.Task[None]] = set()
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: loop_contexts.append(context))
+    try:
+        session = asyncio.create_task(
+            teleop_ws._run_coupled_session(object(), object(), sender_tasks)
+        )
+        await receiver_ready.wait()
+        await sender_ready.wait()
+        release.set()
+
+        try:
+            await session
+        except RuntimeError as error:
+            primary_message = str(error)
+        else:
+            raise AssertionError("双失败 session 未传播异常")
+
+        del session
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert sender_tasks == set()
+    assert primary_message == "receiver_failed"
+    assert not any(
+        context.get("message") == "Task exception was never retrieved"
+        for context in loop_contexts
+    )

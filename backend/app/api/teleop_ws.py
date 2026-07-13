@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from time import monotonic_ns
 from typing import Any
 
+import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
@@ -112,23 +112,35 @@ async def _run_coupled_session(
         name="teleop-state-20hz",
     )
     sender_tasks.add(sender)
-    done: set[asyncio.Task[None]] = set()
-    pending: set[asyncio.Task[None]] = {receiver, sender}
+    wait_error: BaseException | None = None
     try:
-        done, pending = await asyncio.wait(
+        await asyncio.wait(
             {receiver, sender}, return_when=asyncio.FIRST_COMPLETED
         )
-        for task in done:
-            task.result()
+    except BaseException as error:
+        wait_error = error
     finally:
         try:
-            for task in pending:
-                task.cancel()
-            for task in pending:
-                with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
-                    await task
+            for task in (receiver, sender):
+                if not task.done():
+                    task.cancel()
+            with anyio.CancelScope(shield=True):
+                results = await asyncio.gather(
+                    receiver,
+                    sender,
+                    return_exceptions=True,
+                )
         finally:
             sender_tasks.discard(sender)
+    for result in results:
+        if isinstance(result, (asyncio.CancelledError, WebSocketDisconnect)):
+            continue
+        if isinstance(result, BaseException):
+            raise result
+    if wait_error is not None and not isinstance(
+        wait_error, (asyncio.CancelledError, WebSocketDisconnect)
+    ):
+        raise wait_error
 
 
 @router.websocket("/ws/v1/teleop")
@@ -148,22 +160,34 @@ async def teleop_websocket(websocket: WebSocket) -> None:
         )
         await websocket.close(code=4409, reason=message)
         return
+    session_error: BaseException | None = None
+    cleanup_error: BaseException | None = None
     try:
         if control.mode == TeleopMode.DISCONNECTED:
             await control.connect()
         await _run_coupled_session(
             websocket, control, app.state.teleop_sender_tasks
         )
+    except BaseException as error:
+        session_error = error
     finally:
         async with app.state.teleop_owner_lock:
             owns_connection = app.state.teleop_owner is owner_token
         if owns_connection:
             try:
-                await control.on_disconnect()
-                latest = LatestVRFrame()
-                control.latest = latest
-                app.state.latest = latest
+                try:
+                    await control.on_disconnect()
+                except BaseException as error:
+                    cleanup_error = error
+                finally:
+                    latest = LatestVRFrame()
+                    control.latest = latest
+                    app.state.latest = latest
             finally:
                 async with app.state.teleop_owner_lock:
                     if app.state.teleop_owner is owner_token:
                         app.state.teleop_owner = None
+    if session_error is not None:
+        raise session_error
+    if cleanup_error is not None:
+        raise cleanup_error
