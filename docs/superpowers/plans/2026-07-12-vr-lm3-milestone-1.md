@@ -508,7 +508,7 @@ git commit -m "feat: add clutch coordinate mapper"
 - Create: `backend/tests/control/test_safety.py`
 
 **Interfaces:**
-- Produces: `TeleopStateMachine.connect()`, `arm()`, `on_frame()`, `fault()`, `disarm()`
+- Produces: `TeleopStateMachine.connect()`, `arm()`, `observe_grip()`, `fault()`, `disarm()`
 - Produces: `SafetyLimiter.limit(previous: Pose, requested: Pose, dt: float) -> Pose`
 - Produces: `SafetyViolation(code: str)`
 
