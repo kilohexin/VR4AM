@@ -59,7 +59,83 @@ describe('RobotStateBuffer', () => {
     const sample = buffer.sample(25_000_000);
 
     expect(sample?.state.ack_seq).toBe(9);
-    expect(sample?.state.actual_tcp).toBe(newest.actual_tcp);
+    expect(sample?.state.actual_tcp).toEqual(newest.actual_tcp);
+  });
+
+  it('owns an immutable snapshot of every pushed state', () => {
+    const buffer = new RobotStateBuffer();
+    const first: RobotStateMessage = {
+      ...state(100, 1, 0.1),
+      ack_seq: 7,
+      actual_tcp: {p: [1, 2, 3], q: [0, 0, 1, 0]},
+    };
+    buffer.push(first);
+
+    first.server_mono_ns = 300;
+    first.ack_seq = 99;
+    first.actual_q[0] = 99;
+    first.actual_tcp.p[0] = 99;
+    first.actual_tcp.q[0] = 99;
+
+    expect(buffer.sample(100)?.state).toMatchObject({
+      server_mono_ns: 100,
+      ack_seq: 7,
+      actual_q: [1, 1, 1, 1, 1, 1],
+      actual_tcp: {p: [1, 2, 3], q: [0, 0, 1, 0]},
+    });
+
+    buffer.push(state(200, 2, 0.2));
+    const interpolated = buffer.sample(150);
+    expect(interpolated?.state.server_mono_ns).toBe(200);
+    expect(interpolated?.state.actual_q[0]).toBeCloseTo(1.5);
+  });
+
+  it.each([
+    ['single sample', false, 100],
+    ['before the oldest sample', true, 50],
+    ['interpolated sample', true, 150],
+    ['newest sample', true, 200],
+    ['stale sample', true, 100_000_201],
+  ])('does not expose internal state through a %s result', (_name, twoStates, nowNs) => {
+    const buffer = new RobotStateBuffer();
+    buffer.push({
+      ...state(100, 1, 0.1),
+      ack_seq: 7,
+      actual_tcp: {p: [1, 2, 3], q: [0, 0, 1, 0]},
+    });
+    if (twoStates) {
+      buffer.push({
+        ...state(200, 2, 0.2),
+        ack_seq: 8,
+        actual_tcp: {p: [4, 5, 6], q: [0, 1, 0, 0]},
+      });
+    }
+
+    const result = buffer.sample(nowNs);
+    if (!result) throw new Error('测试缓冲区应返回状态');
+    const expected = {
+      serverMonoNs: result.state.server_mono_ns,
+      ackSeq: result.state.ack_seq,
+      actualQ: [...result.state.actual_q],
+      gripper: result.state.gripper,
+      tcpPosition: [...result.state.actual_tcp.p],
+      tcpQuaternion: [...result.state.actual_tcp.q],
+    };
+
+    result.state.server_mono_ns = 999;
+    result.state.ack_seq = 99;
+    result.state.actual_q.fill(99);
+    result.state.gripper = 99;
+    result.state.actual_tcp.p.fill(99);
+    result.state.actual_tcp.q.fill(99);
+
+    const resampled = buffer.sample(nowNs);
+    expect(resampled?.state.server_mono_ns).toBe(expected.serverMonoNs);
+    expect(resampled?.state.ack_seq).toBe(expected.ackSeq);
+    expect(resampled?.state.actual_q).toEqual(expected.actualQ);
+    expect(resampled?.state.gripper).toBe(expected.gripper);
+    expect(resampled?.state.actual_tcp.p).toEqual(expected.tcpPosition);
+    expect(resampled?.state.actual_tcp.q).toEqual(expected.tcpQuaternion);
   });
 
   it('ignores duplicate and out-of-order states', () => {
