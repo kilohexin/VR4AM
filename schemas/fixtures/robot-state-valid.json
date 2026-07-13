@@ -1,0 +1,1 @@
+{"v":1,"type":"robot_state","server_mono_ns":1,"ack_seq":1,"mode":"ARMED","robot_state":"IDLE","actual_tcp":{"p":[0.3,0.0,0.3],"q":[0.0,0.0,0.0,1.0]},"actual_q":[0,0,0,0,0,0],"gripper":0.0,"sample_age_ms":5.0,"fault":null}

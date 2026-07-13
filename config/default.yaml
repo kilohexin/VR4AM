@@ -1,0 +1,14 @@
+backend: simulator
+control_hz: 50
+state_hz: 20
+stale_ms: 100
+disarm_ms: 250
+max_linear_speed_mps: 0.15
+max_angular_speed_radps: 0.6
+max_linear_accel_mps2: 0.4
+max_angular_accel_radps2: 1.2
+translation_scale: 0.8
+rotation_scale: 1.0
+joint_speed_radps: 0.5
+joint_accel_radps2: 1.0
+joint_window_rad: 3.141592653589793
