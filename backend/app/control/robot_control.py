@@ -11,7 +11,7 @@ from app.control.safety import SafetyLimiter, SafetyViolation
 from app.control.state_machine import TeleopStateMachine
 from app.recording.base import RecorderSink
 from app.robots.base import BackendCommandError, RobotBackend, StopReason
-from app.schemas.messages import Pose, RobotStateMessage, TeleopMode, VRFrame
+from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode, VRFrame
 from app.timebase import MonotonicClock
 
 CONTROL_PERIOD_NS = 20_000_000
@@ -29,13 +29,19 @@ class ReceivedFrame:
 class LatestVRFrame:
     def __init__(self) -> None:
         self._value: ReceivedFrame | None = None
+        self._retired_sessions: set[str] = set()
 
     def publish(self, frame: VRFrame, received_ns: int) -> None:
-        if (
-            self._value is None
-            or frame.session_id != self._value.frame.session_id
-            or frame.seq > self._value.frame.seq
-        ):
+        if self._value is None:
+            self._value = ReceivedFrame(frame, received_ns)
+            return
+        current_session = self._value.frame.session_id
+        if frame.session_id == current_session:
+            if frame.seq > self._value.frame.seq:
+                self._value = ReceivedFrame(frame, received_ns)
+            return
+        if frame.session_id not in self._retired_sessions:
+            self._retired_sessions.add(current_session)
             self._value = ReceivedFrame(frame, received_ns)
 
     def snapshot(self) -> ReceivedFrame | None:
@@ -67,9 +73,12 @@ class RobotControl:
         self._last_gripper_sent_ns: int | None = None
         self._consecutive_overruns = 0
         self._pending_stop_completion = False
+        self._hard_stop_completion = False
         self._fault: str | None = None
         self._running = False
         self._task: asyncio.Task[None] | None = None
+        self._lifecycle_lock = asyncio.Lock()
+        self._shutdown_started = False
         self._shutdown_stopped = False
 
     @property
@@ -80,12 +89,15 @@ class RobotControl:
         self.machine.connect()
 
     async def start(self) -> None:
-        if self._running:
-            return
-        if self.machine.mode == TeleopMode.DISCONNECTED:
-            self.machine.connect()
-        self._running = True
-        self._task = asyncio.create_task(self.run())
+        async with self._lifecycle_lock:
+            if self._shutdown_started:
+                raise RuntimeError("control_shutdown")
+            if self._running:
+                return
+            if self.machine.mode == TeleopMode.DISCONNECTED:
+                self.machine.connect()
+            self._running = True
+            self._task = asyncio.create_task(self.run())
 
     async def arm(self) -> None:
         self.machine.arm()
@@ -102,17 +114,19 @@ class RobotControl:
         self.machine.disconnect()
 
     async def stop(self) -> None:
-        if self._shutdown_stopped:
-            return
-        self._shutdown_stopped = True
-        self._running = False
-        task = self._task
-        self._task = None
-        if task is not None and task is not asyncio.current_task():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        await self.backend.stop(StopReason.SHUTDOWN)
+        async with self._lifecycle_lock:
+            if self._shutdown_stopped:
+                return
+            self._shutdown_started = True
+            self._running = False
+            task = self._task
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            self._task = None
+            await self.backend.stop(StopReason.SHUTDOWN)
+            self._shutdown_stopped = True
 
     async def run(self) -> None:
         next_deadline_ns = self.clock.now_ns()
@@ -139,8 +153,7 @@ class RobotControl:
         self._last_sample_age_ms = age_ms
         if age_ms >= 250:
             await self._safe_stop(StopReason.STALE)
-            self._pending_stop_completion = False
-            self.machine.disarm()
+            self._hard_stop_completion = True
             return
         if (
             age_ms >= 100
@@ -208,8 +221,11 @@ class RobotControl:
         if self._pending_stop_completion and self.machine.mode in {
             TeleopMode.STALE,
             TeleopMode.FAULT,
-        }:
+        } and (
+            self._hard_stop_completion or state.robot_state != BackendState.MOVING
+        ):
             self._pending_stop_completion = False
+            self._hard_stop_completion = False
             self.machine.stop_complete()
         return message
 

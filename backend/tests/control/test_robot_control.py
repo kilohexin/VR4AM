@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock
 
@@ -35,6 +36,7 @@ class FakeBackend:
         self.gripper_commands: list[float] = []
         self.connect_count = 0
         self.disconnect_count = 0
+        self.robot_state = BackendState.IDLE
 
     async def connect(self) -> None:
         self.connect_count += 1
@@ -56,7 +58,7 @@ class FakeBackend:
         return RobotStateMessage(
             server_mono_ns=1,
             mode=TeleopMode.READY,
-            robot_state=BackendState.IDLE,
+            robot_state=self.robot_state,
             actual_tcp=Pose(p=(0.3, 0.0, 0.3), q=(0, 0, 0, 1)),
             actual_q=(0, 0, 0, 0, 0, 0),
             gripper=self.gripper,
@@ -130,6 +132,20 @@ def test_latest_frame_accepts_new_session_even_with_lower_sequence() -> None:
     assert received.received_ns == 30
 
 
+def test_retired_session_cannot_take_back_latest_value() -> None:
+    latest = LatestVRFrame()
+    latest.publish(frame(100, False, session_id="old"), 20)
+    latest.publish(frame(1, False, session_id="new"), 30)
+
+    latest.publish(frame(101, False, session_id="old"), 40)
+
+    received = latest.snapshot()
+    assert received is not None
+    assert received.frame.session_id == "new"
+    assert received.frame.seq == 1
+    assert received.received_ns == 30
+
+
 @pytest.mark.asyncio
 async def test_only_latest_frame_is_consumed() -> None:
     control, latest, _backend, clock = make_control()
@@ -190,6 +206,26 @@ async def test_stale_input_stops_and_is_observable_before_disarmed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_soft_stale_waits_for_backend_to_stop_after_publishing_stale() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    backend.robot_state = BackendState.MOVING
+    latest.publish(frame(1, False), clock.now_ns())
+    clock.advance_ms(100)
+    await control.tick()
+
+    first_stale = await control.state_message()
+
+    assert first_stale.mode == TeleopMode.STALE
+    assert control.mode == TeleopMode.STALE
+    backend.robot_state = BackendState.IDLE
+    second_stale = await control.state_message()
+    assert second_stale.mode == TeleopMode.STALE
+    assert control.mode == TeleopMode.DISARMED
+    assert (await control.state_message()).mode == TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
 async def test_received_pc_monotonic_timestamp_is_age_authority() -> None:
     control, latest, backend, clock = make_control()
     await control.connect()
@@ -224,16 +260,43 @@ async def test_tracking_or_visibility_loss_immediately_stops(
 
 
 @pytest.mark.asyncio
-async def test_hard_stale_forces_disarmed_at_250ms() -> None:
+async def test_hard_stale_publishes_stale_before_stop_complete_disarms() -> None:
     control, latest, backend, clock = make_control()
     await control.connect()
+    backend.robot_state = BackendState.MOVING
     latest.publish(frame(1, False), clock.now_ns())
-    clock.advance_ms(250)
+    clock.advance_ms(251)
 
     await control.tick()
 
     assert backend.stops[-1] == StopReason.STALE
+    assert control.mode == TeleopMode.STALE
+    hard_stale = await control.state_message()
+    assert hard_stale.mode == TeleopMode.STALE
     assert control.mode == TeleopMode.DISARMED
+    assert (await control.state_message()).mode == TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_hard_stale_preserves_fault_until_fault_is_published() -> None:
+    control, latest, backend, clock = make_control()
+    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    latest.publish(frame(3, True, p=(0, 1.2, -0.31)), clock.now_ns())
+    await control.tick()
+    assert control.mode == TeleopMode.FAULT
+    backend.robot_state = BackendState.MOVING
+    clock.advance_ms(251)
+
+    await control.tick()
+
+    assert control.mode == TeleopMode.FAULT
+    hard_fault = await control.state_message()
+    assert hard_fault.mode == TeleopMode.FAULT
+    assert control.mode == TeleopMode.DISARMED
+    assert (await control.state_message()).mode == TeleopMode.DISARMED
 
 
 @pytest.mark.asyncio
@@ -428,4 +491,63 @@ async def test_stop_is_idempotent_and_uses_shutdown_reason() -> None:
     await control.stop()
     await control.stop()
 
+    assert backend.stops == [StopReason.SHUTDOWN]
+
+
+@pytest.mark.asyncio
+async def test_start_is_permanently_rejected_after_stop() -> None:
+    control, _latest, backend, _clock = make_control()
+    await control.stop()
+
+    with pytest.raises(RuntimeError, match="control_shutdown"):
+        await control.start()
+
+    assert control._task is None
+    assert backend.stops == [StopReason.SHUTDOWN]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_stop_waits_for_old_run_and_prevents_restart() -> None:
+    control, _latest, backend, _clock = make_control()
+    cancellation_seen = asyncio.Event()
+    allow_run_exit = asyncio.Event()
+    second_stop_started = asyncio.Event()
+    restart_started = asyncio.Event()
+
+    async def blocked_run() -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await allow_run_exit.wait()
+
+    control.run = blocked_run  # type: ignore[method-assign]
+    await control.start()
+    old_task = control._task
+    assert old_task is not None
+    first_stop = asyncio.create_task(control.stop())
+    await cancellation_seen.wait()
+
+    async def marked_stop() -> None:
+        second_stop_started.set()
+        await control.stop()
+
+    async def marked_restart() -> None:
+        restart_started.set()
+        await control.start()
+
+    second_stop = asyncio.create_task(marked_stop())
+    restart = asyncio.create_task(marked_restart())
+    await second_stop_started.wait()
+    await restart_started.wait()
+
+    assert not second_stop.done()
+    assert not restart.done()
+    assert control._task is old_task
+    allow_run_exit.set()
+    await asyncio.gather(first_stop, second_stop)
+    with pytest.raises(RuntimeError, match="control_shutdown"):
+        await restart
+    assert control._task is None
+    assert old_task.done()
     assert backend.stops == [StopReason.SHUTDOWN]
