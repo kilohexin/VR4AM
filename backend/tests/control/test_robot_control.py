@@ -438,6 +438,79 @@ async def test_disarm_cannot_bypass_unpublished_fault_mode() -> None:
 
 
 @pytest.mark.asyncio
+async def test_new_session_preserves_unpublished_fault_priority_and_detail() -> None:
+    control, latest, backend, clock = make_control()
+    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    await control.connect()
+    latest.publish(frame(1, False, session_id="old"), clock.now_ns())
+    await control.tick()
+    await control.arm()
+    latest.publish(frame(2, True, session_id="old"), clock.now_ns())
+    await control.tick()
+    latest.publish(
+        frame(3, True, p=(0, 1.2, -0.31), session_id="old"),
+        clock.now_ns(),
+    )
+    await control.tick()
+    assert control.mode == TeleopMode.FAULT
+    assert control._pending_stop_completion is True
+
+    latest.publish(frame(1, True, session_id="new"), clock.now_ns())
+    await control.tick()
+
+    assert backend.stops[-1] == StopReason.DISCONNECT
+    assert control.mode == TeleopMode.FAULT
+    assert control._fault == "ik_unreachable"
+    assert control._pending_stop_completion is True
+    assert control.last_target is None
+    fault_state = await control.state_message()
+    assert fault_state.mode == TeleopMode.FAULT
+    assert fault_state.fault == "ik_unreachable"
+    assert control.mode == TeleopMode.DISARMED
+    with pytest.raises(RuntimeError, match="arm_requires_grip_release"):
+        await control.arm()
+
+    latest.publish(frame(2, False, session_id="new"), clock.now_ns())
+    await control.tick()
+    await control.arm()
+    assert control.mode == TeleopMode.ARMED
+
+
+@pytest.mark.asyncio
+async def test_new_session_preserves_stale_until_backend_stop_completion() -> None:
+    control, latest, backend, clock = make_control()
+    backend.robot_state = BackendState.MOVING
+    await control.connect()
+    latest.publish(frame(1, False, session_id="old"), clock.now_ns())
+    await control.tick()
+    clock.advance_ms(100)
+    await control.tick()
+    assert control.mode == TeleopMode.STALE
+    assert control._pending_stop_completion is True
+
+    latest.publish(frame(1, True, session_id="new"), clock.now_ns())
+    await control.tick()
+
+    assert backend.stops[-1] == StopReason.DISCONNECT
+    assert control.mode == TeleopMode.STALE
+    assert control._pending_stop_completion is True
+    stale_while_moving = await control.state_message()
+    assert stale_while_moving.mode == TeleopMode.STALE
+    assert control.mode == TeleopMode.STALE
+    backend.robot_state = BackendState.IDLE
+    stopped = await control.state_message()
+    assert stopped.mode == TeleopMode.STALE
+    assert control.mode == TeleopMode.DISARMED
+    with pytest.raises(RuntimeError, match="arm_requires_grip_release"):
+        await control.arm()
+
+    latest.publish(frame(2, False, session_id="new"), clock.now_ns())
+    await control.tick()
+    await control.arm()
+    assert control.mode == TeleopMode.ARMED
+
+
+@pytest.mark.asyncio
 async def test_disconnect_clears_old_hard_stop_episode_before_new_soft_stale() -> None:
     control, latest, backend, clock = make_control()
     await control.connect()

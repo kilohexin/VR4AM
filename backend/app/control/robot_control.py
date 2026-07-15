@@ -202,8 +202,9 @@ class RobotControl:
                 await self.backend.stop(StopReason.DISCONNECT)
                 self.mapper.clear()
                 self.last_target = None
-                self._clear_stop_episode()
-                self.machine.disarm()
+                if self.machine.mode not in {TeleopMode.FAULT, TeleopMode.STALE}:
+                    self._clear_stop_episode()
+                    self.machine.disarm()
             is_new_frame = frame_id != self._last_frame_id
             if is_new_frame:
                 await self.recorder.write_vr_frame(received.frame, received.received_ns)
