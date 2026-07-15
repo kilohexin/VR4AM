@@ -211,9 +211,12 @@ async def test_active_repeated_latest_frame_does_not_repeat_tcp_command() -> Non
 
 
 @pytest.mark.asyncio
-async def test_new_session_same_sequence_is_recorded_and_commanded_as_new_input() -> None:
+async def test_new_session_fails_closed_and_requires_release_rearm_and_fresh_press() -> None:
     control, latest, backend, clock = make_control()
-    await connect_release_arm(control, latest, clock)
+    await control.connect()
+    latest.publish(frame(seq=1, grip=False, session_id="old"), clock.now_ns())
+    await control.tick()
+    await control.arm()
     latest.publish(frame(seq=2, grip=True, session_id="old"), clock.now_ns())
     await control.tick()
     latest.publish(
@@ -234,12 +237,39 @@ async def test_new_session_same_sequence_is_recorded_and_commanded_as_new_input(
     await control.tick()
     await control.tick()
 
-    assert [command_id for command_id, _target in backend.targets] == [3, 3]
+    assert backend.stops.count(StopReason.DISCONNECT) == 1
+    assert control.mode == TeleopMode.DISARMED
+    assert [command_id for command_id, _target in backend.targets] == [3]
+    assert control.last_target is None
+    with pytest.raises(RuntimeError, match="anchor_not_captured"):
+        control.mapper.target(Pose(p=(0, 1.2, -0.32), q=(0, 0, 0, 1)))
     recorder.write_vr_frame.assert_awaited_once_with(
         new_session_frame,
         clock.now_ns(),
     )
     assert control.last_seq == 3
+
+    with pytest.raises(RuntimeError, match="arm_requires_grip_release"):
+        await control.arm()
+    latest.publish(frame(seq=4, grip=False, session_id="new"), clock.now_ns())
+    await control.tick()
+    await control.arm()
+    latest.publish(
+        frame(seq=5, grip=True, p=(0.4, 1.5, -0.6), session_id="new"),
+        clock.now_ns(),
+    )
+    await control.tick()
+
+    assert control.mode == TeleopMode.ACTIVE
+    assert [command_id for command_id, _target in backend.targets] == [3]
+
+    latest.publish(
+        frame(seq=6, grip=True, p=(0.4, 1.5, -0.61), session_id="new"),
+        clock.now_ns(),
+    )
+    await control.tick()
+
+    assert [command_id for command_id, _target in backend.targets] == [3, 6]
 
 
 @pytest.mark.asyncio
@@ -445,7 +475,7 @@ async def test_reconnect_requires_release_and_explicit_arm() -> None:
     await control.tick()
     with pytest.raises(RuntimeError, match="arm_requires_grip_release"):
         await control.arm()
-    assert control.mode == TeleopMode.READY
+    assert control.mode == TeleopMode.DISARMED
 
     latest.publish(frame(3, False, session_id="reconnected"), clock.now_ns())
     await control.tick()
@@ -597,6 +627,73 @@ async def test_two_long_executions_do_not_pretend_both_started_late(
 
     await run_with_fake_sleep(monkeypatch, control, clock, seventy_ms_tick)
 
+    assert control.mode != TeleopMode.FAULT
+    assert StopReason.FAULT not in backend.stops
+
+
+@pytest.mark.asyncio
+async def test_unexpected_control_loop_exception_fails_stop_without_masking_or_restart() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    await control.arm()
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    assert control.mode == TeleopMode.ACTIVE
+
+    recorder = NoopRecorder()
+    recorder.write_vr_frame = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("secret recorder detail")
+    )
+    control.recorder = recorder
+    latest.publish(frame(3, True, p=(0, 1.2, -0.31)), clock.now_ns())
+
+    async def stop_then_fail(reason: StopReason) -> None:
+        backend.stops.append(reason)
+        raise RuntimeError("secondary stop detail")
+
+    backend.stop = stop_then_fail  # type: ignore[method-assign]
+    await control.start()
+    failed_task = control._task
+    assert failed_task is not None
+
+    with pytest.raises(RuntimeError, match="secret recorder detail"):
+        await failed_task
+
+    assert control._running is False
+    assert control.mode == TeleopMode.FAULT
+    assert backend.stops[-1] == StopReason.FAULT
+    assert control.last_target is None
+    fault_state = await control.state_message()
+    assert fault_state.mode == TeleopMode.FAULT
+    assert fault_state.fault == "control_loop_error"
+    assert "secret recorder detail" not in (fault_state.fault or "")
+    with pytest.raises(RuntimeError, match="control_faulted"):
+        await control.start()
+    assert control._task is failed_task
+
+
+@pytest.mark.asyncio
+async def test_control_loop_task_cancellation_remains_cancellation_without_fault_stop() -> None:
+    control, _latest, backend, _clock = make_control()
+    tick_started = asyncio.Event()
+
+    async def blocked_tick() -> None:
+        tick_started.set()
+        await asyncio.Future()
+
+    control.tick = blocked_tick  # type: ignore[method-assign]
+    await control.start()
+    task = control._task
+    assert task is not None
+    await tick_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert control._running is False
     assert control.mode != TeleopMode.FAULT
     assert StopReason.FAULT not in backend.stops
 

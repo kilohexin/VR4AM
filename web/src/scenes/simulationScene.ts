@@ -190,7 +190,7 @@ export class SimulationScene {
 
   private readonly scene = new THREE.Scene();
   private readonly targetMarker = new THREE.Group();
-  private readonly sessionId = createSessionId();
+  private sessionId = createSessionId();
   private robotModel: RobotModel | null = null;
   private animationHandle: number | null = null;
   private sequence = 0;
@@ -294,6 +294,9 @@ export class SimulationScene {
       await this.renderer.xr.setSession(null);
     } finally {
       this.vrSafetyPanel.setVisible(false);
+      this.sessionId = createSessionId();
+      this.sequence = 0;
+      this.lastFrameMs = Number.NEGATIVE_INFINITY;
       if (this.started && this.animationHandle === null) {
         this.animationHandle = requestAnimationFrame(this.animate);
       }

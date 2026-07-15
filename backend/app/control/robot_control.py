@@ -81,6 +81,7 @@ class RobotControl:
         self._hard_stop_completion = False
         self._fault: str | None = None
         self._running = False
+        self._loop_failed = False
         self._task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._shutdown_started = False
@@ -98,6 +99,8 @@ class RobotControl:
         async with self._lifecycle_lock:
             if self._shutdown_started:
                 raise RuntimeError("control_shutdown")
+            if self._loop_failed:
+                raise RuntimeError("control_faulted")
             if self._running:
                 return
             if self.machine.mode == TeleopMode.DISCONNECTED:
@@ -131,7 +134,7 @@ class RobotControl:
             task = self._task
             if task is not None and task is not asyncio.current_task():
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
             self._task = None
             await self.backend.stop(StopReason.SHUTDOWN)
@@ -139,19 +142,37 @@ class RobotControl:
 
     async def run(self) -> None:
         next_deadline_ns = self.clock.now_ns()
-        while self._running:
-            now_ns = self.clock.now_ns()
-            lateness_ns = now_ns - next_deadline_ns
-            if lateness_ns > OVERRUN_NS:
-                self._consecutive_overruns += 1
-            else:
-                self._consecutive_overruns = 0
-            if self._consecutive_overruns >= 2:
-                await self._enter_fault("control_overrun")
-            await self.tick()
-            next_deadline_ns += CONTROL_PERIOD_NS
-            delay_seconds = max(0.0, (next_deadline_ns - self.clock.now_ns()) / 1_000_000_000)
-            await asyncio.sleep(delay_seconds)
+        try:
+            while self._running:
+                now_ns = self.clock.now_ns()
+                lateness_ns = now_ns - next_deadline_ns
+                if lateness_ns > OVERRUN_NS:
+                    self._consecutive_overruns += 1
+                else:
+                    self._consecutive_overruns = 0
+                if self._consecutive_overruns >= 2:
+                    await self._enter_fault("control_overrun")
+                await self.tick()
+                next_deadline_ns += CONTROL_PERIOD_NS
+                delay_seconds = max(
+                    0.0,
+                    (next_deadline_ns - self.clock.now_ns()) / 1_000_000_000,
+                )
+                await asyncio.sleep(delay_seconds)
+        except asyncio.CancelledError:
+            self._running = False
+            raise
+        except Exception:
+            self._running = False
+            self._loop_failed = True
+            self.mapper.clear()
+            self.last_target = None
+            self.machine.fault()
+            self._fault = "control_loop_error"
+            self._pending_stop_completion = True
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self.backend.stop(StopReason.FAULT)
+            raise
 
     async def tick(self) -> None:
         received = self.latest.snapshot()
@@ -174,6 +195,15 @@ class RobotControl:
 
         try:
             frame_id = (received.frame.session_id, received.frame.seq)
+            if (
+                self._last_frame_id is not None
+                and received.frame.session_id != self._last_frame_id[0]
+            ):
+                await self.backend.stop(StopReason.DISCONNECT)
+                self.mapper.clear()
+                self.last_target = None
+                self._clear_stop_episode()
+                self.machine.disarm()
             is_new_frame = frame_id != self._last_frame_id
             if is_new_frame:
                 await self.recorder.write_vr_frame(received.frame, received.received_ns)

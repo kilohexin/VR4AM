@@ -206,6 +206,9 @@ describe('XR render-loop handoff', () => {
     const scene = {
       started: true,
       animationHandle: null,
+      sessionId: 'desktop-before-xr',
+      sequence: 41,
+      lastFrameMs: 912.5,
       animate,
       renderer: {xr: {setSession}, setAnimationLoop},
       vrSafetyPanel: {setVisible},
@@ -218,6 +221,19 @@ describe('XR render-loop handoff', () => {
     expect(setVisible).toHaveBeenCalledWith(false);
     expect(request).toHaveBeenCalledWith(animate);
     expect(scene.animationHandle).toBe(77);
+    expect(scene.sessionId).not.toBe('desktop-before-xr');
+    expect(scene.sequence).toBe(0);
+    expect(scene.lastFrameMs).toBe(Number.NEGATIVE_INFINITY);
+
+    const firstResumedEpoch = scene.sessionId;
+    scene.animationHandle = null;
+    scene.sequence = 9;
+    scene.lastFrameMs = 123;
+    await (SimulationScene.prototype.stopXR as Function).call(scene);
+
+    expect(scene.sessionId).not.toBe(firstResumedEpoch);
+    expect(scene.sequence).toBe(0);
+    expect(scene.lastFrameMs).toBe(Number.NEGATIVE_INFINITY);
   });
 
   it('restores the desktop animation loop when clearing the XR session rejects', async () => {
@@ -229,6 +245,9 @@ describe('XR render-loop handoff', () => {
     const scene = {
       started: true,
       animationHandle: null,
+      sessionId: 'desktop-before-rejected-stop',
+      sequence: 52,
+      lastFrameMs: 1_024,
       animate,
       renderer: {xr: {setSession}, setAnimationLoop},
       vrSafetyPanel: {setVisible},
@@ -240,6 +259,9 @@ describe('XR render-loop handoff', () => {
     expect(setVisible).toHaveBeenCalledWith(false);
     expect(request).toHaveBeenCalledWith(animate);
     expect(scene.animationHandle).toBe(88);
+    expect(scene.sessionId).not.toBe('desktop-before-rejected-stop');
+    expect(scene.sequence).toBe(0);
+    expect(scene.lastFrameMs).toBe(Number.NEGATIVE_INFINITY);
   });
 
   it('forwards cached arm state and controller support to the safety panel', () => {
