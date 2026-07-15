@@ -7,6 +7,25 @@ import {
 import type {XRSessionStatus} from '../xr/session';
 
 export type SendControl = (message: ClientControlMessage) => void;
+export type ControlSource = 'desktop' | 'xr';
+export type ArmSafetyPhase =
+  | 'disconnected'
+  | 'fault'
+  | 'locked'
+  | 'pending'
+  | 'armed'
+  | 'active'
+  | 'stopped';
+
+export type ArmSafetySnapshot = Readonly<{
+  phase: ArmSafetyPhase;
+  connected: boolean;
+  eligible: boolean;
+  armed: boolean;
+  pending: boolean;
+  mode: TeleopMode;
+  fault: string | null;
+}>;
 
 export class ArmPanel {
   readonly backendText = 'SIMULATOR';
@@ -22,12 +41,15 @@ export class ArmPanel {
   private pendingArmRequestId: string | null = null;
   private awaitingArmedMode = false;
   private armFeedback: string | null = null;
+  private mode: TeleopMode = 'DISCONNECTED';
+  private stopRequested = false;
   private readonly armLabel: HTMLElement;
 
   constructor(
     container: Element,
     private readonly sendControl: SendControl,
     onEnterVR: () => void = () => {},
+    private readonly onSafetyChange: (snapshot: ArmSafetySnapshot) => void = () => {},
   ) {
     container.classList.add('command-actions');
     container.innerHTML = `
@@ -47,8 +69,8 @@ export class ArmPanel {
     this.vrButton = requireButton(container, '.command-button--vr');
     this.armLabel = requireElement(this.armButton, 'span');
 
-    this.armButton.addEventListener('click', () => this.requestArm());
-    this.stopButton.addEventListener('click', () => this.stop());
+    this.armButton.addEventListener('click', () => this.requestArm('desktop'));
+    this.stopButton.addEventListener('click', () => this.requestDisarm('desktop'));
     this.vrButton.addEventListener('click', onEnterVR);
   }
 
@@ -62,6 +84,18 @@ export class ArmPanel {
 
   get feedbackText(): string {
     return this.armFeedback ?? '';
+  }
+
+  get safetyState(): ArmSafetySnapshot {
+    return Object.freeze({
+      phase: this.safetyPhase(),
+      connected: this.connected,
+      eligible: this.eligible,
+      armed: this.armed,
+      pending: this.isArmPending,
+      mode: this.mode,
+      fault: this.fault,
+    });
   }
 
   observeGrip(grip: boolean): void {
@@ -83,6 +117,7 @@ export class ArmPanel {
   }
 
   setMode(mode: TeleopMode): void {
+    this.mode = mode;
     const authoritativeArmed = mode === 'ARMED' || mode === 'ACTIVE' || mode === 'HOLD';
     this.armed = authoritativeArmed;
     if (authoritativeArmed) {
@@ -94,6 +129,7 @@ export class ArmPanel {
       this.pendingArmRequestId = null;
       this.awaitingArmedMode = false;
     }
+    if (mode === 'READY') this.stopRequested = false;
     this.syncButtonState();
   }
 
@@ -119,6 +155,7 @@ export class ArmPanel {
     this.pendingArmRequestId = null;
     this.awaitingArmedMode = false;
     this.armFeedback = null;
+    this.stopRequested = false;
     this.syncButtonState();
   }
 
@@ -138,7 +175,7 @@ export class ArmPanel {
         : '进入 VR';
   }
 
-  private requestArm(): void {
+  requestArm(source: ControlSource = 'desktop'): boolean {
     if (
       !this.connected ||
       !this.eligible ||
@@ -146,28 +183,46 @@ export class ArmPanel {
       this.armed ||
       this.isArmPending
     ) {
-      return;
+      return false;
     }
-    const message = this.control('arm_request');
+    const message = this.control('arm_request', source);
     this.pendingArmRequestId = message.request_id;
     this.eligible = false;
+    this.stopRequested = false;
     this.armFeedback = null;
-    this.sendControl(message);
     this.syncButtonState();
+    this.sendControl(message);
+    return true;
   }
 
-  private stop(): void {
-    this.sendControl(this.control('disarm'));
-    this.resetToLocked();
+  requestDisarm(source: ControlSource = 'desktop'): void {
+    this.armed = false;
+    this.eligible = false;
+    this.pendingArmRequestId = null;
+    this.awaitingArmedMode = false;
+    this.armFeedback = null;
+    this.stopRequested = true;
+    this.syncButtonState();
+    this.sendControl(this.control('disarm', source));
   }
 
-  private control(type: 'arm_request' | 'disarm'): ClientControlMessage {
+  private control(type: 'arm_request' | 'disarm', source: ControlSource): ClientControlMessage {
     this.requestSequence += 1;
     return {
       v: PROTOCOL_VERSION,
       type,
-      request_id: `desktop-${type}-${this.requestSequence}`,
+      request_id: `${source}-${type}-${this.requestSequence}`,
     };
+  }
+
+  private safetyPhase(): ArmSafetyPhase {
+    if (!this.connected) return 'disconnected';
+    if (this.fault) return 'fault';
+    if (this.stopRequested || this.mode === 'DISARMED') return 'stopped';
+    if (this.mode === 'ACTIVE') return 'active';
+    if (this.isArmPending) return 'pending';
+    if (this.armed) return 'armed';
+    return 'locked';
   }
 
   private syncButtonState(): void {
@@ -202,6 +257,7 @@ export class ArmPanel {
               ? '仿真已解锁'
               : '解锁仿真',
     );
+    this.onSafetyChange(this.safetyState);
   }
 }
 

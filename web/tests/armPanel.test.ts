@@ -155,4 +155,119 @@ describe('ArmPanel simulator safety', () => {
     expect(panel.vrButton.title).toBe('当前设备不支持沉浸式 VR');
     expect(panel.vrButton.dataset.state).toBe('error');
   });
+
+  it('uses one safety gate for desktop and XR arm requests', () => {
+    const send = vi.fn();
+    const states = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send, undefined, states);
+
+    expect(panel.requestArm('xr')).toBe(false);
+    panel.observeGrip(false);
+    expect(panel.requestArm('xr')).toBe(true);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'arm_request',
+      request_id: expect.stringMatching(/^xr-arm_request-/),
+    }));
+    expect(panel.requestArm('xr')).toBe(false);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(panel.safetyState.phase).toBe('pending');
+  });
+
+  it('XR disarm closes the local gate before transport returns', () => {
+    const events: string[] = [];
+    let panel!: ArmPanel;
+    panel = new ArmPanel(
+      document.querySelector('#panel')!,
+      (message) => events.push(`${message.type}:${panel.safetyState.phase}`),
+    );
+    panel.observeGrip(false);
+    panel.requestArm('xr');
+    panel.setMode('ARMED');
+
+    panel.requestDisarm('xr');
+
+    expect(events.at(-1)).toBe('disarm:stopped');
+    expect(panel.safetyState).toMatchObject({
+      phase: 'stopped',
+      armed: false,
+      eligible: false,
+      pending: false,
+    });
+  });
+
+  it('publishes fresh immutable readable safety snapshots', () => {
+    const snapshots: unknown[] = [];
+    const panel = new ArmPanel(
+      document.querySelector('#panel')!,
+      vi.fn(),
+      undefined,
+      (snapshot) => snapshots.push(snapshot),
+    );
+
+    panel.setConnected(false);
+    const disconnected = panel.safetyState;
+    expect(disconnected.phase).toBe('disconnected');
+    expect(Object.isFrozen(disconnected)).toBe(true);
+    expect(() => {
+      (disconnected as {phase: string}).phase = 'active';
+    }).toThrow(TypeError);
+
+    panel.setConnected(true);
+    panel.setFault('ik_unreachable');
+    const fault = panel.safetyState;
+    expect(fault.phase).toBe('fault');
+    expect(snapshots.length).toBeGreaterThan(0);
+    expect(snapshots.at(-1)).not.toBe(fault);
+    expect(panel.safetyState).not.toBe(fault);
+  });
+
+  it('maps authoritative and local safety phases with stop precedence', () => {
+    const panel = new ArmPanel(document.querySelector('#panel')!, vi.fn());
+
+    panel.setMode('READY');
+    expect(panel.safetyState.phase).toBe('locked');
+
+    panel.observeGrip(false);
+    panel.requestArm('xr');
+    expect(panel.safetyState.phase).toBe('pending');
+
+    panel.setMode('ARMED');
+    expect(panel.safetyState.phase).toBe('armed');
+    panel.setMode('HOLD');
+    expect(panel.safetyState.phase).toBe('armed');
+    panel.setMode('ACTIVE');
+    expect(panel.safetyState.phase).toBe('active');
+
+    panel.requestDisarm('xr');
+    expect(panel.safetyState.phase).toBe('stopped');
+    panel.setMode('ACTIVE');
+    expect(panel.safetyState.phase).toBe('stopped');
+    panel.setMode('READY');
+    expect(panel.safetyState.phase).toBe('locked');
+    panel.setMode('DISARMED');
+    expect(panel.safetyState.phase).toBe('stopped');
+
+    panel.setFault('ik_unreachable');
+    expect(panel.safetyState.phase).toBe('fault');
+    panel.setConnected(false);
+    expect(panel.safetyState.phase).toBe('disconnected');
+  });
+
+  it('keeps desktop button request IDs source-qualified', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+
+    panel.observeGrip(false);
+    panel.armButton.click();
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'arm_request',
+      request_id: expect.stringMatching(/^desktop-arm_request-/),
+    }));
+
+    panel.stopButton.click();
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'disarm',
+      request_id: expect.stringMatching(/^desktop-disarm-/),
+    }));
+  });
 });
