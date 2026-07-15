@@ -211,6 +211,38 @@ async def test_active_repeated_latest_frame_does_not_repeat_tcp_command() -> Non
 
 
 @pytest.mark.asyncio
+async def test_new_session_same_sequence_is_recorded_and_commanded_as_new_input() -> None:
+    control, latest, backend, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(seq=2, grip=True, session_id="old"), clock.now_ns())
+    await control.tick()
+    latest.publish(
+        frame(seq=3, grip=True, p=(0, 1.2, -0.31), session_id="old"),
+        clock.now_ns(),
+    )
+    await control.tick()
+    recorder = AsyncMock()
+    control.recorder = recorder
+
+    new_session_frame = frame(
+        seq=3,
+        grip=True,
+        p=(0, 1.2, -0.32),
+        session_id="new",
+    )
+    latest.publish(new_session_frame, clock.now_ns())
+    await control.tick()
+    await control.tick()
+
+    assert [command_id for command_id, _target in backend.targets] == [3, 3]
+    recorder.write_vr_frame.assert_awaited_once_with(
+        new_session_frame,
+        clock.now_ns(),
+    )
+    assert control.last_seq == 3
+
+
+@pytest.mark.asyncio
 async def test_grip_release_holds_and_stops_motion() -> None:
     control, latest, backend, clock = make_control()
     await connect_release_arm(control, latest, clock)

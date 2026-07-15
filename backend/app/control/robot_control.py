@@ -71,7 +71,7 @@ class RobotControl:
         self.machine = TeleopStateMachine()
         self.filter = PoseFilter()
         self.last_seq: int | None = None
-        self.anchor_seq: int | None = None
+        self._last_frame_id: tuple[str, int] | None = None
         self.last_target: Pose | None = None
         self._last_sample_age_ms: float | None = None
         self._last_gripper_sent: float | None = None
@@ -173,7 +173,9 @@ class RobotControl:
             return
 
         try:
-            if received.frame.seq != self.last_seq:
+            frame_id = (received.frame.session_id, received.frame.seq)
+            is_new_frame = frame_id != self._last_frame_id
+            if is_new_frame:
                 await self.recorder.write_vr_frame(received.frame, received.received_ns)
             await self._send_latest_gripper(received.frame.right.trigger, now_ns)
             previous_mode = self.machine.mode
@@ -190,11 +192,10 @@ class RobotControl:
                 self.limiter.set_anchor(state.actual_tcp.p)
                 self.filter.reset(state.actual_tcp)
                 self.last_target = state.actual_tcp
-                self.anchor_seq = received.frame.seq
             elif previous_mode == TeleopMode.ACTIVE and self.machine.mode == TeleopMode.HOLD:
                 self.mapper.clear()
                 await self.backend.stop(StopReason.GRIP_RELEASED)
-            elif self.machine.mode == TeleopMode.ACTIVE and received.frame.seq != self.last_seq:
+            elif self.machine.mode == TeleopMode.ACTIVE and is_new_frame:
                 if self.last_target is None:
                     raise RuntimeError("active_without_target")
                 raw_requested = self.mapper.target(
@@ -205,6 +206,7 @@ class RobotControl:
                 await self.backend.command_tcp(target, received.frame.seq)
                 self.last_target = target
             self.last_seq = received.frame.seq
+            self._last_frame_id = frame_id
         except (BackendCommandError, SafetyViolation) as error:
             await self._enter_fault(str(error))
 
