@@ -7,6 +7,7 @@ import {
 } from './controllerInput';
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
+const TEARDOWN_ERROR = 'VR 退出失败，桌面模式已恢复，请刷新页面后重试。';
 
 export interface XRRenderHost {
   startXR(session: XRSession, loop: XRFrameRequestCallback): Promise<void>;
@@ -32,38 +33,51 @@ export interface XRSessionControllerOptions {
   now?: () => number;
 }
 
+interface SessionContext {
+  readonly generation: number;
+  readonly session: XRSession;
+  readonly referenceSpace: XRReferenceSpace;
+  readonly sessionId: string;
+  readonly activationSettled: Promise<void>;
+  readonly settleActivation: () => void;
+  readonly frameListener: XRFrameRequestCallback;
+  readonly visibilityListener: () => void;
+  readonly endListener: () => void;
+  sequence: number;
+  lastFrameMs: number;
+  lastClientMs: number;
+  lastSample: ControllerSample;
+  suspended: boolean;
+  activationComplete: boolean;
+  ending: boolean;
+  announceIdle: boolean;
+  cleanupPromise: Promise<void> | null;
+}
+
 export class XRSessionController {
-  private session: XRSession | null = null;
-  private referenceSpace: XRReferenceSpace | null = null;
-  private sessionId = '';
-  private sequence = 0;
-  private lastFrameMs = Number.NEGATIVE_INFINITY;
-  private lastClientMs = 0;
-  private lastSample: ControllerSample = invalidControllerSample();
+  private current: SessionContext | null = null;
   private entering = false;
-  private suspended = false;
   private disposed = false;
   private cleanupPromise: Promise<void> | null = null;
+  private disposePromise: Promise<void> | null = null;
   private generation = 0;
 
   constructor(private readonly options: XRSessionControllerOptions) {}
 
   get isActive(): boolean {
-    return this.session !== null;
+    return this.current !== null && !this.current.ending;
   }
 
   async enterVR(): Promise<void> {
-    if (this.disposed || this.entering || this.session) return;
+    if (this.disposed || this.entering || this.current || this.cleanupPromise) return;
     const generation = ++this.generation;
     this.entering = true;
-    this.options.onDisarm();
-    this.options.onLockReset();
-    this.options.onController({tracking: false, grip: false, trigger: 0});
+    this.signalSafety();
     this.options.onStatus({state: 'starting'});
     try {
       const xr = this.options.xr;
       if (!xr) {
-        this.fail('此浏览器不支持 WebXR');
+        this.failIfEntryLive(generation, '此浏览器不支持 WebXR');
         return;
       }
 
@@ -71,9 +85,10 @@ export class XRSessionController {
       try {
         supported = await xr.isSessionSupported('immersive-vr');
       } catch {
-        this.fail('无法检测 VR 支持，请使用 Quest 浏览器重试。');
+        this.failIfEntryLive(generation, '无法检测 VR 支持，请使用 Quest 浏览器重试。');
         return;
       }
+      if (!this.entryIsLive(generation)) return;
       if (!supported) {
         this.fail('当前设备不支持沉浸式 VR');
         return;
@@ -83,10 +98,10 @@ export class XRSessionController {
       try {
         session = await xr.requestSession('immersive-vr', {requiredFeatures: ['local-floor']});
       } catch {
-        this.fail('无法进入 VR，请确认浏览器权限后重试。');
+        this.failIfEntryLive(generation, '无法进入 VR，请确认浏览器权限后重试。');
         return;
       }
-      if (this.disposed || generation !== this.generation) {
+      if (!this.entryIsLive(generation)) {
         await safeEnd(session);
         return;
       }
@@ -96,37 +111,40 @@ export class XRSessionController {
         referenceSpace = await session.requestReferenceSpace('local-floor');
       } catch {
         await safeEnd(session);
-        this.fail('VR 空间初始化失败，请退出后重试。');
+        this.failIfEntryLive(generation, 'VR 空间初始化失败，请退出后重试。');
         return;
       }
-      if (this.disposed || generation !== this.generation) {
+      if (!this.entryIsLive(generation)) {
         await safeEnd(session);
         return;
       }
 
-      this.session = session;
-      this.referenceSpace = referenceSpace;
-      this.sessionId = (this.options.createSessionId ?? createXRSessionId)();
-      this.sequence = 0;
-      this.lastFrameMs = Number.NEGATIVE_INFINITY;
-      this.lastClientMs = 0;
-      this.lastSample = invalidControllerSample();
-      this.suspended = false;
-      session.addEventListener('visibilitychange', this.onVisibilityChange);
-      session.addEventListener('end', this.onSessionEnd);
+      const context = this.createContext(generation, session, referenceSpace);
+      this.current = context;
+      session.addEventListener('visibilitychange', context.visibilityListener);
+      session.addEventListener('end', context.endListener);
+
+      let startupFailed = false;
       try {
-        await this.options.host.startXR(session, this.onXRFrame);
+        await this.options.host.startXR(session, context.frameListener);
       } catch {
-        this.removeSessionListeners(session);
-        this.session = null;
-        this.referenceSpace = null;
+        startupFailed = true;
+      } finally {
+        context.activationComplete = true;
+        context.settleActivation();
+      }
+
+      if (startupFailed) {
+        const endedDuringStartup = context.ending;
         await safeEnd(session);
-        await this.options.host.stopXR();
-        this.fail('VR 渲染初始化失败，请退出后重试。');
+        await this.finishSession(context, false);
+        if (!endedDuringStartup) {
+          this.failIfEntryLive(generation, 'VR 渲染初始化失败，请退出后重试。');
+        }
         return;
       }
-      if (this.disposed || generation !== this.generation) {
-        await this.finishSession(session, false);
+      if (!this.ownsLiveContext(context)) {
+        await this.finishSession(context, false);
         return;
       }
       this.options.onStatus({state: 'active'});
@@ -136,78 +154,127 @@ export class XRSessionController {
   }
 
   async exitVR(): Promise<void> {
-    const session = this.session;
-    if (!session) return;
-    await safeEnd(session);
-    if (this.session === session) await this.finishSession(session, true);
-    if (this.cleanupPromise) await this.cleanupPromise;
+    const context = this.current;
+    if (!context) {
+      if (this.cleanupPromise) await this.cleanupPromise;
+      return;
+    }
+    await safeEnd(context.session);
+    await this.finishSession(context, true);
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return;
-    this.generation += 1;
-    await this.exitVR();
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    if (this.disposed) return Promise.resolve();
+
     this.disposed = true;
+    this.generation += 1;
+    this.signalSafety();
+
+    const context = this.current;
+    const endPromise = context ? safeEnd(context.session) : Promise.resolve();
+    const teardownPromise = context
+      ? this.finishSession(context, false, false)
+      : (this.cleanupPromise ?? Promise.resolve());
+    this.disposePromise = Promise.all([endPromise, teardownPromise]).then(() => undefined);
+    return this.disposePromise;
   }
 
-  private readonly onXRFrame: XRFrameRequestCallback = (nowMs, frame): void => {
-    const session = this.session;
-    const referenceSpace = this.referenceSpace;
-    if (this.disposed || !session || !referenceSpace) return;
-    this.options.host.renderXR(nowMs);
-    if (this.suspended || session.visibilityState !== 'visible') return;
-    if (nowMs - this.lastFrameMs < FRAME_INTERVAL_MS) return;
+  private createContext(
+    generation: number,
+    session: XRSession,
+    referenceSpace: XRReferenceSpace,
+  ): SessionContext {
+    let settleActivation!: () => void;
+    const activationSettled = new Promise<void>((resolve) => {
+      settleActivation = resolve;
+    });
+    const context: SessionContext = {
+      generation,
+      session,
+      referenceSpace,
+      sessionId: (this.options.createSessionId ?? createXRSessionId)(),
+      activationSettled,
+      settleActivation,
+      frameListener: (nowMs, frame) => this.onXRFrame(context, nowMs, frame),
+      visibilityListener: () => this.onVisibilityChange(context),
+      endListener: () => this.onSessionEnd(context),
+      sequence: 0,
+      lastFrameMs: Number.NEGATIVE_INFINITY,
+      lastClientMs: 0,
+      lastSample: invalidControllerSample(),
+      suspended: false,
+      activationComplete: false,
+      ending: false,
+      announceIdle: false,
+      cleanupPromise: null,
+    };
+    return context;
+  }
 
-    const sample = readRightController(frame, referenceSpace, session.inputSources)
-      ?? invalidControllerSample();
-    if (!sample.trackingValid && this.lastSample.trackingValid) {
+  private onXRFrame(context: SessionContext, nowMs: number, frame: XRFrame): void {
+    if (!this.ownsLiveContext(context)) return;
+    this.options.host.renderXR(nowMs);
+    if (context.suspended || context.session.visibilityState !== 'visible') return;
+    if (nowMs - context.lastFrameMs < FRAME_INTERVAL_MS) return;
+
+    const sample = readRightController(
+      frame,
+      context.referenceSpace,
+      context.session.inputSources,
+    ) ?? invalidControllerSample();
+    if (!sample.trackingValid && context.lastSample.trackingValid) {
       this.options.onDisarm();
       this.options.onLockReset();
     }
-    this.emitFrame(nowMs, sample, 'visible');
-  };
+    this.emitFrame(context, nowMs, sample, 'visible');
+  }
 
-  private readonly onVisibilityChange = (): void => {
-    const session = this.session;
-    if (this.disposed || !session) return;
-    if (session.visibilityState === 'visible') {
-      this.suspended = false;
-      this.lastFrameMs = Number.NEGATIVE_INFINITY;
+  private onVisibilityChange(context: SessionContext): void {
+    if (!this.ownsLiveContext(context)) return;
+    if (context.session.visibilityState === 'visible') {
+      context.suspended = false;
+      context.lastFrameMs = Number.NEGATIVE_INFINITY;
       return;
     }
 
-    if (this.suspended) return;
-    this.suspended = true;
+    if (context.suspended) return;
+    context.suspended = true;
     this.options.onDisarm();
     this.options.onLockReset();
-    const sample = invalidControllerSample();
-    this.emitFrame(this.now(), sample, visibilityFor(session.visibilityState), true);
-  };
+    this.emitFrame(
+      context,
+      this.now(),
+      invalidControllerSample(),
+      visibilityFor(context.session.visibilityState),
+      true,
+    );
+  }
 
-  private readonly onSessionEnd = (): void => {
-    const session = this.session;
-    if (!session || this.disposed) return;
-    void this.finishSession(session, true);
-  };
+  private onSessionEnd(context: SessionContext): void {
+    void this.finishSession(context, true, !this.disposed);
+  }
 
   private emitFrame(
+    context: SessionContext,
     nowMs: number,
     sample: ControllerSample,
     visibility: VisibilityState,
     force = false,
   ): void {
-    if (!force) this.lastFrameMs = nowMs;
-    const clientMs = Math.max(nowMs, this.lastClientMs);
-    this.lastClientMs = clientMs;
-    this.lastSample = sample;
+    if (!this.ownsLiveContext(context)) return;
+    if (!force) context.lastFrameMs = nowMs;
+    const clientMs = Math.max(nowMs, context.lastClientMs);
+    context.lastClientMs = clientMs;
+    context.lastSample = sample;
     this.options.onController({
       tracking: sample.trackingValid,
       grip: sample.grip,
       trigger: sample.trigger,
     });
     this.options.onFrame(createVRFrame({
-      sessionId: this.sessionId,
-      sequence: this.sequence++,
+      sessionId: context.sessionId,
+      sequence: context.sequence++,
       nowMs: clientMs,
       trackingValid: sample.trackingValid,
       position: sample.p,
@@ -218,33 +285,69 @@ export class XRSessionController {
     }));
   }
 
-  private async finishSession(session: XRSession, announceIdle: boolean): Promise<void> {
-    if (this.cleanupPromise) return this.cleanupPromise;
-    this.cleanupPromise = (async () => {
-      this.removeSessionListeners(session);
-      if (this.session === session) {
-        this.session = null;
-        this.referenceSpace = null;
+  private finishSession(
+    context: SessionContext,
+    announceIdle: boolean,
+    emitSafety = true,
+  ): Promise<void> {
+    context.announceIdle ||= announceIdle;
+    if (context.cleanupPromise) return context.cleanupPromise;
+
+    context.ending = true;
+    context.session.removeEventListener('visibilitychange', context.visibilityListener);
+    context.session.removeEventListener('end', context.endListener);
+    if (this.current === context) this.current = null;
+    if (emitSafety && !this.disposed) this.signalSafety(context);
+
+    let cleanup!: Promise<void>;
+    cleanup = (async () => {
+      try {
+        if (!context.activationComplete) await context.activationSettled;
+        let teardownFailed = false;
+        try {
+          await this.options.host.stopXR();
+        } catch {
+          teardownFailed = true;
+        }
+
+        if (!this.disposed) {
+          if (teardownFailed) this.fail(TEARDOWN_ERROR);
+          else if (context.announceIdle) this.options.onStatus({state: 'idle'});
+        }
+      } finally {
+        this.clearCleanup(context, cleanup);
       }
-      if (!this.disposed) {
-        this.options.onDisarm();
-        this.options.onLockReset();
-        this.lastSample = invalidControllerSample();
-        this.options.onController({tracking: false, grip: false, trigger: 0});
-      }
-      await this.options.host.stopXR();
-      if (!this.disposed && announceIdle) this.options.onStatus({state: 'idle'});
     })();
-    try {
-      await this.cleanupPromise;
-    } finally {
-      this.cleanupPromise = null;
-    }
+    context.cleanupPromise = cleanup;
+    this.cleanupPromise = cleanup;
+    return cleanup;
   }
 
-  private removeSessionListeners(session: XRSession): void {
-    session.removeEventListener('visibilitychange', this.onVisibilityChange);
-    session.removeEventListener('end', this.onSessionEnd);
+  private clearCleanup(context: SessionContext, cleanup: Promise<void>): void {
+    if (context.cleanupPromise === cleanup) context.cleanupPromise = null;
+    if (this.cleanupPromise === cleanup) this.cleanupPromise = null;
+  }
+
+  private signalSafety(context?: SessionContext): void {
+    this.options.onDisarm();
+    this.options.onLockReset();
+    if (context) context.lastSample = invalidControllerSample();
+    this.options.onController({tracking: false, grip: false, trigger: 0});
+  }
+
+  private ownsLiveContext(context: SessionContext): boolean {
+    return !this.disposed
+      && !context.ending
+      && this.current === context
+      && context.generation === this.generation;
+  }
+
+  private entryIsLive(generation: number): boolean {
+    return !this.disposed && generation === this.generation;
+  }
+
+  private failIfEntryLive(generation: number, message: string): void {
+    if (this.entryIsLive(generation)) this.fail(message);
   }
 
   private fail(message: string): void {

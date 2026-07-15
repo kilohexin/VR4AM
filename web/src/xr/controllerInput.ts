@@ -25,8 +25,10 @@ export function readRightController(
   if (!pose) return invalidControllerSample();
 
   const {position, orientation} = pose.transform;
-  const triggerButton = source.gamepad?.buttons[TRIGGER_BUTTON_INDEX];
-  const gripButton = source.gamepad?.buttons[GRIP_BUTTON_INDEX];
+  const buttons = source.gamepad?.buttons;
+  if (!buttons) return invalidControllerSample();
+  const triggerButton = buttons[TRIGGER_BUTTON_INDEX];
+  const gripButton = buttons[GRIP_BUTTON_INDEX];
   return {
     p: [position.x, position.y, position.z],
     q: [orientation.x, orientation.y, orientation.z, orientation.w],

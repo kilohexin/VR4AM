@@ -240,4 +240,129 @@ describe('XRSessionController lifecycle', () => {
     expect(controls).toHaveLength(counts.controls);
     expect(statuses).toHaveLength(counts.statuses);
   });
+
+  it('blocks a new session until the prior session cleanup owns and completes teardown', async () => {
+    const firstStop = deferred<void>();
+    const first = setup();
+    first.host.stopXR.mockImplementationOnce(async () => firstStop.promise);
+    await first.controller.enterVR();
+
+    first.session.dispatchEvent(new Event('end'));
+    await Promise.resolve();
+
+    const secondSession = new FakeSession();
+    vi.mocked(first.xr.requestSession).mockResolvedValue(secondSession as unknown as XRSession);
+    await first.controller.enterVR();
+    expect(first.xr.requestSession).toHaveBeenCalledOnce();
+
+    firstStop.resolve();
+    await firstStop.promise;
+    await Promise.resolve();
+    await first.controller.enterVR();
+    expect(first.xr.requestSession).toHaveBeenCalledTimes(2);
+    expect(first.host.loop).not.toBeNull();
+
+    const safetyBeforeSecondEnd = {controls: first.controls.length, locks: first.locks.length};
+    secondSession.dispatchEvent(new Event('end'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(first.controls).toHaveLength(safetyBeforeSecondEnd.controls + 1);
+    expect(first.locks).toHaveLength(safetyBeforeSecondEnd.locks + 1);
+    expect(first.host.stopXR).toHaveBeenCalledTimes(2);
+    expect(first.host.loop).toBeNull();
+  });
+
+  it('never publishes active when the session ends while renderer startup is pending', async () => {
+    const startup = deferred<void>();
+    const {controller, session, host, statuses} = setup();
+    host.startXR.mockImplementationOnce(async (_session, loop) => {
+      host.loop = loop;
+      await startup.promise;
+    });
+
+    const entering = controller.enterVR();
+    await vi.waitFor(() => expect(host.startXR).toHaveBeenCalledOnce());
+    session.dispatchEvent(new Event('end'));
+    startup.resolve();
+    await entering;
+    await Promise.resolve();
+
+    expect(statuses.some(({state}) => state === 'active')).toBe(false);
+    expect(controller.isActive).toBe(false);
+    expect(host.stopXR).toHaveBeenCalledOnce();
+  });
+
+  it('closes the local gate synchronously when dispose starts and waits safely for delayed end', async () => {
+    const ending = deferred<void>();
+    const events: string[] = [];
+    const {controller, session, host, frames, controls, statuses} = setup();
+    session.end.mockImplementationOnce(async () => {
+      events.push('session-end-start');
+      await ending.promise;
+      events.push('session-end-finish');
+    });
+    await controller.enterVR();
+    const staleLoop = host.loop;
+    const beforeDispose = {frames: frames.length, statuses: statuses.length};
+    const controlsBeforeDispose = controls.length;
+
+    events.push('dispose-start');
+    const disposal = controller.dispose();
+    if (controls.length > controlsBeforeDispose) events.push('disarm');
+    events.push('socket-close');
+
+    expect(events.indexOf('disarm')).toBeLessThan(events.indexOf('socket-close'));
+    expect(controls).toHaveLength(controlsBeforeDispose + 1);
+    staleLoop?.(100, poseFrame());
+    session.visibilityState = 'hidden';
+    session.dispatchEvent(new Event('visibilitychange'));
+    session.dispatchEvent(new Event('end'));
+    expect(frames).toHaveLength(beforeDispose.frames);
+    expect(statuses).toHaveLength(beforeDispose.statuses);
+    expect(controls).toHaveLength(controlsBeforeDispose + 1);
+
+    ending.resolve();
+    await disposal;
+  });
+
+  it('contains teardown rejection and reports a readable Chinese end failure', async () => {
+    const {controller, session, host, statuses} = setup();
+    host.stopXR.mockRejectedValueOnce(new DOMException('raw renderer teardown'));
+    await controller.enterVR();
+
+    session.dispatchEvent(new Event('end'));
+    await vi.waitFor(() => expect(statuses.at(-1)?.state).toBe('error'));
+
+    expect(statuses.at(-1)).toEqual({
+      state: 'error',
+      message: 'VR 退出失败，桌面模式已恢复，请刷新页面后重试。',
+    });
+    expect(JSON.stringify(statuses)).not.toContain('raw renderer teardown');
+  });
+
+  it('ends the acquired session and reports readable Chinese when renderer startup rejects', async () => {
+    const {controller, session, host, statuses} = setup();
+    host.startXR.mockRejectedValueOnce(new DOMException('raw renderer startup'));
+
+    await controller.enterVR();
+
+    expect(session.end).toHaveBeenCalledOnce();
+    expect(statuses.at(-1)).toEqual({
+      state: 'error',
+      message: 'VR 渲染初始化失败，请退出后重试。',
+    });
+    expect(JSON.stringify(statuses)).not.toContain('raw renderer startup');
+    expect(controller.isActive).toBe(false);
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return {promise, resolve, reject};
+}

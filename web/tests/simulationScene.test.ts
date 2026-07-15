@@ -181,6 +181,25 @@ describe('XR render-loop handoff', () => {
     expect(request).toHaveBeenCalledWith(animate);
     expect(scene.animationHandle).toBe(77);
   });
+
+  it('restores the desktop animation loop when clearing the XR session rejects', async () => {
+    const setSession = vi.fn().mockRejectedValue(new DOMException('raw setSession failure'));
+    const setAnimationLoop = vi.fn();
+    const request = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(88);
+    const animate = vi.fn();
+    const scene = {
+      started: true,
+      animationHandle: null,
+      animate,
+      renderer: {xr: {setSession}, setAnimationLoop},
+    };
+
+    await expect((SimulationScene.prototype.stopXR as Function).call(scene)).rejects.toThrow();
+
+    expect(setAnimationLoop).toHaveBeenCalledWith(null);
+    expect(request).toHaveBeenCalledWith(animate);
+    expect(scene.animationHandle).toBe(88);
+  });
 });
 
 function pointerEvent(type: string, pointerId: number, button = 0): Event {

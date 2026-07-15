@@ -263,9 +263,12 @@ export class SimulationScene {
 
   async stopXR(): Promise<void> {
     this.renderer.setAnimationLoop(null);
-    await this.renderer.xr.setSession(null);
-    if (this.started && this.animationHandle === null) {
-      this.animationHandle = requestAnimationFrame(this.animate);
+    try {
+      await this.renderer.xr.setSession(null);
+    } finally {
+      if (this.started && this.animationHandle === null) {
+        this.animationHandle = requestAnimationFrame(this.animate);
+      }
     }
   }
 

@@ -1,4 +1,5 @@
 import './styles.css';
+import {disposeAppForUnload} from './appDisposal';
 import {PROTOCOL_VERSION, type RobotStateMessage, type VRFrame} from './protocol/messages';
 import {RobotStateBuffer} from './robot/robotState';
 import {SimulationScene} from './scenes/simulationScene';
@@ -62,9 +63,7 @@ scene.start();
 socket.connect();
 
 window.addEventListener('beforeunload', () => {
-  void xrController.dispose();
-  scene.dispose();
-  socket.close();
+  disposeAppForUnload(xrController, scene, socket);
 });
 
 function updateController(controller: {tracking: boolean; grip: boolean; trigger: number}): void {

@@ -65,3 +65,23 @@ it('clamps trigger values and treats button pressed as Grip', () => {
   expect(sample?.trigger).toBe(1);
   expect(sample?.grip).toBe(true);
 });
+
+it.each([
+  ['absent', {}],
+  ['null', {buttons: null}],
+] as const)('returns tracking-invalid neutral input when gamepad buttons are %s', (_name, gamepad) => {
+  const right = {
+    handedness: 'right',
+    gripSpace: {},
+    gamepad,
+  } as unknown as XRInputSource;
+
+  expect(() => readRightController(frame(), {} as XRReferenceSpace, [right])).not.toThrow();
+  expect(readRightController(frame(), {} as XRReferenceSpace, [right])).toEqual({
+    p: [0, 0, 0],
+    q: [0, 0, 0, 1],
+    grip: false,
+    trigger: 0,
+    trackingValid: false,
+  });
+});
