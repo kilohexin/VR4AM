@@ -6,7 +6,8 @@ import json
 import math
 import random
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ from app.schemas.messages import ControllerState, Pose, RobotStateMessage, Teleo
 STEP_SECONDS = 0.02
 STEP_NS = 20_000_000
 STATE_PERIOD_NS = 50_000_000
+CONTROLLER_PERIOD_STEPS = 5
+CONTROLLER_FRAME_HZ = 1.0 / (STEP_SECONDS * CONTROLLER_PERIOD_STEPS)
 
 EVENT_SCHEDULE = (
     (0.15, "tracking_loss"),
@@ -46,6 +49,25 @@ class FakeMonotonicClock:
 
     def advance_step(self) -> None:
         self.value_ns += STEP_NS
+
+
+class AbsoluteDeadlinePacer:
+    def __init__(
+        self,
+        *,
+        period_seconds: float,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self.period_seconds = period_seconds
+        self.monotonic = monotonic
+        self.sleep = sleep
+        self.next_deadline = monotonic()
+
+    async def wait_next(self) -> None:
+        self.next_deadline += self.period_seconds
+        delay = max(0.0, self.next_deadline - self.monotonic())
+        await self.sleep(delay)
 
 
 def _all_finite(values: Sequence[float]) -> bool:
@@ -109,6 +131,8 @@ class SoakScenario:
         self.session_id = "soak-0"
         self.seq = 0
         self.frames = 0
+        self.control_steps = 0
+        self.virtual_steps = 0
         self.max_queue_depth = 0
         self.state_messages = 0
         self.state_accumulator_ns = 0
@@ -128,6 +152,7 @@ class SoakScenario:
         self.rearm_count = 0
         self.error_count = 0
         self.invariant_failures: list[str] = []
+        self.realtime_pacer: AbsoluteDeadlinePacer | None = None
         self.phases = tuple(self.rng.uniform(-math.pi, math.pi) for _ in range(5))
         self.frequencies = tuple(self.rng.uniform(0.035, 0.11) for _ in range(4))
 
@@ -187,8 +212,10 @@ class SoakScenario:
     def _publish(self, frame: VRFrame) -> None:
         self.latest.publish(frame, self.clock.now_ns())
         self.frames += 1
-        depth = 1 if self.latest.snapshot() is not None else 0
-        self.max_queue_depth = max(self.max_queue_depth, depth)
+        self._sample_storage_depth()
+
+    def _sample_storage_depth(self) -> None:
+        self.max_queue_depth = max(self.max_queue_depth, self.latest.depth)
 
     def _publish_normal(self, step: int, grip: bool) -> None:
         burst = step > 0 and step % 137 == 0
@@ -225,30 +252,37 @@ class SoakScenario:
         self.rearm_count += 1
 
     async def _normal_step(self, step: int) -> None:
+        grip_changed = False
         if step >= self.next_grip_toggle:
             next_grip = not self.grip
             if next_grip and self.control.mode is TeleopMode.READY:
                 await self.control.arm()
                 self.rearm_count += 1
             self.grip = next_grip
+            grip_changed = True
             self.next_grip_toggle = step + self._grip_interval_steps()
 
-        self._publish_normal(step, self.grip)
-        await self.control.tick()
+        if grip_changed or step % CONTROLLER_PERIOD_STEPS == 0:
+            self._publish_normal(step, self.grip)
+        await self._tick_control()
         if not self.grip and self.control.mode is TeleopMode.HOLD:
             await self.control.disarm()
 
+    async def _tick_control(self) -> None:
+        await self.control.tick()
+        self.control_steps += 1
+
     async def _recover(self, step: int) -> None:
         if self.control.mode in {TeleopMode.STALE, TeleopMode.FAULT}:
+            await self._tick_control()
             return
         if self.control.mode is TeleopMode.DISCONNECTED:
             await self.control.connect()
         if self.control.mode is TeleopMode.DISARMED:
             self._publish(self._make_frame(step, grip=False))
-            await self.control.tick()
         elif self.control.mode is TeleopMode.READY:
             self._publish(self._make_frame(step, grip=False))
-            await self.control.tick()
+        await self._tick_control()
         if self.control.mode is not TeleopMode.READY:
             self.invariant_failures.append(
                 f"{self.recovery_event}_release_did_not_reach_ready"
@@ -266,6 +300,7 @@ class SoakScenario:
         self.seq = 0
         self.latest = LatestVRFrame()
         self.control.latest = self.latest
+        self._sample_storage_depth()
 
     async def _inject_event(self, step: int, name: str) -> bool:
         if name in {"command_fault", "safety_fault"} and self.control.mode is not TeleopMode.ACTIVE:
@@ -283,6 +318,7 @@ class SoakScenario:
         if name == "disconnect":
             await self.control.on_disconnect()
             self._replace_session()
+            await self._tick_control()
         else:
             if name == "command_fault":
                 self.adapter.fail_next_command = True
@@ -300,7 +336,7 @@ class SoakScenario:
                 safety_violation=name == "safety_fault",
             )
             self._publish(frame)
-            await self.control.tick()
+            await self._tick_control()
             expected_mode = (
                 TeleopMode.STALE
                 if expected_reason is StopReason.STALE
@@ -324,6 +360,7 @@ class SoakScenario:
 
     async def _advance(self) -> None:
         self.adapter.robot.step(STEP_SECONDS)
+        self.virtual_steps += 1
         if not np.all(np.isfinite(self.adapter.robot.q)) or not np.all(
             np.isfinite(self.adapter.robot.qd)
         ):
@@ -333,11 +370,13 @@ class SoakScenario:
         if self.state_accumulator_ns >= STATE_PERIOD_NS:
             self.state_accumulator_ns -= STATE_PERIOD_NS
             await self._publish_state()
-        if self.realtime:
-            await asyncio.sleep(STEP_SECONDS)
+        if self.realtime_pacer is not None:
+            await self.realtime_pacer.wait_next()
 
     async def run(self) -> dict[str, Any]:
         await self._initialize()
+        if self.realtime:
+            self.realtime_pacer = AbsoluteDeadlinePacer(period_seconds=STEP_SECONDS)
         for step in range(self.total_steps):
             if self.recovery_event is not None:
                 await self._recover(step)
@@ -366,6 +405,10 @@ class SoakScenario:
             self.invariant_failures.append("final_mode_not_disarmed")
         if self.max_queue_depth != 1:
             self.invariant_failures.append("capacity_one_violated")
+        if self.control_steps != self.total_steps:
+            self.invariant_failures.append("control_step_count_mismatch")
+        if self.virtual_steps != self.total_steps:
+            self.invariant_failures.append("virtual_step_count_mismatch")
         if self.injected_events != self.verified_injected_stops:
             self.invariant_failures.append("injected_stop_unverified")
         if self.adapter.nan_count != 0:
@@ -376,6 +419,9 @@ class SoakScenario:
             "simulated_minutes": self.minutes,
             "seed": self.seed,
             "frames": self.frames,
+            "controller_frame_hz": CONTROLLER_FRAME_HZ,
+            "control_steps": self.control_steps,
+            "virtual_steps": self.virtual_steps,
             "commands": self.adapter.commands,
             "stops": sum(self.adapter.stop_counts.values()),
             "max_queue_depth": self.max_queue_depth,

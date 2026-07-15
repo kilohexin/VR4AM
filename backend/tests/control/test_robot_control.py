@@ -119,6 +119,29 @@ def test_latest_frame_has_capacity_one_and_rejects_same_session_rollback() -> No
     assert received.received_ns == 20
 
 
+def test_latest_frame_depth_is_zero_when_empty() -> None:
+    latest = LatestVRFrame()
+
+    assert latest.depth == 0
+
+
+def test_latest_frame_depth_stays_one_for_repeats_bursts_and_new_sessions() -> None:
+    latest = LatestVRFrame()
+    first = frame(1, False, session_id="old")
+
+    latest.publish(first, 10)
+    assert latest.depth == 1
+    latest.publish(first, 20)
+    assert latest.depth == 1
+
+    for seq in range(2, 20):
+        latest.publish(frame(seq, False, session_id="old"), seq * 10)
+        assert latest.depth == 1
+
+    latest.publish(frame(1, False, session_id="new"), 200)
+    assert latest.depth == 1
+
+
 def test_latest_frame_accepts_new_session_even_with_lower_sequence() -> None:
     latest = LatestVRFrame()
     latest.publish(frame(100, False, session_id="old"), 20)
@@ -167,6 +190,21 @@ async def test_active_frame_captures_anchor_without_motion_then_commands_target(
     assert backend.targets == []
 
     latest.publish(frame(seq=3, grip=True, p=(0, 1.2, -0.31)), clock.now_ns())
+    await control.tick()
+
+    assert [command_id for command_id, _target in backend.targets] == [3]
+
+
+@pytest.mark.asyncio
+async def test_active_repeated_latest_frame_does_not_repeat_tcp_command() -> None:
+    control, latest, backend, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(seq=2, grip=True), clock.now_ns())
+    await control.tick()
+    latest.publish(frame(seq=3, grip=True, p=(0, 1.2, -0.31)), clock.now_ns())
+
+    await control.tick()
+    await control.tick()
     await control.tick()
 
     assert [command_id for command_id, _target in backend.targets] == [3]

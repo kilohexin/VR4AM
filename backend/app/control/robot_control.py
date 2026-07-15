@@ -47,6 +47,11 @@ class LatestVRFrame:
     def snapshot(self) -> ReceivedFrame | None:
         return self._value
 
+    @property
+    def depth(self) -> int:
+        """Return the number of frames retained by the newest-only store."""
+        return int(self._value is not None)
+
 
 class RobotControl:
     def __init__(
@@ -189,7 +194,7 @@ class RobotControl:
             elif previous_mode == TeleopMode.ACTIVE and self.machine.mode == TeleopMode.HOLD:
                 self.mapper.clear()
                 await self.backend.stop(StopReason.GRIP_RELEASED)
-            elif self.machine.mode == TeleopMode.ACTIVE and received.frame.seq != self.anchor_seq:
+            elif self.machine.mode == TeleopMode.ACTIVE and received.frame.seq != self.last_seq:
                 if self.last_target is None:
                     raise RuntimeError("active_without_target")
                 raw_requested = self.mapper.target(
