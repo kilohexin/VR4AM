@@ -135,4 +135,24 @@ describe('ArmPanel simulator safety', () => {
     expect(panel.isArmed).toBe(false);
     expect(panel.armButton.disabled).toBe(true);
   });
+
+  it('shows truthful VR starting, active, idle, and error states', () => {
+    const panel = new ArmPanel(document.querySelector('#panel')!, vi.fn());
+
+    panel.setVRStatus({state: 'starting'});
+    expect(panel.vrButton.textContent).toContain('正在进入 VR');
+    expect(panel.vrButton.disabled).toBe(true);
+
+    panel.setVRStatus({state: 'active'});
+    expect(panel.vrButton.textContent).toContain('退出 VR');
+    expect(panel.vrButton.disabled).toBe(false);
+
+    panel.setVRStatus({state: 'idle'});
+    expect(panel.vrButton.textContent).toContain('进入 VR');
+
+    panel.setVRStatus({state: 'error', message: '当前设备不支持沉浸式 VR'});
+    expect(panel.vrButton.textContent).toContain('进入 VR');
+    expect(panel.vrButton.title).toBe('当前设备不支持沉浸式 VR');
+    expect(panel.vrButton.dataset.state).toBe('error');
+  });
 });

@@ -1,0 +1,243 @@
+import {beforeEach, describe, expect, it, vi} from 'vitest';
+import type {VRFrame} from '../src/protocol/messages';
+import {
+  XRSessionController,
+  type XRRenderHost,
+  type XRSessionStatus,
+} from '../src/xr/session';
+
+class FakeSession extends EventTarget {
+  visibilityState: XRVisibilityState = 'visible';
+  readonly inputSources: XRInputSource[] = [rightSource()];
+  readonly requestReferenceSpace = vi.fn(async (_type: XRReferenceSpaceType) => (
+    {} as XRReferenceSpace
+  ));
+  readonly end = vi.fn(async () => {
+    this.dispatchEvent(new Event('end'));
+  });
+}
+
+class FakeHost implements XRRenderHost {
+  loop: XRFrameRequestCallback | null = null;
+  readonly startXR = vi.fn(async (_session: XRSession, loop: XRFrameRequestCallback) => {
+    this.loop = loop;
+  });
+  readonly stopXR = vi.fn(async () => {
+    this.loop = null;
+  });
+  readonly renderXR = vi.fn();
+}
+
+function rightSource(grip = 0.6, trigger = 0.25): XRInputSource {
+  return {
+    handedness: 'right',
+    gripSpace: {},
+    gamepad: {buttons: [{value: trigger}, {value: grip}]},
+  } as unknown as XRInputSource;
+}
+
+function poseFrame(hasPose = true): XRFrame {
+  return {
+    getPose: () => hasPose ? {
+      transform: {
+        position: {x: 0.4, y: 0.5, z: 0.6},
+        orientation: {x: 0, y: 0, z: 0, w: 1},
+      },
+    } : null,
+  } as unknown as XRFrame;
+}
+
+function setup(options: {
+  supported?: boolean;
+  requestError?: unknown;
+  referenceError?: unknown;
+  missingXR?: boolean;
+} = {}) {
+  const session = new FakeSession();
+  if (options.referenceError) session.requestReferenceSpace.mockRejectedValue(options.referenceError);
+  const requestSession = options.requestError
+    ? vi.fn().mockRejectedValue(options.requestError)
+    : vi.fn().mockResolvedValue(session as unknown as XRSession);
+  const xr = {
+    isSessionSupported: vi.fn().mockResolvedValue(options.supported ?? true),
+    requestSession,
+  } as unknown as XRSystem;
+  const host = new FakeHost();
+  const frames: VRFrame[] = [];
+  const controllers: Array<{tracking: boolean; grip: boolean; trigger: number}> = [];
+  const controls: string[] = [];
+  const statuses: XRSessionStatus[] = [];
+  const locks: string[] = [];
+  let sessionIndex = 0;
+  const controller = new XRSessionController({
+    xr: options.missingXR ? undefined : xr,
+    host,
+    onFrame: (frame) => frames.push(frame),
+    onController: (state) => controllers.push(state),
+    onDisarm: () => controls.push('disarm'),
+    onLockReset: () => locks.push('reset'),
+    onStatus: (status) => statuses.push(status),
+    createSessionId: () => `quest-session-${++sessionIndex}`,
+  });
+  return {controller, session, xr, host, frames, controllers, controls, statuses, locks};
+}
+
+beforeEach(() => vi.restoreAllMocks());
+
+describe('XRSessionController lifecycle', () => {
+  it('requests only immersive-vr with required local-floor', async () => {
+    const {controller, session, xr, host} = setup();
+
+    await controller.enterVR();
+
+    expect(xr.requestSession).toHaveBeenCalledWith('immersive-vr', {
+      requiredFeatures: ['local-floor'],
+    });
+    expect(session.requestReferenceSpace).toHaveBeenCalledWith('local-floor');
+    expect(host.startXR).toHaveBeenCalledOnce();
+    expect(controller.isActive).toBe(true);
+  });
+
+  it('caps transport at 60 Hz and keeps sequence and session identity monotonic', async () => {
+    const {controller, host, frames} = setup();
+    await controller.enterVR();
+
+    host.loop?.(100, poseFrame());
+    host.loop?.(110, poseFrame());
+    host.loop?.(117, poseFrame());
+    host.loop?.(134, poseFrame());
+
+    expect(frames.map(({seq}) => seq)).toEqual([0, 1, 2]);
+    expect(new Set(frames.map(({session_id}) => session_id))).toEqual(new Set(['quest-session-1']));
+    expect(frames.map(({client_mono_ms}) => client_mono_ms)).toEqual([100, 117, 134]);
+  });
+
+  it('visibility loss immediately disarms and emits one final tracking-invalid frame', async () => {
+    const {controller, session, host, frames, controllers, controls, locks} = setup();
+    await controller.enterVR();
+    host.loop?.(100, poseFrame());
+    const beforeLoss = frames.length;
+
+    session.visibilityState = 'hidden';
+    session.dispatchEvent(new Event('visibilitychange'));
+
+    expect(controls.at(-1)).toBe('disarm');
+    expect(locks).toHaveLength(2);
+    expect(frames).toHaveLength(beforeLoss + 1);
+    expect(frames.at(-1)).toMatchObject({
+      tracking_valid: false,
+      visibility: 'hidden',
+      right: {grip: false, trigger: 0},
+    });
+    expect(controllers.at(-1)).toEqual({tracking: false, grip: false, trigger: 0});
+
+    host.loop?.(140, poseFrame());
+    expect(frames).toHaveLength(beforeLoss + 1);
+  });
+
+  it('tracking loss closes the local command gate on the first invalid sample', async () => {
+    const {controller, host, frames, controls, locks} = setup();
+    await controller.enterVR();
+    host.loop?.(100, poseFrame());
+    const beforeLoss = {controls: controls.length, locks: locks.length};
+
+    host.loop?.(117, poseFrame(false));
+
+    expect(controls).toHaveLength(beforeLoss.controls + 1);
+    expect(locks).toHaveLength(beforeLoss.locks + 1);
+    expect(frames.at(-1)?.tracking_valid).toBe(false);
+
+    host.loop?.(134, poseFrame(false));
+    expect(controls).toHaveLength(beforeLoss.controls + 1);
+    expect(locks).toHaveLength(beforeLoss.locks + 1);
+  });
+
+  it('session end disarms, locks, clears input, and restores the desktop loop', async () => {
+    const {controller, session, host, controllers, controls, locks, statuses} = setup();
+    await controller.enterVR();
+    host.loop?.(100, poseFrame());
+
+    session.dispatchEvent(new Event('end'));
+    await Promise.resolve();
+
+    expect(controls.at(-1)).toBe('disarm');
+    expect(locks).toHaveLength(2);
+    expect(controllers.at(-1)).toEqual({tracking: false, grip: false, trigger: 0});
+    expect(host.stopXR).toHaveBeenCalledOnce();
+    expect(statuses.at(-1)).toEqual({state: 'idle'});
+    expect(controller.isActive).toBe(false);
+  });
+
+  it('exitVR is safe without a session and awaits the active session end', async () => {
+    const {controller, session} = setup();
+
+    await expect(controller.exitVR()).resolves.toBeUndefined();
+    await controller.enterVR();
+    await controller.exitVR();
+
+    expect(session.end).toHaveBeenCalledOnce();
+    expect(controller.isActive).toBe(false);
+  });
+
+  it.each([
+    ['unsupported browser', {missingXR: true}, '此浏览器不支持 WebXR'],
+    ['unsupported headset', {supported: false}, '当前设备不支持沉浸式 VR'],
+  ])('reports readable Chinese for %s and never claims VR started', async (_name, options, message) => {
+    const {controller, statuses, host, controls, locks} = setup(options);
+
+    await controller.enterVR();
+
+    expect(statuses.at(-1)).toEqual({state: 'error', message});
+    expect(statuses.some(({state}) => state === 'active')).toBe(false);
+    expect(host.startXR).not.toHaveBeenCalled();
+    expect(controls).toEqual(['disarm']);
+    expect(locks).toEqual(['reset']);
+  });
+
+  it.each([
+    ['request rejection', {requestError: new DOMException('permission raw')}, '无法进入 VR，请确认浏览器权限后重试。'],
+    ['reference-space failure', {referenceError: new DOMException('space raw')}, 'VR 空间初始化失败，请退出后重试。'],
+  ])('contains raw browser errors after %s', async (_name, options, expected) => {
+    const {controller, statuses} = setup(options);
+
+    await controller.enterVR();
+
+    expect(statuses.at(-1)).toEqual({state: 'error', message: expected});
+    expect(JSON.stringify(statuses)).not.toContain('raw');
+    expect(controller.isActive).toBe(false);
+  });
+
+  it('restart uses a new session id and never emits arm_request automatically', async () => {
+    const first = setup();
+    await first.controller.enterVR();
+    first.host.loop?.(100, poseFrame());
+    await first.controller.exitVR();
+
+    const secondSession = new FakeSession();
+    vi.mocked(first.xr.requestSession).mockResolvedValue(secondSession as unknown as XRSession);
+    await first.controller.enterVR();
+    first.host.loop?.(200, poseFrame());
+
+    expect(first.frames.at(0)?.session_id).not.toBe(first.frames.at(-1)?.session_id);
+    expect(first.frames.at(-1)?.seq).toBe(0);
+    expect(first.controls).not.toContain('arm_request');
+  });
+
+  it('dispose removes listeners and blocks later frames and actions', async () => {
+    const {controller, session, host, frames, controls, statuses} = setup();
+    await controller.enterVR();
+    const staleLoop = host.loop;
+
+    await controller.dispose();
+    const counts = {frames: frames.length, controls: controls.length, statuses: statuses.length};
+    session.visibilityState = 'hidden';
+    session.dispatchEvent(new Event('visibilitychange'));
+    session.dispatchEvent(new Event('end'));
+    staleLoop?.(100, poseFrame());
+    await Promise.resolve();
+
+    expect(frames).toHaveLength(counts.frames);
+    expect(controls).toHaveLength(counts.controls);
+    expect(statuses).toHaveLength(counts.statuses);
+  });
+});

@@ -150,6 +150,11 @@ export class Hud {
     this.sceneNotice.textContent = message;
     this.sceneNotice.hidden = false;
   }
+
+  clearSceneError(): void {
+    this.sceneNotice.textContent = '';
+    this.sceneNotice.hidden = true;
+  }
 }
 
 function statusRow(iconName: IconName, label: string, value: string): string {

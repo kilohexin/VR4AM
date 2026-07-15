@@ -87,4 +87,14 @@ describe('Chinese simulator HUD', () => {
     expect(document.body.textContent).toContain(message);
     expect(document.body.textContent).not.toContain(fault);
   });
+
+  it('clears stale scene feedback after a later successful VR start', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+    hud.showSceneError('当前设备不支持沉浸式 VR');
+
+    hud.clearSceneError();
+
+    expect(document.body.textContent).not.toContain('当前设备不支持沉浸式 VR');
+    expect(document.querySelector<HTMLElement>('.scene-notice')?.hidden).toBe(true);
+  });
 });

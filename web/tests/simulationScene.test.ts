@@ -7,6 +7,7 @@ import {
   disposeObjectResources,
   modelLoadErrorMessage,
   ServerClockAnchor,
+  SimulationScene,
 } from '../src/scenes/simulationScene';
 
 describe('desktop VR frame path', () => {
@@ -134,6 +135,51 @@ describe('scene connection and model lifetime helpers', () => {
     expect(geometryDispose).toHaveBeenCalledOnce();
     expect(materialDispose).toHaveBeenCalledOnce();
     expect(textureDispose).toHaveBeenCalledOnce();
+  });
+});
+
+describe('XR render-loop handoff', () => {
+  it('stops desktop RAF, installs the XR session, and uses setAnimationLoop', async () => {
+    const loop = vi.fn() as unknown as XRFrameRequestCallback;
+    const session = {} as XRSession;
+    const setSession = vi.fn().mockResolvedValue(undefined);
+    const setAnimationLoop = vi.fn();
+    const resetInput = vi.fn();
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+    const scene = {
+      started: true,
+      animationHandle: 42,
+      inputSafety: {reset: resetInput},
+      renderer: {xr: {setSession}, setAnimationLoop},
+    };
+
+    await (SimulationScene.prototype.startXR as Function).call(scene, session, loop);
+
+    expect(cancel).toHaveBeenCalledWith(42);
+    expect(scene.animationHandle).toBeNull();
+    expect(resetInput).toHaveBeenCalledOnce();
+    expect(setSession).toHaveBeenCalledWith(session);
+    expect(setAnimationLoop).toHaveBeenCalledWith(loop);
+  });
+
+  it('clears XR state and restores the desktop animation loop', async () => {
+    const setSession = vi.fn().mockResolvedValue(undefined);
+    const setAnimationLoop = vi.fn();
+    const request = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(77);
+    const animate = vi.fn();
+    const scene = {
+      started: true,
+      animationHandle: null,
+      animate,
+      renderer: {xr: {setSession}, setAnimationLoop},
+    };
+
+    await (SimulationScene.prototype.stopXR as Function).call(scene);
+
+    expect(setAnimationLoop).toHaveBeenCalledWith(null);
+    expect(setSession).toHaveBeenCalledWith(null);
+    expect(request).toHaveBeenCalledWith(animate);
+    expect(scene.animationHandle).toBe(77);
   });
 });
 

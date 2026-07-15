@@ -4,6 +4,7 @@ import {
   type ClientControlMessage,
   type TeleopMode,
 } from '../protocol/messages';
+import type {XRSessionStatus} from '../xr/session';
 
 export type SendControl = (message: ClientControlMessage) => void;
 
@@ -123,6 +124,18 @@ export class ArmPanel {
 
   onSocketReconnect(): void {
     this.resetToLocked();
+  }
+
+  setVRStatus(status: XRSessionStatus): void {
+    const label = requireElement(this.vrButton, 'span');
+    this.vrButton.disabled = status.state === 'starting';
+    this.vrButton.dataset.state = status.state;
+    this.vrButton.title = status.state === 'error' ? status.message : '';
+    label.textContent = status.state === 'starting'
+      ? '正在进入 VR'
+      : status.state === 'active'
+        ? '退出 VR'
+        : '进入 VR';
   }
 
   private requestArm(): void {

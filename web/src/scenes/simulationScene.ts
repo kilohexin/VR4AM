@@ -1,5 +1,12 @@
 import * as THREE from 'three';
-import {PROTOCOL_VERSION, type Quat, type RobotStateMessage, type VRFrame, type Vec3} from '../protocol/messages';
+import {
+  PROTOCOL_VERSION,
+  type Quat,
+  type RobotStateMessage,
+  type VisibilityState,
+  type VRFrame,
+  type Vec3,
+} from '../protocol/messages';
 import {loadRobotModel, type RobotModel} from '../robot/robotModel';
 import {RobotStateBuffer} from '../robot/robotState';
 
@@ -14,6 +21,7 @@ export interface VRFrameInput {
   quaternion: Quat;
   grip: boolean;
   trigger: number;
+  visibility?: VisibilityState;
 }
 
 export function createVRFrame(input: VRFrameInput): VRFrame {
@@ -24,7 +32,7 @@ export function createVRFrame(input: VRFrameInput): VRFrame {
     seq: input.sequence,
     client_mono_ms: input.nowMs,
     tracking_valid: input.trackingValid,
-    visibility: 'visible',
+    visibility: input.visibility ?? 'visible',
     right: {
       p: [...input.position],
       q: [...input.quaternion],
@@ -196,6 +204,7 @@ export class SimulationScene {
     private readonly options: SimulationSceneOptions,
   ) {
     this.renderer = new THREE.WebGLRenderer({antialias: true, powerPreference: 'high-performance'});
+    this.renderer.xr.enabled = true;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -243,11 +252,35 @@ export class SimulationScene {
     this.renderer.setSize(width, height, false);
   }
 
+  async startXR(session: XRSession, loop: XRFrameRequestCallback): Promise<void> {
+    if (!this.started) throw new Error('Simulation scene is not running');
+    if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
+    this.animationHandle = null;
+    this.inputSafety.reset();
+    await this.renderer.xr.setSession(session);
+    this.renderer.setAnimationLoop(loop);
+  }
+
+  async stopXR(): Promise<void> {
+    this.renderer.setAnimationLoop(null);
+    await this.renderer.xr.setSession(null);
+    if (this.started && this.animationHandle === null) {
+      this.animationHandle = requestAnimationFrame(this.animate);
+    }
+  }
+
+  renderXR(nowMs: number): void {
+    if (!this.started) return;
+    this.updateScene(nowMs);
+    this.renderer.render(this.scene, this.camera);
+  }
+
   dispose(): void {
     if (!this.started) return;
     this.started = false;
     if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
     this.animationHandle = null;
+    this.renderer.setAnimationLoop(null);
     this.removeListeners();
     disposeObjectResources(this.scene);
     this.renderer.dispose();
@@ -258,6 +291,12 @@ export class SimulationScene {
     if (!this.started) return;
     this.animationHandle = requestAnimationFrame(this.animate);
 
+    this.updateScene(nowMs);
+    this.sendDesktopFrame(nowMs);
+    this.renderer.render(this.scene, this.camera);
+  };
+
+  private updateScene(nowMs: number): void {
     const nowNs = this.clockAnchor.estimate(nowMs);
     if (this.robotModel && nowNs !== null) {
       const sample = this.options.stateBuffer.sample(nowNs);
@@ -269,6 +308,9 @@ export class SimulationScene {
 
     this.targetMarker.position.copy(this.controllerPosition);
     this.targetMarker.quaternion.copy(this.controllerQuaternion);
+  }
+
+  private sendDesktopFrame(nowMs: number): void {
     if (nowMs - this.lastFrameMs >= FRAME_INTERVAL_MS) {
       this.lastFrameMs = nowMs;
       const input = this.inputSafety.snapshot();
@@ -289,8 +331,7 @@ export class SimulationScene {
       });
       this.options.onFrame(frame);
     }
-    this.renderer.render(this.scene, this.camera);
-  };
+  }
 
   private async loadModel(): Promise<void> {
     try {

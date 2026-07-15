@@ -1,11 +1,12 @@
 import './styles.css';
-import type {RobotStateMessage, VRFrame} from './protocol/messages';
+import {PROTOCOL_VERSION, type RobotStateMessage, type VRFrame} from './protocol/messages';
 import {RobotStateBuffer} from './robot/robotState';
 import {SimulationScene} from './scenes/simulationScene';
 import {TeleopSocket} from './transport/teleopSocket';
 import {ArmPanel} from './ui/armPanel';
 import {Hud} from './ui/hud';
 import {LatencyTracker} from './ui/latency';
+import {XRSessionController, type XRSessionStatus} from './xr/session';
 
 const app = document.querySelector<HTMLElement>('#app');
 if (!app) throw new Error('页面缺少仿真界面容器');
@@ -17,6 +18,8 @@ const pendingFrames = new Map<number, number>();
 
 let scene: SimulationScene;
 let armPanel: ArmPanel;
+let xrController: XRSessionController;
+let vrControlSequence = 0;
 
 const socket = new TeleopSocket(
   resolveSocketUrl(),
@@ -34,34 +37,63 @@ const socket = new TeleopSocket(
 );
 
 armPanel = new ArmPanel(hud.actionContainer, (message) => socket.sendControl(message), () => {
-  const label = armPanel.vrButton.querySelector('span');
-  if (!label) return;
-  label.textContent = 'VR 暂不可用';
-  armPanel.vrButton.dataset.unavailable = 'true';
-  window.setTimeout(() => {
-    label.textContent = '进入 VR';
-    delete armPanel.vrButton.dataset.unavailable;
-  }, 2_000);
+  void (xrController.isActive ? xrController.exitVR() : xrController.enterVR());
 });
 armPanel.setConnected(false);
 
 scene = new SimulationScene(hud.sceneContainer, {
   stateBuffer,
   onFrame: sendFrame,
-  onController: (controller) => {
-    hud.setController(controller);
-    if (controller.tracking) armPanel.observeGrip(controller.grip);
-  },
+  onController: updateController,
   onError: (message) => hud.showSceneError(message),
+});
+
+xrController = new XRSessionController({
+  xr: navigator.xr,
+  host: scene,
+  onFrame: sendFrame,
+  onController: updateController,
+  onDisarm: sendVRDisarm,
+  onLockReset: () => armPanel.resetToLocked(),
+  onStatus: updateXRStatus,
 });
 
 scene.start();
 socket.connect();
 
 window.addEventListener('beforeunload', () => {
+  void xrController.dispose();
   scene.dispose();
   socket.close();
 });
+
+function updateController(controller: {tracking: boolean; grip: boolean; trigger: number}): void {
+  hud.setController(controller);
+  if (controller.tracking) armPanel.observeGrip(controller.grip);
+}
+
+function sendVRDisarm(): void {
+  vrControlSequence += 1;
+  socket.sendControl({
+    v: PROTOCOL_VERSION,
+    type: 'disarm',
+    request_id: `vr-disarm-${vrControlSequence}`,
+    client_mono_ms: performance.now(),
+  });
+}
+
+function updateXRStatus(status: XRSessionStatus): void {
+  armPanel.setVRStatus(status);
+  if (status.state === 'starting') {
+    pendingFrames.clear();
+    latency.reset();
+    hud.setLatency(null, null);
+  } else if (status.state === 'error') {
+    hud.showSceneError(status.message);
+  } else if (status.state === 'active') {
+    hud.clearSceneError();
+  }
+}
 
 function sendFrame(frame: VRFrame): void {
   pendingFrames.set(frame.seq, frame.client_mono_ms);
