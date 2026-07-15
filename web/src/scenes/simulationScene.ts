@@ -9,6 +9,8 @@ import {
 } from '../protocol/messages';
 import {loadRobotModel, type RobotModel} from '../robot/robotModel';
 import {RobotStateBuffer} from '../robot/robotState';
+import type {ArmSafetySnapshot} from '../ui/armPanel';
+import {VrSafetyPanel} from './vrSafetyPanel';
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
 
@@ -197,6 +199,17 @@ export class SimulationScene {
   private readonly inputSafety: DesktopInputSafety;
   private readonly controllerPosition = new THREE.Vector3(0.56, 0.42, 0.18);
   private readonly controllerQuaternion = new THREE.Quaternion(0, 0, 0, 1);
+  private readonly vrSafetyPanel: VrSafetyPanel;
+  private armSafetyState: ArmSafetySnapshot = {
+    phase: 'disconnected',
+    connected: false,
+    eligible: false,
+    armed: false,
+    pending: false,
+    mode: 'DISCONNECTED',
+    fault: null,
+  };
+  private questControllerSupported: boolean | null = null;
   private started = false;
 
   constructor(
@@ -221,6 +234,8 @@ export class SimulationScene {
     this.scene.background = new THREE.Color(0x07131e);
     this.createEnvironment();
     this.createTargetMarker();
+    this.vrSafetyPanel = new VrSafetyPanel(this.scene);
+    this.vrSafetyPanel.update(this.armSafetyState, this.questControllerSupported);
   }
 
   start(): void {
@@ -244,6 +259,16 @@ export class SimulationScene {
     this.inputSafety.reset();
   }
 
+  setArmSafetyState(snapshot: ArmSafetySnapshot): void {
+    this.armSafetyState = snapshot;
+    this.vrSafetyPanel.update(snapshot, this.questControllerSupported);
+  }
+
+  setQuestControllerSupport(supported: boolean | null): void {
+    this.questControllerSupported = supported;
+    this.vrSafetyPanel.update(this.armSafetyState, supported);
+  }
+
   resize(): void {
     const width = Math.max(1, this.container.clientWidth);
     const height = Math.max(1, this.container.clientHeight);
@@ -257,8 +282,10 @@ export class SimulationScene {
     if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
     this.animationHandle = null;
     this.inputSafety.reset();
+    this.vrSafetyPanel.setVisible(false);
     await this.renderer.xr.setSession(session);
     this.renderer.setAnimationLoop(loop);
+    this.vrSafetyPanel.setVisible(true);
   }
 
   async stopXR(): Promise<void> {
@@ -266,6 +293,7 @@ export class SimulationScene {
     try {
       await this.renderer.xr.setSession(null);
     } finally {
+      this.vrSafetyPanel.setVisible(false);
       if (this.started && this.animationHandle === null) {
         this.animationHandle = requestAnimationFrame(this.animate);
       }
@@ -285,6 +313,8 @@ export class SimulationScene {
     this.animationHandle = null;
     this.renderer.setAnimationLoop(null);
     this.removeListeners();
+    this.vrSafetyPanel.setVisible(false);
+    this.vrSafetyPanel.dispose();
     disposeObjectResources(this.scene);
     this.renderer.dispose();
     this.renderer.domElement.remove();

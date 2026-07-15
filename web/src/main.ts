@@ -37,9 +37,12 @@ const socket = new TeleopSocket(
   (message) => armPanel?.handleArmFeedback(message),
 );
 
-armPanel = new ArmPanel(hud.actionContainer, (message) => socket.sendControl(message), () => {
-  void (xrController.isActive ? xrController.exitVR() : xrController.enterVR());
-});
+armPanel = new ArmPanel(
+  hud.actionContainer,
+  (message) => socket.sendControl(message),
+  () => void (xrController.isActive ? xrController.exitVR() : xrController.enterVR()),
+  (snapshot) => scene?.setArmSafetyState(snapshot),
+);
 armPanel.setConnected(false);
 
 scene = new SimulationScene(hud.sceneContainer, {
@@ -48,12 +51,16 @@ scene = new SimulationScene(hud.sceneContainer, {
   onController: updateController,
   onError: (message) => hud.showSceneError(message),
 });
+scene.setArmSafetyState(armPanel.safetyState);
 
 xrController = new XRSessionController({
   xr: navigator.xr,
   host: scene,
   onFrame: sendFrame,
   onController: updateController,
+  onArmRequest: () => { armPanel.requestArm('xr'); },
+  onStopRequest: () => { armPanel.requestDisarm('xr'); },
+  onControllerSupport: (supported) => scene.setQuestControllerSupport(supported),
   onDisarm: sendVRDisarm,
   onLockReset: () => armPanel.resetToLocked(),
   onStatus: updateXRStatus,

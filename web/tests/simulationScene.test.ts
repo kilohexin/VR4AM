@@ -9,6 +9,7 @@ import {
   ServerClockAnchor,
   SimulationScene,
 } from '../src/scenes/simulationScene';
+import type {ArmSafetySnapshot} from '../src/ui/armPanel';
 
 describe('desktop VR frame path', () => {
   it('uses the shared VRFrame shape with metre poses and xyzw quaternion order', () => {
@@ -139,11 +140,15 @@ describe('scene connection and model lifetime helpers', () => {
 });
 
 describe('XR render-loop handoff', () => {
-  it('stops desktop RAF, installs the XR session, and uses setAnimationLoop', async () => {
+  it('shows the safety panel only after the XR session is installed', async () => {
     const loop = vi.fn() as unknown as XRFrameRequestCallback;
     const session = {} as XRSession;
-    const setSession = vi.fn().mockResolvedValue(undefined);
+    let installSession!: () => void;
+    const setSession = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
+      installSession = resolve;
+    }));
     const setAnimationLoop = vi.fn();
+    const setVisible = vi.fn();
     const resetInput = vi.fn();
     const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
     const scene = {
@@ -151,15 +156,45 @@ describe('XR render-loop handoff', () => {
       animationHandle: 42,
       inputSafety: {reset: resetInput},
       renderer: {xr: {setSession}, setAnimationLoop},
+      vrSafetyPanel: {setVisible},
     };
 
-    await (SimulationScene.prototype.startXR as Function).call(scene, session, loop);
+    const starting = (SimulationScene.prototype.startXR as Function).call(scene, session, loop);
 
     expect(cancel).toHaveBeenCalledWith(42);
     expect(scene.animationHandle).toBeNull();
     expect(resetInput).toHaveBeenCalledOnce();
     expect(setSession).toHaveBeenCalledWith(session);
+    expect(setVisible).not.toHaveBeenCalledWith(true);
+
+    installSession();
+    await starting;
+
+    expect(setVisible).toHaveBeenLastCalledWith(true);
     expect(setAnimationLoop).toHaveBeenCalledWith(loop);
+  });
+
+  it('keeps the safety panel hidden when XR session installation fails', async () => {
+    const setVisible = vi.fn();
+    const scene = {
+      started: true,
+      animationHandle: null,
+      inputSafety: {reset: vi.fn()},
+      renderer: {
+        xr: {setSession: vi.fn().mockRejectedValue(new DOMException('install failed'))},
+        setAnimationLoop: vi.fn(),
+      },
+      vrSafetyPanel: {setVisible},
+    };
+
+    await expect((SimulationScene.prototype.startXR as Function).call(
+      scene,
+      {} as XRSession,
+      vi.fn() as unknown as XRFrameRequestCallback,
+    )).rejects.toThrow();
+
+    expect(setVisible).toHaveBeenCalledWith(false);
+    expect(setVisible).not.toHaveBeenCalledWith(true);
   });
 
   it('clears XR state and restores the desktop animation loop', async () => {
@@ -167,17 +202,20 @@ describe('XR render-loop handoff', () => {
     const setAnimationLoop = vi.fn();
     const request = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(77);
     const animate = vi.fn();
+    const setVisible = vi.fn();
     const scene = {
       started: true,
       animationHandle: null,
       animate,
       renderer: {xr: {setSession}, setAnimationLoop},
+      vrSafetyPanel: {setVisible},
     };
 
     await (SimulationScene.prototype.stopXR as Function).call(scene);
 
     expect(setAnimationLoop).toHaveBeenCalledWith(null);
     expect(setSession).toHaveBeenCalledWith(null);
+    expect(setVisible).toHaveBeenCalledWith(false);
     expect(request).toHaveBeenCalledWith(animate);
     expect(scene.animationHandle).toBe(77);
   });
@@ -187,18 +225,76 @@ describe('XR render-loop handoff', () => {
     const setAnimationLoop = vi.fn();
     const request = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(88);
     const animate = vi.fn();
+    const setVisible = vi.fn();
     const scene = {
       started: true,
       animationHandle: null,
       animate,
       renderer: {xr: {setSession}, setAnimationLoop},
+      vrSafetyPanel: {setVisible},
     };
 
     await expect((SimulationScene.prototype.stopXR as Function).call(scene)).rejects.toThrow();
 
     expect(setAnimationLoop).toHaveBeenCalledWith(null);
+    expect(setVisible).toHaveBeenCalledWith(false);
     expect(request).toHaveBeenCalledWith(animate);
     expect(scene.animationHandle).toBe(88);
+  });
+
+  it('forwards cached arm state and controller support to the safety panel', () => {
+    const snapshot = {
+      phase: 'locked',
+      connected: true,
+      eligible: false,
+      armed: false,
+      pending: false,
+      mode: 'READY',
+      fault: null,
+    } satisfies ArmSafetySnapshot;
+    const update = vi.fn();
+    const scene = {
+      armSafetyState: snapshot,
+      questControllerSupported: null,
+      vrSafetyPanel: {update},
+    };
+
+    SimulationScene.prototype.setQuestControllerSupport.call(scene as never, false);
+    expect(scene.questControllerSupported).toBe(false);
+    expect(update).toHaveBeenLastCalledWith(snapshot, false);
+
+    const stopped = {...snapshot, phase: 'stopped', mode: 'DISARMED'} satisfies ArmSafetySnapshot;
+    SimulationScene.prototype.setArmSafetyState.call(scene as never, stopped);
+    expect(scene.armSafetyState).toBe(stopped);
+    expect(update).toHaveBeenLastCalledWith(stopped, false);
+  });
+
+  it('hides and disposes the safety panel with the scene', () => {
+    const setVisible = vi.fn();
+    const disposePanel = vi.fn();
+    const removeListeners = vi.fn();
+    const disposeRenderer = vi.fn();
+    const removeCanvas = vi.fn();
+    const scene = {
+      started: true,
+      animationHandle: null,
+      renderer: {
+        setAnimationLoop: vi.fn(),
+        dispose: disposeRenderer,
+        domElement: {remove: removeCanvas},
+      },
+      removeListeners,
+      scene: new THREE.Scene(),
+      vrSafetyPanel: {setVisible, dispose: disposePanel},
+    };
+
+    (SimulationScene.prototype.dispose as Function).call(scene);
+
+    expect(setVisible).toHaveBeenCalledWith(false);
+    expect(disposePanel).toHaveBeenCalledOnce();
+    expect(removeListeners).toHaveBeenCalledOnce();
+    expect(disposeRenderer).toHaveBeenCalledOnce();
+    expect(removeCanvas).toHaveBeenCalledOnce();
   });
 });
 
