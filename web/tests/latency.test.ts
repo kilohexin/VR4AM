@@ -23,4 +23,16 @@ describe('LatencyTracker', () => {
     expect(tracker.current).toBe(20);
     expect(new LatencyTracker().p95()).toBeNull();
   });
+
+  it('clears current and percentile values at a connection boundary', () => {
+    const tracker = new LatencyTracker();
+    tracker.add(12);
+    tracker.add(24);
+
+    tracker.reset();
+
+    expect(tracker.current).toBeNull();
+    expect(tracker.p95()).toBeNull();
+    expect(tracker.count).toBe(0);
+  });
 });

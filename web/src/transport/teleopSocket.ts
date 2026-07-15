@@ -1,7 +1,9 @@
 import {
+  isArmFeedbackMessage,
   isRobotStateMessage,
   PROTOCOL_VERSION,
   type ClientControlMessage,
+  type ArmFeedbackMessage,
   type RobotStateMessage,
   type VRFrame,
 } from '../protocol/messages';
@@ -25,6 +27,7 @@ export class TeleopSocket {
     private readonly onRobotState: (state: RobotStateMessage) => void,
     private readonly socketFactory: SocketFactory = (socketUrl) => new WebSocket(socketUrl),
     private readonly onConnectionChange: (connected: boolean) => void = () => {},
+    private readonly onArmFeedback: (message: ArmFeedbackMessage) => void = () => {},
   ) {}
 
   connect(): void {
@@ -89,6 +92,7 @@ export class TeleopSocket {
       try {
         const message: unknown = JSON.parse(event.data);
         if (isRobotStateMessage(message)) this.onRobotState(message);
+        else if (isArmFeedbackMessage(message)) this.onArmFeedback(message);
       } catch {
         // Malformed or unsupported messages are ignored at the transport boundary.
       }

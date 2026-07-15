@@ -48,10 +48,72 @@ describe('ArmPanel simulator safety', () => {
     panel.observeGrip(false);
     panel.armButton.click();
     expect(send.mock.calls[0][0].type).toBe('arm_request');
+    expect(panel.isArmed).toBe(false);
+    expect(panel.isArmPending).toBe(true);
 
     panel.stopButton.click();
     expect(send.mock.calls.at(-1)?.[0].type).toBe('disarm');
     expect(panel.isArmed).toBe(false);
+  });
+
+  it('suppresses duplicate arm requests while one is in flight', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.observeGrip(false);
+
+    panel.armButton.click();
+    panel.armButton.click();
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(panel.armButton.disabled).toBe(true);
+  });
+
+  it('reconciles pending arm state with acknowledgement and authoritative modes', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.observeGrip(false);
+    panel.armButton.click();
+    const request = send.mock.calls[0][0];
+
+    panel.handleArmFeedback({v: 1, type: 'arm_ack', request_id: request.request_id});
+    expect(panel.isArmPending).toBe(true);
+    expect(panel.isArmed).toBe(false);
+
+    panel.setMode('READY');
+    expect(panel.isArmPending).toBe(true);
+
+    panel.setMode('ARMED');
+    expect(panel.isArmPending).toBe(false);
+    expect(panel.isArmed).toBe(true);
+
+    panel.setMode('DISARMED');
+    expect(panel.isArmed).toBe(false);
+    expect(panel.armButton.disabled).toBe(true);
+  });
+
+  it('returns to a readable safe locked state when arm is rejected', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.observeGrip(false);
+    panel.armButton.click();
+    const request = send.mock.calls[0][0];
+
+    panel.handleArmFeedback({
+      v: 1,
+      type: 'arm_rejected',
+      request_id: request.request_id,
+      message: 'raw backend detail',
+    });
+
+    expect(panel.isArmPending).toBe(false);
+    expect(panel.isArmed).toBe(false);
+    expect(panel.armButton.disabled).toBe(true);
+    expect(panel.feedbackText).toContain('解锁请求被拒绝');
+    expect(document.body.textContent).not.toContain('raw backend detail');
+
+    panel.observeGrip(false);
+    expect(panel.armButton.disabled).toBe(false);
+    expect(document.body.textContent).toContain('解锁被拒绝');
   });
 
   it('fault and socket reconnect reset lock', () => {
@@ -59,6 +121,7 @@ describe('ArmPanel simulator safety', () => {
 
     panel.observeGrip(false);
     panel.armButton.click();
+    panel.setMode('ARMED');
     expect(panel.isArmed).toBe(true);
 
     panel.setFault('ik_unreachable');

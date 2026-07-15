@@ -126,6 +126,43 @@ describe('TeleopSocket', () => {
     expect(states).toEqual([robotFixture]);
   });
 
+  it('delivers protocol-valid arm acknowledgements and rejections', () => {
+    const feedback: unknown[] = [];
+    const sockets: FakeSocket[] = [];
+    const client = new TeleopSocket(
+      'wss://test',
+      () => {},
+      () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      () => {},
+      (message) => feedback.push(message),
+    );
+    client.connect();
+    sockets[0].open();
+
+    sockets[0].message(JSON.stringify({v: 1, type: 'arm_ack', request_id: 'arm-1'}));
+    sockets[0].message(JSON.stringify({
+      v: 1,
+      type: 'arm_rejected',
+      request_id: 'arm-2',
+      message: '请先松开手柄抓握键，再请求使能。',
+    }));
+    sockets[0].message(JSON.stringify({v: 1, type: 'arm_ack', request_id: ''}));
+
+    expect(feedback).toEqual([
+      {v: 1, type: 'arm_ack', request_id: 'arm-1'},
+      {
+        v: 1,
+        type: 'arm_rejected',
+        request_id: 'arm-2',
+        message: '请先松开手柄抓握键，再请求使能。',
+      },
+    ]);
+  });
+
   it('reconnects exponentially with a two-second cap and never auto-arms', () => {
     const {client, sockets} = setup();
     client.connect();

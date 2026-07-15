@@ -62,6 +62,21 @@ export interface ClientControlMessage {
   client_mono_ms?: number | null;
 }
 
+export interface ArmAckMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: 'arm_ack';
+  request_id: string;
+}
+
+export interface ArmRejectedMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: 'arm_rejected';
+  request_id: string;
+  message: string;
+}
+
+export type ArmFeedbackMessage = ArmAckMessage | ArmRejectedMessage;
+
 type UnknownRecord = Record<string, unknown>;
 
 const TELEOP_MODES: readonly TeleopMode[] = [
@@ -244,5 +259,23 @@ export function isClientControlMessage(value: unknown): value is ClientControlMe
   }
   return (
     !Object.hasOwn(value, 'client_mono_ms') || isNullableNonNegativeNumber(value.client_mono_ms)
+  );
+}
+
+export function isArmFeedbackMessage(value: unknown): value is ArmFeedbackMessage {
+  if (
+    !isRecord(value) ||
+    value.v !== PROTOCOL_VERSION ||
+    (value.type !== 'arm_ack' && value.type !== 'arm_rejected') ||
+    typeof value.request_id !== 'string' ||
+    codePointLength(value.request_id) < 1 ||
+    codePointLength(value.request_id) > 64
+  ) {
+    return false;
+  }
+  if (value.type === 'arm_ack') return hasExactKeys(value, ['v', 'type', 'request_id']);
+  return (
+    hasExactKeys(value, ['v', 'type', 'request_id', 'message']) &&
+    typeof value.message === 'string'
   );
 }

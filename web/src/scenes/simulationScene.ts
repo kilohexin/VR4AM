@@ -34,6 +34,133 @@ export function createVRFrame(input: VRFrameInput): VRFrame {
   };
 }
 
+export interface DesktopInputSnapshot {
+  activePointer: number | null;
+  grip: boolean;
+  trigger: number;
+}
+
+export class DesktopInputSafety {
+  private activePointer: number | null = null;
+  private grip = false;
+  private trigger = 0;
+  private attached = false;
+  private readonly ownerWindow: Window;
+  private readonly ownerDocument: Document;
+
+  constructor(private readonly canvas: HTMLCanvasElement) {
+    this.ownerDocument = canvas.ownerDocument;
+    this.ownerWindow = this.ownerDocument.defaultView ?? window;
+  }
+
+  attach(): void {
+    if (this.attached) return;
+    this.attached = true;
+    this.ownerWindow.addEventListener('blur', this.onInterrupted);
+    this.ownerWindow.addEventListener('keydown', this.onKeyDown);
+    this.ownerWindow.addEventListener('keyup', this.onKeyUp);
+    this.ownerDocument.addEventListener('visibilitychange', this.onVisibilityChange);
+    this.canvas.addEventListener('pointerdown', this.onPointerDown);
+    this.canvas.addEventListener('pointerup', this.onPointerUp);
+    this.canvas.addEventListener('pointercancel', this.onPointerUp);
+    this.canvas.addEventListener('lostpointercapture', this.onLostPointerCapture);
+  }
+
+  dispose(): void {
+    this.reset();
+    if (!this.attached) return;
+    this.attached = false;
+    this.ownerWindow.removeEventListener('blur', this.onInterrupted);
+    this.ownerWindow.removeEventListener('keydown', this.onKeyDown);
+    this.ownerWindow.removeEventListener('keyup', this.onKeyUp);
+    this.ownerDocument.removeEventListener('visibilitychange', this.onVisibilityChange);
+    this.canvas.removeEventListener('pointerdown', this.onPointerDown);
+    this.canvas.removeEventListener('pointerup', this.onPointerUp);
+    this.canvas.removeEventListener('pointercancel', this.onPointerUp);
+    this.canvas.removeEventListener('lostpointercapture', this.onLostPointerCapture);
+  }
+
+  snapshot(): DesktopInputSnapshot {
+    return {activePointer: this.activePointer, grip: this.grip, trigger: this.trigger};
+  }
+
+  isActivePointer(pointerId: number): boolean {
+    return this.activePointer === pointerId;
+  }
+
+  reset(): void {
+    const pointerId = this.activePointer;
+    this.activePointer = null;
+    this.grip = false;
+    this.trigger = 0;
+    if (pointerId === null) return;
+    try {
+      if (this.canvas.hasPointerCapture(pointerId)) this.canvas.releasePointerCapture(pointerId);
+    } catch {
+      // Capture may already belong to the browser after blur/visibility transitions.
+    }
+  }
+
+  private readonly onPointerDown = (event: PointerEvent): void => {
+    if (event.button !== 0) return;
+    this.activePointer = event.pointerId;
+    this.grip = true;
+    try {
+      this.canvas.setPointerCapture(event.pointerId);
+    } catch {
+      this.reset();
+    }
+  };
+
+  private readonly onPointerUp = (event: PointerEvent): void => {
+    if (this.activePointer !== event.pointerId) return;
+    this.activePointer = null;
+    this.grip = false;
+    try {
+      if (this.canvas.hasPointerCapture(event.pointerId)) {
+        this.canvas.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // The release still wins locally even when browser capture has already gone.
+    }
+  };
+
+  private readonly onLostPointerCapture = (_event: PointerEvent): void => this.reset();
+
+  private readonly onInterrupted = (): void => this.reset();
+
+  private readonly onVisibilityChange = (): void => {
+    if (this.ownerDocument.visibilityState !== 'visible') this.reset();
+  };
+
+  private readonly onKeyDown = (event: KeyboardEvent): void => {
+    if (event.code !== 'Space') return;
+    event.preventDefault();
+    this.trigger = 1;
+  };
+
+  private readonly onKeyUp = (event: KeyboardEvent): void => {
+    if (event.code === 'Space') this.trigger = 0;
+  };
+}
+
+export class ServerClockAnchor {
+  private value: {serverNs: number; clientMs: number} | null = null;
+
+  update(serverNs: number, clientMs: number): void {
+    this.value = {serverNs, clientMs};
+  }
+
+  reset(): void {
+    this.value = null;
+  }
+
+  estimate(clientMs: number): number | null {
+    if (!this.value) return null;
+    return this.value.serverNs + (clientMs - this.value.clientMs) * 1_000_000;
+  }
+}
+
 export interface DesktopControllerState {
   tracking: boolean;
   grip: boolean;
@@ -58,10 +185,8 @@ export class SimulationScene {
   private animationHandle: number | null = null;
   private sequence = 0;
   private lastFrameMs = Number.NEGATIVE_INFINITY;
-  private clockAnchor: {serverNs: number; clientMs: number} | null = null;
-  private activePointer: number | null = null;
-  private grip = false;
-  private trigger = 0;
+  private readonly clockAnchor = new ServerClockAnchor();
+  private readonly inputSafety: DesktopInputSafety;
   private readonly controllerPosition = new THREE.Vector3(0.56, 0.42, 0.18);
   private readonly controllerQuaternion = new THREE.Quaternion(0, 0, 0, 1);
   private started = false;
@@ -78,6 +203,7 @@ export class SimulationScene {
     this.renderer.shadowMap.enabled = true;
     this.renderer.domElement.className = 'simulation-canvas';
     this.renderer.domElement.style.touchAction = 'none';
+    this.inputSafety = new DesktopInputSafety(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(38, 1, 0.01, 50);
     this.camera.position.set(1.55, 1.06, 1.9);
@@ -100,7 +226,13 @@ export class SimulationScene {
 
   applyRobotState(state: RobotStateMessage): void {
     this.options.stateBuffer.push(state);
-    this.clockAnchor = {serverNs: state.server_mono_ns, clientMs: performance.now()};
+    this.clockAnchor.update(state.server_mono_ns, performance.now());
+  }
+
+  resetConnection(): void {
+    this.options.stateBuffer.reset();
+    this.clockAnchor.reset();
+    this.inputSafety.reset();
   }
 
   resize(): void {
@@ -117,12 +249,7 @@ export class SimulationScene {
     if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
     this.animationHandle = null;
     this.removeListeners();
-    this.scene.traverse((object) => {
-      if (!(object instanceof THREE.Mesh) && !(object instanceof THREE.Line)) return;
-      object.geometry.dispose();
-      const materials = Array.isArray(object.material) ? object.material : [object.material];
-      materials.forEach((material) => material.dispose());
-    });
+    disposeObjectResources(this.scene);
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
@@ -131,8 +258,8 @@ export class SimulationScene {
     if (!this.started) return;
     this.animationHandle = requestAnimationFrame(this.animate);
 
-    if (this.robotModel && this.clockAnchor) {
-      const nowNs = this.clockAnchor.serverNs + (nowMs - this.clockAnchor.clientMs) * 1_000_000;
+    const nowNs = this.clockAnchor.estimate(nowMs);
+    if (this.robotModel && nowNs !== null) {
       const sample = this.options.stateBuffer.sample(nowNs);
       if (sample) {
         this.robotModel.setJointAngles(sample.state.actual_q);
@@ -144,6 +271,7 @@ export class SimulationScene {
     this.targetMarker.quaternion.copy(this.controllerQuaternion);
     if (nowMs - this.lastFrameMs >= FRAME_INTERVAL_MS) {
       this.lastFrameMs = nowMs;
+      const input = this.inputSafety.snapshot();
       const frame = createVRFrame({
         sessionId: this.sessionId,
         sequence: this.sequence++,
@@ -151,8 +279,8 @@ export class SimulationScene {
         trackingValid: document.visibilityState === 'visible',
         position: this.controllerPosition.toArray() as Vec3,
         quaternion: this.controllerQuaternion.toArray() as Quat,
-        grip: this.grip,
-        trigger: this.trigger,
+        grip: input.grip,
+        trigger: input.trigger,
       });
       this.options.onController({
         tracking: frame.tracking_valid,
@@ -166,13 +294,17 @@ export class SimulationScene {
 
   private async loadModel(): Promise<void> {
     try {
-      this.robotModel = await loadRobotModel();
-      this.robotModel.setJointAngles([0.2, -0.8, -0.8, -0.4, 0.6, 0]);
-      fitRobotToWorkbench(this.robotModel.group);
-      this.scene.add(this.robotModel.group);
+      const model = await loadRobotModel();
+      if (!this.started) {
+        disposeObjectResources(model.group);
+        return;
+      }
+      this.robotModel = model;
+      model.setJointAngles([0.2, -0.8, -0.8, -0.4, 0.6, 0]);
+      fitRobotToWorkbench(model.group);
+      this.scene.add(model.group);
     } catch (error) {
-      const detail = error instanceof Error ? error.message : '未知错误';
-      this.options.onError(`LM3 模型载入失败：${detail}`);
+      if (this.started) this.options.onError(modelLoadErrorMessage(error));
     }
   }
 
@@ -235,68 +367,33 @@ export class SimulationScene {
 
   private addListeners(): void {
     const canvas = this.renderer.domElement;
+    this.inputSafety.attach();
     window.addEventListener('resize', this.resizeFromEvent);
-    window.addEventListener('keydown', this.onKeyDown);
-    window.addEventListener('keyup', this.onKeyUp);
-    canvas.addEventListener('pointerdown', this.onPointerDown);
     canvas.addEventListener('pointermove', this.onPointerMove);
-    canvas.addEventListener('pointerup', this.onPointerUp);
-    canvas.addEventListener('pointercancel', this.onPointerUp);
     canvas.addEventListener('wheel', this.onWheel, {passive: false});
     canvas.addEventListener('contextmenu', this.preventContextMenu);
   }
 
   private removeListeners(): void {
     const canvas = this.renderer.domElement;
+    this.inputSafety.dispose();
     window.removeEventListener('resize', this.resizeFromEvent);
-    window.removeEventListener('keydown', this.onKeyDown);
-    window.removeEventListener('keyup', this.onKeyUp);
-    canvas.removeEventListener('pointerdown', this.onPointerDown);
     canvas.removeEventListener('pointermove', this.onPointerMove);
-    canvas.removeEventListener('pointerup', this.onPointerUp);
-    canvas.removeEventListener('pointercancel', this.onPointerUp);
     canvas.removeEventListener('wheel', this.onWheel);
     canvas.removeEventListener('contextmenu', this.preventContextMenu);
   }
 
   private readonly resizeFromEvent = (): void => this.resize();
 
-  private readonly onPointerDown = (event: PointerEvent): void => {
-    if (event.button !== 0) return;
-    this.activePointer = event.pointerId;
-    this.grip = true;
-    this.renderer.domElement.setPointerCapture(event.pointerId);
-  };
-
   private readonly onPointerMove = (event: PointerEvent): void => {
-    if (this.activePointer !== event.pointerId) return;
+    if (!this.inputSafety.isActivePointer(event.pointerId)) return;
     this.controllerPosition.x = clamp(this.controllerPosition.x + event.movementX * 0.0012, -0.2, 0.8);
     this.controllerPosition.y = clamp(this.controllerPosition.y - event.movementY * 0.0012, 0.05, 1.05);
-  };
-
-  private readonly onPointerUp = (event: PointerEvent): void => {
-    if (this.activePointer !== event.pointerId) return;
-    this.activePointer = null;
-    this.grip = false;
-    if (this.renderer.domElement.hasPointerCapture(event.pointerId)) {
-      this.renderer.domElement.releasePointerCapture(event.pointerId);
-    }
   };
 
   private readonly onWheel = (event: WheelEvent): void => {
     event.preventDefault();
     this.controllerPosition.z = clamp(this.controllerPosition.z + event.deltaY * 0.0008, -0.62, 0.62);
-  };
-
-  private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (event.code === 'Space') {
-      event.preventDefault();
-      this.trigger = 1;
-    }
-  };
-
-  private readonly onKeyUp = (event: KeyboardEvent): void => {
-    if (event.code === 'Space') this.trigger = 0;
   };
 
   private readonly preventContextMenu = (event: MouseEvent): void => event.preventDefault();
@@ -320,6 +417,28 @@ function fitRobotToWorkbench(group: THREE.Group): void {
 function createSessionId(): string {
   const token = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}`;
   return `desktop-${token}`;
+}
+
+export function modelLoadErrorMessage(_error: unknown): string {
+  return 'LM3 模型加载失败，请检查仿真资源。';
+}
+
+export function disposeObjectResources(root: THREE.Object3D): void {
+  const disposedTextures = new Set<THREE.Texture>();
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh) && !(object instanceof THREE.Line)) return;
+    object.geometry.dispose();
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    materials.forEach((material) => {
+      for (const value of Object.values(material)) {
+        if (value instanceof THREE.Texture && !disposedTextures.has(value)) {
+          disposedTextures.add(value);
+          value.dispose();
+        }
+      }
+      material.dispose();
+    });
+  });
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

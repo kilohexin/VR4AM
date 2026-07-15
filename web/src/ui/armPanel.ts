@@ -1,4 +1,9 @@
-import {PROTOCOL_VERSION, type ClientControlMessage, type TeleopMode} from '../protocol/messages';
+import {
+  PROTOCOL_VERSION,
+  type ArmFeedbackMessage,
+  type ClientControlMessage,
+  type TeleopMode,
+} from '../protocol/messages';
 
 export type SendControl = (message: ClientControlMessage) => void;
 
@@ -13,6 +18,10 @@ export class ArmPanel {
   private connected = true;
   private fault: string | null = null;
   private requestSequence = 0;
+  private pendingArmRequestId: string | null = null;
+  private awaitingArmedMode = false;
+  private armFeedback: string | null = null;
+  private readonly armLabel: HTMLElement;
 
   constructor(
     container: Element,
@@ -35,6 +44,7 @@ export class ArmPanel {
     this.armButton = requireButton(container, '.command-button--arm');
     this.stopButton = requireButton(container, '.command-button--stop');
     this.vrButton = requireButton(container, '.command-button--vr');
+    this.armLabel = requireElement(this.armButton, 'span');
 
     this.armButton.addEventListener('click', () => this.requestArm());
     this.stopButton.addEventListener('click', () => this.stop());
@@ -45,8 +55,18 @@ export class ArmPanel {
     return this.armed;
   }
 
+  get isArmPending(): boolean {
+    return this.pendingArmRequestId !== null || this.awaitingArmedMode;
+  }
+
+  get feedbackText(): string {
+    return this.armFeedback ?? '';
+  }
+
   observeGrip(grip: boolean): void {
-    if (!grip && !this.fault && this.connected) this.eligible = true;
+    if (!grip && !this.fault && this.connected && !this.isArmPending) {
+      this.eligible = true;
+    }
     this.syncButtonState();
   }
 
@@ -62,9 +82,32 @@ export class ArmPanel {
   }
 
   setMode(mode: TeleopMode): void {
-    this.armed = mode === 'ARMED' || mode === 'ACTIVE' || mode === 'HOLD';
+    const authoritativeArmed = mode === 'ARMED' || mode === 'ACTIVE' || mode === 'HOLD';
+    this.armed = authoritativeArmed;
+    if (authoritativeArmed) {
+      this.pendingArmRequestId = null;
+      this.awaitingArmedMode = false;
+    }
     if (mode === 'FAULT' || mode === 'DISCONNECTED' || mode === 'DISARMED') {
       this.eligible = false;
+      this.pendingArmRequestId = null;
+      this.awaitingArmedMode = false;
+    }
+    this.syncButtonState();
+  }
+
+  handleArmFeedback(message: ArmFeedbackMessage): void {
+    if (message.request_id !== this.pendingArmRequestId) return;
+    this.pendingArmRequestId = null;
+    this.eligible = false;
+    if (message.type === 'arm_ack') {
+      this.awaitingArmedMode = true;
+      this.armed = false;
+      this.armFeedback = null;
+    } else {
+      this.awaitingArmedMode = false;
+      this.armed = false;
+      this.armFeedback = '解锁请求被拒绝，请松开 Grip 后重试';
     }
     this.syncButtonState();
   }
@@ -72,6 +115,9 @@ export class ArmPanel {
   resetToLocked(): void {
     this.armed = false;
     this.eligible = false;
+    this.pendingArmRequestId = null;
+    this.awaitingArmedMode = false;
+    this.armFeedback = null;
     this.syncButtonState();
   }
 
@@ -80,10 +126,20 @@ export class ArmPanel {
   }
 
   private requestArm(): void {
-    if (!this.connected || !this.eligible || this.fault || this.armed) return;
-    this.sendControl(this.control('arm_request'));
-    this.armed = true;
+    if (
+      !this.connected ||
+      !this.eligible ||
+      this.fault ||
+      this.armed ||
+      this.isArmPending
+    ) {
+      return;
+    }
+    const message = this.control('arm_request');
+    this.pendingArmRequestId = message.request_id;
     this.eligible = false;
+    this.armFeedback = null;
+    this.sendControl(message);
     this.syncButtonState();
   }
 
@@ -102,11 +158,36 @@ export class ArmPanel {
   }
 
   private syncButtonState(): void {
-    this.armButton.disabled = !this.connected || !this.eligible || this.armed || Boolean(this.fault);
-    this.armButton.dataset.state = this.armed ? 'armed' : this.eligible ? 'ready' : 'locked';
+    this.armButton.disabled =
+      !this.connected ||
+      !this.eligible ||
+      this.armed ||
+      Boolean(this.fault) ||
+      this.isArmPending;
+    this.armButton.dataset.state = this.armed
+      ? 'armed'
+      : this.isArmPending
+        ? 'pending'
+        : this.eligible
+          ? 'ready'
+          : 'locked';
+    this.armLabel.textContent = this.armFeedback
+      ? '解锁被拒绝'
+      : this.isArmPending
+        ? '正在解锁'
+        : '解锁仿真';
+    this.armButton.title = this.armFeedback ?? '';
     this.armButton.setAttribute(
       'aria-label',
-      this.fault ? '故障状态，无法解锁仿真' : this.armed ? '仿真已解锁' : '解锁仿真',
+      this.fault
+        ? '故障状态，无法解锁仿真'
+        : this.armFeedback
+          ? this.armFeedback
+          : this.isArmPending
+            ? '正在等待后端确认解锁'
+            : this.armed
+              ? '仿真已解锁'
+              : '解锁仿真',
     );
   }
 }
@@ -115,6 +196,12 @@ function requireButton(container: Element, selector: string): HTMLButtonElement 
   const button = container.querySelector<HTMLButtonElement>(selector);
   if (!button) throw new Error(`缺少控制按钮: ${selector}`);
   return button;
+}
+
+function requireElement<T extends HTMLElement>(container: Element, selector: string): T {
+  const element = container.querySelector<T>(selector);
+  if (!element) throw new Error(`缺少控制元素: ${selector}`);
+  return element;
 }
 
 function lockIcon(): string {

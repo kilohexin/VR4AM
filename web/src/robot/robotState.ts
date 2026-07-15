@@ -10,6 +10,10 @@ export interface RobotStateSample {
 export class RobotStateBuffer {
   private states: RobotStateMessage[] = [];
 
+  reset(): void {
+    this.states = [];
+  }
+
   push(state: RobotStateMessage): void {
     const newest = this.states.at(-1);
     if (newest && state.server_mono_ns <= newest.server_mono_ns) return;

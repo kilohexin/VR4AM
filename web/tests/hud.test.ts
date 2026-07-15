@@ -41,4 +41,50 @@ describe('Chinese simulator HUD', () => {
     });
     expect(document.body.textContent).toContain('目标不可达');
   });
+
+  it('clears stale backend, age, fault, and latency values on disconnect', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+    hud.setConnection(true);
+    hud.setRobotState({
+      mode: 'ACTIVE',
+      backendState: 'MOVING',
+      sampleAgeMs: 31,
+      fault: 'workspace_violation',
+    });
+    hud.setLatency(18, 42);
+
+    hud.setConnection(false);
+
+    expect(document.body.textContent).toContain('DISCONNECTED · 未连接');
+    expect(document.body.textContent).not.toContain('MOVING');
+    expect(document.body.textContent).not.toContain('31 ms');
+    expect(document.body.textContent).not.toContain('18 ms');
+    expect(document.body.textContent).not.toContain('42 ms');
+    expect(document.body.textContent).toContain('故障');
+    expect(document.body.textContent).toContain('无');
+  });
+
+  it.each([
+    ['protocol_error', '协议消息无效'],
+    ['tracking_lost', '追踪已丢失'],
+    ['input_stale', '控制输入已超时'],
+    ['control_overrun', '控制周期连续超时'],
+    ['invalid_numeric', '控制数据包含无效数值'],
+    ['workspace_violation', '目标超出工作空间'],
+    ['joint_limit', '目标超出关节限制'],
+    ['joint_safety_window', '目标超出仿真关节安全范围'],
+    ['invalid_joint_count', '机器人关节数据无效'],
+    ['ik_unreachable', '目标不可达'],
+    ['ik_singular', '目标接近奇异位形'],
+    ['backend_disconnected', '仿真后端已断开'],
+    ['backend_fault', '仿真后端故障'],
+    ['real_robot_disabled', '第一里程碑禁用真机'],
+  ])('maps backend fault %s to readable Chinese', (fault, message) => {
+    const hud = new Hud(document.querySelector('#app')!);
+
+    hud.setRobotState({mode: 'FAULT', backendState: 'FAULT', sampleAgeMs: 1, fault});
+
+    expect(document.body.textContent).toContain(message);
+    expect(document.body.textContent).not.toContain(fault);
+  });
 });

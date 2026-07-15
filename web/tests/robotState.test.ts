@@ -24,6 +24,16 @@ describe('RobotStateBuffer', () => {
     expect(new RobotStateBuffer().sample(0)).toBeNull();
   });
 
+  it('accepts a restarted backend monotonic epoch after reset', () => {
+    const buffer = new RobotStateBuffer();
+    buffer.push(state(9_000_000_000, 1, 0.1));
+
+    buffer.reset();
+    buffer.push(state(10, 2, 0.2));
+
+    expect(buffer.sample(10)?.state.actual_q[0]).toBe(2);
+  });
+
   it('returns and ages a single sample without extrapolation', () => {
     const buffer = new RobotStateBuffer();
     const only = state(1_000_000, 0.25, 0.4);

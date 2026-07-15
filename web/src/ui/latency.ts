@@ -23,6 +23,10 @@ export class LatencyTracker {
     this.samples.push(milliseconds);
   }
 
+  reset(): void {
+    this.samples.length = 0;
+  }
+
   p95(): number | null {
     if (this.samples.length === 0) return null;
     const sorted = [...this.samples].sort((a, b) => a - b);

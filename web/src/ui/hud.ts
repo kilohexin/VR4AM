@@ -110,6 +110,12 @@ export class Hud {
     if (!connected) {
       this.modeValue.textContent = 'DISCONNECTED · 未连接';
       this.modeValue.parentElement?.setAttribute('data-tone', 'muted');
+      this.backendStateValue.textContent = 'DISCONNECTED';
+      this.backendStateValue.dataset.tone = 'muted';
+      this.sampleAgeValue.textContent = formatMilliseconds(null);
+      this.setLatency(null, null);
+      this.faultValue.textContent = readableFault(null);
+      this.faultRow.dataset.active = 'false';
       this.setController({tracking: false, grip: false, trigger: 0});
     }
   }
@@ -187,12 +193,24 @@ function modeTone(mode: TeleopMode): string {
 function readableFault(fault: string | null): string {
   if (!fault) return '无';
   const labels: Record<string, string> = {
+    protocol_error: '协议消息无效',
+    tracking_lost: '追踪已丢失',
+    input_stale: '控制输入已超时',
+    control_overrun: '控制周期连续超时',
+    invalid_numeric: '控制数据包含无效数值',
+    workspace_violation: '目标超出工作空间',
+    joint_limit: '目标超出关节限制',
+    joint_safety_window: '目标超出仿真关节安全范围',
+    invalid_joint_count: '机器人关节数据无效',
     ik_unreachable: '目标不可达',
+    ik_singular: '目标接近奇异位形',
+    backend_disconnected: '仿真后端已断开',
+    backend_fault: '仿真后端故障',
+    real_robot_disabled: '第一里程碑禁用真机',
     stale_frame: '控制帧超时',
-    tracking_lost: '追踪丢失',
     backend_error: '仿真后端错误',
   };
-  return labels[fault] ?? `仿真故障：${fault}`;
+  return labels[fault] ?? '未知仿真故障';
 }
 
 type IconName = 'shield' | 'robot' | 'link' | 'target' | 'hand' | 'trigger' | 'clock' | 'gauge' | 'warning' | 'info';

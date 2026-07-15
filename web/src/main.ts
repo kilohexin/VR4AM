@@ -23,10 +23,14 @@ const socket = new TeleopSocket(
   (state) => onRobotState(state),
   undefined,
   (connected) => {
+    scene?.resetConnection();
+    pendingFrames.clear();
+    latency.reset();
     hud.setConnection(connected);
+    hud.setLatency(null, null);
     armPanel?.setConnected(connected);
-    if (!connected) armPanel?.onSocketReconnect();
   },
+  (message) => armPanel?.handleArmFeedback(message),
 );
 
 armPanel = new ArmPanel(hud.actionContainer, (message) => socket.sendControl(message), () => {
