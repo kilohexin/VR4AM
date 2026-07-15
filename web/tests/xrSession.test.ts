@@ -8,7 +8,7 @@ import {
 
 class FakeSession extends EventTarget {
   visibilityState: XRVisibilityState = 'visible';
-  readonly inputSources: XRInputSource[] = [rightSource()];
+  inputSources: XRInputSource[] = [rightSource()];
   readonly requestReferenceSpace = vi.fn(async (_type: XRReferenceSpaceType) => (
     {} as XRReferenceSpace
   ));
@@ -31,8 +31,28 @@ class FakeHost implements XRRenderHost {
 function rightSource(grip = 0.6, trigger = 0.25): XRInputSource {
   return {
     handedness: 'right',
+    profiles: ['generic-trigger-squeeze'],
     gripSpace: {},
     gamepad: {buttons: [{value: trigger}, {value: grip}]},
+  } as unknown as XRInputSource;
+}
+
+function questSource(options: {
+  profile?: string;
+  grip?: boolean;
+  a?: boolean;
+  b?: boolean;
+} = {}): XRInputSource {
+  const buttons = Array.from({length: 7}, () => ({value: 0, pressed: false}));
+  buttons[0] = {value: 0.25, pressed: false};
+  buttons[1] = {value: options.grip ? 1 : 0, pressed: options.grip ?? false};
+  buttons[4] = {value: options.a ? 1 : 0, pressed: options.a ?? false};
+  buttons[5] = {value: options.b ? 1 : 0, pressed: options.b ?? false};
+  return {
+    handedness: 'right',
+    profiles: [options.profile ?? 'meta-quest-touch-plus'],
+    gripSpace: {},
+    gamepad: {buttons},
   } as unknown as XRInputSource;
 }
 
@@ -52,6 +72,7 @@ function setup(options: {
   requestError?: unknown;
   referenceError?: unknown;
   missingXR?: boolean;
+  events?: string[];
 } = {}) {
   const session = new FakeSession();
   if (options.referenceError) session.requestReferenceSpace.mockRejectedValue(options.referenceError);
@@ -68,23 +89,173 @@ function setup(options: {
   const controls: string[] = [];
   const statuses: XRSessionStatus[] = [];
   const locks: string[] = [];
+  const armRequests: string[] = [];
+  const stopRequests: string[] = [];
+  const controllerSupport: Array<boolean | null> = [];
   let sessionIndex = 0;
   const controller = new XRSessionController({
     xr: options.missingXR ? undefined : xr,
     host,
-    onFrame: (frame) => frames.push(frame),
-    onController: (state) => controllers.push(state),
+    onFrame: (frame) => {
+      frames.push(frame);
+      options.events?.push('frame');
+    },
+    onController: (state) => {
+      controllers.push(state);
+      options.events?.push(`controller:${state.grip ? 'pressed' : 'released'}`);
+    },
+    onArmRequest: () => {
+      armRequests.push('arm');
+      options.events?.push('arm');
+    },
+    onStopRequest: () => {
+      stopRequests.push('stop');
+      options.events?.push('stop');
+    },
+    onControllerSupport: (supported) => {
+      controllerSupport.push(supported);
+      options.events?.push(`support:${supported}`);
+    },
     onDisarm: () => controls.push('disarm'),
     onLockReset: () => locks.push('reset'),
     onStatus: (status) => statuses.push(status),
     createSessionId: () => `quest-session-${++sessionIndex}`,
   });
-  return {controller, session, xr, host, frames, controllers, controls, statuses, locks};
+  return {
+    controller,
+    session,
+    xr,
+    host,
+    frames,
+    controllers,
+    controls,
+    statuses,
+    locks,
+    armRequests,
+    stopRequests,
+    controllerSupport,
+  };
+}
+
+function emitQuest(
+  session: FakeSession,
+  host: FakeHost,
+  nowMs: number,
+  options: Parameters<typeof questSource>[0] = {},
+  hasPose = true,
+): void {
+  session.inputSources = [questSource(options)];
+  host.loop?.(nowMs, poseFrame(hasPose));
 }
 
 beforeEach(() => vi.restoreAllMocks());
 
 describe('XRSessionController lifecycle', () => {
+  it('publishes controller and support before the frame, then emits one A edge', async () => {
+    const events: string[] = [];
+    const {controller, session, host, armRequests} = setup({events});
+    await controller.enterVR();
+
+    emitQuest(session, host, 100, {grip: false, a: false});
+    events.length = 0;
+    emitQuest(session, host, 120, {grip: false, a: true});
+    emitQuest(session, host, 140, {grip: false, a: true});
+
+    expect(events.slice(0, 4)).toEqual([
+      'controller:released',
+      'support:true',
+      'frame',
+      'arm',
+    ]);
+    expect(armRequests).toHaveLength(1);
+  });
+
+  it('allows another A edge only after release and requires Grip released', async () => {
+    const {controller, session, host, armRequests} = setup();
+    await controller.enterVR();
+
+    emitQuest(session, host, 100, {a: false});
+    emitQuest(session, host, 120, {grip: true, a: true});
+    emitQuest(session, host, 140, {a: false});
+    emitQuest(session, host, 160, {grip: false, a: true});
+    emitQuest(session, host, 180, {a: false});
+    emitQuest(session, host, 200, {grip: false, a: true});
+
+    expect(armRequests).toHaveLength(2);
+  });
+
+  it('requires A release after tracking loss before another arm edge', async () => {
+    const {controller, session, host, armRequests} = setup();
+    await controller.enterVR();
+    emitQuest(session, host, 100, {a: false});
+    emitQuest(session, host, 120, {a: true});
+    emitQuest(session, host, 140, {a: true}, false);
+    emitQuest(session, host, 160, {a: true});
+    expect(armRequests).toHaveLength(1);
+    emitQuest(session, host, 180, {a: false});
+    emitQuest(session, host, 200, {a: true});
+    expect(armRequests).toHaveLength(2);
+  });
+
+  it('requires release after visibility recovery when A was held', async () => {
+    const {controller, session, host, armRequests, controllerSupport} = setup();
+    await controller.enterVR();
+    emitQuest(session, host, 100, {a: false});
+
+    session.visibilityState = 'hidden';
+    session.dispatchEvent(new Event('visibilitychange'));
+    expect(controllerSupport.at(-1)).toBeNull();
+    session.visibilityState = 'visible';
+    session.dispatchEvent(new Event('visibilitychange'));
+
+    emitQuest(session, host, 120, {a: true});
+    expect(armRequests).toHaveLength(0);
+    emitQuest(session, host, 140, {a: false});
+    emitQuest(session, host, 160, {a: true});
+    expect(armRequests).toHaveLength(1);
+  });
+
+  it('resets latches for unsupported profiles without auto-arming on recovery', async () => {
+    const {controller, session, host, armRequests, controllerSupport} = setup();
+    await controller.enterVR();
+    emitQuest(session, host, 100, {a: false});
+    emitQuest(session, host, 120, {profile: 'generic-trigger-squeeze', a: true});
+    expect(controllerSupport.at(-1)).toBe(false);
+    emitQuest(session, host, 140, {a: true});
+    expect(armRequests).toHaveLength(0);
+    emitQuest(session, host, 160, {a: false});
+    emitQuest(session, host, 180, {a: true});
+    expect(armRequests).toHaveLength(1);
+  });
+
+  it('B edge stops once and wins when A and B rise together', async () => {
+    const {controller, session, host, armRequests, stopRequests} = setup();
+    await controller.enterVR();
+    emitQuest(session, host, 100, {a: false, b: false});
+    emitQuest(session, host, 120, {a: true, b: true});
+    emitQuest(session, host, 140, {a: true, b: true});
+
+    expect(stopRequests).toHaveLength(1);
+    expect(armRequests).toHaveLength(0);
+  });
+
+  it('requires release in a restarted session before a held A can arm', async () => {
+    const first = setup();
+    await first.controller.enterVR();
+    emitQuest(first.session, first.host, 100, {a: false});
+    emitQuest(first.session, first.host, 120, {a: true});
+    await first.controller.exitVR();
+
+    const secondSession = new FakeSession();
+    vi.mocked(first.xr.requestSession).mockResolvedValue(secondSession as unknown as XRSession);
+    await first.controller.enterVR();
+    emitQuest(secondSession, first.host, 200, {a: true});
+    expect(first.armRequests).toHaveLength(1);
+    emitQuest(secondSession, first.host, 220, {a: false});
+    emitQuest(secondSession, first.host, 240, {a: true});
+    expect(first.armRequests).toHaveLength(2);
+  });
+
   it('requests only immersive-vr with required local-floor', async () => {
     const {controller, session, xr, host} = setup();
 

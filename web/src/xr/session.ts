@@ -26,6 +26,9 @@ export interface XRSessionControllerOptions {
   host: XRRenderHost;
   onFrame(frame: VRFrame): void;
   onController(state: {tracking: boolean; grip: boolean; trigger: number}): void;
+  onArmRequest?(): void;
+  onStopRequest?(): void;
+  onControllerSupport?(supported: boolean | null): void;
   onDisarm(): void;
   onLockReset(): void;
   onStatus(status: XRSessionStatus): void;
@@ -47,6 +50,8 @@ interface SessionContext {
   lastFrameMs: number;
   lastClientMs: number;
   lastSample: ControllerSample;
+  armLatch: {pressed: boolean; releaseSeen: boolean};
+  stopLatch: {pressed: boolean; releaseSeen: boolean};
   suspended: boolean;
   activationComplete: boolean;
   ending: boolean;
@@ -203,6 +208,8 @@ export class XRSessionController {
       lastFrameMs: Number.NEGATIVE_INFINITY,
       lastClientMs: 0,
       lastSample: invalidControllerSample(),
+      armLatch: {pressed: false, releaseSeen: false},
+      stopLatch: {pressed: false, releaseSeen: false},
       suspended: false,
       activationComplete: false,
       ending: false,
@@ -272,6 +279,9 @@ export class XRSessionController {
       grip: sample.grip,
       trigger: sample.trigger,
     });
+    this.options.onControllerSupport?.(
+      sample.trackingValid ? sample.questFaceButtonsSupported : null,
+    );
     this.options.onFrame(createVRFrame({
       sessionId: context.sessionId,
       sequence: context.sequence++,
@@ -283,6 +293,15 @@ export class XRSessionController {
       trigger: sample.trigger,
       visibility,
     }));
+
+    if (!sample.trackingValid || !sample.questFaceButtonsSupported) {
+      resetFaceLatches(context);
+      return;
+    }
+    const stopEdge = takeReleasedEdge(context.stopLatch, sample.stopButton);
+    const armEdge = takeReleasedEdge(context.armLatch, sample.armButton);
+    if (stopEdge) this.options.onStopRequest?.();
+    else if (armEdge && !sample.grip) this.options.onArmRequest?.();
   }
 
   private finishSession(
@@ -331,8 +350,12 @@ export class XRSessionController {
   private signalSafety(context?: SessionContext): void {
     this.options.onDisarm();
     this.options.onLockReset();
-    if (context) context.lastSample = invalidControllerSample();
+    if (context) {
+      context.lastSample = invalidControllerSample();
+      resetFaceLatches(context);
+    }
     this.options.onController({tracking: false, grip: false, trigger: 0});
+    this.options.onControllerSupport?.(null);
   }
 
   private ownsLiveContext(context: SessionContext): boolean {
@@ -377,4 +400,19 @@ async function safeEnd(session: XRSession): Promise<void> {
   } catch {
     // A session may already be ending; local safety cleanup still proceeds.
   }
+}
+
+function takeReleasedEdge(
+  latch: {pressed: boolean; releaseSeen: boolean},
+  pressedNow: boolean,
+): boolean {
+  const rising = latch.releaseSeen && !latch.pressed && pressedNow;
+  if (!pressedNow) latch.releaseSeen = true;
+  latch.pressed = pressedNow;
+  return rising;
+}
+
+function resetFaceLatches(context: SessionContext): void {
+  context.armLatch = {pressed: false, releaseSeen: false};
+  context.stopLatch = {pressed: false, releaseSeen: false};
 }
