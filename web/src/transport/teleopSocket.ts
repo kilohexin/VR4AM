@@ -24,6 +24,7 @@ export class TeleopSocket {
     private readonly url: string,
     private readonly onRobotState: (state: RobotStateMessage) => void,
     private readonly socketFactory: SocketFactory = (socketUrl) => new WebSocket(socketUrl),
+    private readonly onConnectionChange: (connected: boolean) => void = () => {},
   ) {}
 
   connect(): void {
@@ -55,6 +56,7 @@ export class TeleopSocket {
     }
     const socket = this.socket;
     this.socket = null;
+    if (socket !== null) this.onConnectionChange(false);
     socket?.close();
   }
 
@@ -74,6 +76,7 @@ export class TeleopSocket {
     socket.onopen = () => {
       if (!this.isCurrent(socket, generation)) return;
       this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+      this.onConnectionChange(true);
       this.sendControl({
         v: PROTOCOL_VERSION,
         type: 'hello',
@@ -94,6 +97,7 @@ export class TeleopSocket {
     socket.onclose = () => {
       if (!this.isCurrent(socket, generation)) return;
       this.socket = null;
+      this.onConnectionChange(false);
       this.scheduleReconnect(generation);
     };
   }

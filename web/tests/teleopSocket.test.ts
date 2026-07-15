@@ -59,6 +59,27 @@ afterEach(() => {
 });
 
 describe('TeleopSocket', () => {
+  it('reports every open and close transition to lifecycle observers', () => {
+    const states: boolean[] = [];
+    const sockets: FakeSocket[] = [];
+    const client = new TeleopSocket(
+      'wss://test',
+      () => {},
+      () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      (connected) => states.push(connected),
+    );
+
+    client.connect();
+    sockets[0].open();
+    sockets[0].closeFromServer();
+
+    expect(states).toEqual([true, false]);
+  });
+
   it('drops frames before open and sends only hello when opened', () => {
     const {client, sockets} = setup();
     client.connect();
