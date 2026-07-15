@@ -41,8 +41,9 @@ export class ArmPanel {
   private pendingArmRequestId: string | null = null;
   private awaitingArmedMode = false;
   private armFeedback: string | null = null;
-  private mode: TeleopMode = 'DISCONNECTED';
+  private mode: TeleopMode = 'READY';
   private stopRequested = false;
+  private safetyPublishQueued = false;
   private readonly armLabel: HTMLElement;
 
   constructor(
@@ -87,11 +88,12 @@ export class ArmPanel {
   }
 
   get safetyState(): ArmSafetySnapshot {
+    const phase = this.safetyPhase();
     return Object.freeze({
-      phase: this.safetyPhase(),
-      connected: this.connected,
-      eligible: this.eligible,
-      armed: this.armed,
+      phase,
+      connected: this.connected && this.mode !== 'DISCONNECTED',
+      eligible: phase === 'disconnected' || phase === 'fault' ? false : this.eligible,
+      armed: (phase === 'armed' || phase === 'active') && this.armed,
       pending: this.isArmPending,
       mode: this.mode,
       fault: this.fault,
@@ -99,7 +101,13 @@ export class ArmPanel {
   }
 
   observeGrip(grip: boolean): void {
-    if (!grip && !this.fault && this.connected && !this.isArmPending) {
+    if (
+      !grip &&
+      !this.fault &&
+      this.connected &&
+      !this.isAuthoritativelyUnavailable() &&
+      !this.isArmPending
+    ) {
       this.eligible = true;
     }
     this.syncButtonState();
@@ -112,24 +120,42 @@ export class ArmPanel {
 
   setFault(fault: string | null): void {
     this.fault = fault;
-    if (fault) this.resetToLocked();
-    this.syncButtonState();
+    if (fault) {
+      this.armed = false;
+      this.eligible = false;
+      this.pendingArmRequestId = null;
+      this.awaitingArmedMode = false;
+      this.armFeedback = null;
+      this.stopRequested = true;
+      if (!this.isAuthoritativelyUnavailable()) {
+        this.mode = this.connected ? 'DISARMED' : 'DISCONNECTED';
+      }
+      this.syncButtonState();
+    } else {
+      this.syncButtonState();
+    }
   }
 
   setMode(mode: TeleopMode): void {
     this.mode = mode;
-    const authoritativeArmed = mode === 'ARMED' || mode === 'ACTIVE' || mode === 'HOLD';
+    if (mode === 'READY' || mode === 'ARMED') this.stopRequested = false;
+    const authoritativeArmed =
+      !this.stopRequested && (mode === 'ARMED' || mode === 'ACTIVE' || mode === 'HOLD');
     this.armed = authoritativeArmed;
     if (authoritativeArmed) {
       this.pendingArmRequestId = null;
       this.awaitingArmedMode = false;
     }
-    if (mode === 'FAULT' || mode === 'DISCONNECTED' || mode === 'DISARMED') {
+    if (
+      mode === 'FAULT' ||
+      mode === 'STALE' ||
+      mode === 'DISCONNECTED' ||
+      mode === 'DISARMED'
+    ) {
       this.eligible = false;
       this.pendingArmRequestId = null;
       this.awaitingArmedMode = false;
     }
-    if (mode === 'READY') this.stopRequested = false;
     this.syncButtonState();
   }
 
@@ -155,7 +181,8 @@ export class ArmPanel {
     this.pendingArmRequestId = null;
     this.awaitingArmedMode = false;
     this.armFeedback = null;
-    this.stopRequested = false;
+    this.stopRequested = true;
+    this.mode = this.connected ? 'DISARMED' : 'DISCONNECTED';
     this.syncButtonState();
   }
 
@@ -180,6 +207,7 @@ export class ArmPanel {
       !this.connected ||
       !this.eligible ||
       this.fault ||
+      this.isAuthoritativelyUnavailable() ||
       this.armed ||
       this.isArmPending
     ) {
@@ -188,7 +216,6 @@ export class ArmPanel {
     const message = this.control('arm_request', source);
     this.pendingArmRequestId = message.request_id;
     this.eligible = false;
-    this.stopRequested = false;
     this.armFeedback = null;
     this.syncButtonState();
     this.sendControl(message);
@@ -216,13 +243,17 @@ export class ArmPanel {
   }
 
   private safetyPhase(): ArmSafetyPhase {
-    if (!this.connected) return 'disconnected';
-    if (this.fault) return 'fault';
-    if (this.stopRequested || this.mode === 'DISARMED') return 'stopped';
-    if (this.mode === 'ACTIVE') return 'active';
+    if (!this.connected || this.mode === 'DISCONNECTED') return 'disconnected';
+    if (this.fault || this.mode === 'FAULT' || this.mode === 'STALE') return 'fault';
     if (this.isArmPending) return 'pending';
+    if (this.stopRequested || this.mode === 'DISARMED') return 'stopped';
+    if (this.mode === 'ACTIVE' && this.armed) return 'active';
     if (this.armed) return 'armed';
     return 'locked';
+  }
+
+  private isAuthoritativelyUnavailable(): boolean {
+    return this.mode === 'DISCONNECTED' || this.mode === 'FAULT' || this.mode === 'STALE';
   }
 
   private syncButtonState(): void {
@@ -257,7 +288,20 @@ export class ArmPanel {
               ? '仿真已解锁'
               : '解锁仿真',
     );
-    this.onSafetyChange(this.safetyState);
+    this.publishSafetyChange();
+  }
+
+  private publishSafetyChange(): void {
+    if (this.safetyPublishQueued) return;
+    this.safetyPublishQueued = true;
+    queueMicrotask(() => {
+      this.safetyPublishQueued = false;
+      try {
+        this.onSafetyChange(this.safetyState);
+      } catch {
+        // Safety consumers must never interrupt or reorder control transport.
+      }
+    });
   }
 }
 
