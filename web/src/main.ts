@@ -3,6 +3,7 @@ import {disposeAppForUnload} from './appDisposal';
 import {PROTOCOL_VERSION, type RobotStateMessage, type VRFrame} from './protocol/messages';
 import {RobotStateBuffer} from './robot/robotState';
 import {SimulationScene} from './scenes/simulationScene';
+import {resolveTeleopSocketUrl} from './transport/socketUrl';
 import {TeleopSocket} from './transport/teleopSocket';
 import {ArmPanel} from './ui/armPanel';
 import {Hud} from './ui/hud';
@@ -23,7 +24,7 @@ let xrController: XRSessionController;
 let vrControlSequence = 0;
 
 const socket = new TeleopSocket(
-  resolveSocketUrl(),
+  resolveTeleopSocketUrl(window.location, import.meta.env.VITE_TELEOP_WS_URL),
   (state) => onRobotState(state),
   undefined,
   (connected) => {
@@ -128,11 +129,4 @@ function recordAcknowledgement(sequence: number | null): void {
     if (pendingSequence <= sequence) pendingFrames.delete(pendingSequence);
   }
   hud.setLatency(latency.current, latency.p95());
-}
-
-function resolveSocketUrl(): string {
-  const configured = import.meta.env.VITE_TELEOP_WS_URL;
-  if (configured) return configured;
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.hostname}:8000/ws/v1/teleop`;
 }
