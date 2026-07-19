@@ -10,6 +10,7 @@ import {
 import {loadRobotModel, type RobotModel} from '../robot/robotModel';
 import {RobotStateBuffer} from '../robot/robotState';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
+import type {XRPresentationSample} from '../xr/session';
 import {VrSafetyPanel} from './vrSafetyPanel';
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
@@ -303,6 +304,8 @@ export class SimulationScene {
       }
     }
   }
+
+  updateXRPresentation(_sample: XRPresentationSample, _nowMs: number): void {}
 
   renderXR(nowMs: number): void {
     if (!this.started) return;

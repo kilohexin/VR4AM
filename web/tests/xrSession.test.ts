@@ -2,6 +2,7 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 import type {VRFrame} from '../src/protocol/messages';
 import {
   XRSessionController,
+  type XRPresentationSample,
   type XRRenderHost,
   type XRSessionStatus,
 } from '../src/xr/session';
@@ -25,15 +26,33 @@ class FakeHost implements XRRenderHost {
   readonly stopXR = vi.fn(async () => {
     this.loop = null;
   });
+  readonly updateXRPresentation = vi.fn((_sample: XRPresentationSample, _nowMs: number) => {
+    this.events?.push('presentation');
+  });
   readonly renderXR = vi.fn();
+
+  constructor(private readonly events?: string[]) {
+    this.renderXR.mockImplementation(() => this.events?.push('render'));
+  }
 }
 
 function rightSource(grip = 0.6, trigger = 0.25): XRInputSource {
   return {
     handedness: 'right',
     profiles: ['generic-trigger-squeeze'],
-    gripSpace: {},
+    gripSpace: {handedness: 'right'},
     gamepad: {buttons: [{value: trigger}, {value: grip}]},
+  } as unknown as XRInputSource;
+}
+
+function leftSource(thumbstickY = -0.75, thumbstickPressed = true): XRInputSource {
+  const buttons = Array.from({length: 4}, () => ({value: 0, pressed: false}));
+  buttons[3] = {value: thumbstickPressed ? 1 : 0, pressed: thumbstickPressed};
+  return {
+    handedness: 'left',
+    profiles: ['meta-quest-touch-plus'],
+    gripSpace: {handedness: 'left'},
+    gamepad: {buttons, axes: [0, 0, 0, thumbstickY]},
   } as unknown as XRInputSource;
 }
 
@@ -51,19 +70,29 @@ function questSource(options: {
   return {
     handedness: 'right',
     profiles: [options.profile ?? 'meta-quest-touch-plus'],
-    gripSpace: {},
+    gripSpace: {handedness: 'right'},
     gamepad: {buttons},
   } as unknown as XRInputSource;
 }
 
-function poseFrame(hasPose = true): XRFrame {
+function poseFrame(hasPose = true, leftHasPose = true, headY = 1.68): XRFrame {
   return {
-    getPose: () => hasPose ? {
+    getPose: (space: XRSpace) => {
+      const handedness = (space as unknown as {handedness?: XRHandedness}).handedness;
+      if ((handedness === 'left' && !leftHasPose) || (handedness !== 'left' && !hasPose)) {
+        return null;
+      }
+      const position = handedness === 'left'
+        ? {x: -0.1, y: 0.2, z: 0.3}
+        : {x: 0.4, y: 0.5, z: 0.6};
+      return {
       transform: {
-        position: {x: 0.4, y: 0.5, z: 0.6},
+        position,
         orientation: {x: 0, y: 0, z: 0, w: 1},
       },
-    } : null,
+      };
+    },
+    getViewerPose: () => ({transform: {position: {x: 0, y: headY, z: 0}}}),
   } as unknown as XRFrame;
 }
 
@@ -83,7 +112,7 @@ function setup(options: {
     isSessionSupported: vi.fn().mockResolvedValue(options.supported ?? true),
     requestSession,
   } as unknown as XRSystem;
-  const host = new FakeHost();
+  const host = new FakeHost(options.events);
   const frames: VRFrame[] = [];
   const controllers: Array<{tracking: boolean; grip: boolean; trigger: number}> = [];
   const controls: string[] = [];
@@ -161,7 +190,7 @@ describe('XRSessionController lifecycle', () => {
     emitQuest(session, host, 120, {grip: false, a: true});
     emitQuest(session, host, 140, {grip: false, a: true});
 
-    expect(events.slice(0, 4)).toEqual([
+    expect(events.filter((event) => event !== 'presentation' && event !== 'render').slice(0, 4)).toEqual([
       'controller:released',
       'support:true',
       'frame',
@@ -283,6 +312,72 @@ describe('XRSessionController lifecycle', () => {
     expect(frames.map(({client_mono_ms}) => client_mono_ms)).toEqual([100, 117, 134]);
   });
 
+  it('forwards both hands and viewer height before every visible XR render', async () => {
+    const events: string[] = [];
+    const {controller, session, host, frames} = setup({events});
+    session.inputSources = [leftSource(), rightSource()];
+    await controller.enterVR();
+    events.length = 0;
+
+    host.loop?.(100, poseFrame());
+    host.loop?.(110, poseFrame());
+
+    expect(host.updateXRPresentation).toHaveBeenCalledTimes(2);
+    expect(host.renderXR).toHaveBeenCalledTimes(2);
+    expect(events.filter((event) => event === 'presentation' || event === 'render')).toEqual([
+      'presentation',
+      'render',
+      'presentation',
+      'render',
+    ]);
+    expect(host.updateXRPresentation).toHaveBeenLastCalledWith({
+      left: {
+        p: [-0.1, 0.2, 0.3],
+        q: [0, 0, 0, 1],
+        trackingValid: true,
+        thumbstickY: -0.75,
+        thumbstickPressed: true,
+      },
+      right: expect.objectContaining({
+        p: [0.4, 0.5, 0.6],
+        q: [0, 0, 0, 1],
+        trackingValid: true,
+        grip: true,
+        trigger: 0.25,
+      }),
+      headY: 1.68,
+    }, 110);
+    expect(frames).toHaveLength(1);
+    expect(frames.at(-1)).toMatchObject({
+      right: {p: [0.4, 0.5, 0.6], grip: true, trigger: 0.25},
+    });
+    expect(frames.at(-1)).not.toHaveProperty('left');
+  });
+
+  it('keeps the valid hand in presentation samples when only one hand loses tracking', async () => {
+    const {controller, session, host, controls, locks} = setup();
+    session.inputSources = [leftSource(), rightSource()];
+    await controller.enterVR();
+    host.loop?.(100, poseFrame());
+    const safety = {controls: controls.length, locks: locks.length};
+
+    host.loop?.(117, poseFrame(true, false));
+    expect(host.updateXRPresentation).toHaveBeenLastCalledWith(expect.objectContaining({
+      left: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
+      right: expect.objectContaining({p: [0.4, 0.5, 0.6], trackingValid: true}),
+    }), 117);
+    expect(controls).toHaveLength(safety.controls);
+    expect(locks).toHaveLength(safety.locks);
+
+    host.loop?.(134, poseFrame(false, true));
+    expect(host.updateXRPresentation).toHaveBeenLastCalledWith(expect.objectContaining({
+      left: expect.objectContaining({p: [-0.1, 0.2, 0.3], trackingValid: true}),
+      right: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
+    }), 134);
+    expect(controls).toHaveLength(safety.controls + 1);
+    expect(locks).toHaveLength(safety.locks + 1);
+  });
+
   it('visibility loss immediately disarms and emits one final tracking-invalid frame', async () => {
     const {controller, session, host, frames, controllers, controls, locks} = setup();
     await controller.enterVR();
@@ -301,6 +396,11 @@ describe('XRSessionController lifecycle', () => {
       right: {grip: false, trigger: 0},
     });
     expect(controllers.at(-1)).toEqual({tracking: false, grip: false, trigger: 0});
+    expect(host.updateXRPresentation).toHaveBeenLastCalledWith({
+      left: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
+      right: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
+      headY: null,
+    }, expect.any(Number));
 
     host.loop?.(140, poseFrame());
     expect(frames).toHaveLength(beforeLoss + 1);
@@ -334,6 +434,11 @@ describe('XRSessionController lifecycle', () => {
     expect(controls.at(-1)).toBe('disarm');
     expect(locks).toHaveLength(2);
     expect(controllers.at(-1)).toEqual({tracking: false, grip: false, trigger: 0});
+    expect(host.updateXRPresentation).toHaveBeenLastCalledWith({
+      left: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
+      right: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
+      headY: null,
+    }, expect.any(Number));
     expect(host.stopXR).toHaveBeenCalledOnce();
     expect(statuses.at(-1)).toEqual({state: 'idle'});
     expect(controller.isActive).toBe(false);
@@ -400,6 +505,11 @@ describe('XRSessionController lifecycle', () => {
     const staleLoop = host.loop;
 
     await controller.dispose();
+    expect(host.updateXRPresentation).toHaveBeenLastCalledWith({
+      left: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
+      right: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
+      headY: null,
+    }, expect.any(Number));
     const counts = {frames: frames.length, controls: controls.length, statuses: statuses.length};
     session.visibilityState = 'hidden';
     session.dispatchEvent(new Event('visibilitychange'));

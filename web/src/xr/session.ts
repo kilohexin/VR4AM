@@ -2,8 +2,9 @@ import type {VRFrame, VisibilityState} from '../protocol/messages';
 import {createVRFrame} from '../scenes/simulationScene';
 import {
   invalidControllerSample,
-  readRightController,
+  readControllers,
   type ControllerSample,
+  type LeftControllerSample,
 } from './controllerInput';
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
@@ -12,7 +13,14 @@ const TEARDOWN_ERROR = 'VR 退出失败，桌面模式已恢复，请刷新页�
 export interface XRRenderHost {
   startXR(session: XRSession, loop: XRFrameRequestCallback): Promise<void>;
   stopXR(): Promise<void>;
+  updateXRPresentation(sample: XRPresentationSample, nowMs: number): void;
   renderXR(nowMs: number): void;
+}
+
+export interface XRPresentationSample {
+  left: LeftControllerSample;
+  right: ControllerSample;
+  headY: number | null;
 }
 
 export type XRSessionStatus =
@@ -172,11 +180,11 @@ export class XRSessionController {
     if (this.disposePromise) return this.disposePromise;
     if (this.disposed) return Promise.resolve();
 
+    const context = this.current;
     this.disposed = true;
     this.generation += 1;
-    this.signalSafety();
+    this.signalSafety(context ?? undefined);
 
-    const context = this.current;
     const endPromise = context ? safeEnd(context.session) : Promise.resolve();
     const teardownPromise = context
       ? this.finishSession(context, false, false)
@@ -221,15 +229,18 @@ export class XRSessionController {
 
   private onXRFrame(context: SessionContext, nowMs: number, frame: XRFrame): void {
     if (!this.ownsLiveContext(context)) return;
-    this.options.host.renderXR(nowMs);
     if (context.suspended || context.session.visibilityState !== 'visible') return;
+    const pair = readControllers(frame, context.referenceSpace, context.session.inputSources);
+    const viewerPose = frame.getViewerPose(context.referenceSpace);
+    this.options.host.updateXRPresentation({
+      left: pair.left,
+      right: pair.right,
+      headY: viewerPose?.transform.position.y ?? null,
+    }, nowMs);
+    this.options.host.renderXR(nowMs);
     if (nowMs - context.lastFrameMs < FRAME_INTERVAL_MS) return;
 
-    const sample = readRightController(
-      frame,
-      context.referenceSpace,
-      context.session.inputSources,
-    ) ?? invalidControllerSample();
+    const sample = pair.right;
     if (!sample.trackingValid && context.lastSample.trackingValid) {
       this.options.onDisarm();
       this.options.onLockReset();
@@ -247,11 +258,13 @@ export class XRSessionController {
 
     if (context.suspended) return;
     context.suspended = true;
+    const nowMs = this.now();
+    this.options.host.updateXRPresentation(invalidPresentationSample(), nowMs);
     this.options.onDisarm();
     this.options.onLockReset();
     this.emitFrame(
       context,
-      this.now(),
+      nowMs,
       invalidControllerSample(),
       visibilityFor(context.session.visibilityState),
       true,
@@ -348,6 +361,7 @@ export class XRSessionController {
   }
 
   private signalSafety(context?: SessionContext): void {
+    if (context) this.options.host.updateXRPresentation(invalidPresentationSample(), this.now());
     this.options.onDisarm();
     this.options.onLockReset();
     if (context) {
@@ -380,6 +394,20 @@ export class XRSessionController {
   private now(): number {
     return (this.options.now ?? (() => performance.now()))();
   }
+}
+
+function invalidPresentationSample(): XRPresentationSample {
+  return {
+    left: {
+      p: [0, 0, 0],
+      q: [0, 0, 0, 1],
+      trackingValid: false,
+      thumbstickY: 0,
+      thumbstickPressed: false,
+    },
+    right: invalidControllerSample(),
+    headY: null,
+  };
 }
 
 function visibilityFor(state: XRVisibilityState): VisibilityState {
