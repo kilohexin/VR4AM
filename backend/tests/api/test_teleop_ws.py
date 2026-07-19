@@ -171,8 +171,12 @@ def test_second_socket_is_rejected_without_affecting_owner(
                 intruder.send_json(intruder_message)
                 rejection = intruder.receive_json()
 
-                assert rejection["type"] == "connection_rejected"
-                assert "已有控制连接" in rejection["message"]
+                assert rejection == {
+                    "v": 1,
+                    "type": "connection_rejected",
+                    "reason": "controller_occupied",
+                    "message": "已有控制页面占用，请关闭电脑端网页后重试。",
+                }
                 close = intruder.receive()
                 assert close["type"] == "websocket.close"
                 assert close["code"] == 4409

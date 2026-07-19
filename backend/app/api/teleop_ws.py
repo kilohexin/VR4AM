@@ -153,9 +153,14 @@ async def teleop_websocket(websocket: WebSocket) -> None:
         if owns_connection:
             app.state.teleop_owner = owner_token
     if not owns_connection:
-        message = "已有控制连接，请先断开当前控制端。"
+        message = "已有控制页面占用，请关闭电脑端网页后重试。"
         await websocket.send_json(
-            {"v": 1, "type": "connection_rejected", "message": message}
+            {
+                "v": 1,
+                "type": "connection_rejected",
+                "reason": "controller_occupied",
+                "message": message,
+            }
         )
         await websocket.close(code=4409, reason=message)
         return
