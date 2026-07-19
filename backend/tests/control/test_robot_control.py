@@ -287,6 +287,192 @@ async def test_reset_fault_rejects_backend_while_moving_without_second_stop() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend_state", "reason", "message"),
+    [
+        (
+            BackendState.DISCONNECTED,
+            "control_loop_unavailable",
+            "控制循环不可用，请重启后端并重新检查。",
+        ),
+        (
+            BackendState.FAULT,
+            "stop_incomplete",
+            "仿真后端仍处于故障状态，故障保持锁定。",
+        ),
+        (
+            BackendState.HOLD,
+            "stop_incomplete",
+            "仿真尚未完全停止，请稍后重试。",
+        ),
+    ],
+)
+async def test_reset_fault_requires_backend_to_be_explicitly_idle(
+    backend_state: BackendState,
+    reason: str,
+    message: str,
+) -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+    backend.robot_state = backend_state
+
+    result = await control.reset_fault()
+
+    assert result == robot_control_module.FaultResetResult(False, reason, message)
+    assert backend.stops == [StopReason.FAULT]
+    assert_fault_motion_state_is_retained(control)
+
+
+@pytest.mark.asyncio
+async def test_reset_fault_preserves_new_unrecoverable_fault_during_state_read() -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+    state_read_started = asyncio.Event()
+    allow_state_read = asyncio.Event()
+    original_get_state = backend.get_state
+
+    async def blocked_get_state() -> RobotStateMessage:
+        state_read_started.set()
+        await allow_state_read.wait()
+        return await original_get_state()
+
+    backend.get_state = blocked_get_state  # type: ignore[method-assign]
+    reset = asyncio.create_task(control.reset_fault())
+    await state_read_started.wait()
+
+    await control._enter_fault("control_loop_error")
+    allow_state_read.set()
+    result = await reset
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "unrecoverable_fault",
+        "该故障无法在线复位，请重启后端并重新检查。",
+    )
+    assert control._fault == "control_loop_error"
+    assert control.mode is TeleopMode.FAULT
+    assert control._pending_stop_completion is True
+    assert backend.stops == [StopReason.FAULT, StopReason.FAULT]
+    assert control.mapper._hand_anchor is not None
+    assert control.filter.value is not None
+    assert control.limiter.anchor is not None
+    assert control.last_target is not None
+
+
+@pytest.mark.asyncio
+async def test_reset_fault_rejects_same_named_new_episode_during_state_read() -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+    state_read_started = asyncio.Event()
+    allow_state_read = asyncio.Event()
+    original_get_state = backend.get_state
+    get_state_calls = 0
+
+    async def block_first_get_state() -> RobotStateMessage:
+        nonlocal get_state_calls
+        get_state_calls += 1
+        if get_state_calls == 1:
+            state_read_started.set()
+            await allow_state_read.wait()
+        return await original_get_state()
+
+    backend.get_state = block_first_get_state  # type: ignore[method-assign]
+    reset = asyncio.create_task(control.reset_fault())
+    await state_read_started.wait()
+
+    await control._enter_fault("ik_unreachable")
+    new_episode = await control.state_message()
+    assert new_episode.mode is TeleopMode.FAULT
+    assert control.mode is TeleopMode.DISARMED
+    allow_state_read.set()
+    result = await reset
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "stop_incomplete",
+        "停止尚未完成，请稍后重试。",
+    )
+    assert control._fault == "ik_unreachable"
+    assert backend.stops == [StopReason.FAULT, StopReason.FAULT]
+    assert_fault_motion_state_is_retained(control)
+
+
+@pytest.mark.asyncio
+async def test_reset_fault_preserves_new_fault_during_second_stop() -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+    reset_stop_started = asyncio.Event()
+    allow_reset_stop = asyncio.Event()
+    stop_calls = 0
+
+    async def block_first_stop(reason: StopReason) -> None:
+        nonlocal stop_calls
+        stop_calls += 1
+        backend.stops.append(reason)
+        if stop_calls == 1:
+            reset_stop_started.set()
+            await allow_reset_stop.wait()
+
+    backend.stop = block_first_stop  # type: ignore[method-assign]
+    reset = asyncio.create_task(control.reset_fault())
+    await reset_stop_started.wait()
+
+    await control._enter_fault("control_loop_error")
+    allow_reset_stop.set()
+    result = await reset
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "unrecoverable_fault",
+        "该故障无法在线复位，请重启后端并重新检查。",
+    )
+    assert control._fault == "control_loop_error"
+    assert control.mode is TeleopMode.FAULT
+    assert control._pending_stop_completion is True
+    assert backend.stops == [StopReason.FAULT, StopReason.FAULT, StopReason.FAULT]
+    assert control.mapper._hand_anchor is not None
+    assert control.filter.value is not None
+    assert control.limiter.anchor is not None
+    assert control.last_target is not None
+
+
+@pytest.mark.asyncio
+async def test_reset_fault_preserves_fault_when_shutdown_starts_during_second_stop() -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+    reset_stop_started = asyncio.Event()
+    allow_reset_stop = asyncio.Event()
+    stop_calls = 0
+
+    async def block_first_stop(reason: StopReason) -> None:
+        nonlocal stop_calls
+        stop_calls += 1
+        backend.stops.append(reason)
+        if stop_calls == 1:
+            reset_stop_started.set()
+            await allow_reset_stop.wait()
+
+    backend.stop = block_first_stop  # type: ignore[method-assign]
+    reset = asyncio.create_task(control.reset_fault())
+    await reset_stop_started.wait()
+
+    await control.stop()
+    allow_reset_stop.set()
+    result = await reset
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "control_loop_unavailable",
+        "控制循环不可用，请重启后端并重新检查。",
+    )
+    assert control._fault == "ik_unreachable"
+    assert control._shutdown_started is True
+    assert control._shutdown_stopped is True
+    assert backend.stops == [StopReason.FAULT, StopReason.FAULT, StopReason.SHUTDOWN]
+    assert_fault_motion_state_is_retained(control)
+
+
+@pytest.mark.asyncio
 async def test_reset_fault_contains_get_state_exception_without_partial_clear() -> None:
     control, _latest, backend, _clock = make_control()
     await enter_published_recoverable_fault(control)

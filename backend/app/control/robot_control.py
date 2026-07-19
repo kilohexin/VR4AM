@@ -96,6 +96,7 @@ class RobotControl:
         self._lifecycle_lock = asyncio.Lock()
         self._shutdown_started = False
         self._shutdown_stopped = False
+        self._control_generation = 0
 
     @property
     def mode(self) -> TeleopMode:
@@ -103,6 +104,7 @@ class RobotControl:
 
     async def connect(self) -> None:
         self.machine.connect()
+        self._advance_control_generation()
         self._clear_stop_episode()
 
     async def start(self) -> None:
@@ -115,6 +117,7 @@ class RobotControl:
                 return
             if self.machine.mode == TeleopMode.DISCONNECTED:
                 self.machine.connect()
+                self._advance_control_generation()
             self._running = True
             self._task = asyncio.create_task(self.run())
 
@@ -130,26 +133,11 @@ class RobotControl:
         self.machine.disarm()
 
     async def reset_fault(self) -> FaultResetResult:
-        if self._fault is None:
-            return FaultResetResult(False, "no_fault", "当前没有可复位故障。")
-        if self._fault not in RECOVERABLE_FAULTS:
-            return FaultResetResult(
-                False,
-                "unrecoverable_fault",
-                "该故障无法在线复位，请重启后端并重新检查。",
-            )
-        if self._loop_failed or self._shutdown_started:
-            return FaultResetResult(
-                False,
-                "control_loop_unavailable",
-                "控制循环不可用，请重启后端并重新检查。",
-            )
-        if self._pending_stop_completion or self.machine.mode != TeleopMode.DISARMED:
-            return FaultResetResult(
-                False,
-                "stop_incomplete",
-                "停止尚未完成，请稍后重试。",
-            )
+        rejection = self._fault_reset_rejection()
+        if rejection is not None:
+            return rejection
+        reset_generation = self._control_generation
+        reset_fault = self._fault
         try:
             state = await self.backend.get_state()
         except Exception:
@@ -158,12 +146,15 @@ class RobotControl:
                 "control_loop_unavailable",
                 "控制循环不可用，请重启后端并重新检查。",
             )
-        if state.robot_state == BackendState.MOVING:
-            return FaultResetResult(
-                False,
-                "backend_moving",
-                "仿真仍在运动，请稍后重试。",
-            )
+        rejection = self._fault_reset_snapshot_rejection(
+            reset_generation,
+            reset_fault,
+        )
+        if rejection is not None:
+            return rejection
+        backend_rejection = self._backend_reset_rejection(state.robot_state)
+        if backend_rejection is not None:
+            return backend_rejection
         try:
             await self.backend.stop(StopReason.FAULT)
         except Exception:
@@ -172,6 +163,12 @@ class RobotControl:
                 "stop_incomplete",
                 "无法确认仿真已停止，故障保持锁定。",
             )
+        rejection = self._fault_reset_snapshot_rejection(
+            reset_generation,
+            reset_fault,
+        )
+        if rejection is not None:
+            return rejection
         self.mapper.clear()
         self.filter.clear()
         self.limiter.clear()
@@ -181,6 +178,7 @@ class RobotControl:
         return FaultResetResult(True)
 
     async def on_disconnect(self) -> None:
+        self._advance_control_generation()
         await self.backend.stop(StopReason.DISCONNECT)
         self.mapper.clear()
         self._clear_stop_episode()
@@ -191,6 +189,7 @@ class RobotControl:
             if self._shutdown_stopped:
                 return
             self._shutdown_started = True
+            self._advance_control_generation()
             self._running = False
             task = self._task
             if task is not None and task is not asyncio.current_task():
@@ -231,6 +230,7 @@ class RobotControl:
             self.machine.fault()
             self._fault = "control_loop_error"
             self._pending_stop_completion = True
+            self._advance_control_generation()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self.backend.stop(StopReason.FAULT)
             raise
@@ -244,7 +244,9 @@ class RobotControl:
         self._last_sample_age_ms = age_ms
         if age_ms >= 250:
             await self._safe_stop(StopReason.STALE)
-            self._hard_stop_completion = True
+            if not self._hard_stop_completion:
+                self._hard_stop_completion = True
+                self._advance_control_generation()
             return
         if (
             age_ms >= 100
@@ -260,6 +262,7 @@ class RobotControl:
                 self._last_frame_id is not None
                 and received.frame.session_id != self._last_frame_id[0]
             ):
+                self._advance_control_generation()
                 await self.backend.stop(StopReason.DISCONNECT)
                 self.mapper.clear()
                 self.last_target = None
@@ -330,6 +333,7 @@ class RobotControl:
             self._pending_stop_completion = False
             self._hard_stop_completion = False
             self.machine.stop_complete()
+            self._advance_control_generation()
         return message
 
     async def _send_latest_gripper(self, value: float, now_ns: int) -> None:
@@ -357,12 +361,17 @@ class RobotControl:
     async def _safe_stop(self, reason: StopReason) -> None:
         if reason == StopReason.STALE:
             if self.machine.mode == TeleopMode.FAULT:
-                self._pending_stop_completion = True
+                if not self._pending_stop_completion:
+                    self._pending_stop_completion = True
+                    self._advance_control_generation()
                 return
             if self.machine.mode != TeleopMode.STALE:
                 self.machine.stale()
+                self._advance_control_generation()
                 await self.backend.stop(reason)
-            self._pending_stop_completion = True
+            if not self._pending_stop_completion:
+                self._pending_stop_completion = True
+                self._advance_control_generation()
             return
         await self.backend.stop(reason)
 
@@ -370,10 +379,95 @@ class RobotControl:
         if self.machine.mode != TeleopMode.FAULT:
             self.machine.fault()
             self._fault = fault
+            self._advance_control_generation()
             await self.backend.stop(StopReason.FAULT)
-        self._pending_stop_completion = True
+        if not self._pending_stop_completion:
+            self._pending_stop_completion = True
+            self._advance_control_generation()
 
     def _clear_stop_episode(self) -> None:
+        changed = (
+            self._pending_stop_completion
+            or self._hard_stop_completion
+            or self._fault is not None
+        )
         self._pending_stop_completion = False
         self._hard_stop_completion = False
         self._fault = None
+        if changed:
+            self._advance_control_generation()
+
+    def _advance_control_generation(self) -> None:
+        self._control_generation += 1
+
+    def _fault_reset_rejection(self) -> FaultResetResult | None:
+        if self._fault is None:
+            return FaultResetResult(False, "no_fault", "当前没有可复位故障。")
+        if self._fault not in RECOVERABLE_FAULTS:
+            return FaultResetResult(
+                False,
+                "unrecoverable_fault",
+                "该故障无法在线复位，请重启后端并重新检查。",
+            )
+        if self._loop_failed or self._shutdown_started:
+            return FaultResetResult(
+                False,
+                "control_loop_unavailable",
+                "控制循环不可用，请重启后端并重新检查。",
+            )
+        if self._pending_stop_completion or self.machine.mode != TeleopMode.DISARMED:
+            return FaultResetResult(
+                False,
+                "stop_incomplete",
+                "停止尚未完成，请稍后重试。",
+            )
+        return None
+
+    def _fault_reset_snapshot_rejection(
+        self,
+        reset_generation: int,
+        reset_fault: str | None,
+    ) -> FaultResetResult | None:
+        rejection = self._fault_reset_rejection()
+        if rejection is not None:
+            return rejection
+        if (
+            self._control_generation != reset_generation
+            or self._fault != reset_fault
+        ):
+            return FaultResetResult(
+                False,
+                "stop_incomplete",
+                "停止尚未完成，请稍后重试。",
+            )
+        return None
+
+    @staticmethod
+    def _backend_reset_rejection(
+        robot_state: BackendState,
+    ) -> FaultResetResult | None:
+        if robot_state == BackendState.IDLE:
+            return None
+        if robot_state == BackendState.MOVING:
+            return FaultResetResult(
+                False,
+                "backend_moving",
+                "仿真仍在运动，请稍后重试。",
+            )
+        if robot_state == BackendState.DISCONNECTED:
+            return FaultResetResult(
+                False,
+                "control_loop_unavailable",
+                "控制循环不可用，请重启后端并重新检查。",
+            )
+        if robot_state == BackendState.FAULT:
+            return FaultResetResult(
+                False,
+                "stop_incomplete",
+                "仿真后端仍处于故障状态，故障保持锁定。",
+            )
+        return FaultResetResult(
+            False,
+            "stop_incomplete",
+            "仿真尚未完全停止，请稍后重试。",
+        )
