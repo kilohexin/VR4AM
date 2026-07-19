@@ -16,6 +16,9 @@ class PoseFilter:
     def reset(self, pose: Pose) -> None:
         self.value = pose.model_copy(deep=True)
 
+    def clear(self) -> None:
+        self.value = None
+
     def update(self, pose: Pose, dt: float) -> Pose:
         if not math.isfinite(dt) or dt <= 0:
             raise ValueError("dt_must_be_positive_finite")

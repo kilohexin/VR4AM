@@ -38,6 +38,11 @@ class SafetyLimiter:
         self.linear_velocity[:] = 0
         self.angular_velocity[:] = 0
 
+    def clear(self) -> None:
+        self.anchor = None
+        self.linear_velocity[:] = 0
+        self.angular_velocity[:] = 0
+
     def limit(self, previous: Pose, requested: Pose, dt: float) -> Pose:
         if not math.isfinite(dt) or dt <= 0:
             raise ValueError("dt_must_be_positive_finite")

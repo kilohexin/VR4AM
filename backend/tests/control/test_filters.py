@@ -14,6 +14,16 @@ def test_pose_filter_reset_has_no_jump() -> None:
     assert pose_filter.update(value, 0.02) == value
 
 
+def test_pose_filter_clear_forgets_previous_pose_and_is_idempotent() -> None:
+    pose_filter = PoseFilter()
+    pose_filter.reset(Pose(p=(1, 2, 3), q=(0, 0, 0, 1)))
+
+    pose_filter.clear()
+    pose_filter.clear()
+
+    assert pose_filter.value is None
+
+
 def test_pose_filter_moves_toward_position_and_rotation() -> None:
     pose_filter = PoseFilter(cutoff_hz=8)
     pose_filter.reset(Pose(p=(0, 0, 0), q=(0, 0, 0, 1)))

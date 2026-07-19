@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
@@ -6,6 +7,23 @@ from app.schemas.messages import Pose
 
 
 IDENTITY = (0.0, 0.0, 0.0, 1.0)
+
+
+def test_safety_limiter_clear_removes_anchor_and_motion_history_in_place() -> None:
+    limiter = SafetyLimiter(anchor=(0.3, 0.0, 0.3))
+    linear_velocity = limiter.linear_velocity
+    angular_velocity = limiter.angular_velocity
+    limiter.linear_velocity[:] = (0.1, 0.2, 0.3)
+    limiter.angular_velocity[:] = (0.4, 0.5, 0.6)
+
+    limiter.clear()
+    limiter.clear()
+
+    assert limiter.anchor is None
+    assert limiter.linear_velocity is linear_velocity
+    assert limiter.angular_velocity is angular_velocity
+    assert np.allclose(limiter.linear_velocity, 0)
+    assert np.allclose(limiter.angular_velocity, 0)
 
 
 def test_first_translation_tick_obeys_acceleration_limit() -> None:
