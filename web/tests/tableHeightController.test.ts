@@ -148,6 +148,18 @@ describe('TableHeightController', () => {
     expect(control.manualOffsetM).toBeCloseTo(0.035);
   });
 
+  it('clears the disabled gate on a neutral sample before a baseline exists', () => {
+    const control = new TableHeightController(new MemoryStorage());
+    control.beginSession();
+
+    control.update(sample({headY: null, axisY: -1, enabled: false, nowMs: 100}));
+    control.update(sample({headY: null, axisY: 0, nowMs: 200}));
+    control.update(sample({axisY: -1, nowMs: 300}));
+    control.update(sample({axisY: -1, nowMs: 400}));
+
+    expect(control.manualOffsetM).toBeCloseTo(0.035);
+  });
+
   it('resets once on a press edge only after a released sample has armed it', () => {
     const storage = new MemoryStorage();
     storage.setItem(TABLE_HEIGHT_STORAGE_KEY, '0.4');
@@ -173,6 +185,36 @@ describe('TableHeightController', () => {
     control.update(sample({resetPressed: false}));
 
     control.update(sample({axisY: -1, resetPressed: true, nowMs: 200}));
+
+    expect(control.manualOffsetM).toBe(0);
+  });
+
+  it('persists a reset before baseline and does not retrigger while held after recovery', () => {
+    const storage = new MemoryStorage();
+    storage.setItem(TABLE_HEIGHT_STORAGE_KEY, '0.4');
+    const control = new TableHeightController(storage);
+    control.beginSession();
+
+    control.update(sample({headY: null, resetPressed: false, nowMs: 100}));
+    control.update(sample({headY: null, resetPressed: true, nowMs: 200}));
+    expect(control.manualOffsetM).toBe(0);
+    expect(storage.getItem(TABLE_HEIGHT_STORAGE_KEY)).toBe('0');
+
+    control.update(sample({axisY: -1, resetPressed: true, nowMs: 300}));
+    control.update(sample({axisY: -1, resetPressed: true, nowMs: 400}));
+    expect(control.manualOffsetM).toBeCloseTo(0.035);
+  });
+
+  it('arms the reset release latch from a neutral sample without a baseline', () => {
+    const storage = new MemoryStorage();
+    storage.setItem(TABLE_HEIGHT_STORAGE_KEY, '0.4');
+    const control = new TableHeightController(storage);
+    control.beginSession();
+
+    control.update(sample({headY: null, resetPressed: true, nowMs: 100}));
+    expect(control.manualOffsetM).toBeCloseTo(0.4);
+    control.update(sample({headY: null, axisY: 0, resetPressed: false, nowMs: 200}));
+    control.update(sample({headY: null, resetPressed: true, nowMs: 300}));
 
     expect(control.manualOffsetM).toBe(0);
   });

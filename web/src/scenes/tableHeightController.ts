@@ -64,9 +64,29 @@ export class TableHeightController {
   update(input: TableHeightInput): number {
     if (!this.active) return 0;
 
+    const axisFinite = Number.isFinite(input.axisY);
+    const axisNeutral = axisFinite && Math.abs(input.axisY) <= TABLE_HEIGHT_AXIS_DEAD_ZONE;
+    let inputAllowed = input.enabled;
     if (!input.enabled) {
       this.neutralRequired = true;
       this.resetReleaseSeen = false;
+    } else if (this.neutralRequired) {
+      if (axisNeutral) {
+        this.neutralRequired = false;
+      } else {
+        inputAllowed = false;
+      }
+    }
+
+    let didReset = false;
+    if (inputAllowed) {
+      if (!input.resetPressed) {
+        this.resetReleaseSeen = true;
+      } else if (this.resetReleaseSeen) {
+        this.resetReleaseSeen = false;
+        this.setManualOffset(0);
+        didReset = true;
+      }
     }
 
     if (this.baseHeightM === null) {
@@ -81,23 +101,7 @@ export class TableHeightController {
 
     const dtSeconds = this.elapsedSeconds(input.nowMs);
 
-    if (!input.enabled) return this.heightM;
-
-    const axisFinite = Number.isFinite(input.axisY);
-    const axisNeutral = axisFinite && Math.abs(input.axisY) <= TABLE_HEIGHT_AXIS_DEAD_ZONE;
-    if (this.neutralRequired) {
-      if (!axisNeutral) return this.heightM;
-      this.neutralRequired = false;
-    }
-
-    let didReset = false;
-    if (!input.resetPressed) {
-      this.resetReleaseSeen = true;
-    } else if (this.resetReleaseSeen) {
-      this.resetReleaseSeen = false;
-      this.setManualOffset(0);
-      didReset = true;
-    }
+    if (!inputAllowed) return this.heightM;
 
     if (!didReset && axisFinite && !axisNeutral && dtSeconds > 0) {
       this.setManualOffset(
