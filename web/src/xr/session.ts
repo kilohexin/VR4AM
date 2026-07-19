@@ -35,7 +35,7 @@ export interface XRSessionControllerOptions {
   onFrame(frame: VRFrame): void;
   onController(state: {tracking: boolean; grip: boolean; trigger: number}): void;
   onArmRequest?(): void;
-  onStopRequest?(): void;
+  onStopOrResetRequest?(): void;
   onControllerSupport?(supported: boolean | null): void;
   onDisarm(): void;
   onLockReset(): void;
@@ -313,7 +313,7 @@ export class XRSessionController {
     }
     const stopEdge = takeReleasedEdge(context.stopLatch, sample.stopButton);
     const armEdge = takeReleasedEdge(context.armLatch, sample.armButton);
-    if (stopEdge) this.options.onStopRequest?.();
+    if (stopEdge) this.options.onStopOrResetRequest?.();
     else if (armEdge && !sample.grip) this.options.onArmRequest?.();
   }
 

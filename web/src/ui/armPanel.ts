@@ -2,6 +2,8 @@ import {
   PROTOCOL_VERSION,
   type ArmFeedbackMessage,
   type ClientControlMessage,
+  type FaultResetRejectReason,
+  type FaultResetResultMessage,
   type TeleopMode,
 } from '../protocol/messages';
 import type {XRSessionStatus} from '../xr/session';
@@ -28,7 +30,24 @@ export type ArmSafetySnapshot = Readonly<{
   pending: boolean;
   mode: TeleopMode;
   fault: string | null;
+  faultRecoverable: boolean;
+  faultResetPending: boolean;
 }>;
+
+export const RECOVERABLE_FAULTS = new Set([
+  'workspace_violation',
+  'ik_unreachable',
+  'ik_singular',
+  'joint_safety_window',
+]);
+
+const RESET_REJECTION_FEEDBACK: Readonly<Record<FaultResetRejectReason, string>> = {
+  no_fault: '当前没有可复位故障。',
+  stop_incomplete: '停止尚未完成，请稍后重试。',
+  backend_moving: '机械臂仍在运动，请稍后重试。',
+  unrecoverable_fault: '该故障无法在线复位，请重启后端并重新检查。',
+  control_loop_unavailable: '控制循环不可用，请重启后端并重新检查。',
+};
 
 export class ArmPanel {
   readonly backendText = 'SIMULATOR';
@@ -43,12 +62,16 @@ export class ArmPanel {
   private fault: string | null = null;
   private requestSequence = 0;
   private pendingArmRequestId: string | null = null;
+  private pendingFaultResetId: string | null = null;
   private awaitingArmedMode = false;
   private armFeedback: string | null = null;
+  private resetFeedback: string | null = null;
+  private gripPressed = true;
   private mode: TeleopMode = 'READY';
   private stopRequested = false;
   private safetyPublishQueued = false;
   private readonly armLabel: HTMLElement;
+  private readonly stopLabel: HTMLElement;
 
   constructor(
     container: Element,
@@ -73,9 +96,10 @@ export class ArmPanel {
     this.stopButton = requireButton(container, '.command-button--stop');
     this.vrButton = requireButton(container, '.command-button--vr');
     this.armLabel = requireElement(this.armButton, 'span');
+    this.stopLabel = requireElement(this.stopButton, 'span');
 
     this.armButton.addEventListener('click', () => this.requestArm('desktop'));
-    this.stopButton.addEventListener('click', () => this.requestDisarm('desktop'));
+    this.stopButton.addEventListener('click', () => this.requestStopOrReset('desktop'));
     this.vrButton.addEventListener('click', onEnterVR);
   }
 
@@ -88,7 +112,7 @@ export class ArmPanel {
   }
 
   get feedbackText(): string {
-    return this.armFeedback ?? '';
+    return this.resetFeedback ?? this.armFeedback ?? '';
   }
 
   get safetyState(): ArmSafetySnapshot {
@@ -102,16 +126,20 @@ export class ArmPanel {
       pending: this.isArmPending,
       mode: this.mode,
       fault: this.fault,
+      faultRecoverable: this.isFaultRecoverable,
+      faultResetPending: this.pendingFaultResetId !== null,
     });
   }
 
   observeGrip(grip: boolean): void {
+    this.gripPressed = grip;
     if (
       !grip &&
       !this.fault &&
       this.connected &&
       !this.isAuthoritativelyUnavailable() &&
-      !this.isArmPending
+      !this.isArmPending &&
+      this.pendingFaultResetId === null
     ) {
       this.eligible = true;
     }
@@ -129,6 +157,10 @@ export class ArmPanel {
   }
 
   setFault(fault: string | null): void {
+    if (fault === null && this.pendingFaultResetId !== null) {
+      this.syncButtonState();
+      return;
+    }
     this.fault = fault;
     if (fault) {
       this.armed = false;
@@ -137,6 +169,7 @@ export class ArmPanel {
       this.awaitingArmedMode = false;
       this.armFeedback = null;
       this.stopRequested = true;
+      if (!RECOVERABLE_FAULTS.has(fault)) this.pendingFaultResetId = null;
       if (!this.isAuthoritativelyUnavailable()) {
         this.mode = this.connected ? 'DISARMED' : 'DISCONNECTED';
       }
@@ -191,6 +224,8 @@ export class ArmPanel {
     this.pendingArmRequestId = null;
     this.awaitingArmedMode = false;
     this.armFeedback = null;
+    this.pendingFaultResetId = null;
+    this.resetFeedback = null;
     this.stopRequested = true;
     this.mode = this.connected ? 'DISARMED' : 'DISCONNECTED';
     this.syncButtonState();
@@ -243,7 +278,38 @@ export class ArmPanel {
     this.sendControl(this.control('disarm', source));
   }
 
-  private control(type: 'arm_request' | 'disarm', source: ControlSource): ClientControlMessage {
+  requestStopOrReset(source: ControlSource = 'desktop'): void {
+    if (this.fault) {
+      if (!this.isFaultRecoverable) return;
+      if (!this.connected || this.gripPressed || this.pendingFaultResetId !== null) return;
+      const message = this.control('reset_fault', source);
+      this.pendingFaultResetId = message.request_id;
+      this.resetFeedback = null;
+      this.eligible = false;
+      this.syncButtonState();
+      this.sendControl(message);
+      return;
+    }
+    this.requestDisarm(source);
+  }
+
+  handleFaultResetResult(message: FaultResetResultMessage): void {
+    if (message.request_id !== this.pendingFaultResetId) return;
+    this.pendingFaultResetId = null;
+    if (message.accepted) {
+      this.fault = null;
+      this.resetFeedback = null;
+      this.resetToLocked();
+      return;
+    }
+    this.resetFeedback = RESET_REJECTION_FEEDBACK[message.reason];
+    this.syncButtonState();
+  }
+
+  private control(
+    type: 'arm_request' | 'disarm' | 'reset_fault',
+    source: ControlSource,
+  ): ClientControlMessage {
     this.requestSequence += 1;
     return {
       v: PROTOCOL_VERSION,
@@ -264,6 +330,10 @@ export class ArmPanel {
 
   private isAuthoritativelyUnavailable(): boolean {
     return this.mode === 'DISCONNECTED' || this.mode === 'FAULT' || this.mode === 'STALE';
+  }
+
+  private get isFaultRecoverable(): boolean {
+    return this.fault !== null && RECOVERABLE_FAULTS.has(this.fault);
   }
 
   private syncButtonState(): void {
@@ -298,6 +368,20 @@ export class ArmPanel {
               ? '仿真已解锁'
               : '解锁仿真',
     );
+    if (this.pendingFaultResetId !== null) {
+      this.stopLabel.textContent = '复位中…';
+      this.stopButton.disabled = true;
+    } else if (this.isFaultRecoverable) {
+      this.stopLabel.textContent = '复位故障';
+      this.stopButton.disabled = !this.connected || this.gripPressed;
+    } else if (this.fault) {
+      this.stopLabel.textContent = '无法在线复位';
+      this.stopButton.disabled = true;
+    } else {
+      this.stopLabel.textContent = '停止';
+      this.stopButton.disabled = false;
+    }
+    this.stopButton.title = this.resetFeedback ?? '';
     this.publishSafetyChange();
   }
 

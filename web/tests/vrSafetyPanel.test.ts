@@ -13,6 +13,8 @@ const state = (phase: ArmSafetyPhase): ArmSafetySnapshot => ({
   pending: phase === 'pending',
   mode: phase === 'active' ? 'ACTIVE' : 'READY',
   fault: phase === 'fault' ? 'ik_unreachable' : null,
+  faultRecoverable: false,
+  faultResetPending: false,
 } as const);
 
 describe('VR safety presentation', () => {

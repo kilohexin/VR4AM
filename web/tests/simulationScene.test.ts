@@ -383,6 +383,8 @@ describe('XR render-loop handoff', () => {
       pending: false,
       mode: 'READY',
       fault: null,
+      faultRecoverable: false,
+      faultResetPending: false,
     } satisfies ArmSafetySnapshot;
     const update = vi.fn();
     const scene = {

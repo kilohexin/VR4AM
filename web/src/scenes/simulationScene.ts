@@ -216,6 +216,8 @@ export class SimulationScene {
     pending: false,
     mode: 'DISCONNECTED',
     fault: null,
+    faultRecoverable: false,
+    faultResetPending: false,
   };
   private questControllerSupported: boolean | null = null;
   private started = false;

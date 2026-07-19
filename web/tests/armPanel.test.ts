@@ -424,4 +424,179 @@ describe('ArmPanel simulator safety', () => {
       request_id: expect.stringMatching(/^desktop-disarm-/),
     }));
   });
+
+  it('blocks recoverable reset until Grip is released and suppresses duplicate desktop requests', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+
+    panel.observeGrip(true);
+    panel.setFault('workspace_violation');
+    expect(panel.safetyState).toMatchObject({
+      faultRecoverable: true,
+      faultResetPending: false,
+      eligible: false,
+    });
+    expect(panel.stopButton.textContent).toContain('复位故障');
+
+    panel.stopButton.click();
+    expect(send).not.toHaveBeenCalled();
+
+    panel.observeGrip(false);
+    panel.stopButton.click();
+    panel.stopButton.click();
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'reset_fault',
+      request_id: expect.stringMatching(/^desktop-reset_fault-/),
+    }));
+    expect(panel.stopButton.textContent).toContain('复位中…');
+    expect(panel.stopButton.disabled).toBe(true);
+    expect(panel.safetyState).toMatchObject({
+      faultRecoverable: true,
+      faultResetPending: true,
+      eligible: false,
+    });
+  });
+
+  it('uses XR-qualified reset IDs while normal B-style requests disarm even with Grip pressed', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+
+    panel.observeGrip(true);
+    panel.requestStopOrReset('xr');
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'disarm',
+      request_id: expect.stringMatching(/^xr-disarm-/),
+    }));
+
+    panel.setFault('ik_unreachable');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('xr');
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'reset_fault',
+      request_id: expect.stringMatching(/^xr-reset_fault-/),
+    }));
+  });
+
+  it('accepts only the matching reset result and requires a new released-Grip sample', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.setFault('workspace_violation');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('desktop');
+    const requestId = send.mock.calls[0][0].request_id;
+
+    panel.handleFaultResetResult({
+      v: 1,
+      type: 'fault_reset_result',
+      request_id: 'stale-reset',
+      accepted: true,
+      mode: 'DISARMED',
+    });
+    expect(panel.safetyState).toMatchObject({fault: 'workspace_violation', faultResetPending: true});
+
+    panel.handleFaultResetResult({
+      v: 1,
+      type: 'fault_reset_result',
+      request_id: requestId,
+      accepted: true,
+      mode: 'DISARMED',
+    });
+    expect(panel.safetyState).toMatchObject({
+      phase: 'stopped',
+      mode: 'DISARMED',
+      fault: null,
+      faultResetPending: false,
+      eligible: false,
+      armed: false,
+    });
+    expect(panel.requestArm('desktop')).toBe(false);
+
+    panel.observeGrip(false);
+    expect(panel.requestArm('desktop')).toBe(true);
+  });
+
+  it.each([
+    ['no_fault', '当前没有可复位故障。'],
+    ['stop_incomplete', '停止尚未完成，请稍后重试。'],
+    ['backend_moving', '机械臂仍在运动，请稍后重试。'],
+    ['unrecoverable_fault', '该故障无法在线复位，请重启后端并重新检查。'],
+    ['control_loop_unavailable', '控制循环不可用，请重启后端并重新检查。'],
+  ] as const)('keeps the fault and shows fixed local feedback for %s', (reason, localMessage) => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.setFault('workspace_violation');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('desktop');
+    const requestId = send.mock.calls[0][0].request_id;
+
+    panel.handleFaultResetResult({
+      v: 1,
+      type: 'fault_reset_result',
+      request_id: requestId,
+      accepted: false,
+      reason,
+      message: 'raw backend reset detail',
+    });
+
+    expect(panel.safetyState).toMatchObject({
+      phase: 'fault',
+      fault: 'workspace_violation',
+      faultResetPending: false,
+    });
+    expect(panel.feedbackText).toBe(localMessage);
+    expect(panel.stopButton.title).toBe(localMessage);
+    expect(document.body.textContent).not.toContain('raw backend reset detail');
+  });
+
+  it('keeps reset correlation when authoritative cleared state arrives before the result', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.setFault('workspace_violation');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('desktop');
+    const requestId = send.mock.calls[0][0].request_id;
+
+    panel.setFault(null);
+    panel.setMode('DISARMED');
+    expect(panel.safetyState).toMatchObject({
+      phase: 'fault',
+      fault: 'workspace_violation',
+      faultResetPending: true,
+    });
+
+    panel.handleFaultResetResult({
+      v: 1,
+      type: 'fault_reset_result',
+      request_id: requestId,
+      accepted: true,
+      mode: 'DISARMED',
+    });
+    expect(panel.safetyState).toMatchObject({phase: 'stopped', fault: null, faultResetPending: false});
+  });
+
+  it('disables unrecoverable reset and clears pending state on connection loss', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+
+    panel.setFault('control_loop_error');
+    panel.observeGrip(false);
+    expect(panel.stopButton.textContent).toContain('无法在线复位');
+    expect(panel.stopButton.disabled).toBe(true);
+    panel.requestStopOrReset('desktop');
+    expect(send).not.toHaveBeenCalled();
+
+    panel.setFault('workspace_violation');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('desktop');
+    expect(panel.safetyState.faultResetPending).toBe(true);
+    panel.setConnectionStatus({state: 'disconnected'});
+    expect(panel.safetyState).toMatchObject({
+      phase: 'disconnected',
+      faultResetPending: false,
+      eligible: false,
+    });
+    expect(panel.feedbackText).toBe('');
+  });
 });

@@ -36,6 +36,7 @@ const socket = new TeleopSocket(
     armPanel?.setConnectionStatus(status);
   },
   (message) => armPanel?.handleArmFeedback(message),
+  (message) => armPanel?.handleFaultResetResult(message),
 );
 
 armPanel = new ArmPanel(
@@ -60,7 +61,7 @@ xrController = new XRSessionController({
   onFrame: sendFrame,
   onController: updateController,
   onArmRequest: () => { armPanel.requestArm('xr'); },
-  onStopRequest: () => { armPanel.requestDisarm('xr'); },
+  onStopOrResetRequest: () => { armPanel.requestStopOrReset('xr'); },
   onControllerSupport: (supported) => scene.setQuestControllerSupport(supported),
   onDisarm: sendVRDisarm,
   onLockReset: () => armPanel.resetToLocked(),

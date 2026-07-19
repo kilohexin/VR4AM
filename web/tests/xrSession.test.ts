@@ -137,7 +137,7 @@ function setup(options: {
       armRequests.push('arm');
       options.events?.push('arm');
     },
-    onStopRequest: () => {
+    onStopOrResetRequest: () => {
       stopRequests.push('stop');
       options.events?.push('stop');
     },
@@ -257,7 +257,7 @@ describe('XRSessionController lifecycle', () => {
     expect(armRequests).toHaveLength(1);
   });
 
-  it('B edge stops once and wins when A and B rise together', async () => {
+  it('B released edge routes one context-sensitive stop-or-reset request and wins over A', async () => {
     const {controller, session, host, armRequests, stopRequests} = setup();
     await controller.enterVR();
     emitQuest(session, host, 100, {a: false, b: false});
@@ -266,6 +266,11 @@ describe('XRSessionController lifecycle', () => {
 
     expect(stopRequests).toHaveLength(1);
     expect(armRequests).toHaveLength(0);
+
+    emitQuest(session, host, 160, {a: false, b: false});
+    emitQuest(session, host, 180, {grip: true, b: true});
+    emitQuest(session, host, 200, {grip: true, b: true});
+    expect(stopRequests).toHaveLength(2);
   });
 
   it('requires release in a restarted session before a held A can arm', async () => {
