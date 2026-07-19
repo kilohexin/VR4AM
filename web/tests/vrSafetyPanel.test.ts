@@ -43,6 +43,15 @@ describe('VR safety presentation', () => {
       });
   });
 
+  it('prioritizes occupied connection guidance over unsupported controller copy', () => {
+    expect(describeVrSafety({...state('disconnected'), connectionState: 'occupied'}, false))
+      .toMatchObject({
+        title: '控制端已被占用',
+        instruction: '请关闭电脑端网页后重试',
+        tone: 'red',
+      });
+  });
+
   it.each([
     ['unreachable', '后端不可达'],
     ['disconnected', '连接已中断'],
