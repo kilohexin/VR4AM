@@ -1,7 +1,12 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import robotFixture from '../../schemas/fixtures/robot-state-valid.json';
 import vrFixture from '../../schemas/fixtures/vr-frame-valid.json';
-import type {ClientControlMessage, RobotStateMessage, VRFrame} from '../src/protocol/messages';
+import type {
+  ClientControlMessage,
+  FaultResetResultMessage,
+  RobotStateMessage,
+  VRFrame,
+} from '../src/protocol/messages';
 import {TeleopSocket, type TeleopConnectionStatus} from '../src/transport/teleopSocket';
 
 class FakeSocket {
@@ -231,6 +236,59 @@ describe('TeleopSocket', () => {
         message: '请先松开手柄抓握键，再请求使能。',
       },
     ]);
+  });
+
+  it('delivers only valid fault reset results in arrival order without disturbing other channels', () => {
+    const results: FaultResetResultMessage[] = [];
+    const states: RobotStateMessage[] = [];
+    const connectionStates: TeleopConnectionStatus[] = [];
+    const armFeedback: unknown[] = [];
+    const sockets: FakeSocket[] = [];
+    const client = new TeleopSocket(
+      'wss://test',
+      (state) => states.push(state),
+      () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      (status) => connectionStates.push(status),
+      (message) => armFeedback.push(message),
+      (message) => results.push(message),
+    );
+    client.connect();
+    sockets[0].open();
+
+    const accepted = {
+      v: 1,
+      type: 'fault_reset_result',
+      request_id: 'r1',
+      accepted: true,
+      mode: 'DISARMED',
+    };
+    const rejected = {
+      v: 1,
+      type: 'fault_reset_result',
+      request_id: 'r2',
+      accepted: false,
+      reason: 'unrecoverable_fault',
+      message: '该故障无法在线复位，请重启后端并重新检查。',
+    };
+
+    sockets[0].message(JSON.stringify(accepted));
+    sockets[0].message(JSON.stringify({...accepted, extra: true}));
+    sockets[0].message(JSON.stringify({...accepted, mode: 'READY'}));
+    sockets[0].message(JSON.stringify({...accepted, accepted: false}));
+    sockets[0].message(JSON.stringify({...rejected, reason: 'unknown'}));
+    sockets[0].message(JSON.stringify({...rejected, accepted: true}));
+    sockets[0].message(JSON.stringify(rejected));
+    sockets[0].message(JSON.stringify(robotFixture));
+    sockets[0].message(JSON.stringify({v: 1, type: 'arm_ack', request_id: 'arm-1'}));
+
+    expect(results).toEqual([accepted, rejected]);
+    expect(states).toEqual([robotFixture]);
+    expect(armFeedback).toEqual([{v: 1, type: 'arm_ack', request_id: 'arm-1'}]);
+    expect(connectionStates).toEqual([{state: 'connected'}]);
   });
 
   it('reconnects exponentially with a two-second cap and never auto-arms', () => {

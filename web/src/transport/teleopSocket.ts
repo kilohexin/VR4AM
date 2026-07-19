@@ -1,10 +1,12 @@
 import {
   isArmFeedbackMessage,
   isConnectionRejectedMessage,
+  isFaultResetResultMessage,
   isRobotStateMessage,
   PROTOCOL_VERSION,
   type ClientControlMessage,
   type ArmFeedbackMessage,
+  type FaultResetResultMessage,
   type RobotStateMessage,
   type VRFrame,
 } from '../protocol/messages';
@@ -40,6 +42,7 @@ export class TeleopSocket {
     private readonly socketFactory: SocketFactory = (socketUrl) => new WebSocket(socketUrl),
     private readonly onConnectionChange: (status: TeleopConnectionStatus) => void = () => {},
     private readonly onArmFeedback: (message: ArmFeedbackMessage) => void = () => {},
+    private readonly onFaultResetResult: (message: FaultResetResultMessage) => void = () => {},
   ) {}
 
   connect(): void {
@@ -114,6 +117,7 @@ export class TeleopSocket {
           this.occupiedReconnectDelayMs = OCCUPIED_INITIAL_RECONNECT_DELAY_MS;
           this.onRobotState(message);
         } else if (isArmFeedbackMessage(message)) this.onArmFeedback(message);
+        else if (isFaultResetResultMessage(message)) this.onFaultResetResult(message);
       } catch {
         // Malformed or unsupported messages are ignored at the transport boundary.
       }
