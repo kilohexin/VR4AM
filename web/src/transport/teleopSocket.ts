@@ -30,6 +30,7 @@ export class TeleopSocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private occupied = false;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+  private occupiedReconnectDelayMs = OCCUPIED_INITIAL_RECONNECT_DELAY_MS;
   private explicitClose = false;
   private generation = 0;
 
@@ -106,13 +107,13 @@ export class TeleopSocket {
       try {
         const message: unknown = JSON.parse(event.data);
         if (isConnectionRejectedMessage(message)) {
-          if (!this.occupied) {
-            this.occupied = true;
-            this.reconnectDelayMs = OCCUPIED_INITIAL_RECONNECT_DELAY_MS;
-          }
+          this.occupied = true;
+          this.reconnectDelayMs = this.occupiedReconnectDelayMs;
           this.onConnectionChange({state: 'occupied', message: message.message});
-        } else if (isRobotStateMessage(message)) this.onRobotState(message);
-        else if (isArmFeedbackMessage(message)) this.onArmFeedback(message);
+        } else if (isRobotStateMessage(message)) {
+          this.occupiedReconnectDelayMs = OCCUPIED_INITIAL_RECONNECT_DELAY_MS;
+          this.onRobotState(message);
+        } else if (isArmFeedbackMessage(message)) this.onArmFeedback(message);
       } catch {
         // Malformed or unsupported messages are ignored at the transport boundary.
       }
@@ -138,6 +139,7 @@ export class TeleopSocket {
     const delay = this.reconnectDelayMs;
     const maxDelay = this.occupied ? OCCUPIED_MAX_RECONNECT_DELAY_MS : MAX_RECONNECT_DELAY_MS;
     this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, maxDelay);
+    if (this.occupied) this.occupiedReconnectDelayMs = this.reconnectDelayMs;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.explicitClose || this.generation !== generation) return;

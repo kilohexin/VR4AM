@@ -131,12 +131,14 @@ describe('TeleopSocket', () => {
     vi.advanceTimersByTime(1);
     expect(sockets).toHaveLength(2);
 
+    sockets[1].open();
     rejectAndClose(sockets[1]);
     vi.advanceTimersByTime(3_999);
     expect(sockets).toHaveLength(2);
     vi.advanceTimersByTime(1);
     expect(sockets).toHaveLength(3);
 
+    sockets[2].open();
     rejectAndClose(sockets[2]);
     vi.advanceTimersByTime(4_999);
     expect(sockets).toHaveLength(3);
