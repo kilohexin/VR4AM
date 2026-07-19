@@ -2,8 +2,10 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
+import app.control.robot_control as robot_control_module
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.recording.noop import NoopRecorder
 from app.robots.base import BackendCommandError, StopReason
@@ -105,6 +107,225 @@ async def connect_release_arm(
     latest.publish(frame(1, False), clock.now_ns())
     await control.tick()
     await control.arm()
+
+
+async def enter_published_recoverable_fault(
+    control: RobotControl,
+) -> tuple[str, int]:
+    await control.connect()
+    actual_tcp = Pose(p=(0.3, 0.0, 0.3), q=(0, 0, 0, 1))
+    hand = Pose(p=(0.0, 1.2, -0.3), q=(0, 0, 0, 1))
+    control.mapper.capture(hand, actual_tcp)
+    control.filter.reset(actual_tcp)
+    control.limiter.set_anchor(actual_tcp.p)
+    control.limiter.linear_velocity[:] = (0.1, 0.2, 0.3)
+    control.limiter.angular_velocity[:] = (0.4, 0.5, 0.6)
+    control.last_target = actual_tcp
+    control._last_frame_id = ("fault-session", 7)
+
+    await control._enter_fault("ik_unreachable")
+
+    assert control.mode is TeleopMode.FAULT
+    published = await control.state_message()
+    assert published.mode is TeleopMode.FAULT
+    assert published.fault == "ik_unreachable"
+    assert control.mode is TeleopMode.DISARMED
+    return control._last_frame_id
+
+
+def assert_fault_motion_state_is_retained(control: RobotControl) -> None:
+    assert control._fault == "ik_unreachable"
+    assert control.mapper._hand_anchor is not None
+    assert control.filter.value is not None
+    assert control.limiter.anchor is not None
+    assert np.allclose(control.limiter.linear_velocity, (0.1, 0.2, 0.3))
+    assert np.allclose(control.limiter.angular_velocity, (0.4, 0.5, 0.6))
+    assert control.last_target is not None
+
+
+@pytest.mark.asyncio
+async def test_reset_recoverable_fault_atomically_clears_motion_state() -> None:
+    control, _latest, backend, _clock = make_control()
+    last_frame_id = await enter_published_recoverable_fault(control)
+
+    result = await control.reset_fault()
+
+    assert result == robot_control_module.FaultResetResult(accepted=True)
+    assert control.mode is TeleopMode.DISARMED
+    assert control._fault is None
+    assert control._pending_stop_completion is False
+    assert control._hard_stop_completion is False
+    assert control.last_target is None
+    assert control.mapper._hand_anchor is None
+    assert control.mapper._tcp_anchor is None
+    assert control.filter.value is None
+    assert control.limiter.anchor is None
+    assert np.allclose(control.limiter.linear_velocity, 0)
+    assert np.allclose(control.limiter.angular_velocity, 0)
+    assert control._last_frame_id == last_frame_id
+    assert backend.stops == [StopReason.FAULT, StopReason.FAULT]
+    with pytest.raises(RuntimeError, match="arm_requires_grip_release"):
+        await control.arm()
+
+
+def test_fault_reset_recoverable_whitelist_is_exact() -> None:
+    assert robot_control_module.RECOVERABLE_FAULTS == frozenset(
+        {
+            "workspace_violation",
+            "ik_unreachable",
+            "ik_singular",
+            "joint_safety_window",
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fault", "reason", "message"),
+    [
+        (None, "no_fault", "当前没有可复位故障。"),
+        (
+            "control_loop_error",
+            "unrecoverable_fault",
+            "该故障无法在线复位，请重启后端并重新检查。",
+        ),
+        (
+            "backend_fault",
+            "unrecoverable_fault",
+            "该故障无法在线复位，请重启后端并重新检查。",
+        ),
+    ],
+)
+async def test_reset_fault_rejects_absent_and_unrecoverable_faults_first(
+    fault: str | None,
+    reason: str,
+    message: str,
+) -> None:
+    control, _latest, backend, _clock = make_control()
+    control._fault = fault
+    control._loop_failed = True
+    control._shutdown_started = True
+    control._pending_stop_completion = True
+    control.machine.mode = TeleopMode.FAULT
+    backend.get_state = AsyncMock(side_effect=AssertionError("must not inspect backend"))
+
+    result = await control.reset_fault()
+
+    assert result.accepted is False
+    assert result.reason == reason
+    assert result.message == message
+    backend.get_state.assert_not_awaited()
+    assert backend.stops == []
+    assert control._fault == fault
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unavailable_field", ["_loop_failed", "_shutdown_started"])
+async def test_reset_fault_rejects_unavailable_control_loop_before_stop_state(
+    unavailable_field: str,
+) -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+    setattr(control, unavailable_field, True)
+    control._pending_stop_completion = True
+    backend.get_state = AsyncMock(side_effect=AssertionError("must not inspect backend"))
+
+    result = await control.reset_fault()
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "control_loop_unavailable",
+        "控制循环不可用，请重启后端并重新检查。",
+    )
+    backend.get_state.assert_not_awaited()
+    assert backend.stops == [StopReason.FAULT]
+    assert_fault_motion_state_is_retained(control)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pending", "mode"),
+    [(True, TeleopMode.DISARMED), (False, TeleopMode.FAULT)],
+)
+async def test_reset_fault_requires_completed_stop_and_disarmed_mode(
+    pending: bool,
+    mode: TeleopMode,
+) -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+    control._pending_stop_completion = pending
+    control.machine.mode = mode
+    backend.get_state = AsyncMock(side_effect=AssertionError("must not inspect backend"))
+
+    result = await control.reset_fault()
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "stop_incomplete",
+        "停止尚未完成，请稍后重试。",
+    )
+    backend.get_state.assert_not_awaited()
+    assert backend.stops == [StopReason.FAULT]
+    assert_fault_motion_state_is_retained(control)
+
+
+@pytest.mark.asyncio
+async def test_reset_fault_rejects_backend_while_moving_without_second_stop() -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+    backend.robot_state = BackendState.MOVING
+
+    result = await control.reset_fault()
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "backend_moving",
+        "仿真仍在运动，请稍后重试。",
+    )
+    assert backend.stops == [StopReason.FAULT]
+    assert_fault_motion_state_is_retained(control)
+
+
+@pytest.mark.asyncio
+async def test_reset_fault_contains_get_state_exception_without_partial_clear() -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+    backend.get_state = AsyncMock(side_effect=RuntimeError("secret state detail"))
+
+    result = await control.reset_fault()
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "control_loop_unavailable",
+        "控制循环不可用，请重启后端并重新检查。",
+    )
+    assert "secret" not in (result.message or "")
+    assert backend.stops == [StopReason.FAULT]
+    assert_fault_motion_state_is_retained(control)
+
+
+@pytest.mark.asyncio
+async def test_reset_fault_contains_second_stop_exception_without_partial_clear() -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+
+    async def fail_second_stop(reason: StopReason) -> None:
+        backend.stops.append(reason)
+        raise RuntimeError("secret stop detail")
+
+    backend.stop = fail_second_stop  # type: ignore[method-assign]
+
+    result = await control.reset_fault()
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "stop_incomplete",
+        "无法确认仿真已停止，故障保持锁定。",
+    )
+    assert "secret" not in (result.message or "")
+    assert backend.stops == [StopReason.FAULT, StopReason.FAULT]
+    assert control.mode is TeleopMode.DISARMED
+    assert_fault_motion_state_is_retained(control)
 
 
 def test_latest_frame_has_capacity_one_and_rejects_same_session_rollback() -> None:

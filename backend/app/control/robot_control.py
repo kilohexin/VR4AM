@@ -18,6 +18,16 @@ CONTROL_PERIOD_NS = 20_000_000
 OVERRUN_NS = 40_000_000
 GRIPPER_PERIOD_NS = 100_000_000
 GRIPPER_MIN_DELTA = 0.02
+RECOVERABLE_FAULTS = frozenset(
+    {"workspace_violation", "ik_unreachable", "ik_singular", "joint_safety_window"}
+)
+
+
+@dataclass(frozen=True)
+class FaultResetResult:
+    accepted: bool
+    reason: str | None = None
+    message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +128,57 @@ class RobotControl:
             self.mapper.clear()
         await self.backend.stop(StopReason.GRIP_RELEASED)
         self.machine.disarm()
+
+    async def reset_fault(self) -> FaultResetResult:
+        if self._fault is None:
+            return FaultResetResult(False, "no_fault", "当前没有可复位故障。")
+        if self._fault not in RECOVERABLE_FAULTS:
+            return FaultResetResult(
+                False,
+                "unrecoverable_fault",
+                "该故障无法在线复位，请重启后端并重新检查。",
+            )
+        if self._loop_failed or self._shutdown_started:
+            return FaultResetResult(
+                False,
+                "control_loop_unavailable",
+                "控制循环不可用，请重启后端并重新检查。",
+            )
+        if self._pending_stop_completion or self.machine.mode != TeleopMode.DISARMED:
+            return FaultResetResult(
+                False,
+                "stop_incomplete",
+                "停止尚未完成，请稍后重试。",
+            )
+        try:
+            state = await self.backend.get_state()
+        except Exception:
+            return FaultResetResult(
+                False,
+                "control_loop_unavailable",
+                "控制循环不可用，请重启后端并重新检查。",
+            )
+        if state.robot_state == BackendState.MOVING:
+            return FaultResetResult(
+                False,
+                "backend_moving",
+                "仿真仍在运动，请稍后重试。",
+            )
+        try:
+            await self.backend.stop(StopReason.FAULT)
+        except Exception:
+            return FaultResetResult(
+                False,
+                "stop_incomplete",
+                "无法确认仿真已停止，故障保持锁定。",
+            )
+        self.mapper.clear()
+        self.filter.clear()
+        self.limiter.clear()
+        self.last_target = None
+        self._clear_stop_episode()
+        self.machine.disarm()
+        return FaultResetResult(True)
 
     async def on_disconnect(self) -> None:
         await self.backend.stop(StopReason.DISCONNECT)
