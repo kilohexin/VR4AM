@@ -28,7 +28,7 @@ describe('VR safety presentation', () => {
     expect(describeVrSafety(state(phase), true)).toEqual({
       title,
       instruction,
-      footer: 'A 解锁 · B 停止 · Grip 移动 · Trigger 夹爪',
+      footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度',
       tone,
       shape,
     });
@@ -65,7 +65,7 @@ describe('VR safety presentation', () => {
     expect(describeVrSafety(state('fault'), false)).toEqual({
       title: '手柄不受支持',
       instruction: '当前配置不支持 A/B 安全控制',
-      footer: 'A 解锁 · B 停止 · Grip 移动 · Trigger 夹爪',
+      footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度',
       tone: 'red',
       shape: 'warning',
     });

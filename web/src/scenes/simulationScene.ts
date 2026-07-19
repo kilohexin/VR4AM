@@ -11,6 +11,8 @@ import {loadRobotModel, type RobotModel} from '../robot/robotModel';
 import {RobotStateBuffer} from '../robot/robotState';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
 import type {XRPresentationSample} from '../xr/session';
+import {ControllerHints} from './controllerHints';
+import {TableHeightController} from './tableHeightController';
 import {VrSafetyPanel} from './vrSafetyPanel';
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
@@ -190,6 +192,8 @@ export class SimulationScene {
   readonly camera: THREE.PerspectiveCamera;
 
   private readonly scene = new THREE.Scene();
+  private readonly robotVisualRoot = new THREE.Group();
+  private readonly grid = new THREE.GridHelper(4, 40, 0x1f839f, 0x183245);
   private readonly targetMarker = new THREE.Group();
   private sessionId = createSessionId();
   private robotModel: RobotModel | null = null;
@@ -201,6 +205,8 @@ export class SimulationScene {
   private readonly controllerPosition = new THREE.Vector3(0.56, 0.42, 0.18);
   private readonly controllerQuaternion = new THREE.Quaternion(0, 0, 0, 1);
   private readonly vrSafetyPanel: VrSafetyPanel;
+  private readonly controllerHints: ControllerHints;
+  private readonly tableHeight = new TableHeightController(window.localStorage);
   private armSafetyState: ArmSafetySnapshot = {
     phase: 'disconnected',
     connected: false,
@@ -234,9 +240,13 @@ export class SimulationScene {
     this.camera.lookAt(0.03, 0.42, 0);
 
     this.scene.background = new THREE.Color(0x07131e);
+    this.robotVisualRoot.name = 'robot-visual-root';
+    this.scene.add(this.robotVisualRoot);
     this.createEnvironment();
     this.createTargetMarker();
-    this.vrSafetyPanel = new VrSafetyPanel(this.scene);
+    this.controllerHints = new ControllerHints(this.scene);
+    this.controllerHints.setVisible(false);
+    this.vrSafetyPanel = new VrSafetyPanel(this.robotVisualRoot);
     this.vrSafetyPanel.update(this.armSafetyState, this.questControllerSupported);
   }
 
@@ -285,8 +295,11 @@ export class SimulationScene {
     this.animationHandle = null;
     this.inputSafety.reset();
     this.vrSafetyPanel.setVisible(false);
+    this.controllerHints.setVisible(false);
     await this.renderer.xr.setSession(session);
+    this.tableHeight.beginSession();
     this.renderer.setAnimationLoop(loop);
+    this.controllerHints.setVisible(true);
     this.vrSafetyPanel.setVisible(true);
   }
 
@@ -295,6 +308,9 @@ export class SimulationScene {
     try {
       await this.renderer.xr.setSession(null);
     } finally {
+      this.tableHeight.endSession();
+      this.robotVisualRoot.position.y = 0;
+      this.controllerHints.setVisible(false);
       this.vrSafetyPanel.setVisible(false);
       this.sessionId = createSessionId();
       this.sequence = 0;
@@ -305,7 +321,19 @@ export class SimulationScene {
     }
   }
 
-  updateXRPresentation(_sample: XRPresentationSample, _nowMs: number): void {}
+  updateXRPresentation(sample: XRPresentationSample, nowMs: number): void {
+    this.controllerHints.update(sample.left, sample.right);
+    const adjustable = (this.armSafetyState.phase === 'locked' || this.armSafetyState.phase === 'stopped')
+      && !this.armSafetyState.pending
+      && !sample.right.grip;
+    this.robotVisualRoot.position.y = this.tableHeight.update({
+      headY: sample.headY,
+      axisY: sample.left.thumbstickY,
+      resetPressed: sample.left.thumbstickPressed,
+      enabled: adjustable && sample.left.trackingValid,
+      nowMs,
+    });
+  }
 
   renderXR(nowMs: number): void {
     if (!this.started) return;
@@ -321,6 +349,8 @@ export class SimulationScene {
     this.renderer.setAnimationLoop(null);
     this.removeListeners();
     this.vrSafetyPanel.setVisible(false);
+    this.controllerHints.setVisible(false);
+    this.controllerHints.dispose();
     this.vrSafetyPanel.dispose();
     disposeObjectResources(this.scene);
     this.renderer.dispose();
@@ -383,7 +413,7 @@ export class SimulationScene {
       this.robotModel = model;
       model.setJointAngles([0.2, -0.8, -0.8, -0.4, 0.6, 0]);
       fitRobotToWorkbench(model.group);
-      this.scene.add(model.group);
+      this.robotVisualRoot.add(model.group);
     } catch (error) {
       if (this.started) this.options.onError(modelLoadErrorMessage(error));
     }
@@ -399,21 +429,20 @@ export class SimulationScene {
     rimLight.position.set(-1.5, 1.2, -1.5);
     this.scene.add(rimLight);
 
-    const grid = new THREE.GridHelper(4, 40, 0x1f839f, 0x183245);
-    grid.position.y = -0.115;
-    this.scene.add(grid);
+    this.grid.position.y = -0.115;
+    this.scene.add(this.grid);
 
     const tableMaterial = new THREE.MeshStandardMaterial({color: 0x111923, metalness: 0.35, roughness: 0.78});
     const edgeMaterial = new THREE.MeshStandardMaterial({color: 0x080d12, metalness: 0.9, roughness: 0.35});
     const top = new THREE.Mesh(new THREE.BoxGeometry(1.22, 0.1, 0.86), tableMaterial);
     top.position.set(0, -0.055, 0);
     top.receiveShadow = true;
-    this.scene.add(top);
+    this.robotVisualRoot.add(top);
     for (const [x, z] of [[-0.52, -0.34], [0.52, -0.34], [-0.52, 0.34], [0.52, 0.34]] as const) {
       const leg = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.82, 0.07), edgeMaterial);
       leg.position.set(x, -0.49, z);
       leg.castShadow = true;
-      this.scene.add(leg);
+      this.robotVisualRoot.add(leg);
     }
 
     const workspaceGeometry = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.4, 1.05, 1.02));
@@ -427,7 +456,7 @@ export class SimulationScene {
     const workspace = new THREE.LineSegments(workspaceGeometry, workspaceMaterial);
     workspace.position.set(0, 0.5, 0);
     workspace.computeLineDistances();
-    this.scene.add(workspace);
+    this.robotVisualRoot.add(workspace);
   }
 
   private createTargetMarker(): void {
@@ -443,7 +472,7 @@ export class SimulationScene {
     );
     this.targetMarker.add(axes, ring, marker);
     this.targetMarker.position.copy(this.controllerPosition);
-    this.scene.add(this.targetMarker);
+    this.robotVisualRoot.add(this.targetMarker);
   }
 
   private addListeners(): void {

@@ -10,6 +10,7 @@ import {
   SimulationScene,
 } from '../src/scenes/simulationScene';
 import type {ArmSafetySnapshot} from '../src/ui/armPanel';
+import type {XRPresentationSample} from '../src/xr/session';
 
 describe('desktop VR frame path', () => {
   it('uses the shared VRFrame shape with metre poses and xyzw quaternion order', () => {
@@ -140,6 +141,80 @@ describe('scene connection and model lifetime helpers', () => {
 });
 
 describe('XR render-loop handoff', () => {
+  it('keeps lights and grid in the fixed scene while placing robot visuals under the height root', () => {
+    const fixedScene = new THREE.Scene();
+    const robotVisualRoot = new THREE.Group();
+    fixedScene.add(robotVisualRoot);
+    const targetMarker = new THREE.Group();
+    const scene = {
+      scene: fixedScene,
+      robotVisualRoot,
+      grid: new THREE.GridHelper(4, 40),
+      targetMarker,
+      controllerPosition: new THREE.Vector3(0.56, 0.42, 0.18),
+    };
+
+    (SimulationScene.prototype as unknown as {createEnvironment(this: typeof scene): void})
+      .createEnvironment.call(scene);
+    (SimulationScene.prototype as unknown as {createTargetMarker(this: typeof scene): void})
+      .createTargetMarker.call(scene);
+
+    expect(scene.robotVisualRoot.parent).toBe(scene.scene);
+    expect(scene.targetMarker.parent).toBe(scene.robotVisualRoot);
+    expect(scene.grid.parent).toBe(scene.scene);
+    expect(scene.robotVisualRoot.position.y).toBe(0);
+  });
+
+  it.each([
+    ['locked', false, false, true],
+    ['stopped', false, false, true],
+    ['armed', false, false, false],
+    ['locked', true, false, false],
+    ['locked', false, true, false],
+  ] as const)(
+    'forwards both hands and enables height for phase=%s pending=%s grip=%s only when safe',
+    (phase, pending, grip, expectedEnabled) => {
+      const updateHints = vi.fn();
+      const updateHeight = vi.fn().mockReturnValue(0.93);
+      const scene = {
+        controllerHints: {update: updateHints},
+        tableHeight: {update: updateHeight},
+        robotVisualRoot: new THREE.Group(),
+        armSafetyState: {phase, pending},
+      };
+      const sample = presentationSample({grip});
+
+      SimulationScene.prototype.updateXRPresentation.call(scene as never, sample, 425);
+
+      expect(updateHints).toHaveBeenCalledWith(sample.left, sample.right);
+      expect(updateHeight).toHaveBeenCalledWith({
+        headY: 1.68,
+        axisY: -0.75,
+        resetPressed: true,
+        enabled: expectedEnabled,
+        nowMs: 425,
+      });
+      expect(scene.robotVisualRoot.position.y).toBe(0.93);
+    },
+  );
+
+  it('disables height input when left-hand tracking is lost while still forwarding both hints', () => {
+    const updateHints = vi.fn();
+    const updateHeight = vi.fn().mockReturnValue(0.95);
+    const scene = {
+      controllerHints: {update: updateHints},
+      tableHeight: {update: updateHeight},
+      robotVisualRoot: new THREE.Group(),
+      armSafetyState: {phase: 'locked', pending: false},
+    };
+    const sample = presentationSample({leftTrackingValid: false});
+
+    SimulationScene.prototype.updateXRPresentation.call(scene as never, sample, 510);
+
+    expect(updateHints).toHaveBeenCalledWith(sample.left, sample.right);
+    expect(updateHeight).toHaveBeenCalledWith(expect.objectContaining({enabled: false}));
+  });
+
   it('shows the safety panel only after the XR session is installed', async () => {
     const loop = vi.fn() as unknown as XRFrameRequestCallback;
     const session = {} as XRSession;
@@ -149,6 +224,8 @@ describe('XR render-loop handoff', () => {
     }));
     const setAnimationLoop = vi.fn();
     const setVisible = vi.fn();
+    const setHintsVisible = vi.fn();
+    const beginSession = vi.fn();
     const resetInput = vi.fn();
     const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
     const scene = {
@@ -157,6 +234,8 @@ describe('XR render-loop handoff', () => {
       inputSafety: {reset: resetInput},
       renderer: {xr: {setSession}, setAnimationLoop},
       vrSafetyPanel: {setVisible},
+      controllerHints: {setVisible: setHintsVisible},
+      tableHeight: {beginSession},
     };
 
     const starting = (SimulationScene.prototype.startXR as Function).call(scene, session, loop);
@@ -166,16 +245,22 @@ describe('XR render-loop handoff', () => {
     expect(resetInput).toHaveBeenCalledOnce();
     expect(setSession).toHaveBeenCalledWith(session);
     expect(setVisible).not.toHaveBeenCalledWith(true);
+    expect(setHintsVisible).not.toHaveBeenCalledWith(true);
+    expect(beginSession).not.toHaveBeenCalled();
 
     installSession();
     await starting;
 
     expect(setVisible).toHaveBeenLastCalledWith(true);
+    expect(setHintsVisible).toHaveBeenLastCalledWith(true);
+    expect(beginSession).toHaveBeenCalledOnce();
     expect(setAnimationLoop).toHaveBeenCalledWith(loop);
   });
 
   it('keeps the safety panel hidden when XR session installation fails', async () => {
     const setVisible = vi.fn();
+    const setHintsVisible = vi.fn();
+    const beginSession = vi.fn();
     const scene = {
       started: true,
       animationHandle: null,
@@ -185,6 +270,8 @@ describe('XR render-loop handoff', () => {
         setAnimationLoop: vi.fn(),
       },
       vrSafetyPanel: {setVisible},
+      controllerHints: {setVisible: setHintsVisible},
+      tableHeight: {beginSession},
     };
 
     await expect((SimulationScene.prototype.startXR as Function).call(
@@ -195,6 +282,8 @@ describe('XR render-loop handoff', () => {
 
     expect(setVisible).toHaveBeenCalledWith(false);
     expect(setVisible).not.toHaveBeenCalledWith(true);
+    expect(setHintsVisible).not.toHaveBeenCalledWith(true);
+    expect(beginSession).not.toHaveBeenCalled();
   });
 
   it('clears XR state and restores the desktop animation loop', async () => {
@@ -203,6 +292,10 @@ describe('XR render-loop handoff', () => {
     const request = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(77);
     const animate = vi.fn();
     const setVisible = vi.fn();
+    const setHintsVisible = vi.fn();
+    const endSession = vi.fn().mockReturnValue(0);
+    const robotVisualRoot = new THREE.Group();
+    robotVisualRoot.position.y = 0.92;
     const scene = {
       started: true,
       animationHandle: null,
@@ -212,6 +305,9 @@ describe('XR render-loop handoff', () => {
       animate,
       renderer: {xr: {setSession}, setAnimationLoop},
       vrSafetyPanel: {setVisible},
+      controllerHints: {setVisible: setHintsVisible},
+      tableHeight: {endSession},
+      robotVisualRoot,
     };
 
     await (SimulationScene.prototype.stopXR as Function).call(scene);
@@ -219,6 +315,9 @@ describe('XR render-loop handoff', () => {
     expect(setAnimationLoop).toHaveBeenCalledWith(null);
     expect(setSession).toHaveBeenCalledWith(null);
     expect(setVisible).toHaveBeenCalledWith(false);
+    expect(setHintsVisible).toHaveBeenCalledWith(false);
+    expect(endSession).toHaveBeenCalledOnce();
+    expect(robotVisualRoot.position.y).toBe(0);
     expect(request).toHaveBeenCalledWith(animate);
     expect(scene.animationHandle).toBe(77);
     expect(scene.sessionId).not.toBe('desktop-before-xr');
@@ -242,6 +341,10 @@ describe('XR render-loop handoff', () => {
     const request = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(88);
     const animate = vi.fn();
     const setVisible = vi.fn();
+    const setHintsVisible = vi.fn();
+    const endSession = vi.fn().mockReturnValue(0);
+    const robotVisualRoot = new THREE.Group();
+    robotVisualRoot.position.y = 1.04;
     const scene = {
       started: true,
       animationHandle: null,
@@ -251,12 +354,18 @@ describe('XR render-loop handoff', () => {
       animate,
       renderer: {xr: {setSession}, setAnimationLoop},
       vrSafetyPanel: {setVisible},
+      controllerHints: {setVisible: setHintsVisible},
+      tableHeight: {endSession},
+      robotVisualRoot,
     };
 
     await expect((SimulationScene.prototype.stopXR as Function).call(scene)).rejects.toThrow();
 
     expect(setAnimationLoop).toHaveBeenCalledWith(null);
     expect(setVisible).toHaveBeenCalledWith(false);
+    expect(setHintsVisible).toHaveBeenCalledWith(false);
+    expect(endSession).toHaveBeenCalledOnce();
+    expect(robotVisualRoot.position.y).toBe(0);
     expect(request).toHaveBeenCalledWith(animate);
     expect(scene.animationHandle).toBe(88);
     expect(scene.sessionId).not.toBe('desktop-before-rejected-stop');
@@ -292,9 +401,11 @@ describe('XR render-loop handoff', () => {
     expect(update).toHaveBeenLastCalledWith(stopped, false);
   });
 
-  it('hides and disposes the safety panel with the scene', () => {
+  it('disposes owned XR visuals before generic scene traversal', () => {
+    const order: string[] = [];
     const setVisible = vi.fn();
-    const disposePanel = vi.fn();
+    const disposePanel = vi.fn(() => order.push('panel'));
+    const disposeHints = vi.fn(() => order.push('hints'));
     const removeListeners = vi.fn();
     const disposeRenderer = vi.fn();
     const removeCanvas = vi.fn();
@@ -309,17 +420,43 @@ describe('XR render-loop handoff', () => {
       removeListeners,
       scene: new THREE.Scene(),
       vrSafetyPanel: {setVisible, dispose: disposePanel},
+      controllerHints: {setVisible: vi.fn(), dispose: disposeHints},
     };
 
     (SimulationScene.prototype.dispose as Function).call(scene);
 
     expect(setVisible).toHaveBeenCalledWith(false);
     expect(disposePanel).toHaveBeenCalledOnce();
+    expect(disposeHints).toHaveBeenCalledOnce();
+    expect(order).toEqual(['hints', 'panel']);
     expect(removeListeners).toHaveBeenCalledOnce();
     expect(disposeRenderer).toHaveBeenCalledOnce();
     expect(removeCanvas).toHaveBeenCalledOnce();
   });
 });
+
+function presentationSample(options: {grip?: boolean; leftTrackingValid?: boolean} = {}): XRPresentationSample {
+  return {
+    left: {
+      p: [-0.2, 1.1, -0.4],
+      q: [0, 0, 0, 1],
+      trackingValid: options.leftTrackingValid ?? true,
+      thumbstickY: -0.75,
+      thumbstickPressed: true,
+    },
+    right: {
+      p: [0.2, 1.1, -0.4],
+      q: [0, 0, 0, 1],
+      trackingValid: true,
+      grip: options.grip ?? false,
+      trigger: 0,
+      armButton: false,
+      stopButton: false,
+      questFaceButtonsSupported: true,
+    },
+    headY: 1.68,
+  };
+}
 
 function pointerEvent(type: string, pointerId: number, button = 0): Event {
   const event = new Event(type);

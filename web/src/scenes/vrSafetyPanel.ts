@@ -4,7 +4,7 @@ import type {ArmSafetySnapshot} from '../ui/armPanel';
 export interface VrSafetyPresentation {
   title: string;
   instruction: string;
-  footer: 'A 解锁 · B 停止 · Grip 移动 · Trigger 夹爪';
+  footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度';
   tone: 'cyan' | 'red' | 'muted';
   shape: 'shield' | 'stop' | 'warning';
 }
@@ -55,7 +55,7 @@ function presentation(
   return {
     title,
     instruction,
-    footer: 'A 解锁 · B 停止 · Grip 移动 · Trigger 夹爪',
+    footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度',
     tone,
     shape,
   };
