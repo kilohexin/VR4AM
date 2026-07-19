@@ -20,7 +20,7 @@ describe('Chinese simulator HUD', () => {
   it('updates mode, safety inputs, latency, and readable fault state', () => {
     const hud = new Hud(document.querySelector('#app')!);
 
-    hud.setConnection(true);
+    hud.setConnectionStatus({state: 'connected'});
     hud.setController({tracking: true, grip: false, trigger: 0.4});
     hud.setRobotState({mode: 'ACTIVE', backendState: 'MOVING', sampleAgeMs: 15, fault: null});
     hud.setLatency(24, 48);
@@ -44,7 +44,7 @@ describe('Chinese simulator HUD', () => {
 
   it('clears stale backend, age, fault, and latency values on disconnect', () => {
     const hud = new Hud(document.querySelector('#app')!);
-    hud.setConnection(true);
+    hud.setConnectionStatus({state: 'connected'});
     hud.setRobotState({
       mode: 'ACTIVE',
       backendState: 'MOVING',
@@ -53,7 +53,7 @@ describe('Chinese simulator HUD', () => {
     });
     hud.setLatency(18, 42);
 
-    hud.setConnection(false);
+    hud.setConnectionStatus({state: 'disconnected'});
 
     expect(document.body.textContent).toContain('DISCONNECTED · 未连接');
     expect(document.body.textContent).not.toContain('MOVING');
@@ -62,6 +62,34 @@ describe('Chinese simulator HUD', () => {
     expect(document.body.textContent).not.toContain('42 ms');
     expect(document.body.textContent).toContain('故障');
     expect(document.body.textContent).toContain('无');
+  });
+
+  it('shows controller occupancy guidance and clears stale telemetry', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+    hud.setRobotState({
+      mode: 'ACTIVE',
+      backendState: 'MOVING',
+      sampleAgeMs: 31,
+      fault: null,
+    });
+
+    hud.setConnectionStatus({state: 'occupied', message: '占用'});
+
+    expect(document.body.textContent).toContain('请关闭电脑端网页');
+    expect(document.body.textContent).not.toContain('MOVING');
+    expect(document.body.textContent).not.toContain('31 ms');
+  });
+
+  it.each([
+    [{state: 'unreachable'} as const, '后端不可达'],
+    [{state: 'disconnected'} as const, '连接已中断'],
+    [{state: 'reconnecting'} as const, '正在重连'],
+  ])('renders the exact structured connection label for $status.state', (status, label) => {
+    const hud = new Hud(document.querySelector('#app')!);
+
+    hud.setConnectionStatus(status);
+
+    expect(document.body.textContent).toContain(label);
   });
 
   it.each([

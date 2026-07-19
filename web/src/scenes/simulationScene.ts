@@ -203,6 +203,7 @@ export class SimulationScene {
   private armSafetyState: ArmSafetySnapshot = {
     phase: 'disconnected',
     connected: false,
+    connectionState: 'disconnected',
     eligible: false,
     armed: false,
     pending: false,

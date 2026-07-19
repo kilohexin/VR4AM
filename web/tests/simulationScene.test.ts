@@ -268,6 +268,7 @@ describe('XR render-loop handoff', () => {
     const snapshot = {
       phase: 'locked',
       connected: true,
+      connectionState: 'connected',
       eligible: false,
       armed: false,
       pending: false,

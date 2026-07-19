@@ -1,4 +1,5 @@
 import type {BackendState, TeleopMode} from '../protocol/messages';
+import type {TeleopConnectionStatus} from '../transport/teleopSocket';
 
 export interface ControllerHudState {
   tracking: boolean;
@@ -104,10 +105,17 @@ export class Hud {
     this.sceneNotice = requireElement(root, '.scene-notice');
   }
 
-  setConnection(connected: boolean): void {
-    this.connectionValue.textContent = connected ? '已连接' : '未连接';
-    this.connectionValue.dataset.tone = connected ? 'healthy' : 'muted';
-    if (!connected) {
+  setConnectionStatus(status: TeleopConnectionStatus): void {
+    const labels: Record<TeleopConnectionStatus['state'], string> = {
+      connected: '已连接',
+      occupied: '控制端已被占用，请关闭电脑端网页后重试',
+      unreachable: '后端不可达',
+      disconnected: '连接已中断',
+      reconnecting: '正在重连',
+    };
+    this.connectionValue.textContent = labels[status.state];
+    this.connectionValue.dataset.tone = status.state === 'connected' ? 'healthy' : 'muted';
+    if (status.state !== 'connected') {
       this.modeValue.textContent = 'DISCONNECTED · 未连接';
       this.modeValue.parentElement?.setAttribute('data-tone', 'muted');
       this.backendStateValue.textContent = 'DISCONNECTED';

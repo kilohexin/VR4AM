@@ -5,9 +5,11 @@ import {
   type TeleopMode,
 } from '../protocol/messages';
 import type {XRSessionStatus} from '../xr/session';
+import type {TeleopConnectionStatus} from '../transport/teleopSocket';
 
 export type SendControl = (message: ClientControlMessage) => void;
 export type ControlSource = 'desktop' | 'xr';
+export type ArmConnectionState = TeleopConnectionStatus['state'];
 export type ArmSafetyPhase =
   | 'disconnected'
   | 'fault'
@@ -20,6 +22,7 @@ export type ArmSafetyPhase =
 export type ArmSafetySnapshot = Readonly<{
   phase: ArmSafetyPhase;
   connected: boolean;
+  connectionState: ArmConnectionState;
   eligible: boolean;
   armed: boolean;
   pending: boolean;
@@ -36,6 +39,7 @@ export class ArmPanel {
   private armed = false;
   private eligible = false;
   private connected = true;
+  private connectionState: ArmConnectionState = 'disconnected';
   private fault: string | null = null;
   private requestSequence = 0;
   private pendingArmRequestId: string | null = null;
@@ -92,6 +96,7 @@ export class ArmPanel {
     return Object.freeze({
       phase,
       connected: this.connected && this.mode !== 'DISCONNECTED',
+      connectionState: this.connectionState,
       eligible: phase === 'disconnected' || phase === 'fault' ? false : this.eligible,
       armed: (phase === 'armed' || phase === 'active') && this.armed,
       pending: this.isArmPending,
@@ -114,7 +119,12 @@ export class ArmPanel {
   }
 
   setConnected(connected: boolean): void {
-    this.connected = connected;
+    this.setConnectionStatus({state: connected ? 'connected' : 'disconnected'});
+  }
+
+  setConnectionStatus(status: TeleopConnectionStatus): void {
+    this.connectionState = status.state;
+    this.connected = status.state === 'connected';
     this.resetToLocked();
   }
 

@@ -7,6 +7,7 @@ import type {ArmSafetyPhase, ArmSafetySnapshot} from '../src/ui/armPanel';
 const state = (phase: ArmSafetyPhase): ArmSafetySnapshot => ({
   phase,
   connected: phase !== 'disconnected',
+  connectionState: phase === 'disconnected' ? 'disconnected' : 'connected',
   eligible: false,
   armed: phase === 'armed' || phase === 'active',
   pending: phase === 'pending',
@@ -22,7 +23,7 @@ describe('VR safety presentation', () => {
     ['active', '运动中', '松开 Grip 停止', 'cyan', 'shield'],
     ['stopped', '已停止', '松开 Grip 后按 A', 'red', 'stop'],
     ['fault', '故障/失联', '保持 Grip 松开', 'red', 'warning'],
-    ['disconnected', '故障/失联', '保持 Grip 松开', 'red', 'warning'],
+    ['disconnected', '连接已中断', '保持 Grip 松开', 'red', 'warning'],
   ] as const)('maps %s to readable text and a shape', (phase, title, instruction, tone, shape) => {
     expect(describeVrSafety(state(phase), true)).toEqual({
       title,
@@ -31,6 +32,24 @@ describe('VR safety presentation', () => {
       tone,
       shape,
     });
+  });
+
+  it('prioritizes occupied connection guidance over generic safety state', () => {
+    expect(describeVrSafety({...state('disconnected'), connectionState: 'occupied'}, true))
+      .toMatchObject({
+        title: '控制端已被占用',
+        instruction: '请关闭电脑端网页后重试',
+        tone: 'red',
+      });
+  });
+
+  it.each([
+    ['unreachable', '后端不可达'],
+    ['disconnected', '连接已中断'],
+    ['reconnecting', '正在重连'],
+  ] as const)('renders a distinct %s connection title', (connectionState, title) => {
+    expect(describeVrSafety({...state('disconnected'), connectionState}, true))
+      .toMatchObject({title, tone: 'red'});
   });
 
   it('blocks with a readable unsupported-controller message', () => {

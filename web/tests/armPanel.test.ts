@@ -37,12 +37,28 @@ describe('ArmPanel simulator safety', () => {
     const send = vi.fn();
     const panel = new ArmPanel(document.querySelector('#panel')!, send);
 
-    panel.setConnected(false);
+    panel.setConnectionStatus({state: 'disconnected'});
     panel.observeGrip(false);
     panel.armButton.click();
 
     expect(panel.armButton.disabled).toBe(true);
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it('projects occupied transport status into the locked safety snapshot', () => {
+    const panel = new ArmPanel(document.querySelector('#panel')!, vi.fn());
+
+    panel.setConnectionStatus({
+      state: 'occupied',
+      message: '已有控制页面占用，请关闭电脑端网页后重试。',
+    });
+
+    expect(panel.safetyState).toMatchObject({
+      phase: 'disconnected',
+      connected: false,
+      connectionState: 'occupied',
+    });
+    expect(panel.requestArm('xr')).toBe(false);
   });
 
   it('arms only after grip release and stop disarms', () => {
@@ -208,7 +224,7 @@ describe('ArmPanel simulator safety', () => {
       (snapshot) => snapshots.push(snapshot),
     );
 
-    panel.setConnected(false);
+    panel.setConnectionStatus({state: 'disconnected'});
     expect(snapshots).toHaveLength(0);
     await flushSafetyChange();
     const disconnected = panel.safetyState;
@@ -219,7 +235,7 @@ describe('ArmPanel simulator safety', () => {
       (disconnected as {phase: string}).phase = 'active';
     }).toThrow(TypeError);
 
-    panel.setConnected(true);
+    panel.setConnectionStatus({state: 'connected'});
     panel.setFault('ik_unreachable');
     await flushSafetyChange();
     const fault = panel.safetyState;
@@ -256,7 +272,7 @@ describe('ArmPanel simulator safety', () => {
     const panel = new ArmPanel(document.querySelector('#panel')!, vi.fn());
 
     panel.setMode('ACTIVE');
-    panel.setConnected(false);
+    panel.setConnectionStatus({state: 'disconnected'});
     expect(panel.safetyState).toMatchObject({
       phase: 'disconnected',
       connected: false,
@@ -264,7 +280,7 @@ describe('ArmPanel simulator safety', () => {
       mode: 'DISCONNECTED',
     });
 
-    panel.setConnected(true);
+    panel.setConnectionStatus({state: 'connected'});
     expect(panel.safetyState).toMatchObject({phase: 'stopped', armed: false, mode: 'DISARMED'});
     panel.setMode('ACTIVE');
     panel.onSocketReconnect();
@@ -300,7 +316,7 @@ describe('ArmPanel simulator safety', () => {
     (mode, phase, connected) => {
       const panel = new ArmPanel(document.querySelector('#panel')!, vi.fn());
 
-      panel.setConnected(true);
+      panel.setConnectionStatus({state: 'connected'});
       panel.setFault(null);
       panel.setMode(mode);
       panel.setFault('lagging_fault_detail');
@@ -387,7 +403,7 @@ describe('ArmPanel simulator safety', () => {
 
     panel.setFault('ik_unreachable');
     expect(panel.safetyState.phase).toBe('fault');
-    panel.setConnected(false);
+    panel.setConnectionStatus({state: 'disconnected'});
     expect(panel.safetyState.phase).toBe('disconnected');
   });
 

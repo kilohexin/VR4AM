@@ -27,13 +27,13 @@ const socket = new TeleopSocket(
   resolveTeleopSocketUrl(window.location, import.meta.env.VITE_TELEOP_WS_URL),
   (state) => onRobotState(state),
   undefined,
-  (connected) => {
+  (status) => {
     scene?.resetConnection();
     pendingFrames.clear();
     latency.reset();
-    hud.setConnection(connected);
+    hud.setConnectionStatus(status);
     hud.setLatency(null, null);
-    armPanel?.setConnected(connected);
+    armPanel?.setConnectionStatus(status);
   },
   (message) => armPanel?.handleArmFeedback(message),
 );
@@ -44,7 +44,7 @@ armPanel = new ArmPanel(
   () => void (xrController.isActive ? xrController.exitVR() : xrController.enterVR()),
   (snapshot) => scene?.setArmSafetyState(snapshot),
 );
-armPanel.setConnected(false);
+armPanel.setConnectionStatus({state: 'disconnected'});
 
 scene = new SimulationScene(hud.sceneContainer, {
   stateBuffer,

@@ -16,6 +16,18 @@ export function describeVrSafety(
   if (controllerSupported === false) {
     return presentation('手柄不受支持', '当前配置不支持 A/B 安全控制', 'red', 'warning');
   }
+  if (state.connectionState === 'occupied') {
+    return presentation('控制端已被占用', '请关闭电脑端网页后重试', 'red', 'warning');
+  }
+  if (state.connectionState === 'unreachable') {
+    return presentation('后端不可达', '保持 Grip 松开', 'red', 'warning');
+  }
+  if (state.connectionState === 'disconnected') {
+    return presentation('连接已中断', '保持 Grip 松开', 'red', 'warning');
+  }
+  if (state.connectionState === 'reconnecting') {
+    return presentation('正在重连', '保持 Grip 松开', 'red', 'warning');
+  }
   if (state.phase === 'disconnected' || state.phase === 'fault') {
     return presentation('故障/失联', '保持 Grip 松开', 'red', 'warning');
   }
