@@ -1,5 +1,6 @@
 import {expect, it} from 'vitest';
-import {readRightController} from '../src/xr/controllerInput';
+import {createVRFrame} from '../src/scenes/simulationScene';
+import {readControllers, readRightController} from '../src/xr/controllerInput';
 
 const source = (handedness: 'left' | 'right', trigger = 0.3, grip = 0.6) => ({
   handedness,
@@ -30,6 +31,23 @@ function questSource(options: {
   } as unknown as XRInputSource;
 }
 
+function leftQuestSource(options: {
+  stickY?: number;
+  stickPressed?: boolean;
+} = {}): XRInputSource {
+  const buttons = Array.from({length: 4}, () => ({value: 0, pressed: false}));
+  buttons[3] = {value: options.stickPressed ? 1 : 0, pressed: options.stickPressed ?? false};
+  return {
+    handedness: 'left',
+    profiles: ['meta-quest-touch-plus'],
+    gripSpace: {},
+    gamepad: {
+      buttons,
+      axes: [0, 0, 0, options.stickY ?? 0],
+    },
+  } as unknown as XRInputSource;
+}
+
 const frame = (hasPose = true) => ({
   getPose: () => hasPose ? {
     transform: {
@@ -38,6 +56,80 @@ const frame = (hasPose = true) => ({
     },
   } : null,
 }) as unknown as XRFrame;
+
+it('reads left thumbstick display input independently from right robot controls', () => {
+  const sample = readControllers(frame(), {} as XRReferenceSpace, [
+    leftQuestSource({stickY: -0.75, stickPressed: true}),
+    questSource({a: true}),
+  ]);
+
+  expect(sample.left).toMatchObject({
+    trackingValid: true,
+    thumbstickY: -0.75,
+    thumbstickPressed: true,
+  });
+  expect(sample.right).toMatchObject({
+    trackingValid: true,
+    armButton: true,
+  });
+});
+
+it.each([
+  [1.4, 1],
+  [-1.4, -1],
+] as const)('clamps the left thumbstick Y axis from %s to %s', (stickY, expected) => {
+  const sample = readControllers(frame(), {} as XRReferenceSpace, [
+    leftQuestSource({stickY}),
+  ]);
+
+  expect(sample.left.thumbstickY).toBe(expected);
+});
+
+it('keeps right tracking valid when the left pose is unavailable', () => {
+  const left = leftQuestSource({stickY: 0.5, stickPressed: true});
+  const right = questSource({b: true});
+  const xrFrame = {
+    getPose: (space: XRSpace) => space === left.gripSpace ? null : {
+      transform: {
+        position: {x: 1, y: 2, z: 3},
+        orientation: {x: 0, y: 0, z: 0, w: 1},
+      },
+    },
+  } as unknown as XRFrame;
+
+  const sample = readControllers(xrFrame, {} as XRReferenceSpace, [left, right]);
+
+  expect(sample.left).toEqual({
+    p: [0, 0, 0],
+    q: [0, 0, 0, 1],
+    trackingValid: false,
+    thumbstickY: 0,
+    thumbstickPressed: false,
+  });
+  expect(sample.right).toMatchObject({trackingValid: true, stopButton: true});
+});
+
+it('does not include left-controller fields in the VRFrame built from the right sample', () => {
+  const sample = readControllers(frame(), {} as XRReferenceSpace, [
+    leftQuestSource({stickY: -1, stickPressed: true}),
+    questSource({a: true}),
+  ]);
+
+  const vrFrame = createVRFrame({
+    sessionId: 'test-session',
+    sequence: 1,
+    nowMs: 10,
+    trackingValid: sample.right.trackingValid,
+    position: sample.right.p,
+    quaternion: sample.right.q,
+    grip: sample.right.grip,
+    trigger: sample.right.trigger,
+  });
+
+  expect(vrFrame).not.toHaveProperty('left');
+  expect(vrFrame.right).not.toHaveProperty('thumbstickY');
+  expect(vrFrame.right).not.toHaveProperty('thumbstickPressed');
+});
 
 it('selects right gripSpace and maps buttons', () => {
   const sample = readRightController(

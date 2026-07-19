@@ -4,18 +4,47 @@ const GRIP_BUTTON_INDEX = 1;
 const TRIGGER_BUTTON_INDEX = 0;
 const ARM_BUTTON_INDEX = 4;
 const STOP_BUTTON_INDEX = 5;
+const THUMBSTICK_BUTTON_INDEX = 3;
+const THUMBSTICK_Y_AXIS_INDEX = 3;
 const GRIP_THRESHOLD = 0.5;
 const QUEST_PROFILE_PREFIXES = ['meta-quest-touch', 'oculus-touch'] as const;
 
-export interface ControllerSample {
+export interface TrackedPoseSample {
   p: Vec3;
   q: Quat;
+  trackingValid: boolean;
+}
+
+export interface LeftControllerSample extends TrackedPoseSample {
+  thumbstickY: number;
+  thumbstickPressed: boolean;
+}
+
+export interface ControllerSample extends TrackedPoseSample {
   grip: boolean;
   trigger: number;
   armButton: boolean;
   stopButton: boolean;
   questFaceButtonsSupported: boolean;
-  trackingValid: boolean;
+}
+
+export interface ControllerPairSample {
+  left: LeftControllerSample;
+  right: ControllerSample;
+}
+
+export function readControllers(
+  frame: XRFrame,
+  referenceSpace: XRReferenceSpace,
+  inputSources: Iterable<XRInputSource>,
+): ControllerPairSample {
+  const sources = Array.from(inputSources);
+  const leftSource = sources.find(({handedness}) => handedness === 'left');
+  const rightSource = sources.find(({handedness}) => handedness === 'right');
+  return {
+    left: readLeftController(frame, referenceSpace, leftSource),
+    right: readRightControllerSource(frame, referenceSpace, rightSource),
+  };
 }
 
 export function readRightController(
@@ -25,24 +54,61 @@ export function readRightController(
 ): ControllerSample | null {
   const source = Array.from(inputSources).find(({handedness}) => handedness === 'right');
   if (!source) return null;
-  if (!source.gripSpace) return invalidControllerSample();
 
-  const pose = frame.getPose(source.gripSpace, referenceSpace);
-  if (!pose) return invalidControllerSample();
+  return readRightControllerSource(frame, referenceSpace, source);
+}
 
-  const {position, orientation} = pose.transform;
+function readLeftController(
+  frame: XRFrame,
+  referenceSpace: XRReferenceSpace,
+  source: XRInputSource | undefined,
+): LeftControllerSample {
+  const pose = readPose(frame, referenceSpace, source);
+  if (!pose.trackingValid || !source) return invalidLeftControllerSample();
+
+  return {
+    ...pose,
+    thumbstickY: normalizeAxis(source.gamepad?.axes?.[THUMBSTICK_Y_AXIS_INDEX]),
+    thumbstickPressed: pressed(source.gamepad?.buttons?.[THUMBSTICK_BUTTON_INDEX]),
+  };
+}
+
+function readRightControllerSource(
+  frame: XRFrame,
+  referenceSpace: XRReferenceSpace,
+  source: XRInputSource | undefined,
+): ControllerSample {
+  const pose = readPose(frame, referenceSpace, source);
+  if (!pose.trackingValid || !source) return invalidControllerSample();
+
   const buttons = source.gamepad?.buttons ?? [];
   const triggerButton = buttons[TRIGGER_BUTTON_INDEX];
   const gripButton = buttons[GRIP_BUTTON_INDEX];
   const questFaceButtonsSupported = supportsQuestFaceButtons(source, buttons);
   return {
-    p: [position.x, position.y, position.z],
-    q: [orientation.x, orientation.y, orientation.z, orientation.w],
+    ...pose,
     grip: gripButton?.pressed === true || normalizeButton(gripButton?.value) >= GRIP_THRESHOLD,
     trigger: normalizeButton(triggerButton?.value),
     armButton: questFaceButtonsSupported && pressed(buttons[ARM_BUTTON_INDEX]),
     stopButton: questFaceButtonsSupported && pressed(buttons[STOP_BUTTON_INDEX]),
     questFaceButtonsSupported,
+  };
+}
+
+function readPose(
+  frame: XRFrame,
+  referenceSpace: XRReferenceSpace,
+  source: XRInputSource | undefined,
+): TrackedPoseSample {
+  if (!source?.gripSpace) return invalidTrackedPoseSample();
+
+  const pose = frame.getPose(source.gripSpace, referenceSpace);
+  if (!pose) return invalidTrackedPoseSample();
+
+  const {position, orientation} = pose.transform;
+  return {
+    p: [position.x, position.y, position.z],
+    q: [orientation.x, orientation.y, orientation.z, orientation.w],
     trackingValid: true,
   };
 }
@@ -56,6 +122,22 @@ export function invalidControllerSample(): ControllerSample {
     armButton: false,
     stopButton: false,
     questFaceButtonsSupported: false,
+    trackingValid: false,
+  };
+}
+
+function invalidLeftControllerSample(): LeftControllerSample {
+  return {
+    ...invalidTrackedPoseSample(),
+    thumbstickY: 0,
+    thumbstickPressed: false,
+  };
+}
+
+function invalidTrackedPoseSample(): TrackedPoseSample {
+  return {
+    p: [0, 0, 0],
+    q: [0, 0, 0, 1],
     trackingValid: false,
   };
 }
@@ -76,4 +158,9 @@ function supportsQuestFaceButtons(
 function normalizeButton(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, value));
+}
+
+function normalizeAxis(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(-1, value));
 }
