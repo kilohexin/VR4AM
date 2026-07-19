@@ -11,6 +11,7 @@ export class ControllerHints {
   readonly right: THREE.Group;
 
   private readonly root = new THREE.Group();
+  private readonly sharedArrowGeometries: ReadonlySet<THREE.BufferGeometry>;
   private visible = true;
   private leftTrackingValid = false;
   private rightTrackingValid = false;
@@ -21,6 +22,7 @@ export class ControllerHints {
     this.left = createHandHint('left', LEFT_COLOR, 'L');
     this.right = createHandHint('right', RIGHT_COLOR, 'R');
     this.root.add(this.left, this.right);
+    this.sharedArrowGeometries = collectArrowGeometries(this.root);
     parent.add(this.root);
   }
 
@@ -39,7 +41,7 @@ export class ControllerHints {
     if (this.disposed) return;
     this.disposed = true;
 
-    const resources = collectResources(this.root);
+    const resources = collectResources(this.root, this.sharedArrowGeometries);
     this.root.removeFromParent();
     for (const resource of resources) resource.dispose();
   }
@@ -115,10 +117,27 @@ function updateHand(group: THREE.Group, sample: TrackedPoseSample): boolean {
   return true;
 }
 
-function collectResources(root: THREE.Object3D): Set<DisposableResource> {
+function collectArrowGeometries(root: THREE.Object3D): Set<THREE.BufferGeometry> {
+  const geometries = new Set<THREE.BufferGeometry>();
+  root.traverse((object) => {
+    if (!(object instanceof THREE.ArrowHelper)) return;
+    geometries.add(object.line.geometry);
+    geometries.add(object.cone.geometry);
+  });
+  return geometries;
+}
+
+function collectResources(
+  root: THREE.Object3D,
+  excludedGeometries: ReadonlySet<THREE.BufferGeometry>,
+): Set<DisposableResource> {
   const resources = new Set<DisposableResource>();
   root.traverse((object) => {
-    if ('geometry' in object && object.geometry instanceof THREE.BufferGeometry) {
+    if (
+      'geometry' in object &&
+      object.geometry instanceof THREE.BufferGeometry &&
+      !excludedGeometries.has(object.geometry)
+    ) {
       resources.add(object.geometry);
     }
     if (!('material' in object)) return;

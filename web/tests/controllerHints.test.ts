@@ -79,12 +79,22 @@ describe('ControllerHints', () => {
   });
 
   it('removes its root and disposes every owned resource exactly once', () => {
+    const externalArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1));
     const parent = new THREE.Group();
     const hints = new ControllerHints(parent);
     const root = hints.left.parent;
     expect(root?.parent).toBe(parent);
 
-    const resources = ownedResources(root!);
+    const hintArrow = arrowFor(hints.left);
+    expect(hintArrow.line.geometry).toBe(externalArrow.line.geometry);
+    expect(hintArrow.cone.geometry).toBe(externalArrow.cone.geometry);
+    const sharedGeometries = new Set([
+      externalArrow.line.geometry,
+      externalArrow.cone.geometry,
+    ]);
+    const sharedDisposals = [...sharedGeometries]
+      .map((geometry) => vi.spyOn(geometry, 'dispose'));
+    const resources = ownedResources(root!, sharedGeometries);
     const disposals = resources.map((resource) => vi.spyOn(resource, 'dispose'));
 
     hints.dispose();
@@ -92,6 +102,7 @@ describe('ControllerHints', () => {
 
     expect(root?.parent).toBeNull();
     expect(resources.length).toBeGreaterThan(0);
+    for (const dispose of sharedDisposals) expect(dispose).not.toHaveBeenCalled();
     for (const dispose of disposals) expect(dispose).toHaveBeenCalledOnce();
   });
 });
@@ -130,10 +141,25 @@ function labelFor(root: THREE.Object3D): THREE.Sprite {
   return label;
 }
 
-function ownedResources(root: THREE.Object3D): Array<THREE.BufferGeometry | THREE.Material | THREE.Texture> {
+function arrowFor(root: THREE.Object3D): THREE.ArrowHelper {
+  const arrow = root.children.find((child): child is THREE.ArrowHelper =>
+    child instanceof THREE.ArrowHelper,
+  );
+  if (!arrow) throw new Error('controller direction arrow not found');
+  return arrow;
+}
+
+function ownedResources(
+  root: THREE.Object3D,
+  excludedGeometries: ReadonlySet<THREE.BufferGeometry>,
+): Array<THREE.BufferGeometry | THREE.Material | THREE.Texture> {
   const resources = new Set<THREE.BufferGeometry | THREE.Material | THREE.Texture>();
   root.traverse((object) => {
-    if ('geometry' in object && object.geometry instanceof THREE.BufferGeometry) {
+    if (
+      'geometry' in object &&
+      object.geometry instanceof THREE.BufferGeometry &&
+      !excludedGeometries.has(object.geometry)
+    ) {
       resources.add(object.geometry);
     }
     if (!('material' in object)) return;
