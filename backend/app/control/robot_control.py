@@ -104,8 +104,14 @@ class RobotControl:
 
     async def connect(self) -> None:
         self.machine.connect()
+        if self._fault is not None:
+            if self._pending_stop_completion:
+                self.machine.fault()
+            else:
+                self.machine.disarm()
         self._advance_control_generation()
-        self._clear_stop_episode()
+        if self._fault is None:
+            self._clear_stop_episode()
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
@@ -122,6 +128,12 @@ class RobotControl:
             self._task = asyncio.create_task(self.run())
 
     async def arm(self) -> None:
+        if self._shutdown_started:
+            raise RuntimeError("control_shutdown")
+        if self._loop_failed:
+            raise RuntimeError("control_faulted")
+        if self._fault is not None:
+            raise RuntimeError("arm_blocked_by_fault")
         self.machine.arm()
 
     async def disarm(self) -> None:
@@ -173,7 +185,7 @@ class RobotControl:
         self.filter.clear()
         self.limiter.clear()
         self.last_target = None
-        self._clear_stop_episode()
+        self._clear_stop_episode(clear_fault=True)
         self.machine.disarm()
         return FaultResetResult(True)
 
@@ -181,7 +193,8 @@ class RobotControl:
         self._advance_control_generation()
         await self.backend.stop(StopReason.DISCONNECT)
         self.mapper.clear()
-        self._clear_stop_episode()
+        if self._fault is None:
+            self._clear_stop_episode()
         self.machine.disconnect()
 
     async def stop(self) -> None:
@@ -274,7 +287,13 @@ class RobotControl:
                 await self.recorder.write_vr_frame(received.frame, received.received_ns)
             await self._send_latest_gripper(received.frame.right.trigger, now_ns)
             previous_mode = self.machine.mode
-            self.machine.observe_grip(received.frame.right.grip)
+            if (
+                is_new_frame
+                and self._fault is None
+                and not self._loop_failed
+                and not self._shutdown_started
+            ):
+                self.machine.observe_grip(received.frame.right.grip)
             if (
                 previous_mode in {TeleopMode.ARMED, TeleopMode.HOLD}
                 and self.machine.mode == TeleopMode.ACTIVE
@@ -385,15 +404,16 @@ class RobotControl:
             self._pending_stop_completion = True
             self._advance_control_generation()
 
-    def _clear_stop_episode(self) -> None:
+    def _clear_stop_episode(self, *, clear_fault: bool = False) -> None:
         changed = (
             self._pending_stop_completion
             or self._hard_stop_completion
-            or self._fault is not None
+            or (clear_fault and self._fault is not None)
         )
         self._pending_stop_completion = False
         self._hard_stop_completion = False
-        self._fault = None
+        if clear_fault:
+            self._fault = None
         if changed:
             self._advance_control_generation()
 

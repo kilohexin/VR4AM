@@ -276,6 +276,13 @@ class SoakScenario:
         if self.control.mode in {TeleopMode.STALE, TeleopMode.FAULT}:
             await self._tick_control()
             return
+        if self.recovery_event in {"command_fault", "safety_fault"}:
+            reset = await self.control.reset_fault()
+            if not reset.accepted:
+                self.invariant_failures.append(
+                    f"{self.recovery_event}_explicit_reset_rejected"
+                )
+                return
         if self.control.mode is TeleopMode.DISCONNECTED:
             await self.control.connect()
         if self.control.mode is TeleopMode.DISARMED:

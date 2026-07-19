@@ -168,6 +168,77 @@ async def test_reset_recoverable_fault_atomically_clears_motion_state() -> None:
         await control.arm()
 
 
+@pytest.mark.asyncio
+async def test_latched_fault_ignores_released_grip_and_remains_resettable() -> None:
+    control, latest, _backend, clock = make_control()
+    await enter_published_recoverable_fault(control)
+    latest.publish(
+        frame(8, False, session_id="fault-session"),
+        clock.now_ns(),
+    )
+
+    await control.tick()
+
+    assert control.mode is TeleopMode.DISARMED
+    assert control._fault == "ik_unreachable"
+    assert await control.reset_fault() == robot_control_module.FaultResetResult(True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fault", "loop_failed", "shutdown_started", "error"),
+    [
+        ("workspace_violation", False, False, "arm_blocked_by_fault"),
+        ("backend_fault", False, False, "arm_blocked_by_fault"),
+        ("control_loop_error", True, False, "control_faulted"),
+        (None, False, True, "control_shutdown"),
+    ],
+)
+async def test_arm_explicitly_rejects_latched_fault_and_unavailable_control(
+    fault: str | None,
+    loop_failed: bool,
+    shutdown_started: bool,
+    error: str,
+) -> None:
+    control, _latest, _backend, _clock = make_control()
+    control.machine.mode = TeleopMode.READY
+    control.machine._grip_released = True
+    control._fault = fault
+    control._loop_failed = loop_failed
+    control._shutdown_started = shutdown_started
+
+    with pytest.raises(RuntimeError, match=error):
+        await control.arm()
+
+    assert control.mode is TeleopMode.READY
+
+
+@pytest.mark.asyncio
+async def test_reset_success_requires_a_new_grip_release_frame_before_arm() -> None:
+    control, latest, _backend, clock = make_control()
+    await enter_published_recoverable_fault(control)
+    latest.publish(
+        frame(7, False, session_id="fault-session"),
+        clock.now_ns(),
+    )
+
+    assert await control.reset_fault() == robot_control_module.FaultResetResult(True)
+    await control.tick()
+    assert control.mode is TeleopMode.DISARMED
+    with pytest.raises(RuntimeError, match="arm_requires_grip_release"):
+        await control.arm()
+
+    latest.publish(
+        frame(8, False, session_id="fault-session"),
+        clock.now_ns(),
+    )
+    await control.tick()
+
+    assert control.mode is TeleopMode.READY
+    await control.arm()
+    assert control.mode is TeleopMode.ARMED
+
+
 def test_fault_reset_recoverable_whitelist_is_exact() -> None:
     assert robot_control_module.RECOVERABLE_FAULTS == frozenset(
         {
@@ -874,13 +945,69 @@ async def test_new_session_preserves_unpublished_fault_priority_and_detail() -> 
     assert fault_state.mode == TeleopMode.FAULT
     assert fault_state.fault == "ik_unreachable"
     assert control.mode == TeleopMode.DISARMED
-    with pytest.raises(RuntimeError, match="arm_requires_grip_release"):
+    with pytest.raises(RuntimeError, match="arm_blocked_by_fault"):
         await control.arm()
 
     latest.publish(frame(2, False, session_id="new"), clock.now_ns())
     await control.tick()
-    await control.arm()
-    assert control.mode == TeleopMode.ARMED
+    assert control.mode is TeleopMode.DISARMED
+    assert control._fault == "ik_unreachable"
+    with pytest.raises(RuntimeError, match="arm_blocked_by_fault"):
+        await control.arm()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_and_reconnect_preserve_published_fault_latch() -> None:
+    control, latest, _backend, clock = make_control()
+    await enter_published_recoverable_fault(control)
+
+    await control.on_disconnect()
+    assert control.mode is TeleopMode.DISCONNECTED
+    assert control._fault == "ik_unreachable"
+    await control.connect()
+
+    assert control.mode is TeleopMode.DISARMED
+    assert control._fault == "ik_unreachable"
+    latest.publish(frame(8, False, session_id="fault-session"), clock.now_ns())
+    await control.tick()
+    assert control.mode is TeleopMode.DISARMED
+    with pytest.raises(RuntimeError, match="arm_blocked_by_fault"):
+        await control.arm()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_preserves_unpublished_fault_until_reconnect_publishes_it() -> None:
+    control, _latest, _backend, _clock = make_control()
+    await control.connect()
+    await control._enter_fault("ik_unreachable")
+    assert control.mode is TeleopMode.FAULT
+    assert control._pending_stop_completion is True
+
+    await control.on_disconnect()
+    assert control.mode is TeleopMode.DISCONNECTED
+    assert control._fault == "ik_unreachable"
+    assert control._pending_stop_completion is True
+    await control.connect()
+
+    assert control.mode is TeleopMode.FAULT
+    published = await control.state_message()
+    assert published.mode is TeleopMode.FAULT
+    assert published.fault == "ik_unreachable"
+    assert control.mode is TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_new_session_preserves_published_fault_latch() -> None:
+    control, latest, _backend, clock = make_control()
+    await enter_published_recoverable_fault(control)
+    latest.publish(frame(1, False, session_id="replacement"), clock.now_ns())
+
+    await control.tick()
+
+    assert control.mode is TeleopMode.DISARMED
+    assert control._fault == "ik_unreachable"
+    with pytest.raises(RuntimeError, match="arm_blocked_by_fault"):
+        await control.arm()
 
 
 @pytest.mark.asyncio
