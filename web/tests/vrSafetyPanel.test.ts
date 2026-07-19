@@ -24,7 +24,7 @@ describe('VR safety presentation', () => {
     ['armed', '已解锁', '按住 Grip 移动', 'cyan', 'shield'],
     ['active', '运动中', '松开 Grip 停止', 'cyan', 'shield'],
     ['stopped', '已停止', '松开 Grip 后按 A', 'red', 'stop'],
-    ['fault', '故障/失联', '保持 Grip 松开', 'red', 'warning'],
+    ['fault', '无法在线复位', '请重启后端并检查原因', 'red', 'warning'],
     ['disconnected', '连接已中断', '保持 Grip 松开', 'red', 'warning'],
   ] as const)('maps %s to readable text and a shape', (phase, title, instruction, tone, shape) => {
     expect(describeVrSafety(state(phase), true)).toEqual({
@@ -46,7 +46,14 @@ describe('VR safety presentation', () => {
   });
 
   it('prioritizes occupied connection guidance over unsupported controller copy', () => {
-    expect(describeVrSafety({...state('disconnected'), connectionState: 'occupied'}, false))
+    expect(describeVrSafety({
+      ...state('pending'),
+      connected: false,
+      connectionState: 'occupied',
+      fault: 'workspace_violation',
+      faultRecoverable: true,
+      faultResetPending: true,
+    }, false))
       .toMatchObject({
         title: '控制端已被占用',
         instruction: '请关闭电脑端网页后重试',
@@ -59,18 +66,107 @@ describe('VR safety presentation', () => {
     ['disconnected', '连接已中断'],
     ['reconnecting', '正在重连'],
   ] as const)('renders a distinct %s connection title', (connectionState, title) => {
-    expect(describeVrSafety({...state('disconnected'), connectionState}, true))
+    expect(describeVrSafety({
+      ...state('pending'),
+      connectionState,
+      connected: false,
+      fault: 'workspace_violation',
+      faultRecoverable: true,
+      faultResetPending: true,
+    }, false))
       .toMatchObject({title, tone: 'red'});
   });
 
-  it('blocks with a readable unsupported-controller message', () => {
-    expect(describeVrSafety(state('fault'), false)).toEqual({
+  it('uses the connected safety flag as a disconnected fallback before fault state', () => {
+    expect(describeVrSafety({
+      ...state('pending'),
+      connected: false,
+      connectionState: 'connected',
+      fault: 'workspace_violation',
+      faultRecoverable: true,
+      faultResetPending: true,
+    }, false)).toMatchObject({
+      title: '连接已中断',
+      instruction: '保持 Grip 松开',
+      tone: 'red',
+    });
+  });
+
+  it.each([
+    ['workspace_violation', '目标超出工作空间'],
+    ['ik_unreachable', '目标不可达'],
+    ['ik_singular', '目标接近奇异位形'],
+    ['joint_safety_window', '目标超出仿真关节安全范围'],
+  ] as const)('shows a readable reset instruction for recoverable fault %s', (fault, title) => {
+    expect(describeVrSafety({
+      ...state('fault'),
+      fault,
+      faultRecoverable: true,
+    }, true)).toMatchObject({
+      title,
+      instruction: '松开 Grip，按 B 复位',
+      tone: 'red',
+      shape: 'warning',
+    });
+  });
+
+  it('shows reset progress before the underlying recoverable fault', () => {
+    expect(describeVrSafety({
+      ...state('fault'),
+      fault: 'workspace_violation',
+      faultRecoverable: true,
+      faultResetPending: true,
+    }, true)).toMatchObject({
+      title: '复位中',
+      instruction: '等待仿真确认',
+    });
+  });
+
+  it('shows explicit restart guidance for an unrecoverable fault', () => {
+    expect(describeVrSafety({
+      ...state('fault'),
+      fault: 'control_loop_error',
+      faultRecoverable: false,
+    }, true)).toMatchObject({
+      title: '无法在线复位',
+      instruction: '请重启后端并检查原因',
+      tone: 'red',
+    });
+  });
+
+  it('distinguishes stale data from a latched backend fault', () => {
+    expect(describeVrSafety({
+      ...state('fault'),
+      mode: 'STALE',
+      fault: null,
+      faultRecoverable: false,
+    }, true)).toMatchObject({
+      title: '数据陈旧',
+      instruction: '保持 Grip 松开',
+      tone: 'red',
+    });
+  });
+
+  it('blocks normal operation with a readable unsupported-controller message', () => {
+    expect(describeVrSafety(state('locked'), false)).toEqual({
       title: '手柄不受支持',
       instruction: '当前配置不支持 A/B 安全控制',
       footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度',
       tone: 'red',
       shape: 'warning',
     });
+  });
+
+  it.each([
+    [{faultResetPending: true, faultRecoverable: true}, '复位中'],
+    [{faultResetPending: false, faultRecoverable: true}, '目标超出工作空间'],
+    [{faultResetPending: false, faultRecoverable: false}, '无法在线复位'],
+  ] as const)('prioritizes fault handling over unsupported controller copy', (faultState, title) => {
+    expect(describeVrSafety({
+      ...state('fault'),
+      fault: 'workspace_violation',
+      ...faultState,
+    }, false)).toMatchObject({title, tone: 'red'});
   });
 
   it('keeps the safety phase presentation while controller support is unknown', () => {

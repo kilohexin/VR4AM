@@ -42,6 +42,21 @@ describe('Chinese simulator HUD', () => {
     expect(document.body.textContent).toContain('目标不可达');
   });
 
+  it('keeps a latched fault visible when the backend mode already returned to READY', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+
+    hud.setRobotState({
+      mode: 'READY',
+      backendState: 'IDLE',
+      sampleAgeMs: 1,
+      fault: 'workspace_violation',
+    });
+
+    expect(document.querySelector('[data-field="mode"]')?.textContent).toBe('FAULT · 故障');
+    expect(document.body.textContent).toContain('目标超出工作空间');
+    expect(document.body.textContent).not.toContain('READY · 等待解锁');
+  });
+
   it('clears stale backend, age, fault, and latency values on disconnect', () => {
     const hud = new Hud(document.querySelector('#app')!);
     hud.setConnectionStatus({state: 'connected'});

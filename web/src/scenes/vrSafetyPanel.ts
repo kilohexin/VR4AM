@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
+import {readableFault} from '../ui/hud';
 
 export interface VrSafetyPresentation {
   title: string;
@@ -25,11 +26,29 @@ export function describeVrSafety(
   if (state.connectionState === 'reconnecting') {
     return presentation('正在重连', '保持 Grip 松开', 'red', 'warning');
   }
+  if (!state.connected) {
+    return presentation('连接已中断', '保持 Grip 松开', 'red', 'warning');
+  }
+  if (state.faultResetPending) {
+    return presentation('复位中', '等待仿真确认', 'red', 'warning');
+  }
+  if (state.faultRecoverable && state.fault) {
+    return presentation(readableFault(state.fault), '松开 Grip，按 B 复位', 'red', 'warning');
+  }
+  if (state.fault) {
+    return presentation('无法在线复位', '请重启后端并检查原因', 'red', 'warning');
+  }
+  if (state.mode === 'STALE') {
+    return presentation('数据陈旧', '保持 Grip 松开', 'red', 'warning');
+  }
   if (controllerSupported === false) {
     return presentation('手柄不受支持', '当前配置不支持 A/B 安全控制', 'red', 'warning');
   }
-  if (state.phase === 'disconnected' || state.phase === 'fault') {
-    return presentation('故障/失联', '保持 Grip 松开', 'red', 'warning');
+  if (state.phase === 'disconnected') {
+    return presentation('连接已中断', '保持 Grip 松开', 'red', 'warning');
+  }
+  if (state.phase === 'fault') {
+    return presentation('无法在线复位', '请重启后端并检查原因', 'red', 'warning');
   }
   if (state.phase === 'pending') {
     return presentation('解锁中', '等待仿真确认', 'cyan', 'shield');

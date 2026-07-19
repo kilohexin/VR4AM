@@ -140,8 +140,9 @@ export class Hud {
   }
 
   setRobotState(state: RobotHudState): void {
-    this.modeValue.textContent = `${state.mode} · ${modeLabel(state.mode)}`;
-    this.modeValue.parentElement?.setAttribute('data-tone', modeTone(state.mode));
+    const displayMode: TeleopMode = state.fault ? 'FAULT' : state.mode;
+    this.modeValue.textContent = `${displayMode} · ${modeLabel(displayMode)}`;
+    this.modeValue.parentElement?.setAttribute('data-tone', modeTone(displayMode));
     this.backendStateValue.textContent = state.backendState;
     this.backendStateValue.dataset.tone = state.backendState === 'FAULT' ? 'fault' : 'healthy';
     this.sampleAgeValue.textContent = formatMilliseconds(state.sampleAgeMs);
@@ -203,7 +204,7 @@ function modeTone(mode: TeleopMode): string {
   return 'healthy';
 }
 
-function readableFault(fault: string | null): string {
+export function readableFault(fault: string | null): string {
   if (!fault) return '无';
   const labels: Record<string, string> = {
     protocol_error: '协议消息无效',
