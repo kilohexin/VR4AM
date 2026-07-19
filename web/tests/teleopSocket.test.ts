@@ -2,7 +2,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import robotFixture from '../../schemas/fixtures/robot-state-valid.json';
 import vrFixture from '../../schemas/fixtures/vr-frame-valid.json';
 import type {ClientControlMessage, RobotStateMessage, VRFrame} from '../src/protocol/messages';
-import {TeleopSocket} from '../src/transport/teleopSocket';
+import {TeleopSocket, type TeleopConnectionStatus} from '../src/transport/teleopSocket';
 
 class FakeSocket {
   readyState: number = WebSocket.CONNECTING;
@@ -35,13 +35,16 @@ class FakeSocket {
   }
 }
 
-function setup(onRobotState: (state: RobotStateMessage) => void = () => {}) {
+function setup(
+  onRobotState: (state: RobotStateMessage) => void = () => {},
+  onConnectionChange: (status: TeleopConnectionStatus) => void = () => {},
+) {
   const sockets: FakeSocket[] = [];
   const client = new TeleopSocket('wss://test', onRobotState, () => {
     const socket = new FakeSocket();
     sockets.push(socket);
     return socket as unknown as WebSocket;
-  });
+  }, onConnectionChange);
   return {client, sockets};
 }
 
@@ -59,8 +62,8 @@ afterEach(() => {
 });
 
 describe('TeleopSocket', () => {
-  it('reports every open and close transition to lifecycle observers', () => {
-    const states: boolean[] = [];
+  it('reports connected, disconnected, then reconnecting for an ordinary close', () => {
+    const states: TeleopConnectionStatus[] = [];
     const sockets: FakeSocket[] = [];
     const client = new TeleopSocket(
       'wss://test',
@@ -70,14 +73,79 @@ describe('TeleopSocket', () => {
         sockets.push(socket);
         return socket as unknown as WebSocket;
       },
-      (connected) => states.push(connected),
+      (status) => states.push(status),
     );
 
     client.connect();
     sockets[0].open();
     sockets[0].closeFromServer();
 
-    expect(states).toEqual([true, false]);
+    expect(states).toEqual([
+      {state: 'connected'},
+      {state: 'disconnected'},
+      {state: 'reconnecting'},
+    ]);
+  });
+
+  it('reports unreachable then reconnecting when socket construction fails', () => {
+    const states: TeleopConnectionStatus[] = [];
+    const client = new TeleopSocket(
+      'wss://test',
+      () => {},
+      () => {
+        throw new Error('offline');
+      },
+      (status) => states.push(status),
+    );
+
+    client.connect();
+
+    expect(states).toEqual([{state: 'unreachable'}, {state: 'reconnecting'}]);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('preserves occupied state across close and retries at 2 then 4 then 5 seconds', () => {
+    const states: TeleopConnectionStatus[] = [];
+    const {client, sockets} = setup(() => {}, (status) => states.push(status));
+    const rejection = JSON.stringify({
+      v: 1,
+      type: 'connection_rejected',
+      reason: 'controller_occupied',
+      message: '已有控制页面占用，请关闭电脑端网页后重试。',
+    });
+    const rejectAndClose = (socket: FakeSocket) => {
+      socket.message(rejection);
+      socket.closeFromServer();
+    };
+
+    client.connect();
+    sockets[0].open();
+    rejectAndClose(sockets[0]);
+
+    expect(states.at(-1)).toEqual({
+      state: 'occupied',
+      message: '已有控制页面占用，请关闭电脑端网页后重试。',
+    });
+    vi.advanceTimersByTime(1_999);
+    expect(sockets).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(sockets).toHaveLength(2);
+
+    rejectAndClose(sockets[1]);
+    vi.advanceTimersByTime(3_999);
+    expect(sockets).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(sockets).toHaveLength(3);
+
+    rejectAndClose(sockets[2]);
+    vi.advanceTimersByTime(4_999);
+    expect(sockets).toHaveLength(3);
+    vi.advanceTimersByTime(1);
+    expect(sockets).toHaveLength(4);
+
+    sockets[3].open();
+    expect(states.at(-1)).toEqual({state: 'connected'});
+    expect(sockets[3].sent.map((value) => JSON.parse(value).type)).toEqual(['hello']);
   });
 
   it('drops frames before open and sends only hello when opened', () => {

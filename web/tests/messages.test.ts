@@ -3,11 +3,24 @@ import robotFixture from '../../schemas/fixtures/robot-state-valid.json';
 import vrFixture from '../../schemas/fixtures/vr-frame-valid.json';
 import {
   isClientControlMessage,
+  isConnectionRejectedMessage,
   isRobotStateMessage,
   isVRFrame,
 } from '../src/protocol/messages';
 
 describe('protocol guards', () => {
+  it('accepts only the exact controller-occupied rejection contract', () => {
+    const valid = {
+      v: 1,
+      type: 'connection_rejected',
+      reason: 'controller_occupied',
+      message: '已有控制页面占用，请关闭电脑端网页后重试。',
+    };
+    expect(isConnectionRejectedMessage(valid)).toBe(true);
+    expect(isConnectionRejectedMessage({...valid, reason: 'busy'})).toBe(false);
+    expect(isConnectionRejectedMessage({...valid, extra: true})).toBe(false);
+  });
+
   it('accepts the shared protocol fixtures', () => {
     expect(isVRFrame(vrFixture)).toBe(true);
     expect(isRobotStateMessage(robotFixture)).toBe(true);

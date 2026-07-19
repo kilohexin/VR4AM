@@ -1,5 +1,6 @@
 import {
   isArmFeedbackMessage,
+  isConnectionRejectedMessage,
   isRobotStateMessage,
   PROTOCOL_VERSION,
   type ClientControlMessage,
@@ -10,14 +11,24 @@ import {
 
 export type SocketFactory = (url: string) => WebSocket;
 
+export type TeleopConnectionStatus =
+  | {state: 'connected'}
+  | {state: 'occupied'; message: string}
+  | {state: 'unreachable'}
+  | {state: 'disconnected'}
+  | {state: 'reconnecting'};
+
 const INITIAL_RECONNECT_DELAY_MS = 250;
 const MAX_RECONNECT_DELAY_MS = 2_000;
+const OCCUPIED_INITIAL_RECONNECT_DELAY_MS = 2_000;
+const OCCUPIED_MAX_RECONNECT_DELAY_MS = 5_000;
 const OPEN_READY_STATE = 1;
 const CONNECTING_READY_STATE = 0;
 
 export class TeleopSocket {
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private occupied = false;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private explicitClose = false;
   private generation = 0;
@@ -26,7 +37,7 @@ export class TeleopSocket {
     private readonly url: string,
     private readonly onRobotState: (state: RobotStateMessage) => void,
     private readonly socketFactory: SocketFactory = (socketUrl) => new WebSocket(socketUrl),
-    private readonly onConnectionChange: (connected: boolean) => void = () => {},
+    private readonly onConnectionChange: (status: TeleopConnectionStatus) => void = () => {},
     private readonly onArmFeedback: (message: ArmFeedbackMessage) => void = () => {},
   ) {}
 
@@ -59,7 +70,7 @@ export class TeleopSocket {
     }
     const socket = this.socket;
     this.socket = null;
-    if (socket !== null) this.onConnectionChange(false);
+    if (socket !== null) this.onConnectionChange({state: 'disconnected'});
     socket?.close();
   }
 
@@ -71,6 +82,8 @@ export class TeleopSocket {
       socket = this.socketFactory(this.url);
     } catch {
       this.socket = null;
+      this.onConnectionChange({state: 'unreachable'});
+      this.onConnectionChange({state: 'reconnecting'});
       this.scheduleReconnect(generation);
       return;
     }
@@ -78,8 +91,9 @@ export class TeleopSocket {
 
     socket.onopen = () => {
       if (!this.isCurrent(socket, generation)) return;
+      this.occupied = false;
       this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
-      this.onConnectionChange(true);
+      this.onConnectionChange({state: 'connected'});
       this.sendControl({
         v: PROTOCOL_VERSION,
         type: 'hello',
@@ -91,7 +105,13 @@ export class TeleopSocket {
       if (!this.isCurrent(socket, generation) || typeof event.data !== 'string') return;
       try {
         const message: unknown = JSON.parse(event.data);
-        if (isRobotStateMessage(message)) this.onRobotState(message);
+        if (isConnectionRejectedMessage(message)) {
+          if (!this.occupied) {
+            this.occupied = true;
+            this.reconnectDelayMs = OCCUPIED_INITIAL_RECONNECT_DELAY_MS;
+          }
+          this.onConnectionChange({state: 'occupied', message: message.message});
+        } else if (isRobotStateMessage(message)) this.onRobotState(message);
         else if (isArmFeedbackMessage(message)) this.onArmFeedback(message);
       } catch {
         // Malformed or unsupported messages are ignored at the transport boundary.
@@ -101,7 +121,10 @@ export class TeleopSocket {
     socket.onclose = () => {
       if (!this.isCurrent(socket, generation)) return;
       this.socket = null;
-      this.onConnectionChange(false);
+      if (!this.occupied) {
+        this.onConnectionChange({state: 'disconnected'});
+        this.onConnectionChange({state: 'reconnecting'});
+      }
       this.scheduleReconnect(generation);
     };
   }
@@ -113,7 +136,8 @@ export class TeleopSocket {
   private scheduleReconnect(generation: number): void {
     if (this.explicitClose || this.generation !== generation || this.reconnectTimer !== null) return;
     const delay = this.reconnectDelayMs;
-    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
+    const maxDelay = this.occupied ? OCCUPIED_MAX_RECONNECT_DELAY_MS : MAX_RECONNECT_DELAY_MS;
+    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, maxDelay);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.explicitClose || this.generation !== generation) return;

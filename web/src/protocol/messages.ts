@@ -77,6 +77,13 @@ export interface ArmRejectedMessage {
 
 export type ArmFeedbackMessage = ArmAckMessage | ArmRejectedMessage;
 
+export interface ConnectionRejectedMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: 'connection_rejected';
+  reason: 'controller_occupied';
+  message: string;
+}
+
 type UnknownRecord = Record<string, unknown>;
 
 const TELEOP_MODES: readonly TeleopMode[] = [
@@ -276,6 +283,17 @@ export function isArmFeedbackMessage(value: unknown): value is ArmFeedbackMessag
   if (value.type === 'arm_ack') return hasExactKeys(value, ['v', 'type', 'request_id']);
   return (
     hasExactKeys(value, ['v', 'type', 'request_id', 'message']) &&
+    typeof value.message === 'string'
+  );
+}
+
+export function isConnectionRejectedMessage(value: unknown): value is ConnectionRejectedMessage {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ['v', 'type', 'reason', 'message']) &&
+    value.v === PROTOCOL_VERSION &&
+    value.type === 'connection_rejected' &&
+    value.reason === 'controller_occupied' &&
     typeof value.message === 'string'
   );
 }
