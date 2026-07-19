@@ -23,7 +23,8 @@ with warnings.catch_warnings():
     from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.schemas.messages import TeleopMode
+from app.control.robot_control import FaultResetResult
+from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -40,6 +41,29 @@ def _receive_until(ws, message_type: str, limit: int = 8) -> dict[str, object]:
         if message.get("type") == message_type:
             return message
     raise AssertionError(f"未收到 {message_type}")
+
+
+def _disarmed_robot_state() -> RobotStateMessage:
+    return RobotStateMessage(
+        server_mono_ns=123,
+        mode=TeleopMode.DISARMED,
+        robot_state=BackendState.IDLE,
+        actual_tcp=Pose(p=(0.3, 0.0, 0.3), q=(0.0, 0.0, 0.0, 1.0)),
+        actual_q=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        gripper=0.0,
+        fault=None,
+    )
+
+
+def _receive_reset_sequence(ws, limit: int = 8) -> list[dict[str, object]]:
+    messages: list[dict[str, object]] = []
+    for _ in range(limit):
+        message = ws.receive_json()
+        if message.get("type") in {"robot_state", "fault_reset_result"}:
+            messages.append(message)
+        if message.get("type") == "fault_reset_result":
+            return messages
+    raise AssertionError("未收到 fault_reset_result")
 
 
 def test_hello_and_frame_ack() -> None:
@@ -118,6 +142,82 @@ def test_disarm_is_delegated_to_robot_control() -> None:
         assert app.state.control.disarm.await_count == 1
 
 
+def test_accepted_fault_reset_sends_authoritative_state_before_exact_result() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.control.reset_fault = AsyncMock(return_value=FaultResetResult(True))
+        app.state.control.state_message = AsyncMock(
+            return_value=_disarmed_robot_state()
+        )
+        with client.websocket_connect("/ws/v1/teleop") as ws:
+            ws.send_json({"v": 1, "type": "reset_fault", "request_id": "复位-1"})
+            ws.send_json({"invalid": True})
+            messages = _receive_reset_sequence(ws)
+
+    assert [message["type"] for message in messages] == [
+        "robot_state",
+        "fault_reset_result",
+    ]
+    assert messages[0]["mode"] == "DISARMED"
+    assert messages[0]["fault"] is None
+    assert messages[1] == {
+        "v": 1,
+        "type": "fault_reset_result",
+        "request_id": "复位-1",
+        "accepted": True,
+        "mode": "DISARMED",
+    }
+    app.state.control.reset_fault.assert_awaited_once_with()
+    app.state.control.state_message.assert_awaited_once_with()
+
+
+def test_rejected_fault_reset_sends_exact_reason_and_message() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.control.reset_fault = AsyncMock(
+            return_value=FaultResetResult(
+                False,
+                "backend_moving",
+                "仿真仍在运动，请稍后重试。",
+            )
+        )
+        with client.websocket_connect("/ws/v1/teleop") as ws:
+            ws.send_json({"v": 1, "type": "reset_fault", "request_id": "r2"})
+            ws.send_json({"invalid": True})
+            result = _receive_until(ws, "fault_reset_result")
+
+    assert result == {
+        "v": 1,
+        "type": "fault_reset_result",
+        "request_id": "r2",
+        "accepted": False,
+        "reason": "backend_moving",
+        "message": "仿真仍在运动，请稍后重试。",
+    }
+
+
+def test_fault_reset_exception_is_contained_without_raw_details() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.control.reset_fault = AsyncMock(
+            side_effect=RuntimeError("private backend failure")
+        )
+        with client.websocket_connect("/ws/v1/teleop") as ws:
+            ws.send_json({"v": 1, "type": "reset_fault", "request_id": "r3"})
+            ws.send_json({"invalid": True})
+            result = _receive_until(ws, "fault_reset_result")
+
+    assert result == {
+        "v": 1,
+        "type": "fault_reset_result",
+        "request_id": "r3",
+        "accepted": False,
+        "reason": "unrecoverable_fault",
+        "message": "该故障无法在线复位，请重启后端并重新检查。",
+    }
+    assert "private backend failure" not in str(result)
+
+
 def test_socket_close_stops_immediately_and_cleans_sender_task() -> None:
     app = create_app()
     with TestClient(app) as client:
@@ -149,6 +249,7 @@ def test_reconnect_does_not_automatically_arm() -> None:
         _valid_frame(session_id="intruder", seq=999),
         {"v": 1, "type": "arm_request", "request_id": "intruder-arm"},
         {"v": 1, "type": "disarm", "request_id": "intruder-disarm"},
+        {"v": 1, "type": "reset_fault", "request_id": "intruder-reset"},
     ],
 )
 def test_second_socket_is_rejected_without_affecting_owner(
@@ -159,9 +260,11 @@ def test_second_socket_is_rejected_without_affecting_owner(
         original_disconnect = app.state.control.on_disconnect
         original_arm = app.state.control.arm
         original_disarm = app.state.control.disarm
+        original_reset_fault = app.state.control.reset_fault
         app.state.control.on_disconnect = AsyncMock(wraps=original_disconnect)
         app.state.control.arm = AsyncMock(wraps=original_arm)
         app.state.control.disarm = AsyncMock(wraps=original_disarm)
+        app.state.control.reset_fault = AsyncMock(wraps=original_reset_fault)
 
         with client.websocket_connect("/ws/v1/teleop") as owner:
             owner.send_json({"v": 1, "type": "hello", "request_id": "owner"})
@@ -184,6 +287,7 @@ def test_second_socket_is_rejected_without_affecting_owner(
             assert app.state.control.on_disconnect.await_count == 0
             assert app.state.control.arm.await_count == 0
             assert app.state.control.disarm.await_count == 0
+            assert app.state.control.reset_fault.await_count == 0
             assert app.state.latest.snapshot() is None
             owner.send_json({"v": 1, "type": "ping", "request_id": "still-owner"})
             assert _receive_until(owner, "pong")["request_id"] == "still-owner"

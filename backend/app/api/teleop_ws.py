@@ -91,6 +91,44 @@ async def _receive_messages(
             await websocket.send_json(
                 {"v": 1, "type": "disarm_ack", "request_id": message.request_id}
             )
+        elif message.type == "reset_fault":
+            try:
+                result = await control.reset_fault()
+            except Exception:
+                await websocket.send_json(
+                    {
+                        "v": 1,
+                        "type": "fault_reset_result",
+                        "request_id": message.request_id,
+                        "accepted": False,
+                        "reason": "unrecoverable_fault",
+                        "message": "该故障无法在线复位，请重启后端并重新检查。",
+                    }
+                )
+            else:
+                if result.accepted:
+                    state = await control.state_message()
+                    await websocket.send_json(state.model_dump(mode="json"))
+                    await websocket.send_json(
+                        {
+                            "v": 1,
+                            "type": "fault_reset_result",
+                            "request_id": message.request_id,
+                            "accepted": True,
+                            "mode": "DISARMED",
+                        }
+                    )
+                else:
+                    await websocket.send_json(
+                        {
+                            "v": 1,
+                            "type": "fault_reset_result",
+                            "request_id": message.request_id,
+                            "accepted": False,
+                            "reason": result.reason,
+                            "message": result.message,
+                        }
+                    )
         elif message.type == "ping":
             await websocket.send_json(
                 {"v": 1, "type": "pong", "request_id": message.request_id}
