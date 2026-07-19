@@ -53,7 +53,7 @@ export interface RobotStateMessage {
   fault?: string | null;
 }
 
-export type ClientControlType = 'hello' | 'arm_request' | 'disarm' | 'ping';
+export type ClientControlType = 'hello' | 'arm_request' | 'disarm' | 'reset_fault' | 'ping';
 
 export interface ClientControlMessage {
   v: typeof PROTOCOL_VERSION;
@@ -84,6 +84,30 @@ export interface ConnectionRejectedMessage {
   message: string;
 }
 
+export type FaultResetRejectReason =
+  | 'no_fault'
+  | 'stop_incomplete'
+  | 'backend_moving'
+  | 'unrecoverable_fault'
+  | 'control_loop_unavailable';
+
+export type FaultResetResultMessage =
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'fault_reset_result';
+      request_id: string;
+      accepted: true;
+      mode: 'DISARMED';
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'fault_reset_result';
+      request_id: string;
+      accepted: false;
+      reason: FaultResetRejectReason;
+      message: string;
+    };
+
 type UnknownRecord = Record<string, unknown>;
 
 const TELEOP_MODES: readonly TeleopMode[] = [
@@ -108,7 +132,20 @@ const VISIBILITY_STATES: readonly VisibilityState[] = [
   'visible-blurred',
   'hidden',
 ];
-const CONTROL_TYPES: readonly ClientControlType[] = ['hello', 'arm_request', 'disarm', 'ping'];
+const CONTROL_TYPES: readonly ClientControlType[] = [
+  'hello',
+  'arm_request',
+  'disarm',
+  'reset_fault',
+  'ping',
+];
+const FAULT_RESET_REJECT_REASONS: readonly FaultResetRejectReason[] = [
+  'no_fault',
+  'stop_incomplete',
+  'backend_moving',
+  'unrecoverable_fault',
+  'control_loop_unavailable',
+];
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -294,6 +331,33 @@ export function isConnectionRejectedMessage(value: unknown): value is Connection
     value.v === PROTOCOL_VERSION &&
     value.type === 'connection_rejected' &&
     value.reason === 'controller_occupied' &&
+    typeof value.message === 'string'
+  );
+}
+
+export function isFaultResetResultMessage(value: unknown): value is FaultResetResultMessage {
+  if (
+    !isRecord(value) ||
+    value.v !== PROTOCOL_VERSION ||
+    value.type !== 'fault_reset_result' ||
+    typeof value.request_id !== 'string' ||
+    codePointLength(value.request_id) < 1 ||
+    codePointLength(value.request_id) > 64
+  ) {
+    return false;
+  }
+
+  if (value.accepted === true) {
+    return (
+      hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'mode']) &&
+      value.mode === 'DISARMED'
+    );
+  }
+
+  return (
+    value.accepted === false &&
+    hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'reason', 'message']) &&
+    isEnumValue(FAULT_RESET_REJECT_REASONS, value.reason) &&
     typeof value.message === 'string'
   );
 }

@@ -10,6 +10,13 @@ PROTOCOL_VERSION = 1
 Vec3 = tuple[float, float, float]
 Quat = tuple[float, float, float, float]
 JointVector = tuple[float, float, float, float, float, float]
+FaultResetRejectReason = Literal[
+    "no_fault",
+    "stop_incomplete",
+    "backend_moving",
+    "unrecoverable_fault",
+    "control_loop_unavailable",
+]
 
 
 class StrictMessage(BaseModel):
@@ -92,6 +99,6 @@ class RobotStateMessage(StrictMessage):
 
 class ClientControlMessage(StrictMessage):
     v: Literal[1]
-    type: Literal["hello", "arm_request", "disarm", "ping"]
+    type: Literal["hello", "arm_request", "disarm", "reset_fault", "ping"]
     request_id: str = Field(min_length=1, max_length=64)
     client_mono_ms: float | None = Field(default=None, ge=0)

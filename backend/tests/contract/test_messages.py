@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ValidationError
 
+from app.schemas import messages
 from app.schemas.messages import ClientControlMessage, RobotStateMessage, VRFrame
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -179,3 +180,82 @@ def test_protocol_schema_validates_shared_fixtures(definition: str, fixture_name
     Draft202012Validator.check_schema(root_schema)
     errors = list(Draft202012Validator(root_schema).iter_errors(load_fixture(fixture_name)))
     assert not errors, "\n".join(error.message for error in errors)
+
+
+def test_reset_fault_is_a_valid_v1_control_message() -> None:
+    message = ClientControlMessage.model_validate(
+        {"v": 1, "type": "reset_fault", "request_id": "reset-1"}
+    )
+    assert message.type == "reset_fault"
+
+    schema = load_protocol_schema()
+    validator = Draft202012Validator({**schema, "$ref": "#/$defs/ClientControlMessage"})
+    assert not list(validator.iter_errors(message.model_dump(mode="json")))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "v": 1,
+            "type": "fault_reset_result",
+            "request_id": "reset-1",
+            "accepted": True,
+            "mode": "DISARMED",
+        },
+        {
+            "v": 1,
+            "type": "fault_reset_result",
+            "request_id": "reset-2",
+            "accepted": False,
+            "reason": "unrecoverable_fault",
+            "message": "该故障无法在线复位，请重启后端并重新检查。",
+        },
+    ],
+)
+def test_fault_reset_result_schema_accepts_exact_discriminated_variants(payload: dict) -> None:
+    schema = load_protocol_schema()
+    validator = Draft202012Validator({**schema, "$ref": "#/$defs/FaultResetResultMessage"})
+    assert not list(validator.iter_errors(payload))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "v": 1,
+            "type": "fault_reset_result",
+            "request_id": "reset-1",
+            "accepted": True,
+            "mode": "DISARMED",
+            "extra": True,
+        },
+        {
+            "v": 1,
+            "type": "fault_reset_result",
+            "request_id": "reset-2",
+            "accepted": False,
+            "reason": "unrecoverable_fault",
+            "message": "该故障无法在线复位，请重启后端并重新检查。",
+            "extra": True,
+        },
+    ],
+)
+def test_fault_reset_result_schema_rejects_extra_fields(payload: dict) -> None:
+    schema = load_protocol_schema()
+    validator = Draft202012Validator({**schema, "$ref": "#/$defs/FaultResetResultMessage"})
+    assert list(validator.iter_errors(payload))
+
+
+def test_fault_reset_reject_reasons_match_python_and_json_schema() -> None:
+    expected = {
+        "no_fault",
+        "stop_incomplete",
+        "backend_moving",
+        "unrecoverable_fault",
+        "control_loop_unavailable",
+    }
+    schema = load_protocol_schema()
+    assert hasattr(messages, "FaultResetRejectReason")
+    assert set(get_args(messages.FaultResetRejectReason)) == expected
+    assert set(schema["$defs"]["FaultResetRejected"]["properties"]["reason"]["enum"]) == expected

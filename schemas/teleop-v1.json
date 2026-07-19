@@ -25,6 +25,7 @@
             "hello",
             "arm_request",
             "disarm",
+            "reset_fault",
             "ping"
           ],
           "title": "Type",
@@ -57,6 +58,94 @@
       ],
       "title": "ClientControlMessage",
       "type": "object"
+    },
+    "FaultResetAccepted": {
+      "additionalProperties": false,
+      "properties": {
+        "v": {
+          "const": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "fault_reset_result",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "maxLength": 64,
+          "type": "string"
+        },
+        "accepted": {
+          "const": true,
+          "type": "boolean"
+        },
+        "mode": {
+          "const": "DISARMED",
+          "type": "string"
+        }
+      },
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "accepted",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "FaultResetRejected": {
+      "additionalProperties": false,
+      "properties": {
+        "v": {
+          "const": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "fault_reset_result",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "maxLength": 64,
+          "type": "string"
+        },
+        "accepted": {
+          "const": false,
+          "type": "boolean"
+        },
+        "reason": {
+          "enum": [
+            "no_fault",
+            "stop_incomplete",
+            "backend_moving",
+            "unrecoverable_fault",
+            "control_loop_unavailable"
+          ],
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "accepted",
+        "reason",
+        "message"
+      ],
+      "type": "object"
+    },
+    "FaultResetResultMessage": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/FaultResetAccepted"
+        },
+        {
+          "$ref": "#/$defs/FaultResetRejected"
+        }
+      ]
     },
     "ControllerState": {
       "additionalProperties": false,

@@ -4,6 +4,7 @@ import vrFixture from '../../schemas/fixtures/vr-frame-valid.json';
 import {
   isClientControlMessage,
   isConnectionRejectedMessage,
+  isFaultResetResultMessage,
   isRobotStateMessage,
   isVRFrame,
 } from '../src/protocol/messages';
@@ -27,12 +28,50 @@ describe('protocol guards', () => {
   });
 
   it('accepts every valid control type and optional nullable fields', () => {
-    for (const type of ['hello', 'arm_request', 'disarm', 'ping']) {
+    for (const type of ['hello', 'arm_request', 'disarm', 'reset_fault', 'ping']) {
       expect(isClientControlMessage({v: 1, type, request_id: 'request'})).toBe(true);
       expect(
         isClientControlMessage({v: 1, type, request_id: 'request', client_mono_ms: null}),
       ).toBe(true);
     }
+  });
+
+  it('accepts only exact discriminated fault reset results', () => {
+    const accepted = {
+      v: 1,
+      type: 'fault_reset_result',
+      request_id: 'reset-1',
+      accepted: true,
+      mode: 'DISARMED',
+    };
+    const rejected = {
+      v: 1,
+      type: 'fault_reset_result',
+      request_id: 'reset-2',
+      accepted: false,
+      reason: 'unrecoverable_fault',
+      message: '该故障无法在线复位，请重启后端并重新检查。',
+    };
+
+    expect(isFaultResetResultMessage(accepted)).toBe(true);
+    expect(isFaultResetResultMessage(rejected)).toBe(true);
+    expect(isFaultResetResultMessage({...accepted, mode: 'READY'})).toBe(false);
+    expect(isFaultResetResultMessage({...accepted, accepted: false})).toBe(false);
+    expect(isFaultResetResultMessage({...rejected, accepted: true})).toBe(false);
+    expect(isFaultResetResultMessage({...rejected, reason: 'unknown'})).toBe(false);
+    expect(isFaultResetResultMessage({...rejected, extra: true})).toBe(false);
+  });
+
+  it('enforces request identifier code-point limits on fault reset results', () => {
+    const accepted = {
+      v: 1,
+      type: 'fault_reset_result',
+      accepted: true,
+      mode: 'DISARMED',
+    };
+    expect(isFaultResetResultMessage({...accepted, request_id: '😀'.repeat(64)})).toBe(true);
+    expect(isFaultResetResultMessage({...accepted, request_id: ''})).toBe(false);
+    expect(isFaultResetResultMessage({...accepted, request_id: '😀'.repeat(65)})).toBe(false);
   });
 
   it('rejects unknown versions and message types', () => {
