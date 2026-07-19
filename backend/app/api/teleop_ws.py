@@ -14,10 +14,25 @@ from app.schemas.messages import ClientControlMessage, TeleopMode, VRFrame
 router = APIRouter()
 
 
-async def state_sender(websocket: WebSocket, control: RobotControl) -> None:
+async def _send_json(
+    websocket: WebSocket,
+    payload: dict[str, Any],
+    send_lock: asyncio.Lock,
+) -> None:
+    async with send_lock:
+        await websocket.send_json(payload)
+
+
+async def state_sender(
+    websocket: WebSocket,
+    control: RobotControl,
+    send_lock: asyncio.Lock | None = None,
+) -> None:
+    send_lock = send_lock or asyncio.Lock()
     while True:
-        state = await control.state_message()
-        await websocket.send_json(state.model_dump(mode="json"))
+        async with send_lock:
+            state = await control.state_message()
+            await websocket.send_json(state.model_dump(mode="json"))
         await asyncio.sleep(0.05)
 
 
@@ -25,15 +40,19 @@ async def _delayed_state_sender(
     websocket: WebSocket,
     control: RobotControl,
     start_sender: asyncio.Event,
+    send_lock: asyncio.Lock,
 ) -> None:
     await start_sender.wait()
-    await state_sender(websocket, control)
+    await state_sender(websocket, control, send_lock)
 
 
-async def _protocol_error(websocket: WebSocket) -> None:
+async def _protocol_error(websocket: WebSocket, send_lock: asyncio.Lock) -> None:
     message = "消息格式无效，请检查协议版本和字段。"
-    await websocket.send_json({"v": 1, "type": "protocol_error", "message": message})
-    await websocket.close(code=1008, reason=message)
+    async with send_lock:
+        await websocket.send_json(
+            {"v": 1, "type": "protocol_error", "message": message}
+        )
+        await websocket.close(code=1008, reason=message)
 
 
 def _parse_message(payload: Any) -> VRFrame | ClientControlMessage:
@@ -48,6 +67,7 @@ async def _receive_messages(
     websocket: WebSocket,
     control: RobotControl,
     start_sender: asyncio.Event,
+    send_lock: asyncio.Lock,
 ) -> None:
     app = websocket.app
     while True:
@@ -57,7 +77,7 @@ async def _receive_messages(
         except WebSocketDisconnect:
             return
         except (ValidationError, ValueError, TypeError):
-            await _protocol_error(websocket)
+            await _protocol_error(websocket, send_lock)
             return
 
         if isinstance(message, VRFrame):
@@ -66,36 +86,45 @@ async def _receive_messages(
             continue
 
         if message.type == "hello":
-            await websocket.send_json(
-                {"v": 1, "type": "hello_ack", "request_id": message.request_id}
+            await _send_json(
+                websocket,
+                {"v": 1, "type": "hello_ack", "request_id": message.request_id},
+                send_lock,
             )
             start_sender.set()
         elif message.type == "arm_request":
             try:
                 await control.arm()
             except RuntimeError:
-                await websocket.send_json(
+                await _send_json(
+                    websocket,
                     {
                         "v": 1,
                         "type": "arm_rejected",
                         "request_id": message.request_id,
                         "message": "请先松开手柄抓握键，再请求使能。",
-                    }
+                    },
+                    send_lock,
                 )
             else:
-                await websocket.send_json(
-                    {"v": 1, "type": "arm_ack", "request_id": message.request_id}
+                await _send_json(
+                    websocket,
+                    {"v": 1, "type": "arm_ack", "request_id": message.request_id},
+                    send_lock,
                 )
         elif message.type == "disarm":
             await control.disarm()
-            await websocket.send_json(
-                {"v": 1, "type": "disarm_ack", "request_id": message.request_id}
+            await _send_json(
+                websocket,
+                {"v": 1, "type": "disarm_ack", "request_id": message.request_id},
+                send_lock,
             )
         elif message.type == "reset_fault":
             try:
                 result = await control.reset_fault()
             except Exception:
-                await websocket.send_json(
+                await _send_json(
+                    websocket,
                     {
                         "v": 1,
                         "type": "fault_reset_result",
@@ -103,23 +132,26 @@ async def _receive_messages(
                         "accepted": False,
                         "reason": "unrecoverable_fault",
                         "message": "该故障无法在线复位，请重启后端并重新检查。",
-                    }
+                    },
+                    send_lock,
                 )
             else:
                 if result.accepted:
-                    state = await control.state_message()
-                    await websocket.send_json(state.model_dump(mode="json"))
-                    await websocket.send_json(
-                        {
-                            "v": 1,
-                            "type": "fault_reset_result",
-                            "request_id": message.request_id,
-                            "accepted": True,
-                            "mode": "DISARMED",
-                        }
-                    )
+                    async with send_lock:
+                        state = await control.state_message()
+                        await websocket.send_json(state.model_dump(mode="json"))
+                        await websocket.send_json(
+                            {
+                                "v": 1,
+                                "type": "fault_reset_result",
+                                "request_id": message.request_id,
+                                "accepted": True,
+                                "mode": "DISARMED",
+                            }
+                        )
                 else:
-                    await websocket.send_json(
+                    await _send_json(
+                        websocket,
                         {
                             "v": 1,
                             "type": "fault_reset_result",
@@ -127,11 +159,14 @@ async def _receive_messages(
                             "accepted": False,
                             "reason": result.reason,
                             "message": result.message,
-                        }
+                        },
+                        send_lock,
                     )
         elif message.type == "ping":
-            await websocket.send_json(
-                {"v": 1, "type": "pong", "request_id": message.request_id}
+            await _send_json(
+                websocket,
+                {"v": 1, "type": "pong", "request_id": message.request_id},
+                send_lock,
             )
 
 
@@ -141,12 +176,13 @@ async def _run_coupled_session(
     sender_tasks: set[asyncio.Task[None]],
 ) -> None:
     start_sender = asyncio.Event()
+    send_lock = asyncio.Lock()
     receiver = asyncio.create_task(
-        _receive_messages(websocket, control, start_sender),
+        _receive_messages(websocket, control, start_sender, send_lock),
         name="teleop-receiver",
     )
     sender = asyncio.create_task(
-        _delayed_state_sender(websocket, control, start_sender),
+        _delayed_state_sender(websocket, control, start_sender, send_lock),
         name="teleop-state-20hz",
     )
     sender_tasks.add(sender)

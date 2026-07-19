@@ -55,6 +55,12 @@ def _disarmed_robot_state() -> RobotStateMessage:
     )
 
 
+def _fault_robot_state() -> RobotStateMessage:
+    return _disarmed_robot_state().model_copy(
+        update={"mode": TeleopMode.FAULT, "fault": "workspace_violation"}
+    )
+
+
 def _receive_reset_sequence(ws, limit: int = 8) -> list[dict[str, object]]:
     messages: list[dict[str, object]] = []
     for _ in range(limit):
@@ -216,6 +222,86 @@ def test_fault_reset_exception_is_contained_without_raw_details() -> None:
         "message": "该故障无法在线复位，请重启后端并重新检查。",
     }
     assert "private backend failure" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_reset_serializes_periodic_state_and_authoritative_result() -> None:
+    from app.api import teleop_ws
+
+    old_state_started = asyncio.Event()
+    reset_done = asyncio.Event()
+    post_result_state_sent = asyncio.Event()
+    sent: list[dict[str, object]] = []
+
+    class RacingControl:
+        mode = TeleopMode.READY
+
+        def __init__(self) -> None:
+            self.state_calls = 0
+
+        async def state_message(self) -> RobotStateMessage:
+            self.state_calls += 1
+            if self.state_calls == 1:
+                old_state_started.set()
+                await reset_done.wait()
+                return _fault_robot_state()
+            return _disarmed_robot_state()
+
+        async def reset_fault(self) -> FaultResetResult:
+            await old_state_started.wait()
+            reset_done.set()
+            return FaultResetResult(True)
+
+    class RacingWebSocket:
+        def __init__(self, control: RacingControl) -> None:
+            self.app = SimpleNamespace(state=SimpleNamespace(latest=object()))
+            self.control = control
+            self.incoming = [
+                {"v": 1, "type": "hello", "request_id": "hello-race"},
+                {"v": 1, "type": "reset_fault", "request_id": "reset-race"},
+            ]
+            self.result_sent = False
+
+        async def receive_json(self) -> dict[str, object]:
+            if self.incoming:
+                return self.incoming.pop(0)
+            await asyncio.Future()
+            raise AssertionError("unreachable")
+
+        async def send_json(self, payload: dict[str, object]) -> None:
+            sent.append(payload)
+            if payload.get("type") == "fault_reset_result":
+                self.result_sent = True
+            elif payload.get("type") == "robot_state" and self.result_sent:
+                post_result_state_sent.set()
+
+    control = RacingControl()
+    websocket = RacingWebSocket(control)
+    session = asyncio.create_task(
+        teleop_ws._run_coupled_session(websocket, control, set())
+    )
+    try:
+        await asyncio.wait_for(post_result_state_sent.wait(), timeout=0.3)
+    finally:
+        session.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await session
+
+    result_index = next(
+        index
+        for index, message in enumerate(sent)
+        if message.get("type") == "fault_reset_result"
+    )
+    states_before_result = [
+        message for message in sent[:result_index] if message.get("type") == "robot_state"
+    ]
+    states_after_result = [
+        message for message in sent[result_index + 1 :] if message.get("type") == "robot_state"
+    ]
+
+    assert states_before_result[-1]["mode"] == "DISARMED"
+    assert states_before_result[-1]["fault"] is None
+    assert states_after_result[0]["fault"] is None
 
 
 def test_socket_close_stops_immediately_and_cleans_sender_task() -> None:
