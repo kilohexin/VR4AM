@@ -218,7 +218,7 @@ async def test_reset_success_requires_a_new_grip_release_frame_before_arm() -> N
     control, latest, _backend, clock = make_control()
     await enter_published_recoverable_fault(control)
     latest.publish(
-        frame(7, False, session_id="fault-session"),
+        frame(8, False, session_id="fault-session"),
         clock.now_ns(),
     )
 
@@ -229,7 +229,7 @@ async def test_reset_success_requires_a_new_grip_release_frame_before_arm() -> N
         await control.arm()
 
     latest.publish(
-        frame(8, False, session_id="fault-session"),
+        frame(9, False, session_id="fault-session"),
         clock.now_ns(),
     )
     await control.tick()
@@ -237,6 +237,34 @@ async def test_reset_success_requires_a_new_grip_release_frame_before_arm() -> N
     assert control.mode is TeleopMode.READY
     await control.arm()
     assert control.mode is TeleopMode.ARMED
+
+
+@pytest.mark.asyncio
+async def test_reset_cuts_off_queued_held_frame_until_later_release() -> None:
+    control, latest, _backend, clock = make_control()
+    await enter_published_recoverable_fault(control)
+    latest.publish(
+        frame(8, True, session_id="fault-session"),
+        clock.now_ns(),
+    )
+
+    assert await control.reset_fault() == robot_control_module.FaultResetResult(True)
+    await control.tick()
+    assert control.mode is TeleopMode.DISARMED
+
+    latest.publish(
+        frame(9, True, session_id="fault-session"),
+        clock.now_ns(),
+    )
+    await control.tick()
+    assert control.mode is TeleopMode.DISARMED
+
+    latest.publish(
+        frame(10, False, session_id="fault-session"),
+        clock.now_ns(),
+    )
+    await control.tick()
+    assert control.mode is TeleopMode.READY
 
 
 def test_fault_reset_recoverable_whitelist_is_exact() -> None:
@@ -748,6 +776,63 @@ async def test_new_session_fails_closed_and_requires_release_rearm_and_fresh_pre
     await control.tick()
 
     assert [command_id for command_id, _target in backend.targets] == [3, 6]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_new_session_does_not_repeat_completed_disconnect_stop() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False, session_id="old"), clock.now_ns())
+    await control.tick()
+
+    await control.on_disconnect()
+    await control.connect()
+    latest.publish(frame(1, False, session_id="new"), clock.now_ns())
+    await control.tick()
+
+    assert backend.stops.count(StopReason.DISCONNECT) == 1
+
+
+@pytest.mark.asyncio
+async def test_same_session_reconnect_consumes_disconnect_stop_credit() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False, session_id="old"), clock.now_ns())
+    await control.tick()
+    await control.on_disconnect()
+    await control.connect()
+
+    latest.publish(frame(2, False, session_id="old"), clock.now_ns())
+    await control.tick()
+    assert control._disconnect_stop_pending_frame is False
+
+    latest.publish(frame(1, False, session_id="replacement"), clock.now_ns())
+    await control.tick()
+
+    assert backend.stops.count(StopReason.DISCONNECT) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_disconnect_stop_does_not_create_stop_credit() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False, session_id="old"), clock.now_ns())
+    await control.tick()
+    original_stop = backend.stop
+
+    async def fail_disconnect(reason: StopReason) -> None:
+        raise RuntimeError(f"failed_{reason}")
+
+    backend.stop = fail_disconnect  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="failed_disconnect"):
+        await control.on_disconnect()
+    assert control._disconnect_stop_pending_frame is False
+
+    backend.stop = original_stop  # type: ignore[method-assign]
+    latest.publish(frame(1, False, session_id="new"), clock.now_ns())
+    await control.tick()
+
+    assert backend.stops.count(StopReason.DISCONNECT) == 1
 
 
 @pytest.mark.asyncio

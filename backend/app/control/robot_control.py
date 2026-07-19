@@ -97,6 +97,7 @@ class RobotControl:
         self._shutdown_started = False
         self._shutdown_stopped = False
         self._control_generation = 0
+        self._disconnect_stop_pending_frame = False
 
     @property
     def mode(self) -> TeleopMode:
@@ -181,6 +182,12 @@ class RobotControl:
         )
         if rejection is not None:
             return rejection
+        release_cutoff = self.latest.snapshot()
+        if release_cutoff is not None:
+            self._last_frame_id = (
+                release_cutoff.frame.session_id,
+                release_cutoff.frame.seq,
+            )
         self.mapper.clear()
         self.filter.clear()
         self.limiter.clear()
@@ -190,8 +197,10 @@ class RobotControl:
         return FaultResetResult(True)
 
     async def on_disconnect(self) -> None:
+        self._disconnect_stop_pending_frame = False
         self._advance_control_generation()
         await self.backend.stop(StopReason.DISCONNECT)
+        self._disconnect_stop_pending_frame = True
         self.mapper.clear()
         if self._fault is None:
             self._clear_stop_episode()
@@ -252,6 +261,8 @@ class RobotControl:
         received = self.latest.snapshot()
         if received is None:
             return
+        disconnect_stop_completed = self._disconnect_stop_pending_frame
+        self._disconnect_stop_pending_frame = False
         now_ns = self.clock.now_ns()
         age_ms = max(0.0, (now_ns - received.received_ns) / 1_000_000)
         self._last_sample_age_ms = age_ms
@@ -276,7 +287,8 @@ class RobotControl:
                 and received.frame.session_id != self._last_frame_id[0]
             ):
                 self._advance_control_generation()
-                await self.backend.stop(StopReason.DISCONNECT)
+                if not disconnect_stop_completed:
+                    await self.backend.stop(StopReason.DISCONNECT)
                 self.mapper.clear()
                 self.last_target = None
                 if self.machine.mode not in {TeleopMode.FAULT, TeleopMode.STALE}:
