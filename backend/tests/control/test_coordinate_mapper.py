@@ -2,41 +2,30 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from app.control.coordinate_mapper import CoordinateMapper, DEFAULT_R_BX
+from app.control.coordinate_mapper import CoordinateMapper
 from app.schemas.messages import Pose
 
-IDENTITY = (0.0, 0.0, 0.0, 1.0)
 
+def test_mapper_uses_scene_translation_and_camera_tool_roll() -> None:
+    mapper = CoordinateMapper(
+        translation_scale=0.5,
+        rotation_scale=1.0,
+        rotation_dead_zone_deg=0.0,
+    )
+    hand_anchor = Pose(p=(0.0, 1.2, -0.3), q=(0.0, 0.0, 0.0, 1.0))
+    tcp_rotation = Rotation.from_euler("x", 30.0, degrees=True)
+    tcp_anchor = Pose(p=(0.3, 0.4, -0.2), q=tuple(tcp_rotation.as_quat()))
+    mapper.capture(
+        hand_anchor,
+        tcp_anchor,
+        tuple(Rotation.from_euler("y", 80.0, degrees=True).as_quat()),
+    )
+    controller_roll = Rotation.from_rotvec((0.0, 0.0, -0.2))
 
-def pose(p=(0.0, 0.0, 0.0), q=IDENTITY) -> Pose:
-    return Pose(p=p, q=q)
+    target = mapper.target(
+        Pose(p=(0.02, 1.16, -0.36), q=tuple(controller_roll.as_quat()))
+    )
 
-
-def test_default_mapping_is_proper_rotation() -> None:
-    assert np.allclose(DEFAULT_R_BX.T @ DEFAULT_R_BX, np.eye(3))
-    assert np.linalg.det(DEFAULT_R_BX) == pytest.approx(1.0)
-
-
-@pytest.mark.parametrize(
-    ("hand_delta", "robot_delta"),
-    [((0, 0, -0.1), (0.08, 0, 0)), ((0.1, 0, 0), (0, -0.08, 0)), ((0, 0.1, 0), (0, 0, 0.08))],
-)
-def test_default_axes_and_translation_scale(hand_delta, robot_delta) -> None:
-    mapper = CoordinateMapper(translation_scale=0.8)
-    mapper.capture(pose(), pose((0.3, 0.0, 0.2)))
-    assert mapper.target(pose(hand_delta)).p == pytest.approx(tuple(np.add((0.3, 0.0, 0.2), robot_delta)))
-
-
-def test_capture_makes_current_hand_equal_current_tcp() -> None:
-    hand = pose((1, 2, 3), Rotation.from_euler("x", 20, degrees=True).as_quat())
-    tcp = pose((0.2, 0.1, 0.4), Rotation.from_euler("z", 30, degrees=True).as_quat())
-    mapper = CoordinateMapper()
-    mapper.capture(hand, tcp)
-    target = mapper.target(hand)
-    assert target.p == pytest.approx(tcp.p)
-    assert abs(np.dot(target.q, tcp.q)) == pytest.approx(1.0)
-
-
-def test_target_requires_anchor() -> None:
-    with pytest.raises(RuntimeError, match="anchor_not_captured"):
-        CoordinateMapper().target(pose())
+    assert target.p == pytest.approx((0.31, 0.38, -0.23))
+    local_tcp_delta = tcp_rotation.inv() * Rotation.from_quat(target.q)
+    np.testing.assert_allclose(local_tcp_delta.as_rotvec(), (0.0, -0.2, 0.0), atol=1e-8)
