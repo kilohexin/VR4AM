@@ -12,7 +12,7 @@ import {RobotStateBuffer} from '../robot/robotState';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
 import type {XRPresentationSample} from '../xr/session';
 import {ControllerHints} from './controllerHints';
-import {TableHeightController} from './tableHeightController';
+import {WorkspacePlacementController} from './workspacePlacementController';
 import {VrSafetyPanel} from './vrSafetyPanel';
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
@@ -209,7 +209,7 @@ export class SimulationScene {
   private readonly controllerQuaternion = new THREE.Quaternion(0, 0, 0, 1);
   private readonly vrSafetyPanel: VrSafetyPanel;
   private readonly controllerHints: ControllerHints;
-  private readonly tableHeight = new TableHeightController(window.localStorage);
+  private readonly workspacePlacement = new WorkspacePlacementController(window.localStorage);
   private armSafetyState: ArmSafetySnapshot = {
     phase: 'disconnected',
     connected: false,
@@ -302,7 +302,7 @@ export class SimulationScene {
     this.vrSafetyPanel.setVisible(false);
     this.controllerHints.setVisible(false);
     await this.renderer.xr.setSession(session);
-    this.tableHeight.beginSession();
+    this.workspacePlacement.beginSession();
     this.renderer.setAnimationLoop(loop);
     this.controllerHints.setVisible(true);
     this.vrSafetyPanel.setVisible(true);
@@ -313,8 +313,8 @@ export class SimulationScene {
     try {
       await this.renderer.xr.setSession(null);
     } finally {
-      this.tableHeight.endSession();
-      this.robotVisualRoot.position.y = 0;
+      this.workspacePlacement.endSession();
+      this.robotVisualRoot.position.set(0, 0, 0);
       this.controllerHints.setVisible(false);
       this.vrSafetyPanel.setVisible(false);
       this.sessionId = createSessionId();
@@ -328,16 +328,23 @@ export class SimulationScene {
 
   updateXRPresentation(sample: XRPresentationSample, nowMs: number): void {
     this.controllerHints.update(sample.left, sample.right);
-    const adjustable = (this.armSafetyState.phase === 'locked' || this.armSafetyState.phase === 'stopped')
+    const adjustable = (
+      this.armSafetyState.phase === 'locked'
+      || this.armSafetyState.phase === 'stopped'
+      || this.armSafetyState.phase === 'fault'
+    )
       && !this.armSafetyState.pending
+      && !this.armSafetyState.faultResetPending
       && !sample.right.grip;
-    this.robotVisualRoot.position.y = this.tableHeight.update({
+    this.robotVisualRoot.position.fromArray(this.workspacePlacement.update({
       headY: sample.headY,
+      axisX: sample.left.thumbstickX,
       axisY: sample.left.thumbstickY,
+      heightModifier: sample.left.grip,
       resetPressed: sample.left.thumbstickPressed,
       enabled: adjustable && sample.left.trackingValid,
       nowMs,
-    });
+    }));
   }
 
   renderXR(nowMs: number): void {
