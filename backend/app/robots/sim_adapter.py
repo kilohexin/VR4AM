@@ -9,7 +9,8 @@ import numpy as np
 
 from app.robots.base import BackendCommandError, HomeOptions, HomePhase, StopReason
 from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
-from app.sim.ik import IKError, solve_ik
+from app.sim.cartesian_servo import cartesian_servo_step
+from app.sim.ik import IKError
 from app.sim.kinematics import forward_pose
 from app.sim.lm3_model import LM3Model
 from app.sim.virtual_robot import VirtualRobot
@@ -21,7 +22,6 @@ class SimRobotAdapter:
     def __init__(self) -> None:
         self.model = LM3Model()
         self.robot = VirtualRobot(self.model)
-        self._ik_seed_q = np.asarray(self.model.home_q, dtype=float)
         self.gripper = 0.0
         self.command_id: int | None = None
         self.mode = TeleopMode.READY
@@ -56,11 +56,15 @@ class SimRobotAdapter:
     async def command_tcp(self, target: Pose, command_id: int) -> None:
         async with self._lock:
             try:
-                result = solve_ik(target, self._ik_seed_q, self.model)
+                result = cartesian_servo_step(
+                    target,
+                    self.robot.q,
+                    self.model,
+                    dt=self.STEP_SECONDS,
+                )
             except IKError as exc:
                 raise BackendCommandError(str(exc)) from exc
             self.robot.set_target_q(result.q)
-            self._ik_seed_q = np.asarray(result.q, dtype=float)
             self.command_id = command_id
 
     async def set_gripper(self, value: float) -> None:
@@ -106,7 +110,6 @@ class SimRobotAdapter:
                     stable_since = now
                     on_phase("stabilizing")
                 elif now - stable_since >= options.stable_seconds:
-                    self._ik_seed_q = np.asarray(self.model.home_q, dtype=float)
                     return
             elif stable_since is not None:
                 stable_since = None
