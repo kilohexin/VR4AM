@@ -26,6 +26,7 @@
             "arm_request",
             "disarm",
             "reset_fault",
+            "home_request",
             "ping"
           ],
           "title": "Type",
@@ -144,6 +145,94 @@
         },
         {
           "$ref": "#/$defs/FaultResetRejected"
+        }
+      ]
+    },
+    "HomeAccepted": {
+      "additionalProperties": false,
+      "properties": {
+        "v": {
+          "const": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "home_result",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "maxLength": 64,
+          "type": "string"
+        },
+        "accepted": {
+          "const": true,
+          "type": "boolean"
+        },
+        "mode": {
+          "const": "DISARMED",
+          "type": "string"
+        }
+      },
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "accepted",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "HomeRejected": {
+      "additionalProperties": false,
+      "properties": {
+        "v": {
+          "const": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "home_result",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "maxLength": 64,
+          "type": "string"
+        },
+        "accepted": {
+          "const": false,
+          "type": "boolean"
+        },
+        "reason": {
+          "enum": [
+            "fault_present",
+            "grip_pressed",
+            "not_stopped",
+            "control_loop_unavailable",
+            "home_failed"
+          ],
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "accepted",
+        "reason",
+        "message"
+      ],
+      "type": "object"
+    },
+    "HomeResultMessage": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/HomeAccepted"
+        },
+        {
+          "$ref": "#/$defs/HomeRejected"
         }
       ]
     },

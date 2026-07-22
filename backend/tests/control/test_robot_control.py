@@ -168,6 +168,262 @@ async def test_manual_home_requires_released_grip_and_ends_disarmed() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("grip", "tracking_valid", "visibility", "age_ms"),
+    [
+        (False, True, "visible", 100.0),
+        (False, False, "visible", 0.0),
+        (False, True, "hidden", 0.0),
+        (True, True, "visible", 0.0),
+    ],
+)
+async def test_manual_home_rejects_invalid_release_sample_without_backend_calls(
+    grip: bool,
+    tracking_valid: bool,
+    visibility: str,
+    age_ms: float,
+) -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(
+        frame(
+            1,
+            grip,
+            tracking_valid=tracking_valid,
+            visibility=visibility,
+        ),
+        clock.now_ns(),
+    )
+    clock.advance_ms(age_ms)
+
+    result = await control.home()
+
+    assert result.reason == "grip_pressed"
+    assert backend.stops == []
+    assert backend.home_phases == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_tick_does_not_stale_stop_delayed_home() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    home_started = asyncio.Event()
+    allow_home = asyncio.Event()
+
+    async def delayed_home(options, on_phase) -> None:
+        on_phase("homing")
+        home_started.set()
+        await allow_home.wait()
+        on_phase("stabilizing")
+
+    backend.home = delayed_home  # type: ignore[method-assign]
+    home = asyncio.create_task(control.home())
+    try:
+        await home_started.wait()
+        clock.advance_ms(150)
+
+        await control.tick()
+
+        assert StopReason.STALE not in backend.stops
+        assert control.mode is TeleopMode.READY
+    finally:
+        allow_home.set()
+
+    assert await home == robot_control_module.HomeResult(True)
+    assert control.mode is TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_manual_home_generation_aba_cannot_clear_newer_motion_state() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    actual_tcp = await backend.get_state()
+    hand = Pose(p=(0.0, 1.2, -0.3), q=(0, 0, 0, 1))
+    control.mapper.capture(hand, actual_tcp.actual_tcp)
+    control.last_target = actual_tcp.actual_tcp
+    home_started = asyncio.Event()
+    allow_home = asyncio.Event()
+
+    async def delayed_home(options, on_phase) -> None:
+        on_phase("homing")
+        home_started.set()
+        await allow_home.wait()
+
+    backend.home = delayed_home  # type: ignore[method-assign]
+    home = asyncio.create_task(control.home())
+    await home_started.wait()
+    control._advance_control_generation()
+    control._advance_control_generation()
+    allow_home.set()
+
+    result = await home
+
+    assert result.reason == "not_stopped"
+    assert control.mapper._hand_anchor is not None
+    assert control.last_target == actual_tcp.actual_tcp
+    assert backend.stops == [StopReason.HOME, StopReason.HOME]
+
+
+@pytest.mark.asyncio
+async def test_manual_home_and_fault_reset_share_one_recovery_operation() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    first_home_started = asyncio.Event()
+    allow_first_home = asyncio.Event()
+    home_calls = 0
+    active_homes = 0
+    max_active_homes = 0
+
+    async def serialized_home(options, on_phase) -> None:
+        nonlocal home_calls, active_homes, max_active_homes
+        home_calls += 1
+        active_homes += 1
+        max_active_homes = max(max_active_homes, active_homes)
+        try:
+            on_phase("homing")
+            if home_calls == 1:
+                first_home_started.set()
+                await allow_first_home.wait()
+            on_phase("stabilizing")
+        finally:
+            active_homes -= 1
+
+    backend.home = serialized_home  # type: ignore[method-assign]
+    manual_home = asyncio.create_task(control.home())
+    await first_home_started.wait()
+    await control._enter_fault("ik_unreachable")
+    await control.state_message()
+    reset = asyncio.create_task(control.reset_fault())
+    await asyncio.sleep(0)
+
+    assert home_calls == 1
+    assert not reset.done()
+
+    allow_first_home.set()
+    manual_result = await manual_home
+    reset_result = await reset
+
+    assert manual_result.reason == "fault_present"
+    assert reset_result == robot_control_module.FaultResetResult(True)
+    assert max_active_homes == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_home_exception_stops_started_home_motion() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+
+    async def failing_home(options, on_phase) -> None:
+        on_phase("homing")
+        raise RuntimeError("private home failure")
+
+    backend.home = failing_home  # type: ignore[method-assign]
+
+    result = await control.home()
+
+    assert result == robot_control_module.HomeResult(
+        False,
+        "home_failed",
+        "仿真无法返回初始姿态，请稍后重试。",
+    )
+    assert backend.stops == [StopReason.HOME, StopReason.HOME]
+    assert control.mode is TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_manual_home_cancellation_stops_started_home_motion() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    home_started = asyncio.Event()
+
+    async def cancellable_home(options, on_phase) -> None:
+        on_phase("homing")
+        home_started.set()
+        await asyncio.Future()
+
+    backend.home = cancellable_home  # type: ignore[method-assign]
+    home = asyncio.create_task(control.home())
+    await home_started.wait()
+    home.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await home
+
+    assert backend.stops == [StopReason.HOME, StopReason.HOME]
+    assert control.mode is TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_fault_reset_home_exception_stops_started_home_motion() -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+
+    async def failing_home(options, on_phase) -> None:
+        on_phase("homing")
+        raise RuntimeError("private reset home failure")
+
+    backend.home = failing_home  # type: ignore[method-assign]
+
+    result = await control.reset_fault()
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "stop_incomplete",
+        "仿真无法返回初始姿态，故障保持锁定。",
+    )
+    assert backend.stops == [StopReason.FAULT, StopReason.FAULT, StopReason.HOME]
+    assert control._fault == "ik_unreachable"
+    assert control.mode is TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_manual_home_bounds_state_read_and_rejects_idle_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    loop_times = iter((0.0, 0.25, 1.0))
+    timeouts: list[float] = []
+
+    class FakeLoop:
+        def time(self) -> float:
+            return next(loop_times)
+
+    async def recording_wait_for(awaitable, timeout: float):
+        timeouts.append(timeout)
+        return await awaitable
+
+    monkeypatch.setattr(
+        robot_control_module.asyncio,
+        "get_running_loop",
+        lambda: FakeLoop(),
+    )
+    monkeypatch.setattr(robot_control_module.asyncio, "wait_for", recording_wait_for)
+
+    result = await control.home()
+
+    assert result == robot_control_module.HomeResult(
+        False,
+        "home_failed",
+        "等待仿真停止超时。",
+    )
+    assert timeouts == [pytest.approx(0.75)]
+    assert backend.home_phases == []
+
+
+@pytest.mark.asyncio
 async def test_reset_recoverable_fault_atomically_clears_motion_state() -> None:
     control, _latest, backend, _clock = make_control()
     last_frame_id = await enter_published_recoverable_fault(control)

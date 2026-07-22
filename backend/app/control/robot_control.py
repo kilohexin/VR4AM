@@ -33,6 +33,7 @@ CONTROL_PERIOD_NS = 20_000_000
 OVERRUN_NS = 40_000_000
 GRIPPER_PERIOD_NS = 100_000_000
 GRIPPER_MIN_DELTA = 0.02
+VR_FRAME_STALE_MS = 100.0
 RECOVERABLE_FAULTS = frozenset(
     {"workspace_violation", "ik_unreachable", "ik_singular", "joint_safety_window"}
 )
@@ -57,6 +58,12 @@ class HomeResult:
     accepted: bool
     reason: HomeRejectReason | None = None
     message: str | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryEpisode:
+    control_generation: int
+    session_id: str | None
 
 
 @dataclass(frozen=True)
@@ -138,6 +145,7 @@ class RobotControl:
         self._loop_failed = False
         self._task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
+        self._recovery_lock = asyncio.Lock()
         self._shutdown_started = False
         self._shutdown_stopped = False
         self._control_generation = 0
@@ -179,6 +187,8 @@ class RobotControl:
             raise RuntimeError("control_faulted")
         if self._fault is not None:
             raise RuntimeError("arm_blocked_by_fault")
+        if self._recovery_lock.locked():
+            raise RuntimeError("arm_blocked_by_recovery")
         self.machine.arm()
 
     async def disarm(self) -> None:
@@ -191,36 +201,26 @@ class RobotControl:
         self.machine.disarm()
 
     async def home(self) -> HomeResult:
+        async with self._recovery_lock:
+            return await self._home_locked()
+
+    async def _home_locked(self) -> HomeResult:
         rejection = self._home_rejection()
         if rejection is not None:
             return rejection
+        home_episode = self._recovery_episode()
 
         self._recovery_phase = "stopping"
+        home_motion_started = False
         try:
             try:
                 await self.backend.stop(StopReason.HOME)
-                deadline = asyncio.get_running_loop().time() + 1.0
-                while True:
-                    state = await self.backend.get_state()
-                    if state.robot_state is BackendState.IDLE:
-                        break
-                    if state.robot_state is not BackendState.MOVING:
-                        self._lock_after_home_failure()
-                        return HomeResult(
-                            False,
-                            "home_failed",
-                            "仿真后端无法进入停止状态。",
-                        )
-                    if asyncio.get_running_loop().time() >= deadline:
-                        self._lock_after_home_failure()
-                        return HomeResult(
-                            False,
-                            "home_failed",
-                            "等待仿真停止超时。",
-                        )
-                    await asyncio.sleep(0.02)
+                idle_rejection = await self._wait_for_home_idle()
+                if idle_rejection is not None:
+                    self._lock_after_home_failure()
+                    return idle_rejection
 
-                interrupted = self._home_rejection()
+                interrupted = self._home_snapshot_rejection(home_episode)
                 if interrupted is not None:
                     self._lock_after_home_failure()
                     return interrupted
@@ -228,8 +228,16 @@ class RobotControl:
                 def on_home_phase(phase: HomePhase) -> None:
                     self._recovery_phase = phase
 
+                home_motion_started = True
                 await self.backend.home(self.home_options, on_home_phase)
+            except asyncio.CancelledError:
+                if home_motion_started:
+                    await self._stop_failed_home_motion()
+                self._lock_after_home_failure()
+                raise
             except Exception:
+                if home_motion_started:
+                    await self._stop_failed_home_motion()
                 self._lock_after_home_failure()
                 return HomeResult(
                     False,
@@ -237,8 +245,9 @@ class RobotControl:
                     "仿真无法返回初始姿态，请稍后重试。",
                 )
 
-            interrupted = self._home_rejection()
+            interrupted = self._home_snapshot_rejection(home_episode)
             if interrupted is not None:
+                await self._stop_failed_home_motion()
                 self._lock_after_home_failure()
                 return interrupted
 
@@ -259,10 +268,14 @@ class RobotControl:
             self._recovery_phase = None
 
     async def reset_fault(self) -> FaultResetResult:
+        async with self._recovery_lock:
+            return await self._reset_fault_locked()
+
+    async def _reset_fault_locked(self) -> FaultResetResult:
         rejection = self._fault_reset_rejection()
         if rejection is not None:
             return rejection
-        reset_generation = self._control_generation
+        reset_episode = self._recovery_episode()
         reset_fault = self._fault
         try:
             state = await self.backend.get_state()
@@ -273,7 +286,7 @@ class RobotControl:
                 "控制循环不可用，请重启后端并重新检查。",
             )
         rejection = self._fault_reset_snapshot_rejection(
-            reset_generation,
+            reset_episode,
             reset_fault,
         )
         if rejection is not None:
@@ -292,7 +305,7 @@ class RobotControl:
                 "无法确认仿真已停止，故障保持锁定。",
             )
         rejection = self._fault_reset_snapshot_rejection(
-            reset_generation,
+            reset_episode,
             reset_fault,
         )
         if rejection is not None:
@@ -304,7 +317,11 @@ class RobotControl:
 
         try:
             await self.backend.home(self.home_options, on_home_phase)
+        except asyncio.CancelledError:
+            await self._stop_failed_home_motion()
+            raise
         except Exception:
+            await self._stop_failed_home_motion()
             return FaultResetResult(
                 False,
                 "stop_incomplete",
@@ -314,10 +331,11 @@ class RobotControl:
             self._recovery_phase = None
 
         rejection = self._fault_reset_snapshot_rejection(
-            reset_generation,
+            reset_episode,
             reset_fault,
         )
         if rejection is not None:
+            await self._stop_failed_home_motion()
             return rejection
         release_cutoff = self.latest.snapshot()
         if release_cutoff is not None:
@@ -400,6 +418,8 @@ class RobotControl:
             raise
 
     async def tick(self) -> None:
+        if self._recovery_lock.locked():
+            return
         received = self.latest.snapshot()
         if received is None:
             return
@@ -415,7 +435,7 @@ class RobotControl:
                 self._advance_control_generation()
             return
         if (
-            age_ms >= 100
+            age_ms >= VR_FRAME_STALE_MS
             or not received.frame.tracking_valid
             or received.frame.visibility != "visible"
         ):
@@ -645,13 +665,100 @@ class RobotControl:
                 "仅可在停止状态下执行 Home。",
             )
         received = self.latest.snapshot()
-        if received is None or received.frame.right.grip:
+        if received is None:
+            return HomeResult(
+                False,
+                "grip_pressed",
+                "请先松开手柄抓握键，再请求 Home。",
+            )
+        sample_age_ms = max(
+            0.0,
+            (self.clock.now_ns() - received.received_ns) / 1_000_000,
+        )
+        if (
+            sample_age_ms >= VR_FRAME_STALE_MS
+            or not received.frame.tracking_valid
+            or received.frame.visibility != "visible"
+            or received.frame.right.grip
+        ):
             return HomeResult(
                 False,
                 "grip_pressed",
                 "请先松开手柄抓握键，再请求 Home。",
             )
         return None
+
+    def _recovery_episode(self) -> RecoveryEpisode:
+        received = self.latest.snapshot()
+        return RecoveryEpisode(
+            control_generation=self._control_generation,
+            session_id=None if received is None else received.frame.session_id,
+        )
+
+    def _recovery_episode_changed(self, episode: RecoveryEpisode) -> bool:
+        received = self.latest.snapshot()
+        session_id = None if received is None else received.frame.session_id
+        return (
+            self._control_generation != episode.control_generation
+            or session_id != episode.session_id
+        )
+
+    def _home_snapshot_rejection(
+        self,
+        home_episode: RecoveryEpisode,
+    ) -> HomeResult | None:
+        if self._fault is not None:
+            return HomeResult(
+                False,
+                "fault_present",
+                "存在未清除故障，请先完成故障复位。",
+            )
+        if self._loop_failed or self._shutdown_started:
+            return HomeResult(
+                False,
+                "control_loop_unavailable",
+                "控制循环不可用，请重启后端并重新检查。",
+            )
+        if (
+            self._recovery_episode_changed(home_episode)
+            or self.machine.mode not in {TeleopMode.READY, TeleopMode.DISARMED}
+        ):
+            return HomeResult(
+                False,
+                "not_stopped",
+                "控制状态已变化，请确认停止后重试。",
+            )
+        return None
+
+    async def _wait_for_home_idle(self) -> HomeResult | None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 1.0
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return HomeResult(False, "home_failed", "等待仿真停止超时。")
+            try:
+                state = await asyncio.wait_for(
+                    self.backend.get_state(),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                return HomeResult(False, "home_failed", "等待仿真停止超时。")
+            if loop.time() >= deadline:
+                return HomeResult(False, "home_failed", "等待仿真停止超时。")
+            if state.robot_state is BackendState.IDLE:
+                return None
+            if state.robot_state is not BackendState.MOVING:
+                return HomeResult(
+                    False,
+                    "home_failed",
+                    "仿真后端无法进入停止状态。",
+                )
+            await asyncio.sleep(min(0.02, max(0.0, deadline - loop.time())))
+
+    async def _stop_failed_home_motion(self) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await self.backend.stop(StopReason.HOME)
 
     def _lock_after_home_failure(self) -> None:
         if self.machine.mode in {TeleopMode.READY, TeleopMode.DISARMED}:
@@ -682,16 +789,13 @@ class RobotControl:
 
     def _fault_reset_snapshot_rejection(
         self,
-        reset_generation: int,
+        reset_episode: RecoveryEpisode,
         reset_fault: str | None,
     ) -> FaultResetResult | None:
         rejection = self._fault_reset_rejection()
         if rejection is not None:
             return rejection
-        if (
-            self._control_generation != reset_generation
-            or self._fault != reset_fault
-        ):
+        if self._recovery_episode_changed(reset_episode) or self._fault != reset_fault:
             return FaultResetResult(
                 False,
                 "stop_incomplete",

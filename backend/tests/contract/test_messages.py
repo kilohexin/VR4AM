@@ -199,6 +199,63 @@ def test_home_request_is_a_valid_v1_control_message() -> None:
     )
     assert message.type == "home_request"
 
+    schema = load_protocol_schema()
+    validator = Draft202012Validator({**schema, "$ref": "#/$defs/ClientControlMessage"})
+    assert not list(validator.iter_errors(message.model_dump(mode="json")))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "v": 1,
+            "type": "home_result",
+            "request_id": "home-1",
+            "accepted": True,
+            "mode": "DISARMED",
+        },
+        {
+            "v": 1,
+            "type": "home_result",
+            "request_id": "home-2",
+            "accepted": False,
+            "reason": "home_failed",
+            "message": "仿真无法返回初始姿态，请稍后重试。",
+        },
+    ],
+)
+def test_home_result_schema_accepts_exact_discriminated_variants(payload: dict) -> None:
+    schema = load_protocol_schema()
+    validator = Draft202012Validator({**schema, "$ref": "#/$defs/HomeResultMessage"})
+    assert not list(validator.iter_errors(payload))
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_home_result_schema_rejects_extra_fields(accepted: bool) -> None:
+    payload = (
+        {
+            "v": 1,
+            "type": "home_result",
+            "request_id": "home-1",
+            "accepted": True,
+            "mode": "DISARMED",
+            "extra": True,
+        }
+        if accepted
+        else {
+            "v": 1,
+            "type": "home_result",
+            "request_id": "home-2",
+            "accepted": False,
+            "reason": "grip_pressed",
+            "message": "请先松开手柄抓握键，再请求 Home。",
+            "extra": True,
+        }
+    )
+    schema = load_protocol_schema()
+    validator = Draft202012Validator({**schema, "$ref": "#/$defs/HomeResultMessage"})
+    assert list(validator.iter_errors(payload))
+
 
 @pytest.mark.parametrize(
     "payload",
