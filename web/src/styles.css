@@ -283,6 +283,10 @@ button {
   color: var(--red) !important;
 }
 
+[data-tone="constraint"] {
+  color: #ffb84a !important;
+}
+
 .line-icon {
   display: block;
   fill: none;
@@ -355,7 +359,6 @@ button {
 }
 
 .fault-row {
-  border-bottom: 0;
   color: var(--red);
 }
 
@@ -368,6 +371,23 @@ button {
 .fault-row:not([data-active="true"]) .status-label,
 .fault-row:not([data-active="true"]) .status-value,
 .fault-row:not([data-active="true"]) .line-icon {
+  color: #a6b6bf;
+}
+
+.constraint-row {
+  border-bottom: 0;
+  color: #ffb84a;
+}
+
+.constraint-row .status-value {
+  color: #ffb84a;
+  font-size: 17px;
+  white-space: normal;
+}
+
+.constraint-row:not([data-active="true"]) .status-label,
+.constraint-row:not([data-active="true"]) .status-value,
+.constraint-row:not([data-active="true"]) .line-icon {
   color: #a6b6bf;
 }
 

@@ -34,6 +34,7 @@ const socket = new TeleopSocket(
     hud.setConnectionStatus(status);
     hud.setLatency(null, null);
     armPanel?.setConnectionStatus(status);
+    xrController?.setConstraint(null);
   },
   (message) => armPanel?.handleArmFeedback(message),
   (message) => armPanel?.handleFaultResetResult(message),
@@ -110,14 +111,21 @@ function sendFrame(frame: VRFrame): void {
 }
 
 function onRobotState(state: RobotStateMessage): void {
+  const constraint = state.constraint ?? null;
+  const recoveryPhase = state.recovery_phase ?? null;
   scene.applyRobotState(state);
   armPanel.setFault(state.fault ?? null);
+  armPanel.setConstraint(constraint);
+  armPanel.setRecoveryPhase(recoveryPhase);
   armPanel.setMode(state.mode);
+  xrController.setConstraint(constraint);
   hud.setRobotState({
     mode: state.mode,
     backendState: state.robot_state,
     sampleAgeMs: state.sample_age_ms ?? null,
     fault: state.fault ?? null,
+    constraint,
+    recoveryPhase,
   });
   recordAcknowledgement(state.ack_seq ?? null);
 }

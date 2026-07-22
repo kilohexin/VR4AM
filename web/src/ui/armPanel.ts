@@ -2,8 +2,10 @@ import {
   PROTOCOL_VERSION,
   type ArmFeedbackMessage,
   type ClientControlMessage,
+  type ConstraintKind,
   type FaultResetRejectReason,
   type FaultResetResultMessage,
+  type RecoveryPhase,
   type TeleopMode,
 } from '../protocol/messages';
 import type {XRSessionStatus} from '../xr/session';
@@ -32,6 +34,8 @@ export type ArmSafetySnapshot = Readonly<{
   fault: string | null;
   faultRecoverable: boolean;
   faultResetPending: boolean;
+  constraint: ConstraintKind | null;
+  recoveryPhase: RecoveryPhase | null;
 }>;
 
 export const RECOVERABLE_FAULTS = new Set([
@@ -60,6 +64,8 @@ export class ArmPanel {
   private connected = true;
   private connectionState: ArmConnectionState = 'disconnected';
   private fault: string | null = null;
+  private constraint: ConstraintKind | null = null;
+  private recoveryPhase: RecoveryPhase | null = null;
   private requestSequence = 0;
   private pendingArmRequestId: string | null = null;
   private pendingFaultResetId: string | null = null;
@@ -128,6 +134,8 @@ export class ArmPanel {
       fault: this.fault,
       faultRecoverable: this.isFaultRecoverable,
       faultResetPending: this.pendingFaultResetId !== null,
+      constraint: this.constraint,
+      recoveryPhase: this.recoveryPhase,
     });
   }
 
@@ -179,6 +187,16 @@ export class ArmPanel {
     }
   }
 
+  setConstraint(constraint: ConstraintKind | null): void {
+    this.constraint = constraint;
+    this.syncButtonState();
+  }
+
+  setRecoveryPhase(phase: RecoveryPhase | null): void {
+    this.recoveryPhase = phase;
+    this.syncButtonState();
+  }
+
   setMode(mode: TeleopMode): void {
     this.mode = mode;
     if (mode === 'READY' || mode === 'ARMED') this.stopRequested = false;
@@ -227,6 +245,8 @@ export class ArmPanel {
     this.armFeedback = null;
     this.pendingFaultResetId = null;
     this.resetFeedback = null;
+    this.constraint = null;
+    this.recoveryPhase = null;
     this.stopRequested = true;
     this.mode = this.connected ? 'DISARMED' : 'DISCONNECTED';
     this.syncButtonState();
@@ -370,7 +390,13 @@ export class ArmPanel {
               : '解锁仿真',
     );
     if (this.pendingFaultResetId !== null) {
-      this.stopLabel.textContent = '复位中…';
+      this.stopLabel.textContent = this.recoveryPhase === 'stopping'
+        ? '正在确认停止…'
+        : this.recoveryPhase === 'homing'
+          ? '正在回到初始姿态…'
+          : this.recoveryPhase === 'stabilizing'
+            ? '正在确认 Home 稳定…'
+            : '复位准备中…';
       this.stopButton.disabled = true;
     } else if (this.isFaultRecoverable) {
       this.stopLabel.textContent = '复位故障';

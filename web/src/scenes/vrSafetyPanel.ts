@@ -1,12 +1,14 @@
 import * as THREE from 'three';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
-import {readableFault} from '../ui/hud';
+import {readableConstraint, readableFault} from '../ui/hud';
+
+const CONTROL_FOOTER = 'A 解锁 · B 停止 · Grip 控制末端 · 左摇杆平移 · 左 Grip+摇杆调高度' as const;
 
 export interface VrSafetyPresentation {
   title: string;
   instruction: string;
-  footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度';
-  tone: 'cyan' | 'red' | 'muted';
+  footer: typeof CONTROL_FOOTER;
+  tone: 'cyan' | 'amber' | 'red' | 'muted';
   shape: 'shield' | 'stop' | 'warning';
 }
 
@@ -30,7 +32,14 @@ export function describeVrSafety(
     return presentation('连接已中断', '保持 Grip 松开', 'red', 'warning');
   }
   if (state.faultResetPending) {
-    return presentation('复位中', '等待仿真确认', 'red', 'warning');
+    const recovery = state.recoveryPhase
+      ? {
+          stopping: ['正在确认停止', '保持 Grip 松开'],
+          homing: ['正在回到初始姿态', '保持 Grip 松开'],
+          stabilizing: ['正在确认 Home 稳定', '保持 Grip 松开'],
+        }[state.recoveryPhase]
+      : ['复位准备中', '保持 Grip 松开'];
+    return presentation(recovery[0], recovery[1], 'red', 'warning');
   }
   if (state.faultRecoverable && state.fault) {
     return presentation(readableFault(state.fault), '松开 Grip，按 B 复位', 'red', 'warning');
@@ -53,6 +62,14 @@ export function describeVrSafety(
   if (state.phase === 'pending') {
     return presentation('解锁中', '等待仿真确认', 'cyan', 'shield');
   }
+  if (state.constraint) {
+    return presentation(
+      readableConstraint(state.constraint),
+      '将手柄移回可达区域，无需复位',
+      'amber',
+      'warning',
+    );
+  }
   if (state.phase === 'active') {
     return presentation('运动中', '松开 Grip 停止', 'cyan', 'shield');
   }
@@ -74,7 +91,7 @@ function presentation(
   return {
     title,
     instruction,
-    footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度',
+    footer: CONTROL_FOOTER,
     tone,
     shape,
   };
@@ -133,6 +150,8 @@ export class VrSafetyPanel {
     const context = this.context;
     const accent = view.tone === 'cyan'
       ? '#32d7ff'
+      : view.tone === 'amber'
+        ? '#ffb84a'
       : view.tone === 'red'
         ? '#ff3347'
         : '#8ca5b6';

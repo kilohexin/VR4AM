@@ -1,4 +1,4 @@
-import type {Quat, VRFrame, VisibilityState} from '../protocol/messages';
+import type {ConstraintKind, Quat, VRFrame, VisibilityState} from '../protocol/messages';
 import {createVRFrame} from '../scenes/simulationScene';
 import {
   invalidControllerSample,
@@ -9,6 +9,15 @@ import {
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
 const TEARDOWN_ERROR = 'VR 退出失败，桌面模式已恢复，请刷新页面后重试。';
+
+interface HapticActuator {
+  pulse(value: number, duration: number): Promise<boolean>;
+}
+
+type HapticGamepad = Gamepad & {
+  hapticActuators?: readonly HapticActuator[];
+  vibrationActuator?: HapticActuator | null;
+};
 
 export interface XRRenderHost {
   startXR(session: XRSession, loop: XRFrameRequestCallback): Promise<void>;
@@ -70,6 +79,7 @@ interface SessionContext {
 
 export class XRSessionController {
   private current: SessionContext | null = null;
+  private lastConstraint: ConstraintKind | null = null;
   private entering = false;
   private disposed = false;
   private cleanupPromise: Promise<void> | null = null;
@@ -80,6 +90,19 @@ export class XRSessionController {
 
   get isActive(): boolean {
     return this.current !== null && !this.current.ending;
+  }
+
+  setConstraint(constraint: ConstraintKind | null): void {
+    if (constraint === this.lastConstraint) return;
+    const shouldPulse = constraint !== null;
+    this.lastConstraint = constraint;
+    if (!shouldPulse) return;
+
+    const source = [...(this.current?.session.inputSources ?? [])]
+      .find((candidate) => candidate.handedness === 'right');
+    const gamepad = source?.gamepad as HapticGamepad | undefined;
+    const actuator = gamepad?.hapticActuators?.[0] ?? gamepad?.vibrationActuator;
+    if (actuator) void actuator.pulse(0.35, 40).catch(() => undefined);
   }
 
   async enterVR(): Promise<void> {
@@ -369,6 +392,7 @@ export class XRSessionController {
   }
 
   private signalSafety(context?: SessionContext): void {
+    this.lastConstraint = null;
     if (context) this.options.host.updateXRPresentation(invalidPresentationSample(), this.now());
     this.options.onDisarm();
     this.options.onLockReset();
