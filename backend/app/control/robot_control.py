@@ -297,7 +297,12 @@ class RobotControl:
             is_new_frame = frame_id != self._last_frame_id
             if is_new_frame:
                 await self.recorder.write_vr_frame(received.frame, received.received_ns)
-            await self._send_latest_gripper(received.frame.right.trigger, now_ns)
+            if (
+                self._fault is None
+                and not self._loop_failed
+                and not self._shutdown_started
+            ):
+                await self._send_latest_gripper(received.frame.right.trigger, now_ns)
             previous_mode = self.machine.mode
             if (
                 is_new_frame

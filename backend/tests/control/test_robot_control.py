@@ -111,6 +111,7 @@ async def connect_release_arm(
 
 async def enter_published_recoverable_fault(
     control: RobotControl,
+    fault: str = "ik_unreachable",
 ) -> tuple[str, int]:
     await control.connect()
     actual_tcp = Pose(p=(0.3, 0.0, 0.3), q=(0, 0, 0, 1))
@@ -123,12 +124,12 @@ async def enter_published_recoverable_fault(
     control.last_target = actual_tcp
     control._last_frame_id = ("fault-session", 7)
 
-    await control._enter_fault("ik_unreachable")
+    await control._enter_fault(fault)
 
     assert control.mode is TeleopMode.FAULT
     published = await control.state_message()
     assert published.mode is TeleopMode.FAULT
-    assert published.fault == "ik_unreachable"
+    assert published.fault == fault
     assert control.mode is TeleopMode.DISARMED
     return control._last_frame_id
 
@@ -1206,6 +1207,55 @@ async def test_gripper_has_strict_10hz_ceiling_delta_threshold_and_no_queue() ->
     latest.publish(frame(6, False, trigger=0.771), clock.now_ns())
     await control.tick()
     assert backend.gripper_commands == pytest.approx([0.70, 0.75, 0.771])
+
+
+@pytest.mark.asyncio
+async def test_latched_fault_blocks_new_gripper_commands_after_stop_completion() -> None:
+    control, latest, backend, clock = make_control()
+    await enter_published_recoverable_fault(control, "workspace_violation")
+    assert control.mode is TeleopMode.DISARMED
+    assert control._fault == "workspace_violation"
+
+    latest.publish(
+        frame(8, False, trigger=0.75, session_id="fault-session"),
+        clock.now_ns(),
+    )
+    await control.tick()
+
+    assert backend.gripper_commands == []
+    assert backend.gripper == 0.0
+
+
+@pytest.mark.asyncio
+async def test_failed_control_loop_blocks_new_gripper_commands() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False, trigger=0.20), clock.now_ns())
+    await control.tick()
+    clock.advance_ms(100)
+    control._loop_failed = True
+
+    latest.publish(frame(2, False, trigger=0.80), clock.now_ns())
+    await control.tick()
+
+    assert backend.gripper_commands == pytest.approx([0.20])
+    assert backend.gripper == pytest.approx(0.20)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_started_blocks_new_gripper_commands() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False, trigger=0.20), clock.now_ns())
+    await control.tick()
+    await control.stop()
+    clock.advance_ms(100)
+
+    latest.publish(frame(2, False, trigger=0.80), clock.now_ns())
+    await control.tick()
+
+    assert backend.gripper_commands == pytest.approx([0.20])
+    assert backend.gripper == pytest.approx(0.20)
 
 
 @pytest.mark.asyncio
