@@ -39,7 +39,7 @@ def create_app() -> FastAPI:
                 max_angular_speed=settings.max_angular_speed_radps,
                 max_linear_accel=settings.max_linear_accel_mps2,
                 max_angular_accel=settings.max_angular_accel_radps2,
-                envelope=settings.workspace_radius_m,
+                workspace_radius=settings.workspace_radius_m,
             ),
             constraint_clear_ms=settings.constraint_clear_ms,
         )

@@ -20,6 +20,7 @@ class SimRobotAdapter:
     def __init__(self) -> None:
         self.model = LM3Model()
         self.robot = VirtualRobot(self.model)
+        self._ik_seed_q = np.asarray(self.model.home_q, dtype=float)
         self.gripper = 0.0
         self.command_id: int | None = None
         self.mode = TeleopMode.READY
@@ -54,10 +55,11 @@ class SimRobotAdapter:
     async def command_tcp(self, target: Pose, command_id: int) -> None:
         async with self._lock:
             try:
-                result = solve_ik(target, self.robot.q, self.model)
+                result = solve_ik(target, self._ik_seed_q, self.model)
             except IKError as exc:
                 raise BackendCommandError(str(exc)) from exc
             self.robot.set_target_q(result.q)
+            self._ik_seed_q = np.asarray(result.q, dtype=float)
             self.command_id = command_id
 
     async def set_gripper(self, value: float) -> None:

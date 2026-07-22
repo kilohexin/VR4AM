@@ -11,7 +11,14 @@ from app.control.safety import SafetyLimiter, SafetyViolation
 from app.control.state_machine import TeleopStateMachine
 from app.recording.base import RecorderSink
 from app.robots.base import BackendCommandError, RobotBackend, StopReason
-from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode, VRFrame
+from app.schemas.messages import (
+    BackendState,
+    ConstraintKind,
+    Pose,
+    RobotStateMessage,
+    TeleopMode,
+    VRFrame,
+)
 from app.timebase import MonotonicClock
 
 CONTROL_PERIOD_NS = 20_000_000
@@ -94,6 +101,8 @@ class RobotControl:
         self._pending_stop_completion = False
         self._hard_stop_completion = False
         self._fault: str | None = None
+        self._constraint: ConstraintKind | None = None
+        self._constraint_valid_since_ns: int | None = None
         self._running = False
         self._loop_failed = False
         self._task: asyncio.Task[None] | None = None
@@ -147,6 +156,7 @@ class RobotControl:
         if self.machine.mode == TeleopMode.ACTIVE:
             self.mapper.clear()
         await self.backend.stop(StopReason.GRIP_RELEASED)
+        self._clear_constraint()
         self.machine.disarm()
 
     async def reset_fault(self) -> FaultResetResult:
@@ -196,6 +206,7 @@ class RobotControl:
         self.filter.clear()
         self.limiter.clear()
         self.last_target = None
+        self._clear_constraint()
         self._clear_stop_episode(clear_fault=True)
         self.machine.disarm()
         return FaultResetResult(True)
@@ -206,6 +217,7 @@ class RobotControl:
         await self.backend.stop(StopReason.DISCONNECT)
         self._disconnect_stop_pending_frame = True
         self.mapper.clear()
+        self._clear_constraint()
         if self._fault is None:
             self._clear_stop_episode()
         self.machine.disconnect()
@@ -253,6 +265,7 @@ class RobotControl:
             self._loop_failed = True
             self.mapper.clear()
             self.last_target = None
+            self._clear_constraint()
             self.machine.fault()
             self._fault = "control_loop_error"
             self._pending_stop_completion = True
@@ -295,6 +308,7 @@ class RobotControl:
                     await self.backend.stop(StopReason.DISCONNECT)
                 self.mapper.clear()
                 self.last_target = None
+                self._clear_constraint()
                 if self.machine.mode not in {TeleopMode.FAULT, TeleopMode.STALE}:
                     self._clear_stop_episode()
                     self.machine.disarm()
@@ -335,6 +349,7 @@ class RobotControl:
                 self.last_target = state.actual_tcp
             elif previous_mode == TeleopMode.ACTIVE and self.machine.mode == TeleopMode.HOLD:
                 self.mapper.clear()
+                self._clear_constraint()
                 await self.backend.stop(StopReason.GRIP_RELEASED)
             elif self.machine.mode == TeleopMode.ACTIVE and is_new_frame:
                 if self.last_target is None:
@@ -342,10 +357,27 @@ class RobotControl:
                 raw_requested = self.mapper.target(
                     Pose(p=received.frame.right.p, q=received.frame.right.q)
                 )
-                requested = self.filter.update(raw_requested, 0.02)
-                target = self.limiter.limit(self.last_target, requested, 0.02)
-                await self.backend.command_tcp(target, received.frame.seq)
-                self.last_target = target
+                workspace = self.limiter.project_workspace(raw_requested)
+                requested = self.filter.update(workspace.pose, 0.02)
+                target = self.limiter.limit_motion(self.last_target, requested, 0.02)
+                try:
+                    await self.backend.command_tcp(target, received.frame.seq)
+                except BackendCommandError as error:
+                    code = str(error)
+                    if code in {"ik_unreachable", "ik_singular"}:
+                        self._set_constraint("ik_boundary")
+                    elif code == "joint_safety_window":
+                        self._set_constraint("joint_boundary")
+                    else:
+                        raise
+                    self.filter.reset(self.last_target)
+                    self.limiter.reset_motion()
+                else:
+                    self.last_target = target
+                    if workspace.constrained:
+                        self._set_constraint("workspace_boundary")
+                    else:
+                        self._observe_valid_constraint(now_ns)
             self.last_seq = received.frame.seq
             self._last_frame_id = frame_id
         except (BackendCommandError, SafetyViolation) as error:
@@ -367,6 +399,7 @@ class RobotControl:
                 "mode": self.machine.mode,
                 "sample_age_ms": sample_age_ms,
                 "fault": self._fault,
+                "constraint": self._constraint,
             }
         )
         await self.recorder.write_robot_state(message, server_mono_ns)
@@ -422,6 +455,7 @@ class RobotControl:
         await self.backend.stop(reason)
 
     async def _enter_fault(self, fault: str) -> None:
+        self._clear_constraint()
         if self.machine.mode != TeleopMode.FAULT:
             self.machine.fault()
             self._fault = fault
@@ -443,6 +477,23 @@ class RobotControl:
             self._fault = None
         if changed:
             self._advance_control_generation()
+
+    def _set_constraint(self, constraint: ConstraintKind) -> None:
+        self._constraint = constraint
+        self._constraint_valid_since_ns = None
+
+    def _observe_valid_constraint(self, now_ns: int) -> None:
+        if self._constraint is None:
+            return
+        if self._constraint_valid_since_ns is None:
+            self._constraint_valid_since_ns = now_ns
+            return
+        if now_ns - self._constraint_valid_since_ns >= self.constraint_clear_ns:
+            self._clear_constraint()
+
+    def _clear_constraint(self) -> None:
+        self._constraint = None
+        self._constraint_valid_since_ns = None
 
     def _advance_control_generation(self) -> None:
         self._control_generation += 1
