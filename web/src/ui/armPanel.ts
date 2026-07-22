@@ -221,6 +221,7 @@ export class ArmPanel {
   resetToLocked(): void {
     this.armed = false;
     this.eligible = false;
+    this.gripPressed = true;
     this.pendingArmRequestId = null;
     this.awaitingArmedMode = false;
     this.armFeedback = null;

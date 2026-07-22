@@ -459,6 +459,38 @@ describe('ArmPanel simulator safety', () => {
     });
   });
 
+  it('requires a fresh released-Grip sample before resetting after reconnect', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+
+    panel.setFault('workspace_violation');
+    panel.observeGrip(false);
+    expect(panel.stopButton.disabled).toBe(false);
+
+    panel.setConnectionStatus({state: 'disconnected'});
+    panel.setConnectionStatus({state: 'connected'});
+
+    expect(panel.stopButton.disabled).toBe(true);
+    panel.stopButton.click();
+    panel.requestStopOrReset('desktop');
+    expect(send).not.toHaveBeenCalled();
+
+    panel.observeGrip(true);
+    expect(panel.stopButton.disabled).toBe(true);
+    panel.requestStopOrReset('desktop');
+    expect(send).not.toHaveBeenCalled();
+
+    panel.observeGrip(false);
+    expect(panel.stopButton.disabled).toBe(false);
+    panel.stopButton.click();
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'reset_fault',
+      request_id: expect.stringMatching(/^desktop-reset_fault-/),
+    }));
+  });
+
   it('uses XR-qualified reset IDs while normal B-style requests disarm even with Grip pressed', () => {
     const send = vi.fn();
     const panel = new ArmPanel(document.querySelector('#panel')!, send);
