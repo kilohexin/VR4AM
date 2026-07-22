@@ -23,7 +23,7 @@ with warnings.catch_warnings():
     from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.control.robot_control import FaultResetResult
+from app.control.robot_control import FaultResetResult, HomeResult
 from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -146,6 +146,24 @@ def test_disarm_is_delegated_to_robot_control() -> None:
             ws.send_json({"v": 1, "type": "disarm", "request_id": "d1"})
             assert ws.receive_json()["type"] == "disarm_ack"
         assert app.state.control.disarm.await_count == 1
+
+
+def test_home_request_returns_correlated_result() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.control.home = AsyncMock(return_value=HomeResult(True))
+        with client.websocket_connect("/ws/v1/teleop") as ws:
+            ws.send_json({"v": 1, "type": "home_request", "request_id": "home-1"})
+            result = ws.receive_json()
+
+    assert result == {
+        "v": 1,
+        "type": "home_result",
+        "request_id": "home-1",
+        "accepted": True,
+        "mode": "DISARMED",
+    }
+    app.state.control.home.assert_awaited_once_with()
 
 
 def test_accepted_fault_reset_sends_authoritative_state_before_exact_result() -> None:

@@ -165,6 +165,41 @@ async def _receive_messages(
                         },
                         send_lock,
                     )
+        elif message.type == "home_request":
+            try:
+                result = await control.home()
+            except Exception:
+                await _send_json(
+                    websocket,
+                    {
+                        "v": 1,
+                        "type": "home_result",
+                        "request_id": message.request_id,
+                        "accepted": False,
+                        "reason": "home_failed",
+                        "message": "仿真无法返回初始姿态，请稍后重试。",
+                    },
+                    send_lock,
+                )
+            else:
+                if result.accepted:
+                    payload = {
+                        "v": 1,
+                        "type": "home_result",
+                        "request_id": message.request_id,
+                        "accepted": True,
+                        "mode": "DISARMED",
+                    }
+                else:
+                    payload = {
+                        "v": 1,
+                        "type": "home_result",
+                        "request_id": message.request_id,
+                        "accepted": False,
+                        "reason": result.reason,
+                        "message": result.message,
+                    }
+                await _send_json(websocket, payload, send_lock)
         elif message.type == "ping":
             await _send_json(
                 websocket,

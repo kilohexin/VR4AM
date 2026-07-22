@@ -10,6 +10,7 @@ class StopReason(StrEnum):
     STALE = "stale"
     DISCONNECT = "disconnect"
     FAULT = "fault"
+    HOME = "home"
     SHUTDOWN = "shutdown"
 
 

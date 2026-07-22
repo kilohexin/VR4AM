@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 from app.control.coordinate_mapper import CoordinateMapper
 from app.control.filters import PoseFilter
@@ -35,12 +36,26 @@ GRIPPER_MIN_DELTA = 0.02
 RECOVERABLE_FAULTS = frozenset(
     {"workspace_violation", "ik_unreachable", "ik_singular", "joint_safety_window"}
 )
+HomeRejectReason = Literal[
+    "fault_present",
+    "grip_pressed",
+    "not_stopped",
+    "control_loop_unavailable",
+    "home_failed",
+]
 
 
 @dataclass(frozen=True)
 class FaultResetResult:
     accepted: bool
     reason: str | None = None
+    message: str | None = None
+
+
+@dataclass(frozen=True)
+class HomeResult:
+    accepted: bool
+    reason: HomeRejectReason | None = None
     message: str | None = None
 
 
@@ -174,6 +189,74 @@ class RobotControl:
         await self.backend.stop(StopReason.GRIP_RELEASED)
         self._clear_constraint()
         self.machine.disarm()
+
+    async def home(self) -> HomeResult:
+        rejection = self._home_rejection()
+        if rejection is not None:
+            return rejection
+
+        self._recovery_phase = "stopping"
+        try:
+            try:
+                await self.backend.stop(StopReason.HOME)
+                deadline = asyncio.get_running_loop().time() + 1.0
+                while True:
+                    state = await self.backend.get_state()
+                    if state.robot_state is BackendState.IDLE:
+                        break
+                    if state.robot_state is not BackendState.MOVING:
+                        self._lock_after_home_failure()
+                        return HomeResult(
+                            False,
+                            "home_failed",
+                            "仿真后端无法进入停止状态。",
+                        )
+                    if asyncio.get_running_loop().time() >= deadline:
+                        self._lock_after_home_failure()
+                        return HomeResult(
+                            False,
+                            "home_failed",
+                            "等待仿真停止超时。",
+                        )
+                    await asyncio.sleep(0.02)
+
+                interrupted = self._home_rejection()
+                if interrupted is not None:
+                    self._lock_after_home_failure()
+                    return interrupted
+
+                def on_home_phase(phase: HomePhase) -> None:
+                    self._recovery_phase = phase
+
+                await self.backend.home(self.home_options, on_home_phase)
+            except Exception:
+                self._lock_after_home_failure()
+                return HomeResult(
+                    False,
+                    "home_failed",
+                    "仿真无法返回初始姿态，请稍后重试。",
+                )
+
+            interrupted = self._home_rejection()
+            if interrupted is not None:
+                self._lock_after_home_failure()
+                return interrupted
+
+            release_cutoff = self.latest.snapshot()
+            if release_cutoff is not None:
+                self._last_frame_id = (
+                    release_cutoff.frame.session_id,
+                    release_cutoff.frame.seq,
+                )
+            self.mapper.clear()
+            self.filter.clear()
+            self.limiter.clear()
+            self.last_target = None
+            self._clear_constraint()
+            self.machine.disarm()
+            return HomeResult(True)
+        finally:
+            self._recovery_phase = None
 
     async def reset_fault(self) -> FaultResetResult:
         rejection = self._fault_reset_rejection()
@@ -541,6 +624,38 @@ class RobotControl:
 
     def _advance_control_generation(self) -> None:
         self._control_generation += 1
+
+    def _home_rejection(self) -> HomeResult | None:
+        if self._fault is not None:
+            return HomeResult(
+                False,
+                "fault_present",
+                "存在未清除故障，请先完成故障复位。",
+            )
+        if self._loop_failed or self._shutdown_started:
+            return HomeResult(
+                False,
+                "control_loop_unavailable",
+                "控制循环不可用，请重启后端并重新检查。",
+            )
+        if self.machine.mode not in {TeleopMode.READY, TeleopMode.DISARMED}:
+            return HomeResult(
+                False,
+                "not_stopped",
+                "仅可在停止状态下执行 Home。",
+            )
+        received = self.latest.snapshot()
+        if received is None or received.frame.right.grip:
+            return HomeResult(
+                False,
+                "grip_pressed",
+                "请先松开手柄抓握键，再请求 Home。",
+            )
+        return None
+
+    def _lock_after_home_failure(self) -> None:
+        if self.machine.mode in {TeleopMode.READY, TeleopMode.DISARMED}:
+            self.machine.disarm()
 
     def _fault_reset_rejection(self) -> FaultResetResult | None:
         if self._fault is None:

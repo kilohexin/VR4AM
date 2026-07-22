@@ -113,6 +113,13 @@ class RobotStateMessage(StrictMessage):
 
 class ClientControlMessage(StrictMessage):
     v: Literal[1]
-    type: Literal["hello", "arm_request", "disarm", "reset_fault", "ping"]
+    type: Literal[
+        "hello",
+        "arm_request",
+        "disarm",
+        "reset_fault",
+        "home_request",
+        "ping",
+    ]
     request_id: str = Field(min_length=1, max_length=64)
     client_mono_ms: float | None = Field(default=None, ge=0)

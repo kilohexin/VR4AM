@@ -193,6 +193,13 @@ def test_reset_fault_is_a_valid_v1_control_message() -> None:
     assert not list(validator.iter_errors(message.model_dump(mode="json")))
 
 
+def test_home_request_is_a_valid_v1_control_message() -> None:
+    message = ClientControlMessage.model_validate(
+        {"v": 1, "type": "home_request", "request_id": "home-1"}
+    )
+    assert message.type == "home_request"
+
+
 @pytest.mark.parametrize(
     "payload",
     [

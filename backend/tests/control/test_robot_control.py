@@ -39,6 +39,7 @@ class FakeBackend:
         self.connect_count = 0
         self.disconnect_count = 0
         self.robot_state = BackendState.IDLE
+        self.home_phases: list[str] = []
 
     async def connect(self) -> None:
         self.connect_count += 1
@@ -55,6 +56,12 @@ class FakeBackend:
 
     async def stop(self, reason: StopReason) -> None:
         self.stops.append(reason)
+
+    async def home(self, options, on_phase) -> None:
+        on_phase("homing")
+        self.home_phases.append("homing")
+        on_phase("stabilizing")
+        self.home_phases.append("stabilizing")
 
     async def get_state(self) -> RobotStateMessage:
         return RobotStateMessage(
@@ -142,6 +149,22 @@ def assert_fault_motion_state_is_retained(control: RobotControl) -> None:
     assert np.allclose(control.limiter.linear_velocity, (0.1, 0.2, 0.3))
     assert np.allclose(control.limiter.angular_velocity, (0.4, 0.5, 0.6))
     assert control.last_target is not None
+
+
+@pytest.mark.asyncio
+async def test_manual_home_requires_released_grip_and_ends_disarmed() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    result = await control.home()
+
+    assert result == robot_control_module.HomeResult(True)
+    assert backend.stops[-1] is StopReason.HOME
+    assert backend.home_phases == ["homing", "stabilizing"]
+    assert control.mode is TeleopMode.DISARMED
+    assert control.mapper._hand_anchor is None
+    assert control.last_target is None
 
 
 @pytest.mark.asyncio
