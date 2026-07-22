@@ -14,6 +14,7 @@ from app.sim.lm3_model import LM3Model
 @dataclass(frozen=True)
 class CartesianServoResult:
     q: tuple[float, float, float, float, float, float]
+    joint_velocity: tuple[float, float, float, float, float, float]
     position_error_m: float
     orientation_error_rad: float
     joint_limited: bool
@@ -105,10 +106,12 @@ def cartesian_servo_step(
     upper = np.asarray(model.home_q) + model.joint_window_rad
     next_q = np.clip(candidate, lower, upper)
     joint_limited = not np.allclose(candidate, next_q, atol=1e-12, rtol=0.0)
+    bounded_velocity = (next_q - q) / dt
     solved = forward_pose(next_q, model)
     solved_position_error, solved_orientation_error = _pose_errors(target, solved)
     return CartesianServoResult(
         q=tuple(float(value) for value in next_q),
+        joint_velocity=tuple(float(value) for value in bounded_velocity),
         position_error_m=float(np.linalg.norm(solved_position_error)),
         orientation_error_rad=float(np.linalg.norm(solved_orientation_error)),
         joint_limited=joint_limited,

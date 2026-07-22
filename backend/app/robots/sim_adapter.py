@@ -64,7 +64,7 @@ class SimRobotAdapter:
                 )
             except IKError as exc:
                 raise BackendCommandError(str(exc)) from exc
-            self.robot.set_target_q(result.q)
+            self.robot.set_target_qd(result.joint_velocity)
             self.command_id = command_id
 
     async def set_gripper(self, value: float) -> None:

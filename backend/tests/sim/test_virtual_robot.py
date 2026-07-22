@@ -19,6 +19,20 @@ def test_virtual_robot_moves_over_time_without_jumping() -> None:
     assert robot.q == pytest.approx(goal_q, abs=2e-3)
 
 
+def test_velocity_mode_accelerates_to_and_integrates_the_requested_speed_once() -> None:
+    robot = VirtualRobot(LM3Model())
+    requested = np.full(6, 0.6)
+    robot.set_target_qd(requested)
+
+    for _ in range(25):
+        robot.step(0.02)
+
+    assert robot.target_q is None
+    assert robot.target_qd == pytest.approx(requested)
+    assert robot.qd == pytest.approx(requested)
+    assert np.min(robot.q - np.asarray(robot.model.home_q)) > 0.15
+
+
 def test_virtual_robot_respects_speed_and_acceleration_limits() -> None:
     model = LM3Model()
     robot = VirtualRobot(model)

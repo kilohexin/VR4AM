@@ -39,18 +39,18 @@ def test_position_priority_servo_reaches_one_small_six_dof_target() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sim_adapter_commands_only_one_bounded_servo_step() -> None:
+async def test_sim_adapter_commands_velocity_without_a_second_position_servo() -> None:
     adapter = SimRobotAdapter()
-    start_q = adapter.robot.q.copy()
-    start = forward_pose(start_q, adapter.model)
+    start = forward_pose(adapter.robot.q, adapter.model)
     target = start.model_copy(
         update={"p": (start.p[0] + 0.03, start.p[1], start.p[2] - 0.02)}
     )
 
     await adapter.command_tcp(target, command_id=7)
 
-    assert adapter.robot.target_q is not None
-    assert np.max(np.abs(adapter.robot.target_q - start_q)) <= (
-        adapter.model.max_joint_speed_radps * adapter.STEP_SECONDS + 1e-12
+    assert adapter.robot.target_q is None
+    assert adapter.robot.target_qd is not None
+    assert np.max(np.abs(adapter.robot.target_qd)) <= (
+        adapter.model.max_joint_speed_radps + 1e-12
     )
     assert adapter.command_id == 7
