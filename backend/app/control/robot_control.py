@@ -10,11 +10,18 @@ from app.control.filters import PoseFilter
 from app.control.safety import SafetyLimiter, SafetyViolation
 from app.control.state_machine import TeleopStateMachine
 from app.recording.base import RecorderSink
-from app.robots.base import BackendCommandError, RobotBackend, StopReason
+from app.robots.base import (
+    BackendCommandError,
+    HomeOptions,
+    HomePhase,
+    RobotBackend,
+    StopReason,
+)
 from app.schemas.messages import (
     BackendState,
     ConstraintKind,
     Pose,
+    RecoveryPhase,
     RobotStateMessage,
     TeleopMode,
     VRFrame,
@@ -81,6 +88,7 @@ class RobotControl:
         mapper: CoordinateMapper | None = None,
         limiter: SafetyLimiter | None = None,
         constraint_clear_ms: int = 100,
+        home_options: HomeOptions | None = None,
     ) -> None:
         self.backend = backend
         self.latest = latest
@@ -89,6 +97,13 @@ class RobotControl:
         self.mapper = mapper if mapper is not None else CoordinateMapper()
         self.limiter = limiter if limiter is not None else SafetyLimiter()
         self.constraint_clear_ns = constraint_clear_ms * 1_000_000
+        self.home_options = home_options or HomeOptions(
+            max_speed_radps=0.25,
+            timeout_s=15.0,
+            position_tolerance_rad=math.radians(1.0),
+            velocity_tolerance_radps=0.02,
+            stable_seconds=0.3,
+        )
         self.machine = TeleopStateMachine()
         self.filter = PoseFilter()
         self.last_seq: int | None = None
@@ -103,6 +118,7 @@ class RobotControl:
         self._fault: str | None = None
         self._constraint: ConstraintKind | None = None
         self._constraint_valid_since_ns: int | None = None
+        self._recovery_phase: RecoveryPhase | None = None
         self._running = False
         self._loop_failed = False
         self._task: asyncio.Task[None] | None = None
@@ -182,14 +198,38 @@ class RobotControl:
         backend_rejection = self._backend_reset_rejection(state.robot_state)
         if backend_rejection is not None:
             return backend_rejection
+        self._recovery_phase = "stopping"
         try:
             await self.backend.stop(StopReason.FAULT)
         except Exception:
+            self._recovery_phase = None
             return FaultResetResult(
                 False,
                 "stop_incomplete",
                 "无法确认仿真已停止，故障保持锁定。",
             )
+        rejection = self._fault_reset_snapshot_rejection(
+            reset_generation,
+            reset_fault,
+        )
+        if rejection is not None:
+            self._recovery_phase = None
+            return rejection
+
+        def on_home_phase(phase: HomePhase) -> None:
+            self._recovery_phase = phase
+
+        try:
+            await self.backend.home(self.home_options, on_home_phase)
+        except Exception:
+            return FaultResetResult(
+                False,
+                "stop_incomplete",
+                "仿真无法返回初始姿态，故障保持锁定。",
+            )
+        finally:
+            self._recovery_phase = None
+
         rejection = self._fault_reset_snapshot_rejection(
             reset_generation,
             reset_fault,
@@ -213,6 +253,7 @@ class RobotControl:
 
     async def on_disconnect(self) -> None:
         self._disconnect_stop_pending_frame = False
+        self._recovery_phase = None
         self._advance_control_generation()
         await self.backend.stop(StopReason.DISCONNECT)
         self._disconnect_stop_pending_frame = True
@@ -266,6 +307,7 @@ class RobotControl:
             self.mapper.clear()
             self.last_target = None
             self._clear_constraint()
+            self._recovery_phase = None
             self.machine.fault()
             self._fault = "control_loop_error"
             self._pending_stop_completion = True
@@ -400,6 +442,7 @@ class RobotControl:
                 "sample_age_ms": sample_age_ms,
                 "fault": self._fault,
                 "constraint": self._constraint,
+                "recovery_phase": self._recovery_phase,
             }
         )
         await self.recorder.write_robot_state(message, server_mono_ns)
@@ -456,6 +499,7 @@ class RobotControl:
 
     async def _enter_fault(self, fault: str) -> None:
         self._clear_constraint()
+        self._recovery_phase = None
         if self.machine.mode != TeleopMode.FAULT:
             self.machine.fault()
             self._fault = fault

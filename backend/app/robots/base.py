@@ -1,5 +1,6 @@
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Callable, Literal, Protocol
 
 from app.schemas.messages import Pose, RobotStateMessage
 
@@ -16,6 +17,18 @@ class BackendCommandError(RuntimeError):
     pass
 
 
+HomePhase = Literal["homing", "stabilizing"]
+
+
+@dataclass(frozen=True)
+class HomeOptions:
+    max_speed_radps: float
+    timeout_s: float
+    position_tolerance_rad: float
+    velocity_tolerance_radps: float
+    stable_seconds: float
+
+
 class RobotBackend(Protocol):
     async def connect(self) -> None: ...
 
@@ -26,5 +39,11 @@ class RobotBackend(Protocol):
     async def set_gripper(self, value: float) -> None: ...
 
     async def stop(self, reason: StopReason) -> None: ...
+
+    async def home(
+        self,
+        options: HomeOptions,
+        on_phase: Callable[[HomePhase], None],
+    ) -> None: ...
 
     async def get_state(self) -> RobotStateMessage: ...

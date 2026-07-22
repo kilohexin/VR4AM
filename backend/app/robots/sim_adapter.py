@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from typing import Callable
 
 import numpy as np
 
-from app.robots.base import BackendCommandError, StopReason
+from app.robots.base import BackendCommandError, HomeOptions, HomePhase, StopReason
 from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
 from app.sim.ik import IKError, solve_ik
 from app.sim.kinematics import forward_pose
@@ -70,6 +71,52 @@ class SimRobotAdapter:
     async def stop(self, reason: StopReason) -> None:
         async with self._lock:
             self.robot.stop()
+
+    async def home(
+        self,
+        options: HomeOptions,
+        on_phase: Callable[[HomePhase], None],
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + options.timeout_s
+        stable_since: float | None = None
+        on_phase("homing")
+        async with self._lock:
+            self.robot.set_target_q(
+                self.model.home_q,
+                max_speed_radps=options.max_speed_radps,
+            )
+
+        while True:
+            now = loop.time()
+            async with self._lock:
+                if self.robot.target_q is None:
+                    raise BackendCommandError("home_interrupted")
+                position_error = float(
+                    np.max(np.abs(self.robot.q - np.asarray(self.model.home_q)))
+                )
+                velocity = float(np.max(np.abs(self.robot.qd)))
+
+            within_tolerance = (
+                position_error <= options.position_tolerance_rad
+                and velocity <= options.velocity_tolerance_radps
+            )
+            if within_tolerance:
+                if stable_since is None:
+                    stable_since = now
+                    on_phase("stabilizing")
+                elif now - stable_since >= options.stable_seconds:
+                    self._ik_seed_q = np.asarray(self.model.home_q, dtype=float)
+                    return
+            elif stable_since is not None:
+                stable_since = None
+                on_phase("homing")
+
+            if now >= deadline:
+                async with self._lock:
+                    self.robot.stop()
+                raise BackendCommandError("home_timeout")
+            await asyncio.sleep(self.STEP_SECONDS)
 
     async def get_state(self) -> RobotStateMessage:
         async with self._lock:

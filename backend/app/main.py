@@ -13,6 +13,7 @@ from app.control.coordinate_mapper import CoordinateMapper
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.control.safety import SafetyLimiter
 from app.recording.noop import NoopRecorder
+from app.robots.base import HomeOptions
 from app.robots.sim_adapter import SimRobotAdapter
 from app.timebase import MonotonicClock
 
@@ -42,6 +43,13 @@ def create_app() -> FastAPI:
                 workspace_radius=settings.workspace_radius_m,
             ),
             constraint_clear_ms=settings.constraint_clear_ms,
+            home_options=HomeOptions(
+                max_speed_radps=settings.home_joint_speed_radps,
+                timeout_s=settings.home_timeout_s,
+                position_tolerance_rad=settings.home_position_tolerance_rad,
+                velocity_tolerance_radps=settings.home_velocity_tolerance_radps,
+                stable_seconds=settings.home_stable_ms / 1000,
+            ),
         )
         app.state.settings = settings
         app.state.backend = backend
