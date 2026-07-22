@@ -7,11 +7,17 @@ import {
   type VRFrame,
   type Vec3,
 } from '../protocol/messages';
-import {loadRobotModel, type RobotModel} from '../robot/robotModel';
+import {
+  LM3_HOME_Q,
+  LM3_TCP_OFFSET,
+  loadRobotModel,
+  type RobotModel,
+} from '../robot/robotModel';
 import {RobotStateBuffer} from '../robot/robotState';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
 import type {XRPresentationSample} from '../xr/session';
 import {ControllerHints} from './controllerHints';
+import {KinematicGraspController} from './kinematicGraspController';
 import {WorkspacePlacementController} from './workspacePlacementController';
 import {VrSafetyPanel} from './vrSafetyPanel';
 
@@ -198,8 +204,10 @@ export class SimulationScene {
   private readonly robotVisualRoot = new THREE.Group();
   private readonly grid = new THREE.GridHelper(4, 40, 0x1f839f, 0x183245);
   private readonly targetMarker = new THREE.Group();
+  private readonly graspCube = createGraspCube();
   private sessionId = createSessionId();
   private robotModel: RobotModel | null = null;
+  private graspController: KinematicGraspController | null = null;
   private animationHandle: number | null = null;
   private sequence = 0;
   private lastFrameMs = Number.NEGATIVE_INFINITY;
@@ -221,6 +229,8 @@ export class SimulationScene {
     fault: null,
     faultRecoverable: false,
     faultResetPending: false,
+    constraint: null,
+    recoveryPhase: null,
   };
   private questControllerSupported: boolean | null = null;
   private started = false;
@@ -248,6 +258,7 @@ export class SimulationScene {
     this.robotVisualRoot.name = 'robot-visual-root';
     this.scene.add(this.robotVisualRoot);
     this.createEnvironment();
+    this.robotVisualRoot.add(this.graspCube);
     this.createTargetMarker();
     this.controllerHints = new ControllerHints(this.scene);
     this.controllerHints.setVisible(false);
@@ -385,6 +396,8 @@ export class SimulationScene {
       if (sample) {
         this.robotModel.setJointAngles(sample.state.actual_q);
         this.robotModel.setGripper(sample.state.gripper);
+        this.robotVisualRoot.updateMatrixWorld(true);
+        this.graspController?.update(sample.state.gripper);
       }
     }
 
@@ -423,9 +436,19 @@ export class SimulationScene {
         return;
       }
       this.robotModel = model;
-      model.setJointAngles([0.2, -0.8, -0.8, -0.4, 0.6, 0]);
-      fitRobotToWorkbench(model.group);
+      model.setJointAngles(LM3_HOME_Q);
+      model.group.scale.setScalar(1);
+      model.group.position.set(0, 0, 0);
       this.robotVisualRoot.add(model.group);
+      this.graspController = new KinematicGraspController({
+        visualRoot: this.robotVisualRoot,
+        tool: model.tool,
+        cube: this.graspCube,
+        tcpOffset: new THREE.Vector3(...LM3_TCP_OFFSET),
+        tableRestY: 0.025,
+        tableHalfWidth: 0.56,
+        tableHalfDepth: 0.38,
+      });
     } catch (error) {
       if (this.started) this.options.onError(modelLoadErrorMessage(error));
     }
@@ -521,24 +544,21 @@ export class SimulationScene {
   private readonly preventContextMenu = (event: MouseEvent): void => event.preventDefault();
 }
 
-function fitRobotToWorkbench(group: THREE.Group): void {
-  group.updateMatrixWorld(true);
-  const bounds = new THREE.Box3().setFromObject(group);
-  const size = bounds.getSize(new THREE.Vector3());
-  const scale = size.y > 0 ? 0.68 / size.y : 1;
-  group.scale.setScalar(scale);
-  group.updateMatrixWorld(true);
-  const fitted = new THREE.Box3().setFromObject(group);
-  const center = fitted.getCenter(new THREE.Vector3());
-  group.position.x -= center.x;
-  group.position.x += 0.04;
-  group.position.z -= center.z;
-  group.position.y -= fitted.min.y;
-}
-
 function createSessionId(): string {
   const token = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}`;
   return `desktop-${token}`;
+}
+
+function createGraspCube(): THREE.Mesh {
+  const cube = new THREE.Mesh(
+    new THREE.BoxGeometry(0.06, 0.06, 0.06),
+    new THREE.MeshStandardMaterial({color: 0xff8a3d, metalness: 0.05, roughness: 0.58}),
+  );
+  cube.name = 'grasp-cube';
+  cube.position.set(0.18, 0.025, -0.32);
+  cube.castShadow = true;
+  cube.receiveShadow = true;
+  return cube;
 }
 
 export function modelLoadErrorMessage(_error: unknown): string {

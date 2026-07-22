@@ -22,7 +22,10 @@ describe('Chinese simulator HUD', () => {
 
     hud.setConnectionStatus({state: 'connected'});
     hud.setController({tracking: true, grip: false, trigger: 0.4});
-    hud.setRobotState({mode: 'ACTIVE', backendState: 'MOVING', sampleAgeMs: 15, fault: null});
+    hud.setRobotState({
+      mode: 'ACTIVE', backendState: 'MOVING', sampleAgeMs: 15, fault: null,
+      constraint: null, recoveryPhase: null,
+    });
     hud.setLatency(24, 48);
 
     expect(document.body.textContent).toContain('ACTIVE · 遥操作中');
@@ -38,6 +41,8 @@ describe('Chinese simulator HUD', () => {
       backendState: 'FAULT',
       sampleAgeMs: 120,
       fault: 'ik_unreachable',
+      constraint: null,
+      recoveryPhase: null,
     });
     expect(document.body.textContent).toContain('目标不可达');
   });
@@ -50,6 +55,8 @@ describe('Chinese simulator HUD', () => {
       backendState: 'IDLE',
       sampleAgeMs: 1,
       fault: 'workspace_violation',
+      constraint: null,
+      recoveryPhase: null,
     });
 
     expect(document.querySelector('[data-field="mode"]')?.textContent).toBe('FAULT · 故障');
@@ -65,6 +72,8 @@ describe('Chinese simulator HUD', () => {
       backendState: 'MOVING',
       sampleAgeMs: 31,
       fault: 'workspace_violation',
+      constraint: null,
+      recoveryPhase: null,
     });
     hud.setLatency(18, 42);
 
@@ -86,6 +95,8 @@ describe('Chinese simulator HUD', () => {
       backendState: 'MOVING',
       sampleAgeMs: 31,
       fault: null,
+      constraint: null,
+      recoveryPhase: null,
     });
 
     hud.setConnectionStatus({state: 'occupied', message: '占用'});
@@ -125,7 +136,10 @@ describe('Chinese simulator HUD', () => {
   ])('maps backend fault %s to readable Chinese', (fault, message) => {
     const hud = new Hud(document.querySelector('#app')!);
 
-    hud.setRobotState({mode: 'FAULT', backendState: 'FAULT', sampleAgeMs: 1, fault});
+    hud.setRobotState({
+      mode: 'FAULT', backendState: 'FAULT', sampleAgeMs: 1, fault,
+      constraint: null, recoveryPhase: null,
+    });
 
     expect(document.body.textContent).toContain(message);
     expect(document.body.textContent).not.toContain(fault);

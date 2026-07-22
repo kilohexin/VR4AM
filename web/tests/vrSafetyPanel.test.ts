@@ -15,6 +15,8 @@ const state = (phase: ArmSafetyPhase): ArmSafetySnapshot => ({
   fault: phase === 'fault' ? 'ik_unreachable' : null,
   faultRecoverable: false,
   faultResetPending: false,
+  constraint: null,
+  recoveryPhase: null,
 } as const);
 
 describe('VR safety presentation', () => {

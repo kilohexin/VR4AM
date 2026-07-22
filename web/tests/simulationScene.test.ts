@@ -385,6 +385,8 @@ describe('XR render-loop handoff', () => {
       fault: null,
       faultRecoverable: false,
       faultResetPending: false,
+      constraint: null,
+      recoveryPhase: null,
     } satisfies ArmSafetySnapshot;
     const update = vi.fn();
     const scene = {
@@ -443,8 +445,10 @@ function presentationSample(options: {grip?: boolean; leftTrackingValid?: boolea
       p: [-0.2, 1.1, -0.4],
       q: [0, 0, 0, 1],
       trackingValid: options.leftTrackingValid ?? true,
+      thumbstickX: 0,
       thumbstickY: -0.75,
       thumbstickPressed: true,
+      grip: false,
     },
     right: {
       p: [0.2, 1.1, -0.4],
