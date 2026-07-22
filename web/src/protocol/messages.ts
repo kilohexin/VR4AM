@@ -15,6 +15,8 @@ export interface ControllerState extends Pose {
 }
 
 export type VisibilityState = 'visible' | 'visible-blurred' | 'hidden';
+export type ConstraintKind = 'workspace_boundary' | 'ik_boundary' | 'joint_boundary';
+export type RecoveryPhase = 'stopping' | 'homing' | 'stabilizing';
 
 export interface VRFrame {
   v: typeof PROTOCOL_VERSION;
@@ -25,6 +27,7 @@ export interface VRFrame {
   tracking_valid: boolean;
   visibility: VisibilityState;
   right: ControllerState;
+  head_q?: Quat | null;
 }
 
 export type TeleopMode =
@@ -51,6 +54,8 @@ export interface RobotStateMessage {
   gripper: number;
   sample_age_ms?: number | null;
   fault?: string | null;
+  constraint?: ConstraintKind | null;
+  recovery_phase?: RecoveryPhase | null;
 }
 
 export type ClientControlType = 'hello' | 'arm_request' | 'disarm' | 'reset_fault' | 'ping';
@@ -132,6 +137,12 @@ const VISIBILITY_STATES: readonly VisibilityState[] = [
   'visible-blurred',
   'hidden',
 ];
+const CONSTRAINT_KINDS: readonly ConstraintKind[] = [
+  'workspace_boundary',
+  'ik_boundary',
+  'joint_boundary',
+];
+const RECOVERY_PHASES: readonly RecoveryPhase[] = ['stopping', 'homing', 'stabilizing'];
 const CONTROL_TYPES: readonly ClientControlType[] = [
   'hello',
   'arm_request',
@@ -234,28 +245,26 @@ function isNullableNonNegativeNumber(value: unknown): boolean {
 }
 
 export function isVRFrame(value: unknown): value is VRFrame {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      'v', 'type', 'session_id', 'seq', 'client_mono_ms', 'tracking_valid', 'visibility', 'right',
+    ], ['head_q']) ||
+    value.v !== PROTOCOL_VERSION ||
+    value.type !== 'vr_frame' ||
+    typeof value.session_id !== 'string' ||
+    codePointLength(value.session_id) < 1 ||
+    codePointLength(value.session_id) > 64 ||
+    !isNonNegativeInteger(value.seq) ||
+    !isNonNegativeNumber(value.client_mono_ms) ||
+    typeof value.tracking_valid !== 'boolean' ||
+    !isEnumValue(VISIBILITY_STATES, value.visibility) ||
+    !isControllerState(value.right)
+  ) {
+    return false;
+  }
   return (
-    isRecord(value) &&
-    hasExactKeys(value, [
-      'v',
-      'type',
-      'session_id',
-      'seq',
-      'client_mono_ms',
-      'tracking_valid',
-      'visibility',
-      'right',
-    ]) &&
-    value.v === PROTOCOL_VERSION &&
-    value.type === 'vr_frame' &&
-    typeof value.session_id === 'string' &&
-    codePointLength(value.session_id) >= 1 &&
-    codePointLength(value.session_id) <= 64 &&
-    isNonNegativeInteger(value.seq) &&
-    isNonNegativeNumber(value.client_mono_ms) &&
-    typeof value.tracking_valid === 'boolean' &&
-    isEnumValue(VISIBILITY_STATES, value.visibility) &&
-    isControllerState(value.right)
+    !Object.hasOwn(value, 'head_q') || value.head_q === null || isQuat(value.head_q)
   );
 }
 
@@ -265,7 +274,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
     !hasExactKeys(
       value,
       ['v', 'type', 'server_mono_ns', 'mode', 'robot_state', 'actual_tcp', 'actual_q', 'gripper'],
-      ['ack_seq', 'sample_age_ms', 'fault'],
+      ['ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase'],
     ) ||
     value.v !== PROTOCOL_VERSION ||
     value.type !== 'robot_state' ||
@@ -286,7 +295,21 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
   ) {
     return false;
   }
-  return !Object.hasOwn(value, 'fault') || value.fault === null || typeof value.fault === 'string';
+  if (Object.hasOwn(value, 'fault') && value.fault !== null && typeof value.fault !== 'string') {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, 'constraint') &&
+    value.constraint !== null &&
+    !isEnumValue(CONSTRAINT_KINDS, value.constraint)
+  ) {
+    return false;
+  }
+  return (
+    !Object.hasOwn(value, 'recovery_phase') ||
+    value.recovery_phase === null ||
+    isEnumValue(RECOVERY_PHASES, value.recovery_phase)
+  );
 }
 
 export function isClientControlMessage(value: unknown): value is ClientControlMessage {

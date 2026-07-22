@@ -17,6 +17,8 @@ FaultResetRejectReason = Literal[
     "unrecoverable_fault",
     "control_loop_unavailable",
 ]
+ConstraintKind = Literal["workspace_boundary", "ik_boundary", "joint_boundary"]
+RecoveryPhase = Literal["stopping", "homing", "stabilizing"]
 
 
 class StrictMessage(BaseModel):
@@ -27,6 +29,14 @@ def _finite(values: tuple[float, ...], name: str) -> tuple[float, ...]:
     if not all(math.isfinite(value) for value in values):
         raise ValueError(f"{name} must contain only finite values")
     return values
+
+
+def _normalize_quaternion(value: Quat, name: str = "quaternion") -> Quat:
+    _finite(value, name)
+    norm = math.sqrt(sum(component * component for component in value))
+    if not 0.9 <= norm <= 1.1:
+        raise ValueError(f"{name} norm must be between 0.9 and 1.1")
+    return tuple(component / norm for component in value)  # type: ignore[return-value]
 
 
 class Pose(StrictMessage):
@@ -41,11 +51,7 @@ class Pose(StrictMessage):
     @field_validator("q")
     @classmethod
     def validate_quaternion(cls, value: Quat) -> Quat:
-        _finite(value, "quaternion")
-        norm = math.sqrt(sum(component * component for component in value))
-        if not 0.9 <= norm <= 1.1:
-            raise ValueError("quaternion norm must be between 0.9 and 1.1")
-        return tuple(component / norm for component in value)  # type: ignore[return-value]
+        return _normalize_quaternion(value)
 
 
 class ControllerState(Pose):
@@ -62,6 +68,12 @@ class VRFrame(StrictMessage):
     tracking_valid: bool
     visibility: Literal["visible", "visible-blurred", "hidden"]
     right: ControllerState
+    head_q: Quat | None = None
+
+    @field_validator("head_q")
+    @classmethod
+    def validate_head_quaternion(cls, value: Quat | None) -> Quat | None:
+        return None if value is None else _normalize_quaternion(value, "head quaternion")
 
 
 class TeleopMode(StrEnum):
@@ -95,6 +107,8 @@ class RobotStateMessage(StrictMessage):
     gripper: Annotated[float, Field(ge=0.0, le=1.0)]
     sample_age_ms: float | None = Field(default=None, ge=0)
     fault: str | None = None
+    constraint: ConstraintKind | None = None
+    recovery_phase: RecoveryPhase | None = None
 
 
 class ClientControlMessage(StrictMessage):

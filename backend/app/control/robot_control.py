@@ -71,13 +71,17 @@ class RobotControl:
         latest: LatestVRFrame,
         clock: MonotonicClock,
         recorder: RecorderSink,
+        mapper: CoordinateMapper | None = None,
+        limiter: SafetyLimiter | None = None,
+        constraint_clear_ms: int = 100,
     ) -> None:
         self.backend = backend
         self.latest = latest
         self.clock = clock
         self.recorder = recorder
-        self.mapper = CoordinateMapper()
-        self.limiter = SafetyLimiter()
+        self.mapper = mapper if mapper is not None else CoordinateMapper()
+        self.limiter = limiter if limiter is not None else SafetyLimiter()
+        self.constraint_clear_ns = constraint_clear_ms * 1_000_000
         self.machine = TeleopStateMachine()
         self.filter = PoseFilter()
         self.last_seq: int | None = None
