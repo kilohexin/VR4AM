@@ -32,6 +32,7 @@ def create_app() -> FastAPI:
             mapper=CoordinateMapper(
                 translation_scale=settings.translation_scale,
                 rotation_scale=settings.rotation_scale,
+                rotation_dead_zone_deg=settings.rotation_dead_zone_deg,
             ),
             limiter=SafetyLimiter(
                 max_linear_speed=settings.max_linear_speed_mps,

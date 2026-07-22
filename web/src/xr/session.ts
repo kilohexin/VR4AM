@@ -1,4 +1,4 @@
-import type {VRFrame, VisibilityState} from '../protocol/messages';
+import type {Quat, VRFrame, VisibilityState} from '../protocol/messages';
 import {createVRFrame} from '../scenes/simulationScene';
 import {
   invalidControllerSample,
@@ -21,6 +21,7 @@ export interface XRPresentationSample {
   left: LeftControllerSample;
   right: ControllerSample;
   headY: number | null;
+  headQ?: Quat | null;
 }
 
 export type XRSessionStatus =
@@ -232,10 +233,15 @@ export class XRSessionController {
     if (context.suspended || context.session.visibilityState !== 'visible') return;
     const pair = readControllers(frame, context.referenceSpace, context.session.inputSources);
     const viewerPose = frame.getViewerPose(context.referenceSpace);
+    const headOrientation = viewerPose?.transform.orientation;
+    const headQ: Quat | null = headOrientation
+      ? [headOrientation.x, headOrientation.y, headOrientation.z, headOrientation.w]
+      : null;
     this.options.host.updateXRPresentation({
       left: pair.left,
       right: pair.right,
       headY: viewerPose?.transform.position.y ?? null,
+      headQ,
     }, nowMs);
     this.options.host.renderXR(nowMs);
     if (nowMs - context.lastFrameMs < FRAME_INTERVAL_MS) return;
@@ -245,7 +251,7 @@ export class XRSessionController {
       this.options.onDisarm();
       this.options.onLockReset();
     }
-    this.emitFrame(context, nowMs, sample, 'visible');
+    this.emitFrame(context, nowMs, sample, 'visible', false, headQ);
   }
 
   private onVisibilityChange(context: SessionContext): void {
@@ -281,6 +287,7 @@ export class XRSessionController {
     sample: ControllerSample,
     visibility: VisibilityState,
     force = false,
+    headQ: Quat | null = null,
   ): void {
     if (!this.ownsLiveContext(context)) return;
     if (!force) context.lastFrameMs = nowMs;
@@ -302,6 +309,7 @@ export class XRSessionController {
       trackingValid: sample.trackingValid,
       position: sample.p,
       quaternion: sample.q,
+      ...(headQ ? {headQ} : {}),
       grip: sample.grip,
       trigger: sample.trigger,
       visibility,
@@ -407,6 +415,7 @@ function invalidPresentationSample(): XRPresentationSample {
     },
     right: invalidControllerSample(),
     headY: null,
+    headQ: null,
   };
 }
 

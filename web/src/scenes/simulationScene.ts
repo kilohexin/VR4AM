@@ -24,13 +24,14 @@ export interface VRFrameInput {
   trackingValid: boolean;
   position: Vec3;
   quaternion: Quat;
+  headQ?: Quat;
   grip: boolean;
   trigger: number;
   visibility?: VisibilityState;
 }
 
 export function createVRFrame(input: VRFrameInput): VRFrame {
-  return {
+  const frame: VRFrame = {
     v: PROTOCOL_VERSION,
     type: 'vr_frame',
     session_id: input.sessionId,
@@ -45,6 +46,8 @@ export function createVRFrame(input: VRFrameInput): VRFrame {
       trigger: clamp(input.trigger, 0, 1),
     },
   };
+  if (input.headQ) frame.head_q = [...input.headQ];
+  return frame;
 }
 
 export interface DesktopInputSnapshot {

@@ -320,10 +320,16 @@ class RobotControl:
                 and self.machine.mode == TeleopMode.ACTIVE
             ):
                 state = await self.backend.get_state()
-                self.mapper.capture(
-                    Pose(p=received.frame.right.p, q=received.frame.right.q),
-                    state.actual_tcp,
-                )
+                try:
+                    self.mapper.capture(
+                        Pose(p=received.frame.right.p, q=received.frame.right.q),
+                        state.actual_tcp,
+                        received.frame.head_q,
+                    )
+                except RuntimeError as error:
+                    if str(error) != "invalid_control_basis":
+                        raise
+                    raise SafetyViolation("invalid_numeric") from error
                 self.limiter.set_anchor(state.actual_tcp.p)
                 self.filter.reset(state.actual_tcp)
                 self.last_target = state.actual_tcp
