@@ -413,7 +413,7 @@ def test_new_owner_after_disconnect_still_requires_release_and_explicit_arm() ->
             assert _receive_until(second, "arm_ack")["request_id"] == "explicit"
 
 
-def test_state_sender_runs_at_20hz_without_blocking_ping_receiver() -> None:
+def test_state_sender_runs_at_50hz_without_blocking_ping_receiver() -> None:
     with TestClient(create_app()) as client, client.websocket_connect(
         "/ws/v1/teleop"
     ) as ws:
@@ -426,11 +426,11 @@ def test_state_sender_runs_at_20hz_without_blocking_ping_receiver() -> None:
 
         assert pong["request_id"] == "p1"
         delta = (second_state["server_mono_ns"] - first_state["server_mono_ns"]) / 1e9
-        assert 0.03 <= delta <= 0.12
+        assert 0.012 <= delta <= 0.08
 
 
 @pytest.mark.asyncio
-async def test_state_sender_sleeps_exactly_fifty_ms(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_state_sender_sleeps_exactly_twenty_ms(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api import teleop_ws
 
     sent: list[dict[str, object]] = []
@@ -459,7 +459,7 @@ async def test_state_sender_sleeps_exactly_fifty_ms(monkeypatch: pytest.MonkeyPa
         await teleop_ws.state_sender(FakeWebSocket(), FakeControl())
 
     assert len(sent) == 3
-    assert sleeps == [0.05, 0.05, 0.05]
+    assert sleeps == [0.02, 0.02, 0.02]
 
 
 @pytest.mark.asyncio

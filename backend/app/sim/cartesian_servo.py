@@ -80,12 +80,12 @@ def cartesian_servo_step(
     position_jacobian = jacobian[:3]
     rotation_jacobian = jacobian[3:]
 
-    position_command = _clip_norm(4.0 * position_error, 0.20)
+    position_command = _clip_norm(4.0 * position_error, 0.30)
     position_inverse = _damped_pseudoinverse(position_jacobian)
     position_velocity = position_inverse @ position_command
 
     nullspace = np.eye(6) - position_inverse @ position_jacobian
-    rotation_command = _clip_norm(2.5 * orientation_error, 0.8)
+    rotation_command = _clip_norm(2.5 * orientation_error, 1.5)
     remaining_rotation = rotation_command - rotation_jacobian @ position_velocity
     projected_rotation_jacobian = rotation_jacobian @ nullspace
     rotation_velocity = (

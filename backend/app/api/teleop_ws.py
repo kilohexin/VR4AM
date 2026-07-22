@@ -29,11 +29,14 @@ async def state_sender(
     send_lock: asyncio.Lock | None = None,
 ) -> None:
     send_lock = send_lock or asyncio.Lock()
+    settings = getattr(getattr(websocket, "app", None), "state", None)
+    state_hz = getattr(getattr(settings, "settings", None), "state_hz", 50)
+    period_s = 1.0 / state_hz
     while True:
         async with send_lock:
             state = await control.state_message()
             await websocket.send_json(state.model_dump(mode="json"))
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(period_s)
 
 
 async def _delayed_state_sender(
@@ -183,7 +186,7 @@ async def _run_coupled_session(
     )
     sender = asyncio.create_task(
         _delayed_state_sender(websocket, control, start_sender, send_lock),
-        name="teleop-state-20hz",
+        name="teleop-state-50hz",
     )
     sender_tasks.add(sender)
     wait_error: BaseException | None = None

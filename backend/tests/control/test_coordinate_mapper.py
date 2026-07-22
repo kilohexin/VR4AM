@@ -6,26 +6,29 @@ from app.control.coordinate_mapper import CoordinateMapper
 from app.schemas.messages import Pose
 
 
-def test_mapper_uses_scene_translation_and_camera_tool_roll() -> None:
+def test_mapper_applies_fixed_one_to_one_world_pose_delta_without_a_jump() -> None:
     mapper = CoordinateMapper(
-        translation_scale=0.5,
+        translation_scale=1.0,
         rotation_scale=1.0,
         rotation_dead_zone_deg=0.0,
     )
-    hand_anchor = Pose(p=(0.0, 1.2, -0.3), q=(0.0, 0.0, 0.0, 1.0))
-    tcp_rotation = Rotation.from_euler("x", 30.0, degrees=True)
+    hand_rotation = Rotation.from_euler("xyz", (15, -20, 10), degrees=True)
+    tcp_rotation = Rotation.from_euler("xyz", (-30, 5, 40), degrees=True)
+    hand_anchor = Pose(p=(0.0, 1.2, -0.3), q=tuple(hand_rotation.as_quat()))
     tcp_anchor = Pose(p=(0.3, 0.4, -0.2), q=tuple(tcp_rotation.as_quat()))
-    mapper.capture(
-        hand_anchor,
-        tcp_anchor,
-        tuple(Rotation.from_euler("y", 80.0, degrees=True).as_quat()),
-    )
-    controller_roll = Rotation.from_rotvec((0.0, 0.0, -0.2))
+    mapper.capture(hand_anchor, tcp_anchor)
+    delta = Rotation.from_euler("xyz", (12, -8, 20), degrees=True)
 
     target = mapper.target(
-        Pose(p=(0.02, 1.16, -0.36), q=tuple(controller_roll.as_quat()))
+        Pose(
+            p=(0.10, 1.15, -0.22),
+            q=tuple((delta * hand_rotation).as_quat()),
+        )
     )
 
-    assert target.p == pytest.approx((0.31, 0.38, -0.23))
-    local_tcp_delta = tcp_rotation.inv() * Rotation.from_quat(target.q)
-    np.testing.assert_allclose(local_tcp_delta.as_rotvec(), (0.0, -0.2, 0.0), atol=1e-8)
+    assert target.p == pytest.approx((0.40, 0.35, -0.12))
+    np.testing.assert_allclose(
+        Rotation.from_quat(target.q).as_matrix(),
+        (delta * tcp_rotation).as_matrix(),
+        atol=1e-8,
+    )
