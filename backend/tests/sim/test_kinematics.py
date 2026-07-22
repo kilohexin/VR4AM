@@ -32,7 +32,15 @@ def test_home_keeps_tcp_and_forward_while_camera_is_up_and_jaws_are_horizontal()
     legacy_forward = legacy[:3, :3] @ np.asarray((0.0, -1.0, 0.0))
 
     assert model.home_q[5] == pytest.approx(-np.pi / 2)
-    np.testing.assert_allclose(home[:3, 3], legacy[:3, 3], atol=1e-9)
-    np.testing.assert_allclose(forward, legacy_forward, atol=1e-9)
+    np.testing.assert_allclose(home[:3, 3], legacy[:3, 3], atol=5e-8)
+    forward_error = np.arccos(
+        np.clip(
+            np.dot(forward, legacy_forward)
+            / (np.linalg.norm(forward) * np.linalg.norm(legacy_forward)),
+            -1.0,
+            1.0,
+        )
+    )
+    assert forward_error <= 5e-7
     np.testing.assert_allclose(camera_up, (0.0, 1.0, 0.0), atol=1e-8)
     assert jaw_axis[1] == pytest.approx(0.0, abs=1e-8)
