@@ -5,6 +5,8 @@ import {
   type ConstraintKind,
   type FaultResetRejectReason,
   type FaultResetResultMessage,
+  type HomeRejectReason,
+  type HomeResultMessage,
   type RecoveryPhase,
   type TeleopMode,
 } from '../protocol/messages';
@@ -34,6 +36,7 @@ export type ArmSafetySnapshot = Readonly<{
   fault: string | null;
   faultRecoverable: boolean;
   faultResetPending: boolean;
+  homePending?: boolean;
   constraint: ConstraintKind | null;
   recoveryPhase: RecoveryPhase | null;
 }>;
@@ -53,6 +56,14 @@ const RESET_REJECTION_FEEDBACK: Readonly<Record<FaultResetRejectReason, string>>
   control_loop_unavailable: '控制循环不可用，请重启后端并重新检查。',
 };
 
+const HOME_REJECTION_FEEDBACK: Readonly<Record<HomeRejectReason, string>> = {
+  fault_present: '存在未清除故障，请先完成故障复位。',
+  grip_pressed: '请保持 Grip 松开后重试。',
+  not_stopped: '机械臂尚未停止，请先停止后重试。',
+  control_loop_unavailable: '控制循环不可用，请重启后端并重新检查。',
+  home_failed: '无法返回 Home，请稍后重试。',
+};
+
 export class ArmPanel {
   readonly backendText = 'SIMULATOR';
   readonly armButton: HTMLButtonElement;
@@ -69,9 +80,11 @@ export class ArmPanel {
   private requestSequence = 0;
   private pendingArmRequestId: string | null = null;
   private pendingFaultResetId: string | null = null;
+  private pendingHomeRequestId: string | null = null;
   private awaitingArmedMode = false;
   private armFeedback: string | null = null;
   private resetFeedback: string | null = null;
+  private homeFeedback: string | null = null;
   private gripPressed = true;
   private mode: TeleopMode = 'READY';
   private stopRequested = false;
@@ -118,7 +131,7 @@ export class ArmPanel {
   }
 
   get feedbackText(): string {
-    return this.resetFeedback ?? this.armFeedback ?? '';
+    return this.resetFeedback ?? this.homeFeedback ?? this.armFeedback ?? '';
   }
 
   get safetyState(): ArmSafetySnapshot {
@@ -134,6 +147,7 @@ export class ArmPanel {
       fault: this.fault,
       faultRecoverable: this.isFaultRecoverable,
       faultResetPending: this.pendingFaultResetId !== null,
+      homePending: this.pendingHomeRequestId !== null,
       constraint: this.constraint,
       recoveryPhase: this.recoveryPhase,
     });
@@ -147,7 +161,9 @@ export class ArmPanel {
       this.connected &&
       !this.isAuthoritativelyUnavailable() &&
       !this.isArmPending &&
-      this.pendingFaultResetId === null
+      this.pendingFaultResetId === null &&
+      this.pendingHomeRequestId === null &&
+      this.recoveryPhase === null
     ) {
       this.eligible = true;
     }
@@ -194,6 +210,7 @@ export class ArmPanel {
 
   setRecoveryPhase(phase: RecoveryPhase | null): void {
     this.recoveryPhase = phase;
+    if (phase !== null) this.eligible = false;
     this.syncButtonState();
   }
 
@@ -245,6 +262,8 @@ export class ArmPanel {
     this.armFeedback = null;
     this.pendingFaultResetId = null;
     this.resetFeedback = null;
+    this.pendingHomeRequestId = null;
+    this.homeFeedback = null;
     this.constraint = null;
     this.recoveryPhase = null;
     this.stopRequested = true;
@@ -275,7 +294,9 @@ export class ArmPanel {
       this.fault ||
       this.isAuthoritativelyUnavailable() ||
       this.armed ||
-      this.isArmPending
+      this.isArmPending ||
+      this.pendingHomeRequestId !== null ||
+      this.recoveryPhase !== null
     ) {
       return false;
     }
@@ -283,6 +304,7 @@ export class ArmPanel {
     this.pendingArmRequestId = message.request_id;
     this.eligible = false;
     this.armFeedback = null;
+    this.homeFeedback = null;
     this.syncButtonState();
     this.sendControl(message);
     return true;
@@ -311,6 +333,22 @@ export class ArmPanel {
       this.sendControl(message);
       return;
     }
+    if (this.pendingHomeRequestId !== null || this.recoveryPhase !== null) return;
+    if (this.isArmPending) {
+      this.requestDisarm(source);
+      return;
+    }
+    const stopped = this.mode === 'DISARMED' || (!this.armed && this.mode === 'READY');
+    if (stopped && this.connected && !this.gripPressed) {
+      const message = this.control('home_request', source);
+      this.pendingHomeRequestId = message.request_id;
+      this.resetFeedback = null;
+      this.homeFeedback = null;
+      this.eligible = false;
+      this.syncButtonState();
+      this.sendControl(message);
+      return;
+    }
     this.requestDisarm(source);
   }
 
@@ -327,8 +365,26 @@ export class ArmPanel {
     this.syncButtonState();
   }
 
+  handleHomeResult(message: HomeResultMessage): void {
+    if (message.request_id !== this.pendingHomeRequestId) return;
+    this.pendingHomeRequestId = null;
+    if (message.accepted) {
+      this.homeFeedback = null;
+      this.resetToLocked();
+      return;
+    }
+    this.armed = false;
+    this.eligible = false;
+    this.pendingArmRequestId = null;
+    this.awaitingArmedMode = false;
+    this.stopRequested = true;
+    this.mode = this.connected ? 'DISARMED' : 'DISCONNECTED';
+    this.homeFeedback = HOME_REJECTION_FEEDBACK[message.reason];
+    this.syncButtonState();
+  }
+
   private control(
-    type: 'arm_request' | 'disarm' | 'reset_fault',
+    type: 'arm_request' | 'disarm' | 'reset_fault' | 'home_request',
     source: ControlSource,
   ): ClientControlMessage {
     this.requestSequence += 1;
@@ -363,7 +419,9 @@ export class ArmPanel {
       !this.eligible ||
       this.armed ||
       Boolean(this.fault) ||
-      this.isArmPending;
+      this.isArmPending ||
+      this.pendingHomeRequestId !== null ||
+      this.recoveryPhase !== null;
     this.armButton.dataset.state = this.armed
       ? 'armed'
       : this.isArmPending
@@ -396,7 +454,10 @@ export class ArmPanel {
           ? '正在回到初始姿态…'
           : this.recoveryPhase === 'stabilizing'
             ? '正在确认 Home 稳定…'
-            : '复位准备中…';
+            : '复位中…';
+      this.stopButton.disabled = true;
+    } else if (this.pendingHomeRequestId !== null || this.recoveryPhase !== null) {
+      this.stopLabel.textContent = '正在返回 Home…';
       this.stopButton.disabled = true;
     } else if (this.isFaultRecoverable) {
       this.stopLabel.textContent = '复位故障';
@@ -405,10 +466,12 @@ export class ArmPanel {
       this.stopLabel.textContent = '无法在线复位';
       this.stopButton.disabled = true;
     } else {
-      this.stopLabel.textContent = '停止';
+      const stopped = this.mode === 'DISARMED' || (!this.armed && this.mode === 'READY');
+      const canRequestHome = stopped && !this.isArmPending && this.connected && !this.gripPressed;
+      this.stopLabel.textContent = canRequestHome ? '回到 Home' : '停止';
       this.stopButton.disabled = false;
     }
-    this.stopButton.title = this.resetFeedback ?? '';
+    this.stopButton.title = this.resetFeedback ?? this.homeFeedback ?? '';
     this.publishSafetyChange();
   }
 

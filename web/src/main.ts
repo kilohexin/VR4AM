@@ -38,6 +38,7 @@ const socket = new TeleopSocket(
   },
   (message) => armPanel?.handleArmFeedback(message),
   (message) => armPanel?.handleFaultResetResult(message),
+  (message) => armPanel?.handleHomeResult(message),
 );
 
 armPanel = new ArmPanel(

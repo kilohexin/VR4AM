@@ -58,7 +58,13 @@ export interface RobotStateMessage {
   recovery_phase?: RecoveryPhase | null;
 }
 
-export type ClientControlType = 'hello' | 'arm_request' | 'disarm' | 'reset_fault' | 'ping';
+export type ClientControlType =
+  | 'hello'
+  | 'arm_request'
+  | 'disarm'
+  | 'reset_fault'
+  | 'home_request'
+  | 'ping';
 
 export interface ClientControlMessage {
   v: typeof PROTOCOL_VERSION;
@@ -113,6 +119,30 @@ export type FaultResetResultMessage =
       message: string;
     };
 
+export type HomeRejectReason =
+  | 'fault_present'
+  | 'grip_pressed'
+  | 'not_stopped'
+  | 'control_loop_unavailable'
+  | 'home_failed';
+
+export type HomeResultMessage =
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'home_result';
+      request_id: string;
+      accepted: true;
+      mode: 'DISARMED';
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'home_result';
+      request_id: string;
+      accepted: false;
+      reason: HomeRejectReason;
+      message: string;
+    };
+
 type UnknownRecord = Record<string, unknown>;
 
 const TELEOP_MODES: readonly TeleopMode[] = [
@@ -148,6 +178,7 @@ const CONTROL_TYPES: readonly ClientControlType[] = [
   'arm_request',
   'disarm',
   'reset_fault',
+  'home_request',
   'ping',
 ];
 const FAULT_RESET_REJECT_REASONS: readonly FaultResetRejectReason[] = [
@@ -156,6 +187,13 @@ const FAULT_RESET_REJECT_REASONS: readonly FaultResetRejectReason[] = [
   'backend_moving',
   'unrecoverable_fault',
   'control_loop_unavailable',
+];
+const HOME_REJECT_REASONS: readonly HomeRejectReason[] = [
+  'fault_present',
+  'grip_pressed',
+  'not_stopped',
+  'control_loop_unavailable',
+  'home_failed',
 ];
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -381,6 +419,33 @@ export function isFaultResetResultMessage(value: unknown): value is FaultResetRe
     value.accepted === false &&
     hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'reason', 'message']) &&
     isEnumValue(FAULT_RESET_REJECT_REASONS, value.reason) &&
+    typeof value.message === 'string'
+  );
+}
+
+export function isHomeResultMessage(value: unknown): value is HomeResultMessage {
+  if (
+    !isRecord(value) ||
+    value.v !== PROTOCOL_VERSION ||
+    value.type !== 'home_result' ||
+    typeof value.request_id !== 'string' ||
+    codePointLength(value.request_id) < 1 ||
+    codePointLength(value.request_id) > 64
+  ) {
+    return false;
+  }
+
+  if (value.accepted === true) {
+    return (
+      hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'mode']) &&
+      value.mode === 'DISARMED'
+    );
+  }
+
+  return (
+    value.accepted === false &&
+    hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'reason', 'message']) &&
+    isEnumValue(HOME_REJECT_REASONS, value.reason) &&
     typeof value.message === 'string'
   );
 }

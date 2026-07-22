@@ -5,6 +5,7 @@ import {
   isClientControlMessage,
   isConnectionRejectedMessage,
   isFaultResetResultMessage,
+  isHomeResultMessage,
   isRobotStateMessage,
   isVRFrame,
 } from '../src/protocol/messages';
@@ -28,7 +29,7 @@ describe('protocol guards', () => {
   });
 
   it('accepts every valid control type and optional nullable fields', () => {
-    for (const type of ['hello', 'arm_request', 'disarm', 'reset_fault', 'ping']) {
+    for (const type of ['hello', 'arm_request', 'disarm', 'reset_fault', 'home_request', 'ping']) {
       expect(isClientControlMessage({v: 1, type, request_id: 'request'})).toBe(true);
       expect(
         isClientControlMessage({v: 1, type, request_id: 'request', client_mono_ms: null}),
@@ -72,6 +73,45 @@ describe('protocol guards', () => {
     expect(isFaultResetResultMessage({...accepted, request_id: '😀'.repeat(64)})).toBe(true);
     expect(isFaultResetResultMessage({...accepted, request_id: ''})).toBe(false);
     expect(isFaultResetResultMessage({...accepted, request_id: '😀'.repeat(65)})).toBe(false);
+  });
+
+  it('accepts only exact discriminated Home results', () => {
+    const accepted = {
+      v: 1,
+      type: 'home_result',
+      request_id: 'home-1',
+      accepted: true,
+      mode: 'DISARMED',
+    };
+    const rejected = {
+      v: 1,
+      type: 'home_result',
+      request_id: 'home-2',
+      accepted: false,
+      reason: 'home_failed',
+      message: '仿真无法返回初始姿态，请稍后重试。',
+    };
+
+    expect(isClientControlMessage({v: 1, type: 'home_request', request_id: 'home-1'})).toBe(true);
+    expect(isHomeResultMessage(accepted)).toBe(true);
+    expect(isHomeResultMessage(rejected)).toBe(true);
+    expect(isHomeResultMessage({...accepted, mode: 'READY'})).toBe(false);
+    expect(isHomeResultMessage({...accepted, accepted: false})).toBe(false);
+    expect(isHomeResultMessage({...rejected, accepted: true})).toBe(false);
+    expect(isHomeResultMessage({...rejected, reason: 'unknown'})).toBe(false);
+    expect(isHomeResultMessage({...rejected, extra: true})).toBe(false);
+  });
+
+  it('enforces request identifier code-point limits on Home results', () => {
+    const accepted = {
+      v: 1,
+      type: 'home_result',
+      accepted: true,
+      mode: 'DISARMED',
+    };
+    expect(isHomeResultMessage({...accepted, request_id: '😀'.repeat(64)})).toBe(true);
+    expect(isHomeResultMessage({...accepted, request_id: ''})).toBe(false);
+    expect(isHomeResultMessage({...accepted, request_id: '😀'.repeat(65)})).toBe(false);
   });
 
   it('rejects unknown versions and message types', () => {

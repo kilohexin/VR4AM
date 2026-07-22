@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
 import {readableConstraint, readableFault} from '../ui/hud';
 
-const CONTROL_FOOTER = 'A 解锁 · B 停止 · Grip 控制末端 · 左摇杆平移 · 左 Grip+摇杆调高度' as const;
+const CONTROL_FOOTER = 'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪' as const;
 
 export interface VrSafetyPresentation {
   title: string;
@@ -31,18 +31,14 @@ export function describeVrSafety(
   if (!state.connected) {
     return presentation('连接已中断', '保持 Grip 松开', 'red', 'warning');
   }
+  if (state.homePending || state.recoveryPhase) {
+    return presentation('正在返回 Home', '请保持 Grip 松开', 'red', 'warning');
+  }
   if (state.faultResetPending) {
-    const recovery = state.recoveryPhase
-      ? {
-          stopping: ['正在确认停止', '保持 Grip 松开'],
-          homing: ['正在回到初始姿态', '保持 Grip 松开'],
-          stabilizing: ['正在确认 Home 稳定', '保持 Grip 松开'],
-        }[state.recoveryPhase]
-      : ['复位准备中', '保持 Grip 松开'];
-    return presentation(recovery[0], recovery[1], 'red', 'warning');
+    return presentation('复位中', '等待仿真确认', 'red', 'warning');
   }
   if (state.faultRecoverable && state.fault) {
-    return presentation(readableFault(state.fault), '松开 Grip，按 B 复位', 'red', 'warning');
+    return presentation(readableFault(state.fault), '松开 Grip，按 B 复位并回 Home', 'red', 'warning');
   }
   if (state.fault) {
     return presentation('无法在线复位', '请重启后端并检查原因', 'red', 'warning');
@@ -71,13 +67,13 @@ export function describeVrSafety(
     );
   }
   if (state.phase === 'active') {
-    return presentation('运动中', '松开 Grip 停止', 'cyan', 'shield');
+    return presentation('运动中', '松开 Grip 停止 · B 紧急停止', 'cyan', 'shield');
   }
   if (state.phase === 'armed') {
     return presentation('已解锁', '按住 Grip 移动', 'cyan', 'shield');
   }
   if (state.phase === 'stopped') {
-    return presentation('已停止', '松开 Grip 后按 A', 'red', 'stop');
+    return presentation('已停止', '保持 Grip 松开：A 解锁，B 回 Home', 'red', 'stop');
   }
   return presentation('未解锁', '松开 Grip 后按 A', 'muted', 'shield');
 }
@@ -120,7 +116,7 @@ export class VrSafetyPanel {
       depthTest: false,
     });
     this.sprite = new THREE.Sprite(this.material);
-    this.sprite.position.set(-0.82, 1.18, -0.58);
+    this.sprite.position.set(-0.82, 1.52, -0.72);
     this.sprite.scale.set(1.15, 0.2875, 1);
     this.sprite.renderOrder = 1000;
     this.sprite.visible = false;

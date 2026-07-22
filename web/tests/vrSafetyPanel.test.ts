@@ -24,15 +24,15 @@ describe('VR safety presentation', () => {
     ['locked', '未解锁', '松开 Grip 后按 A', 'muted', 'shield'],
     ['pending', '解锁中', '等待仿真确认', 'cyan', 'shield'],
     ['armed', '已解锁', '按住 Grip 移动', 'cyan', 'shield'],
-    ['active', '运动中', '松开 Grip 停止', 'cyan', 'shield'],
-    ['stopped', '已停止', '松开 Grip 后按 A', 'red', 'stop'],
+    ['active', '运动中', '松开 Grip 停止 · B 紧急停止', 'cyan', 'shield'],
+    ['stopped', '已停止', '保持 Grip 松开：A 解锁，B 回 Home', 'red', 'stop'],
     ['fault', '无法在线复位', '请重启后端并检查原因', 'red', 'warning'],
     ['disconnected', '连接已中断', '保持 Grip 松开', 'red', 'warning'],
   ] as const)('maps %s to readable text and a shape', (phase, title, instruction, tone, shape) => {
     expect(describeVrSafety(state(phase), true)).toEqual({
       title,
       instruction,
-      footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度',
+      footer: 'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
       tone,
       shape,
     });
@@ -106,7 +106,7 @@ describe('VR safety presentation', () => {
       faultRecoverable: true,
     }, true)).toMatchObject({
       title,
-      instruction: '松开 Grip，按 B 复位',
+      instruction: '松开 Grip，按 B 复位并回 Home',
       tone: 'red',
       shape: 'warning',
     });
@@ -121,6 +121,23 @@ describe('VR safety presentation', () => {
     }, true)).toMatchObject({
       title: '复位中',
       instruction: '等待仿真确认',
+    });
+  });
+
+  it('shows the Home recovery instruction for a pending Home or active recovery phase', () => {
+    expect(describeVrSafety({...state('stopped'), homePending: true}, true)).toMatchObject({
+      title: '正在返回 Home',
+      instruction: '请保持 Grip 松开',
+    });
+    expect(describeVrSafety({
+      ...state('fault'),
+      fault: 'workspace_violation',
+      faultRecoverable: true,
+      faultResetPending: true,
+      recoveryPhase: 'homing',
+    }, true)).toMatchObject({
+      title: '正在返回 Home',
+      instruction: '请保持 Grip 松开',
     });
   });
 
@@ -153,7 +170,7 @@ describe('VR safety presentation', () => {
     expect(describeVrSafety(state('locked'), false)).toEqual({
       title: '手柄不受支持',
       instruction: '当前配置不支持 A/B 安全控制',
-      footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度',
+      footer: 'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
       tone: 'red',
       shape: 'warning',
     });
@@ -198,6 +215,13 @@ describe('VR safety sprite resources', () => {
 
     expect(panel.sprite.visible).toBe(false);
     expect(panel.sprite.parent).toBe(parent);
+    expect(panel.sprite.position.toArray()).toEqual([-0.82, 1.52, -0.72]);
+    expect(describeVrSafety(state('stopped'), true).footer).toBe(
+      'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
+    );
+    expect(describeVrSafety(state('stopped'), true).instruction).toBe(
+      '保持 Grip 松开：A 解锁，B 回 Home',
+    );
     const texture = (panel.sprite.material as THREE.SpriteMaterial).map as THREE.CanvasTexture;
     expect(texture.image).toMatchObject({width: 1024, height: 256});
 
