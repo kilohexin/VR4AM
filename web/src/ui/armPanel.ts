@@ -333,11 +333,11 @@ export class ArmPanel {
       this.sendControl(message);
       return;
     }
-    if (this.pendingHomeRequestId !== null || this.recoveryPhase !== null) return;
-    if (this.isArmPending) {
+    if (this.isUnlockedOrMoving()) {
       this.requestDisarm(source);
       return;
     }
+    if (this.pendingHomeRequestId !== null || this.recoveryPhase !== null) return;
     const stopped = this.mode === 'DISARMED' || (!this.armed && this.mode === 'READY');
     if (stopped && this.connected && !this.gripPressed) {
       const message = this.control('home_request', source);
@@ -409,6 +409,16 @@ export class ArmPanel {
     return this.mode === 'DISCONNECTED' || this.mode === 'FAULT' || this.mode === 'STALE';
   }
 
+  private isUnlockedOrMoving(): boolean {
+    return (
+      this.mode === 'ARMED' ||
+      this.mode === 'ACTIVE' ||
+      this.mode === 'HOLD' ||
+      this.armed ||
+      this.isArmPending
+    );
+  }
+
   private get isFaultRecoverable(): boolean {
     return this.fault !== null && RECOVERABLE_FAULTS.has(this.fault);
   }
@@ -456,14 +466,17 @@ export class ArmPanel {
             ? '正在确认 Home 稳定…'
             : '复位中…';
       this.stopButton.disabled = true;
-    } else if (this.pendingHomeRequestId !== null || this.recoveryPhase !== null) {
-      this.stopLabel.textContent = '正在返回 Home…';
-      this.stopButton.disabled = true;
     } else if (this.isFaultRecoverable) {
       this.stopLabel.textContent = '复位故障';
       this.stopButton.disabled = !this.connected || this.gripPressed;
     } else if (this.fault) {
       this.stopLabel.textContent = '无法在线复位';
+      this.stopButton.disabled = true;
+    } else if (this.isUnlockedOrMoving()) {
+      this.stopLabel.textContent = '停止';
+      this.stopButton.disabled = false;
+    } else if (this.pendingHomeRequestId !== null || this.recoveryPhase !== null) {
+      this.stopLabel.textContent = '正在返回 Home…';
       this.stopButton.disabled = true;
     } else {
       const stopped = this.mode === 'DISARMED' || (!this.armed && this.mode === 'READY');

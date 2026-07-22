@@ -534,6 +534,54 @@ describe('ArmPanel simulator safety', () => {
     expect(panel.stopButton.disabled).toBe(true);
   });
 
+  it('keeps B stop-priority when Home is pending and authoritative mode becomes ACTIVE', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.setConnectionStatus({state: 'connected'});
+    panel.setMode('DISARMED');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('xr');
+    expect(panel.safetyState.homePending).toBe(true);
+
+    panel.setMode('ACTIVE');
+    expect(panel.stopButton.disabled).toBe(false);
+    expect(panel.stopButton.textContent).toContain('停止');
+    panel.requestStopOrReset('xr');
+
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'disarm',
+      request_id: expect.stringMatching(/^xr-disarm-/),
+    }));
+    panel.handleHomeResult({
+      v: 1,
+      type: 'home_result',
+      request_id: 'stale-home',
+      accepted: true,
+      mode: 'DISARMED',
+    });
+    expect(panel.safetyState).toMatchObject({mode: 'ACTIVE', homePending: true, armed: false});
+  });
+
+  it.each(['ARMED', 'HOLD'] as const)(
+    'keeps B enabled as Stop during homing when authoritative mode is %s',
+    (mode) => {
+      const send = vi.fn();
+      const panel = new ArmPanel(document.querySelector('#panel')!, send);
+      panel.setConnectionStatus({state: 'connected'});
+      panel.setRecoveryPhase('homing');
+      panel.setMode(mode);
+
+      expect(panel.stopButton.disabled).toBe(false);
+      expect(panel.stopButton.textContent).toContain('停止');
+      panel.requestStopOrReset('desktop');
+
+      expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+        type: 'disarm',
+        request_id: expect.stringMatching(/^desktop-disarm-/),
+      }));
+    },
+  );
+
   it('correlates Home results and keeps a rejected Home stopped with fixed local feedback', () => {
     const send = vi.fn();
     const panel = new ArmPanel(document.querySelector('#panel')!, send);
