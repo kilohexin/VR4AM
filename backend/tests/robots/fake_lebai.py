@@ -13,6 +13,14 @@ IDENTITY_TCP = {
     "ry": 0.0,
     "rx": 0.0,
 }
+ACTUAL_TCP = {
+    "x": 0.3,
+    "y": 0.0,
+    "z": 0.4,
+    "rz": 0.0,
+    "ry": 0.0,
+    "rx": 0.0,
+}
 IDLE_Q = [0.0, -1.0, 1.0, 0.0, 1.57, 0.0]
 
 
@@ -33,9 +41,9 @@ class FakeLebaiClient:
             "target_joint_speed": [0.0] * 6,
             "target_joint_acc": [0.0] * 6,
             "target_joint_torque": [0.0] * 6,
-            "actual_tcp_pose": dict(IDENTITY_TCP),
-            "target_tcp_pose": dict(IDENTITY_TCP),
-            "actual_flange_pose": dict(IDENTITY_TCP),
+            "actual_tcp_pose": dict(ACTUAL_TCP),
+            "target_tcp_pose": dict(ACTUAL_TCP),
+            "actual_flange_pose": dict(ACTUAL_TCP),
         }
         self.ik_results: deque[object] = deque([list(IDLE_Q)])
         self.read_calls: list[str] = []
@@ -55,8 +63,6 @@ class FakeLebaiClient:
         client = cls()
         if tcp is not None:
             client.tcp = dict(tcp)
-            client.kin_data["actual_tcp_pose"] = dict(tcp)
-            client.kin_data["target_tcp_pose"] = dict(tcp)
         if q is not None:
             client.kin_data["actual_joint_pose"] = list(q)
             client.kin_data["target_joint_pose"] = list(q)

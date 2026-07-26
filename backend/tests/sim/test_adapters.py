@@ -146,22 +146,17 @@ async def test_sim_adapter_run_uses_fixed_steps_and_absolute_deadlines(monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("method_name", "args"),
-    [
-        ("connect", ()),
-        ("disconnect", ()),
-        ("command_tcp", (None, 1)),
-        ("set_gripper", (0.5,)),
-        ("stop", (StopReason.SHUTDOWN,)),
-        ("get_state", ()),
-    ],
-)
-async def test_real_adapter_is_hard_disabled(method_name: str, args: tuple[object, ...]) -> None:
-    method = getattr(RealLebaiAdapter(), method_name)
+async def test_sim_adapter_preflight_is_ready_without_changing_state() -> None:
+    adapter = SimRobotAdapter()
+    before = await adapter.get_state()
 
-    with pytest.raises(BackendCommandError, match="^real_robot_disabled$"):
-        await method(*args)
+    preflight = await adapter.preflight()
+
+    after = await adapter.get_state()
+    assert preflight.ready is True
+    assert preflight.reason is None
+    assert preflight.actual_q == before.actual_q
+    assert after.actual_q == before.actual_q
 
 
 def test_real_adapter_module_discovery_does_not_import_lebai_sdk(monkeypatch) -> None:

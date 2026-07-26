@@ -7,7 +7,13 @@ from typing import Callable
 
 import numpy as np
 
-from app.robots.base import BackendCommandError, HomeOptions, HomePhase, StopReason
+from app.robots.base import (
+    BackendCommandError,
+    BackendPreflight,
+    HomeOptions,
+    HomePhase,
+    StopReason,
+)
 from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
 from app.sim.cartesian_servo import cartesian_servo_step
 from app.sim.ik import IKError
@@ -142,3 +148,15 @@ class SimRobotAdapter:
                 sample_age_ms=None,
                 fault=self.fault,
             )
+
+    async def preflight(self) -> BackendPreflight:
+        state = await self.get_state()
+        return BackendPreflight(
+            ready=True,
+            reason=None,
+            robot_state=state.robot_state,
+            actual_tcp=state.actual_tcp,
+            actual_q=state.actual_q,
+            tcp_matches=True,
+            capabilities=("command_tcp", "home", "gripper"),
+        )

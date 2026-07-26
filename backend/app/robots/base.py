@@ -2,7 +2,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Callable, Literal, Protocol
 
-from app.schemas.messages import Pose, RobotStateMessage
+from app.schemas.messages import (
+    BackendState,
+    JointVector,
+    Pose,
+    RobotStateMessage,
+)
 
 
 class StopReason(StrEnum):
@@ -30,6 +35,17 @@ class HomeOptions:
     stable_seconds: float
 
 
+@dataclass(frozen=True)
+class BackendPreflight:
+    ready: bool
+    reason: str | None
+    robot_state: BackendState
+    actual_tcp: Pose
+    actual_q: JointVector
+    tcp_matches: bool
+    capabilities: tuple[str, ...]
+
+
 class RobotBackend(Protocol):
     async def connect(self) -> None: ...
 
@@ -48,3 +64,5 @@ class RobotBackend(Protocol):
     ) -> None: ...
 
     async def get_state(self) -> RobotStateMessage: ...
+
+    async def preflight(self) -> BackendPreflight: ...
