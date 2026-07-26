@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import platform
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -12,66 +15,198 @@ from app.config import Settings
 from app.control.coordinate_mapper import CoordinateMapper
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.control.safety import SafetyLimiter
+from app.recording.base import RecorderSink
+from app.recording.commissioning import CommissioningRecorder
 from app.recording.noop import NoopRecorder
-from app.robots.base import HomeOptions
+from app.robots.base import BackendPreflight, HomeOptions, RobotBackend
+from app.robots.lebai_adapter import ClientFactory, RealLebaiAdapter
+from app.robots.lebai_sdk_bridge import connect_real_client
 from app.robots.sim_adapter import SimRobotAdapter
 from app.timebase import MonotonicClock
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
-def create_app() -> FastAPI:
-    settings = Settings.load()
+
+def build_recorder(settings: Settings) -> RecorderSink:
+    if settings.backend == "simulator":
+        return NoopRecorder()
+    if settings.lebai is None:
+        raise RuntimeError("missing_lebai_settings")
+    return CommissioningRecorder(
+        REPOSITORY_ROOT / "logs" / "commissioning",
+        metadata={
+            "backend": "LEBAI",
+            "real_robot_mode": settings.lebai.mode,
+            "python_version": platform.python_version(),
+            "platform": platform.platform(),
+        },
+    )
+
+
+def build_backend(
+    settings: Settings,
+    recorder: RecorderSink,
+    client_factory: ClientFactory = connect_real_client,
+) -> RobotBackend:
+    if settings.backend == "simulator":
+        return SimRobotAdapter()
+    if settings.lebai is None:
+        raise RuntimeError("missing_lebai_settings")
+    return RealLebaiAdapter(
+        settings.lebai,
+        client_factory=client_factory,
+        event_callback=recorder.write_event,
+    )
+
+
+def _build_mapper(settings: Settings) -> CoordinateMapper:
+    if settings.backend == "lebai":
+        if settings.lebai is None:
+            raise RuntimeError("missing_lebai_settings")
+        return CoordinateMapper(
+            translation_scale=settings.lebai.control.translation_scale,
+            rotation_scale=1.0,
+            rotation_dead_zone_deg=settings.rotation_dead_zone_deg,
+        )
+    return CoordinateMapper(
+        translation_scale=settings.translation_scale,
+        rotation_scale=settings.rotation_scale,
+        rotation_dead_zone_deg=settings.rotation_dead_zone_deg,
+    )
+
+
+def _build_limiter(settings: Settings) -> SafetyLimiter:
+    if settings.backend == "lebai":
+        if settings.lebai is None:
+            raise RuntimeError("missing_lebai_settings")
+        control = settings.lebai.control
+        return SafetyLimiter(
+            max_linear_speed=control.max_tcp_speed_mps,
+            max_angular_speed=control.max_tcp_rotation_radps,
+            max_linear_accel=control.max_tcp_acceleration_mps2,
+            max_angular_accel=control.max_tcp_angular_acceleration_radps2,
+            workspace_half_extent_m=control.max_relative_translation_m,
+            max_rotation_from_anchor_rad=math.radians(
+                control.max_relative_rotation_deg
+            ),
+            max_linear_step_m=control.max_tcp_step_m,
+            max_angular_step_rad=math.radians(
+                control.max_tcp_rotation_step_deg
+            ),
+        )
+    return SafetyLimiter(
+        max_linear_speed=settings.max_linear_speed_mps,
+        max_angular_speed=settings.max_angular_speed_radps,
+        max_linear_accel=settings.max_linear_accel_mps2,
+        max_angular_accel=settings.max_angular_accel_radps2,
+        workspace_radius=settings.workspace_radius_m,
+    )
+
+
+def _preflight_payload(preflight: BackendPreflight) -> dict[str, object]:
+    return {
+        "ready": preflight.ready,
+        "reason": preflight.reason,
+        "robot_state": preflight.robot_state.value,
+        "tcp_matches": preflight.tcp_matches,
+        "capabilities": list(preflight.capabilities),
+    }
+
+
+def create_app(
+    *,
+    settings: Settings | None = None,
+    client_factory: ClientFactory = connect_real_client,
+) -> FastAPI:
+    runtime_settings = settings if settings is not None else Settings.load()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        backend = SimRobotAdapter()
+        recorder = build_recorder(runtime_settings)
+        backend = build_backend(runtime_settings, recorder, client_factory)
         latest = LatestVRFrame()
         control = RobotControl(
             backend=backend,
             latest=latest,
             clock=MonotonicClock(),
-            recorder=NoopRecorder(),
-            mapper=CoordinateMapper(
-                translation_scale=settings.translation_scale,
-                rotation_scale=settings.rotation_scale,
-                rotation_dead_zone_deg=settings.rotation_dead_zone_deg,
-            ),
-            limiter=SafetyLimiter(
-                max_linear_speed=settings.max_linear_speed_mps,
-                max_angular_speed=settings.max_angular_speed_radps,
-                max_linear_accel=settings.max_linear_accel_mps2,
-                max_angular_accel=settings.max_angular_accel_radps2,
-                workspace_radius=settings.workspace_radius_m,
-            ),
-            constraint_clear_ms=settings.constraint_clear_ms,
+            recorder=recorder,
+            mapper=_build_mapper(runtime_settings),
+            limiter=_build_limiter(runtime_settings),
+            constraint_clear_ms=runtime_settings.constraint_clear_ms,
             home_options=HomeOptions(
-                max_speed_radps=settings.home_joint_speed_radps,
-                timeout_s=settings.home_timeout_s,
-                position_tolerance_rad=settings.home_position_tolerance_rad,
-                velocity_tolerance_radps=settings.home_velocity_tolerance_radps,
-                stable_seconds=settings.home_stable_ms / 1000,
+                max_speed_radps=runtime_settings.home_joint_speed_radps,
+                timeout_s=runtime_settings.home_timeout_s,
+                position_tolerance_rad=(
+                    runtime_settings.home_position_tolerance_rad
+                ),
+                velocity_tolerance_radps=(
+                    runtime_settings.home_velocity_tolerance_radps
+                ),
+                stable_seconds=runtime_settings.home_stable_ms / 1000,
             ),
         )
-        app.state.settings = settings
+        app.state.settings = runtime_settings
         app.state.backend = backend
         app.state.latest = latest
         app.state.control = control
-        app.state.recorder = control.recorder
+        app.state.recorder = recorder
         app.state.teleop_sender_tasks = set()
         app.state.teleop_owner = None
         app.state.teleop_owner_lock = asyncio.Lock()
+        app.state.backend_name = (
+            "SIMULATOR" if runtime_settings.backend == "simulator" else "LEBAI"
+        )
+        app.state.real_robot_mode = (
+            None
+            if runtime_settings.lebai is None
+            else runtime_settings.lebai.mode
+        )
+        app.state.real_robot_enabled = False
+        app.state.preflight_ready = None
+        app.state.preflight_reason = None
+
+        recorder_started = False
         backend_connect_started = False
         backend_connected = False
         primary_error: BaseException | None = None
         cleanup_error: BaseException | None = None
+        startup_stage = "recorder_start"
         try:
+            await recorder.start()
+            recorder_started = True
+            startup_stage = "backend_connect"
             backend_connect_started = True
             await backend.connect()
             backend_connected = True
+            startup_stage = "backend_preflight"
+            preflight = await backend.preflight()
+            app.state.preflight_ready = preflight.ready
+            app.state.preflight_reason = preflight.reason
+            app.state.real_robot_enabled = bool(
+                runtime_settings.lebai is not None
+                and runtime_settings.lebai.mode == "control"
+                and preflight.ready
+            )
+            await recorder.write_critical_event(
+                "preflight_result",
+                _preflight_payload(preflight),
+                0,
+            )
+            startup_stage = "control_connect"
             await control.connect()
+            startup_stage = "control_start"
             await control.start()
+            startup_stage = "running"
             yield
         except BaseException as error:
             primary_error = error
+            if recorder_started:
+                with suppress(Exception):
+                    await recorder.write_critical_event(
+                        "startup_failure",
+                        {"stage": startup_stage},
+                        0,
+                    )
             raise
         finally:
             if backend_connected:
@@ -82,6 +217,12 @@ def create_app() -> FastAPI:
             if backend_connect_started:
                 try:
                     await backend.disconnect()
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+            if recorder_started:
+                try:
+                    await recorder.close()
                 except BaseException as error:
                     if cleanup_error is None:
                         cleanup_error = error

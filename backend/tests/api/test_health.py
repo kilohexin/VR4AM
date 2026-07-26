@@ -5,7 +5,12 @@ import socket
 import warnings
 
 import pytest
-from starlette.exceptions import StarletteDeprecationWarning
+try:
+    from starlette.exceptions import StarletteDeprecationWarning
+except ImportError:
+    class StarletteDeprecationWarning(DeprecationWarning):
+        """Compatibility category for Starlette versions that removed it."""
+
 
 STARLETTE_HTTPX_WARNING_TEXT = (
     "Using `httpx` with `starlette.testclient` is deprecated; "
@@ -24,7 +29,11 @@ with warnings.catch_warnings():
     )
     from fastapi.testclient import TestClient
 
+from app.config import Settings
 from app.main import create_app
+from app.recording.noop import NoopRecorder
+from tests.config.test_real_robot_config import REAL_CONFIG_TEMPLATE
+from tests.robots.fake_lebai import FakeLebaiClient
 
 
 def _install_lifecycle_fakes(
@@ -55,6 +64,20 @@ def _install_lifecycle_fakes(
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+
+        async def preflight(self):
+            from app.robots.base import BackendPreflight
+            from app.schemas.messages import BackendState, Pose
+
+            return BackendPreflight(
+                ready=True,
+                reason=None,
+                robot_state=BackendState.IDLE,
+                actual_tcp=Pose(p=(0.3, 0.0, 0.3), q=(0, 0, 0, 1)),
+                actual_q=(0, 0, 0, 0, 0, 0),
+                tcp_matches=True,
+                capabilities=("command_tcp", "home", "gripper"),
+            )
 
     class FakeControl:
         instances: list["FakeControl"] = []
@@ -93,12 +116,25 @@ def _install_lifecycle_fakes(
     return FakeBackend, FakeControl
 
 
-def test_health_is_simulator_only() -> None:
+def test_simulator_app_never_imports_lebai_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def guarded(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "lebai_sdk":
+            raise AssertionError("simulator imported real SDK")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded)
     with TestClient(create_app()) as client:
         assert client.get("/health").json() == {
             "status": "ok",
             "backend": "SIMULATOR",
+            "real_robot_mode": None,
             "real_robot_enabled": False,
+            "preflight_ready": True,
+            "preflight_reason": None,
         }
 
 
@@ -141,8 +177,45 @@ def test_non_simulator_backend_is_rejected_without_sdk_or_network(
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     monkeypatch.setattr(socket, "create_connection", reject_network)
 
-    with pytest.raises(RuntimeError, match="^real_robot_disabled$"):
+    with pytest.raises(RuntimeError, match="^invalid_config:real_robot$"):
         create_app()
+
+
+def test_readonly_health_reports_not_enabled(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "readonly-real.yaml"
+    config_path.write_text(
+        REAL_CONFIG_TEMPLATE.format(mode="readonly"),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VR4ARM_CONFIG", str(config_path))
+    settings = Settings.load()
+    fake = FakeLebaiClient.idle()
+
+    async def fake_client_factory(ip: str):
+        assert ip == "192.168.10.20"
+        return fake
+
+    monkeypatch.setattr(
+        "app.main.build_recorder",
+        lambda _settings: NoopRecorder(),
+        raising=False,
+    )
+    with TestClient(
+        create_app(settings=settings, client_factory=fake_client_factory)
+    ) as client:
+        payload = client.get("/health").json()
+
+    assert payload == {
+        "status": "ok",
+        "backend": "LEBAI",
+        "real_robot_mode": "readonly",
+        "real_robot_enabled": False,
+        "preflight_ready": False,
+        "preflight_reason": "real_robot_readonly",
+    }
+    assert fake.write_calls == []
 
 
 @pytest.mark.parametrize("failure_stage", ["connect", "start"])

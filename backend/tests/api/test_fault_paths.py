@@ -8,7 +8,12 @@ from typing import Literal
 from unittest.mock import AsyncMock
 
 import pytest
-from starlette.exceptions import StarletteDeprecationWarning
+try:
+    from starlette.exceptions import StarletteDeprecationWarning
+except ImportError:
+    class StarletteDeprecationWarning(DeprecationWarning):
+        """Compatibility category for Starlette versions that removed it."""
+
 
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.main import create_app

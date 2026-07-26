@@ -66,6 +66,33 @@ def test_valid_robot_state_fixture_round_trips() -> None:
     state = RobotStateMessage.model_validate(load_fixture("robot-state-valid.json"))
     assert state.mode == "ARMED"
     assert len(state.actual_q) == 6
+    assert state.backend is None
+    assert state.real_robot_mode is None
+    assert state.preflight_ready is None
+    assert state.preflight_reason is None
+
+
+def test_robot_state_accepts_optional_real_backend_diagnostics() -> None:
+    payload = load_fixture("robot-state-valid.json")
+    payload.update(
+        {
+            "backend": "LEBAI",
+            "real_robot_mode": "readonly",
+            "preflight_ready": False,
+            "preflight_reason": "real_robot_readonly",
+        }
+    )
+
+    state = RobotStateMessage.model_validate(payload)
+    schema = load_protocol_schema()
+    validator = Draft202012Validator(
+        {**schema, "$ref": "#/$defs/RobotStateMessage"}
+    )
+
+    assert state.backend == "LEBAI"
+    assert state.real_robot_mode == "readonly"
+    assert state.preflight_ready is False
+    assert not list(validator.iter_errors(payload))
 
 
 def test_self_collision_is_a_valid_robot_state_constraint() -> None:

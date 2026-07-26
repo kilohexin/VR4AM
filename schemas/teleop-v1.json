@@ -464,6 +464,79 @@
           ],
           "default": null,
           "title": "Constraint"
+        },
+        "recovery_phase": {
+          "anyOf": [
+            {
+              "enum": [
+                "stopping",
+                "homing",
+                "stabilizing"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recovery Phase"
+        },
+        "backend": {
+          "anyOf": [
+            {
+              "enum": [
+                "SIMULATOR",
+                "LEBAI"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Backend"
+        },
+        "real_robot_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "readonly",
+                "control"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Real Robot Mode"
+        },
+        "preflight_ready": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preflight Ready"
+        },
+        "preflight_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preflight Reason"
         }
       },
       "required": [

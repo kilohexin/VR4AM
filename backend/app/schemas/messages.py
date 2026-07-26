@@ -114,6 +114,10 @@ class RobotStateMessage(StrictMessage):
     fault: str | None = None
     constraint: ConstraintKind | None = None
     recovery_phase: RecoveryPhase | None = None
+    backend: Literal["SIMULATOR", "LEBAI"] | None = None
+    real_robot_mode: Literal["readonly", "control"] | None = None
+    preflight_ready: bool | None = None
+    preflight_reason: str | None = None
 
 
 class ClientControlMessage(StrictMessage):

@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from starlette.exceptions import StarletteDeprecationWarning
+try:
+    from starlette.exceptions import StarletteDeprecationWarning
+except ImportError:
+    class StarletteDeprecationWarning(DeprecationWarning):
+        """Compatibility category for Starlette versions that removed it."""
+
 
 STARLETTE_HTTPX_WARNING_PATTERN = (
     r"\AUsing `httpx` with `starlette\.testclient` is deprecated; "
