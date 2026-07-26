@@ -7,8 +7,10 @@ import pytest
 
 import app.control.robot_control as robot_control_module
 from app.control.robot_control import LatestVRFrame, RobotControl
+from app.control.safety import SafetyLimiter
 from app.recording.noop import NoopRecorder
-from app.robots.base import BackendCommandError, StopReason
+from app.recording.commissioning import RecorderUnavailable
+from app.robots.base import BackendCommandError, BackendPreflight, StopReason
 from app.schemas.messages import (
     BackendState,
     ControllerState,
@@ -40,6 +42,17 @@ class FakeBackend:
         self.disconnect_count = 0
         self.robot_state = BackendState.IDLE
         self.home_phases: list[str] = []
+        self.actual_tcp = Pose(p=(0.3, 0.0, 0.3), q=(0, 0, 0, 1))
+        self.actual_q = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self.preflight_result = BackendPreflight(
+            ready=True,
+            reason=None,
+            robot_state=BackendState.IDLE,
+            actual_tcp=self.actual_tcp,
+            actual_q=self.actual_q,
+            tcp_matches=True,
+            capabilities=("command_tcp", "home", "gripper"),
+        )
 
     async def connect(self) -> None:
         self.connect_count += 1
@@ -68,9 +81,34 @@ class FakeBackend:
             server_mono_ns=1,
             mode=TeleopMode.READY,
             robot_state=self.robot_state,
-            actual_tcp=Pose(p=(0.3, 0.0, 0.3), q=(0, 0, 0, 1)),
-            actual_q=(0, 0, 0, 0, 0, 0),
+            actual_tcp=self.actual_tcp,
+            actual_q=self.actual_q,
             gripper=self.gripper,
+        )
+
+    async def preflight(self) -> BackendPreflight:
+        return self.preflight_result
+
+
+class RecordingRecorder(NoopRecorder):
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+        self.fail_critical_with: RecorderUnavailable | None = None
+
+    async def write_critical_event(
+        self,
+        kind: str,
+        payload: object,
+        server_mono_ns: int,
+    ) -> None:
+        if self.fail_critical_with is not None:
+            raise self.fail_critical_with
+        self.events.append(
+            {
+                "kind": kind,
+                "payload": payload,
+                "server_mono_ns": server_mono_ns,
+            }
         )
 
 
@@ -97,11 +135,21 @@ def frame(
     )
 
 
-def make_control() -> tuple[RobotControl, LatestVRFrame, FakeBackend, FakeClock]:
+def make_control(
+    *,
+    recorder: NoopRecorder | None = None,
+    limiter=None,
+) -> tuple[RobotControl, LatestVRFrame, FakeBackend, FakeClock]:
     latest = LatestVRFrame()
     backend = FakeBackend()
     clock = FakeClock()
-    control = RobotControl(backend=backend, latest=latest, clock=clock, recorder=NoopRecorder())
+    control = RobotControl(
+        backend=backend,
+        latest=latest,
+        clock=clock,
+        recorder=recorder or NoopRecorder(),
+        limiter=limiter,
+    )
     return control, latest, backend, clock
 
 
@@ -114,6 +162,16 @@ async def connect_release_arm(
     latest.publish(frame(1, False), clock.now_ns())
     await control.tick()
     await control.arm()
+
+
+async def activate(
+    control: RobotControl,
+    latest: LatestVRFrame,
+    clock: FakeClock,
+) -> None:
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
 
 
 async def enter_published_recoverable_fault(
@@ -1825,3 +1883,82 @@ async def test_concurrent_stop_waits_for_old_run_and_prevents_restart() -> None:
     assert control._task is None
     assert old_task.done()
     assert backend.stops == [StopReason.SHUTDOWN]
+
+
+@pytest.mark.asyncio
+async def test_arm_rejects_failed_backend_preflight_without_motion() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, grip=False), clock.now_ns())
+    await control.tick()
+    backend.preflight_result = BackendPreflight(
+        ready=False,
+        reason="tcp_mismatch",
+        robot_state=BackendState.IDLE,
+        actual_tcp=backend.actual_tcp,
+        actual_q=backend.actual_q,
+        tcp_matches=False,
+        capabilities=("pvat",),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^arm_blocked_by_preflight:tcp_mismatch$",
+    ):
+        await control.arm()
+
+    assert control.mode is TeleopMode.READY
+    assert backend.targets == []
+
+
+@pytest.mark.asyncio
+async def test_stop_records_request_before_backend_and_confirmation_after() -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await activate(control, latest, clock)
+    latest.publish(frame(10, grip=False), clock.now_ns())
+
+    await control.tick()
+
+    kinds = [str(event["kind"]) for event in recorder.events]
+    assert kinds.index("stop_requested") < kinds.index("stop_confirmed")
+    assert backend.stops[-1] is StopReason.GRIP_RELEASED
+
+
+@pytest.mark.asyncio
+async def test_critical_recorder_failure_never_prevents_physical_stop() -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await activate(control, latest, clock)
+    recorder.fail_critical_with = RecorderUnavailable("critical_log_queue_full")
+
+    await control.disarm()
+
+    assert backend.stops[-1] is StopReason.GRIP_RELEASED
+    assert control.mode is TeleopMode.FAULT
+    assert control._fault == "recording_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_out_of_real_envelope_holds_target_and_retreat_resumes() -> None:
+    limiter = SafetyLimiter(
+        workspace_half_extent_m=0.005,
+        max_rotation_from_anchor_rad=np.deg2rad(30),
+    )
+    control, latest, backend, clock = make_control(limiter=limiter)
+    await activate(control, latest, clock)
+    safe_target = control.last_target
+
+    latest.publish(frame(3, True, p=(0.02, 1.2, -0.3)), clock.now_ns())
+    await control.tick()
+
+    assert backend.targets == []
+    assert control.last_target == safe_target
+    assert (await control.state_message()).constraint == "workspace_boundary"
+    assert control.mode is TeleopMode.ACTIVE
+
+    latest.publish(frame(4, True, p=(0.001, 1.2, -0.3)), clock.now_ns())
+    await control.tick()
+
+    assert [command_id for command_id, _target in backend.targets] == [4]
+    assert control.mode is TeleopMode.ACTIVE

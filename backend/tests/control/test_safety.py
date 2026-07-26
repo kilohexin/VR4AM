@@ -72,3 +72,63 @@ def test_rejects_anchor_envelope_violation() -> None:
     with pytest.raises(SafetyViolation, match="workspace_violation") as exc_info:
         limiter.limit(Pose(p=(0, 0, 0), q=IDENTITY), Pose(p=(0.26, 0, 0), q=IDENTITY), 0.02)
     assert exc_info.value.code == "workspace_violation"
+
+
+def test_optional_box_envelope_constrains_each_axis_without_changing_defaults() -> None:
+    limiter = SafetyLimiter(
+        workspace_half_extent_m=0.10,
+        max_rotation_from_anchor_rad=np.deg2rad(30),
+    )
+    limiter.set_pose_anchor(Pose(p=(0.3, 0.0, 0.3), q=IDENTITY))
+
+    inside = limiter.project_workspace(
+        Pose(p=(0.4, -0.1, 0.2), q=IDENTITY),
+    )
+    outside = limiter.project_workspace(
+        Pose(p=(0.4001, 0.0, 0.3), q=IDENTITY),
+    )
+    default = SafetyLimiter(anchor=(0.3, 0.0, 0.3)).project_workspace(
+        Pose(p=(0.4001, 0.0, 0.3), q=IDENTITY),
+    )
+
+    assert inside.constrained is False
+    assert outside.constrained is True
+    assert default.constrained is False
+
+
+def test_optional_orientation_envelope_uses_captured_tcp_orientation() -> None:
+    anchor_q = tuple(Rotation.from_euler("z", 20, degrees=True).as_quat())
+    limiter = SafetyLimiter(max_rotation_from_anchor_rad=np.deg2rad(30))
+    limiter.set_pose_anchor(Pose(p=(0.3, 0.0, 0.3), q=anchor_q))
+
+    inside_q = tuple(Rotation.from_euler("z", 50, degrees=True).as_quat())
+    outside_q = tuple(Rotation.from_euler("z", 50.1, degrees=True).as_quat())
+
+    assert limiter.project_workspace(
+        Pose(p=(0.3, 0.0, 0.3), q=inside_q),
+    ).constrained is False
+    assert limiter.project_workspace(
+        Pose(p=(0.3, 0.0, 0.3), q=outside_q),
+    ).constrained is True
+
+
+def test_optional_hard_per_cycle_caps_apply_even_after_long_dt() -> None:
+    limiter = SafetyLimiter(
+        max_linear_speed=100,
+        max_angular_speed=100,
+        max_linear_accel=100,
+        max_angular_accel=100,
+        max_linear_step_m=0.002,
+        max_angular_step_rad=np.deg2rad(1),
+    )
+    previous = Pose(p=(0, 0, 0), q=IDENTITY)
+    requested = Pose(
+        p=(1, 0, 0),
+        q=tuple(Rotation.from_euler("z", 90, degrees=True).as_quat()),
+    )
+
+    actual = limiter.limit_motion(previous, requested, 1.0)
+
+    assert np.linalg.norm(np.asarray(actual.p) - np.asarray(previous.p)) <= 0.002
+    delta = Rotation.from_quat(actual.q) * Rotation.from_quat(previous.q).inv()
+    assert delta.magnitude() <= np.deg2rad(1)
