@@ -166,9 +166,11 @@ async def test_control_preflight_can_be_ready_without_writing() -> None:
         client_factory=AsyncMock(return_value=client),
     )
     await adapter.connect()
+    try:
+        result = await adapter.preflight()
 
-    result = await adapter.preflight()
-
-    assert result.ready is True
-    assert result.reason is None
-    assert client.write_calls == []
+        assert result.ready is True
+        assert result.reason is None
+        assert client.write_calls == []
+    finally:
+        await adapter.disconnect()

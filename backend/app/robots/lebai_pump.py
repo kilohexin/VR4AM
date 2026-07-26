@@ -105,6 +105,11 @@ class PvatPump:
                         await self._handler(request)
                     except asyncio.CancelledError:
                         raise
+                    except BackendCommandError as error:
+                        self._fault = error
+                        self._running = False
+                        self.invalidate()
+                        return
                     except Exception:
                         self._fault = BackendCommandError("pvat_pump_failed")
                         self._running = False

@@ -22,6 +22,7 @@ from app.robots.lebai_codec import (
     joint_vector,
     map_robot_state,
     pose_from_lebai,
+    pose_to_lebai,
 )
 from app.robots.lebai_sdk_bridge import (
     LebaiClientProtocol,
@@ -29,6 +30,8 @@ from app.robots.lebai_sdk_bridge import (
     connect_real_client,
     detect_capabilities,
 )
+from app.robots.lebai_pump import PvatPump, PvatRequest
+from app.robots.lebai_pvat import PvatLimits, build_pvat_point
 from app.schemas.messages import (
     BackendState,
     JointVector,
@@ -80,17 +83,59 @@ class RealLebaiAdapter:
         self._capabilities = SdkCapabilities(names=())
         self._command_id: int | None = None
         self._motion_accepted = False
+        margin = settings.joint_limit_margin_rad
+        self._pvat_limits = PvatLimits(
+            horizon_s=settings.control.pvat_horizon_s,
+            max_joint_speed_radps=settings.control.max_joint_speed_radps,
+            max_joint_acceleration_radps2=(
+                settings.control.max_joint_acceleration_radps2
+            ),
+            max_joint_step_rad=settings.control.max_joint_step_rad,
+            soft_joint_min_rad=tuple(
+                value + margin for value in settings.soft_joint_min_rad
+            ),
+            soft_joint_max_rad=tuple(
+                value - margin for value in settings.soft_joint_max_rad
+            ),
+        )
+        self._pump = PvatPump(
+            self._send_target,
+            period_s=1 / settings.control.pvat_send_hz,
+        )
+        self._previous_sent_qd: JointVector | None = None
+        self._constraint: str | None = None
+        self._constraint_error: str | None = None
+        self._consecutive_ik_failures = 0
+
+    @property
+    def constraint(self) -> str | None:
+        return self._constraint
+
+    @property
+    def pump_fault(self) -> BackendCommandError | None:
+        return self._pump.fault
 
     async def connect(self) -> None:
         if self._client is not None:
             return
-        client = await self._client_factory(self.settings.ip)
+        try:
+            client = await asyncio.wait_for(
+                self._client_factory(self.settings.ip),
+                timeout=3.0,
+            )
+        except TimeoutError:
+            raise BackendCommandError("sdk_timeout:connect") from None
         if not await client.is_connected():
             raise BackendCommandError("robot_disconnected")
         self._client = client
         self._capabilities = detect_capabilities(client)
         try:
-            await self._read_snapshot()
+            snapshot = await self._read_snapshot()
+            if (
+                self.settings.mode == "control"
+                and self._preflight_from_snapshot(snapshot).ready
+            ):
+                await self._pump.start()
         except BaseException:
             self._client = None
             self._snapshot = None
@@ -103,13 +148,28 @@ class RealLebaiAdapter:
             and self._client is not None
         ):
             await self.stop(StopReason.SHUTDOWN)
+        await self._pump.stop()
         self._snapshot = None
         self._client = None
         self._motion_accepted = False
 
     async def command_tcp(self, target: Pose, command_id: int) -> None:
         self._require_control()
-        raise BackendCommandError("real_robot_control_not_implemented")
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise BackendCommandError("robot_state_stale")
+        max_age_ns = int(
+            (1 / self.settings.control.state_hz + 0.04) * 1_000_000_000
+        )
+        if self._clock() - snapshot.captured_ns > max_age_ns:
+            raise BackendCommandError("robot_state_stale")
+        if self._pump.fault is not None:
+            raise self._pump.fault
+        if not self._pump.running:
+            raise BackendCommandError("preflight_not_ready")
+        self._pump.submit(target, command_id)
+        if self._constraint_error is not None:
+            raise BackendCommandError(self._constraint_error)
 
     async def set_gripper(self, value: float) -> None:
         self._require_control()
@@ -118,7 +178,19 @@ class RealLebaiAdapter:
     async def stop(self, reason: StopReason) -> None:
         if self.settings.mode == "readonly":
             return
-        raise BackendCommandError("real_robot_control_not_implemented")
+        client = self._client
+        if client is None:
+            raise BackendCommandError("robot_disconnected")
+        self._pump.invalidate()
+        self._previous_sent_qd = None
+        async with self._sdk_lock:
+            try:
+                await asyncio.wait_for(client.stop_move(), timeout=0.20)
+            except TimeoutError:
+                raise BackendCommandError("sdk_timeout:stop_move") from None
+            except Exception:
+                raise BackendCommandError("sdk_call_failed:stop_move") from None
+        self._motion_accepted = False
 
     async def home(
         self,
@@ -129,6 +201,8 @@ class RealLebaiAdapter:
         raise BackendCommandError("real_robot_control_not_implemented")
 
     async def get_state(self) -> RobotStateMessage:
+        if self._pump.fault is not None:
+            raise self._pump.fault
         snapshot = await self._read_snapshot()
         return RobotStateMessage(
             server_mono_ns=snapshot.captured_ns,
@@ -144,6 +218,20 @@ class RealLebaiAdapter:
 
     async def preflight(self) -> BackendPreflight:
         snapshot = await self._read_snapshot()
+        result = self._preflight_from_snapshot(snapshot)
+        if (
+            result.ready
+            and self.settings.mode == "control"
+            and not self._pump.running
+            and self._pump.fault is None
+        ):
+            await self._pump.start()
+        return result
+
+    def _preflight_from_snapshot(
+        self,
+        snapshot: LebaiSnapshot,
+    ) -> BackendPreflight:
         tcp_matches = self._tcp_matches(snapshot.tcp_setting)
         reason: str | None = None
         if snapshot.robot_state is not BackendState.IDLE:
@@ -174,6 +262,109 @@ class RealLebaiAdapter:
             tcp_matches=tcp_matches,
             capabilities=self._capabilities.names,
         )
+
+    async def _send_target(self, request: PvatRequest) -> None:
+        snapshot = await self._read_snapshot()
+        client = self._client
+        if client is None:
+            raise BackendCommandError("robot_disconnected")
+        try:
+            async with self._sdk_lock:
+                try:
+                    solution = await asyncio.wait_for(
+                        client.kinematics_inverse(
+                            pose_to_lebai(request.target),
+                            list(snapshot.actual_q),
+                        ),
+                        timeout=0.20,
+                    )
+                except TimeoutError:
+                    raise BackendCommandError("sdk_timeout:ik") from None
+                except Exception:
+                    raise BackendCommandError("sdk_call_failed:ik") from None
+                if not self._pump.is_current(request.generation):
+                    return
+                if solution is None:
+                    raise BackendCommandError("ik_unreachable")
+                point = build_pvat_point(
+                    solution_q=solution,
+                    actual_q=snapshot.actual_q,
+                    actual_qd=snapshot.actual_qd,
+                    previous_qd=self._previous_sent_qd,
+                    limits=self._pvat_limits,
+                )
+                pvat_started = self._clock()
+                try:
+                    await asyncio.wait_for(
+                        client.move_pvat(
+                            list(point.q),
+                            list(point.qd),
+                            list(point.qdd),
+                            point.horizon_s,
+                        ),
+                        timeout=0.06,
+                    )
+                except TimeoutError:
+                    raise BackendCommandError("sdk_timeout:move_pvat") from None
+                except Exception:
+                    raise BackendCommandError(
+                        "sdk_call_failed:move_pvat"
+                    ) from None
+                pvat_latency_ms = max(
+                    0.0,
+                    (self._clock() - pvat_started) / 1_000_000,
+                )
+        except BackendCommandError as error:
+            if str(error) in {
+                "ik_unreachable",
+                "ik_invalid",
+                "ik_joint_limit",
+                "ik_joint_jump",
+                "joint_speed_limit",
+            }:
+                self._note_soft_constraint(str(error))
+                return
+            raise
+        self._constraint = None
+        self._constraint_error = None
+        self._consecutive_ik_failures = 0
+        self._previous_sent_qd = point.qd
+        self._command_id = request.command_id
+        self._motion_accepted = True
+        await self._emit_event(
+            {
+                "kind": "pvat_sent",
+                "command_id": request.command_id,
+                "target_tcp": request.target.model_dump(),
+                "p": list(point.q),
+                "v": list(point.qd),
+                "a": list(point.qdd),
+                "horizon_s": point.horizon_s,
+                "sdk_latency_ms": pvat_latency_ms,
+            }
+        )
+
+    def _note_soft_constraint(self, reason: str) -> None:
+        self._consecutive_ik_failures += 1
+        self._constraint_error = (
+            "ik_unreachable" if reason in {"ik_unreachable", "ik_invalid"}
+            else reason
+        )
+        self._constraint = (
+            "ik_boundary"
+            if self._constraint_error == "ik_unreachable"
+            else "joint_boundary"
+        )
+        if self._consecutive_ik_failures >= 5:
+            raise BackendCommandError("ik_failure_persistent")
+
+    async def _emit_event(self, event: dict[str, object]) -> None:
+        if self._event_callback is None:
+            return
+        try:
+            await self._event_callback(event, self._clock())
+        except Exception:
+            raise BackendCommandError("recording_unavailable") from None
 
     async def _read_snapshot(self) -> LebaiSnapshot:
         client = self._client
@@ -272,7 +463,9 @@ class RealLebaiAdapter:
     ) -> Any:
         started = self._clock()
         try:
-            return await operation()
+            return await asyncio.wait_for(operation(), timeout=0.20)
+        except TimeoutError:
+            raise BackendCommandError(f"sdk_timeout:{name}") from None
         except BackendCommandError:
             raise
         except Exception:

@@ -49,6 +49,9 @@ class FakeLebaiClient:
         self.read_calls: list[str] = []
         self.write_calls: list[tuple[Any, ...]] = []
         self.ik_calls: list[tuple[dict[str, float], list[float]]] = []
+        self.block_ik = False
+        self.ik_started = asyncio.Event()
+        self.release_ik = asyncio.Event()
         self.discovery_calls = 0
         self.network_calls = 0
         self._write_event = asyncio.Event()
@@ -104,6 +107,9 @@ class FakeLebaiClient:
     ) -> object:
         self.read_calls.append("kinematics_inverse")
         self.ik_calls.append((dict(pose), list(joints)))
+        self.ik_started.set()
+        if self.block_ik:
+            await self.release_ik.wait()
         if not self.ik_results:
             return None
         return self.ik_results.popleft()

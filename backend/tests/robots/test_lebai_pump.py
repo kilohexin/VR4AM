@@ -82,6 +82,20 @@ async def test_handler_error_latches_stable_fault_and_stops_pump() -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_backend_error_is_preserved_as_pump_fault() -> None:
+    async def fail(request: PvatRequest) -> None:
+        raise BackendCommandError("ik_failure_persistent")
+
+    pump = PvatPump(fail, period_s=0.001)
+    await pump.start()
+    pump.submit(_pose(), 1)
+    await _wait_until(lambda: pump.fault is not None)
+
+    assert str(pump.fault) == "ik_failure_persistent"
+    await pump.stop()
+
+
+@pytest.mark.asyncio
 async def test_stop_clears_pending_and_rejects_later_submit() -> None:
     handled: list[int] = []
 
