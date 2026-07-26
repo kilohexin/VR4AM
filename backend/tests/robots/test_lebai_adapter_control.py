@@ -6,12 +6,25 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.robots.base import BackendCommandError, StopReason
+from app.robots.base import (
+    BackendCommandError,
+    HomeOptions,
+    StopReason,
+)
 from app.robots.lebai_adapter import RealLebaiAdapter
 from app.robots.lebai_codec import pose_to_lebai
 from app.schemas.messages import Pose
 from tests.robots.fake_lebai import FakeLebaiClient, IDLE_Q
 from tests.robots.real_settings import control_settings
+
+
+HOME_OPTIONS = HomeOptions(
+    max_speed_radps=0.1,
+    timeout_s=10.0,
+    position_tolerance_rad=0.01,
+    velocity_tolerance_radps=0.02,
+    stable_seconds=0.3,
+)
 
 
 class FakeClock:
@@ -23,6 +36,10 @@ class FakeClock:
 
     def advance_ms(self, value: float) -> None:
         self.value += int(value * 1_000_000)
+
+    async def sleep(self, seconds: float) -> None:
+        self.value += int(seconds * 1_000_000_000)
+        await asyncio.sleep(0)
 
 
 def _target(x: float = 0.3) -> Pose:
@@ -49,6 +66,7 @@ async def _connected_control_adapter(
         control_settings(),
         client_factory=AsyncMock(return_value=fake),
         clock=test_clock.now_ns,
+        sleep=test_clock.sleep,
     )
     await adapter.connect()
     return adapter, fake, test_clock
@@ -138,6 +156,78 @@ async def test_one_ik_miss_recovers_but_five_consecutive_misses_fault() -> None:
     await _wait_until(lambda: adapter.pump_fault is not None)
 
     assert str(adapter.pump_fault) == "ik_failure_persistent"
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_stop_move_requires_three_hundred_ms_stationary_confirmation() -> None:
+    adapter, client, clock = await _connected_control_adapter()
+
+    await adapter.stop(StopReason.GRIP_RELEASED)
+
+    assert client.write_calls == [("stop_move",)]
+    assert clock.value >= 300_000_000
+    assert "stop_sys" not in [call[0] for call in client.write_calls]
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_stop_escalates_once_when_joint_speed_never_settles() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    client.kin_data["actual_joint_speed"] = [0.1] * 6
+
+    with pytest.raises(BackendCommandError, match="^stop_incomplete$"):
+        await adapter.stop(StopReason.STALE)
+
+    assert client.write_calls[0] == ("stop_move",)
+    assert [call[0] for call in client.write_calls].count("stop_sys") == 1
+    state = await adapter.get_state()
+    assert state.robot_state.value == "FAULT"
+    assert state.fault == "stop_incomplete"
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_home_uses_configured_joint_pose_and_acceleration() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    phases: list[str] = []
+    options = HOME_OPTIONS
+
+    await adapter.home(options, phases.append)
+
+    movej = next(call for call in client.write_calls if call[0] == "movej")
+    assert movej[1] == list(adapter.settings.home_q)
+    assert movej[2] == pytest.approx(0.5)
+    assert movej[3] == pytest.approx(0.1)
+    assert movej[4:] == (0.0, 0.0)
+    assert phases == ["homing", "stabilizing"]
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_home_rejects_non_idle_without_writing() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    client.robot_state = "MOVING"
+
+    with pytest.raises(BackendCommandError, match="^home_requires_idle$"):
+        await adapter.home(HOME_OPTIONS, lambda phase: None)
+
+    assert client.write_calls == []
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_gripper_force_and_amplitude_are_config_bounded() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+
+    await adapter.set_gripper(0.25)
+    await adapter.set_gripper(2.0)
+
+    assert client.write_calls[-2:] == [
+        ("set_claw", 30, 75),
+        ("set_claw", 30, 0),
+    ]
+    assert "init_claw" not in [call[0] for call in client.write_calls]
     await adapter.disconnect()
 
 

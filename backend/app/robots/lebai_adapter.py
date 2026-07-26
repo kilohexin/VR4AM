@@ -71,11 +71,13 @@ class RealLebaiAdapter:
         *,
         client_factory: ClientFactory = connect_real_client,
         clock: Callable[[], int] = time.monotonic_ns,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         event_callback: EventCallback | None = None,
     ) -> None:
         self.settings = settings
         self._client_factory = client_factory
         self._clock = clock
+        self._sleep = sleep
         self._event_callback = event_callback
         self._client: LebaiClientProtocol | None = None
         self._sdk_lock = asyncio.Lock()
@@ -106,6 +108,7 @@ class RealLebaiAdapter:
         self._constraint: str | None = None
         self._constraint_error: str | None = None
         self._consecutive_ik_failures = 0
+        self._latched_fault: str | None = None
 
     @property
     def constraint(self) -> str | None:
@@ -173,7 +176,34 @@ class RealLebaiAdapter:
 
     async def set_gripper(self, value: float) -> None:
         self._require_control()
-        raise BackendCommandError("real_robot_control_not_implemented")
+        client = self._client
+        if client is None:
+            raise BackendCommandError("robot_disconnected")
+        try:
+            normalized = min(1.0, max(0.0, float(value)))
+        except (TypeError, ValueError):
+            raise BackendCommandError("invalid_gripper_command") from None
+        if not math.isfinite(normalized):
+            raise BackendCommandError("invalid_gripper_command")
+        gripper = self.settings.gripper
+        amplitude = round(
+            gripper.open_amplitude_percent
+            + normalized
+            * (
+                gripper.closed_amplitude_percent
+                - gripper.open_amplitude_percent
+            )
+        )
+        async with self._sdk_lock:
+            try:
+                await asyncio.wait_for(
+                    client.set_claw(gripper.max_force_percent, amplitude),
+                    timeout=0.20,
+                )
+            except TimeoutError:
+                raise BackendCommandError("sdk_timeout:set_claw") from None
+            except Exception:
+                raise BackendCommandError("sdk_call_failed:set_claw") from None
 
     async def stop(self, reason: StopReason) -> None:
         if self.settings.mode == "readonly":
@@ -190,7 +220,56 @@ class RealLebaiAdapter:
                 raise BackendCommandError("sdk_timeout:stop_move") from None
             except Exception:
                 raise BackendCommandError("sdk_call_failed:stop_move") from None
-        self._motion_accepted = False
+        started_ns = self._clock()
+        stable_since_ns: int | None = None
+        while True:
+            try:
+                snapshot = await self._read_snapshot()
+            except BackendCommandError as error:
+                if str(error) == "robot_disconnected":
+                    self._latched_fault = "stop_unverified_disconnected"
+                    self._motion_accepted = False
+                    raise BackendCommandError(
+                        "stop_unverified_disconnected"
+                    ) from None
+                raise
+            now_ns = self._clock()
+            stationary = max(abs(value) for value in snapshot.actual_qd) <= 0.02
+            if stationary:
+                if stable_since_ns is None:
+                    stable_since_ns = now_ns
+                elif now_ns - stable_since_ns >= 300_000_000:
+                    self._motion_accepted = False
+                    return
+            else:
+                stable_since_ns = None
+            if now_ns - started_ns >= 500_000_000:
+                async with self._sdk_lock:
+                    try:
+                        connected = await asyncio.wait_for(
+                            client.is_connected(),
+                            timeout=0.20,
+                        )
+                    except Exception:
+                        connected = False
+                    if connected:
+                        try:
+                            await asyncio.wait_for(
+                                client.stop_sys(),
+                                timeout=0.20,
+                            )
+                        except TimeoutError:
+                            raise BackendCommandError(
+                                "sdk_timeout:stop_sys"
+                            ) from None
+                        except Exception:
+                            raise BackendCommandError(
+                                "sdk_call_failed:stop_sys"
+                            ) from None
+                self._latched_fault = "stop_incomplete"
+                self._motion_accepted = False
+                raise BackendCommandError("stop_incomplete")
+            await self._sleep(0.02)
 
     async def home(
         self,
@@ -198,22 +277,111 @@ class RealLebaiAdapter:
         on_phase: Callable[[HomePhase], None],
     ) -> None:
         self._require_control()
-        raise BackendCommandError("real_robot_control_not_implemented")
+        client = self._client
+        if client is None:
+            raise BackendCommandError("robot_disconnected")
+        snapshot = await self._read_snapshot()
+        if snapshot.robot_state is not BackendState.IDLE:
+            raise BackendCommandError("home_requires_idle")
+        if snapshot.running_motion is not None:
+            raise BackendCommandError("home_motion_running")
+        if self._pump.has_pending:
+            raise BackendCommandError("home_command_pending")
+        self._pump.invalidate()
+        self._previous_sent_qd = None
+        on_phase("homing")
+        async with self._sdk_lock:
+            try:
+                motion_id = await asyncio.wait_for(
+                    client.movej(
+                        list(self.settings.home_q),
+                        self.settings.control.max_joint_acceleration_radps2,
+                        options.max_speed_radps,
+                        0.0,
+                        0.0,
+                    ),
+                    timeout=0.20,
+                )
+            except TimeoutError:
+                raise BackendCommandError("sdk_timeout:movej") from None
+            except Exception:
+                raise BackendCommandError("sdk_call_failed:movej") from None
+        self._motion_accepted = True
+        started_ns = self._clock()
+        stable_since_ns: int | None = None
+        stabilizing = False
+        while True:
+            snapshot = await self._read_snapshot()
+            async with self._sdk_lock:
+                try:
+                    motion_state = await asyncio.wait_for(
+                        client.get_motion_state(motion_id),
+                        timeout=0.20,
+                    )
+                except TimeoutError:
+                    raise BackendCommandError(
+                        "sdk_timeout:get_motion_state"
+                    ) from None
+                except Exception:
+                    raise BackendCommandError(
+                        "sdk_call_failed:get_motion_state"
+                    ) from None
+            if str(motion_state).upper() in {"ERROR", "FAILED", "CANCELLED"}:
+                raise BackendCommandError("home_failed")
+            now_ns = self._clock()
+            position_error = max(
+                abs(actual - target)
+                for actual, target in zip(
+                    snapshot.actual_q,
+                    self.settings.home_q,
+                    strict=True,
+                )
+            )
+            velocity = max(abs(value) for value in snapshot.actual_qd)
+            within_tolerance = (
+                position_error <= options.position_tolerance_rad
+                and velocity <= options.velocity_tolerance_radps
+            )
+            if within_tolerance:
+                if stable_since_ns is None:
+                    stable_since_ns = now_ns
+                    stabilizing = True
+                    on_phase("stabilizing")
+                elif (
+                    now_ns - stable_since_ns
+                    >= int(options.stable_seconds * 1_000_000_000)
+                ):
+                    self._motion_accepted = False
+                    return
+            else:
+                stable_since_ns = None
+                if stabilizing:
+                    stabilizing = False
+                    on_phase("homing")
+            if now_ns - started_ns >= int(options.timeout_s * 1_000_000_000):
+                await self.stop(StopReason.HOME)
+                raise BackendCommandError("home_timeout")
+            await self._sleep(0.02)
 
     async def get_state(self) -> RobotStateMessage:
         if self._pump.fault is not None:
             raise self._pump.fault
         snapshot = await self._read_snapshot()
+        robot_state = (
+            BackendState.FAULT
+            if self._latched_fault is not None
+            else snapshot.robot_state
+        )
         return RobotStateMessage(
             server_mono_ns=snapshot.captured_ns,
             ack_seq=self._command_id,
             mode=TeleopMode.READY,
-            robot_state=snapshot.robot_state,
+            robot_state=robot_state,
             actual_tcp=snapshot.actual_tcp,
             actual_q=snapshot.actual_q,
             gripper=snapshot.gripper,
             sample_age_ms=0.0,
-            fault=snapshot.estop,
+            fault=self._latched_fault or snapshot.estop,
         )
 
     async def preflight(self) -> BackendPreflight:

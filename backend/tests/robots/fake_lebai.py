@@ -32,6 +32,7 @@ class FakeLebaiClient:
         self.tcp: dict[str, object] = dict(IDENTITY_TCP)
         self.claw: dict[str, object] = {"force": 0, "amplitude": 100}
         self.running_motion: object = None
+        self.motion_state: object = "FINISHED"
         self.kin_data: dict[str, object] = {
             "actual_joint_pose": list(IDLE_Q),
             "actual_joint_speed": [0.0] * 6,
@@ -149,7 +150,7 @@ class FakeLebaiClient:
 
     async def get_motion_state(self, motion_id: object) -> object:
         self.read_calls.append("get_motion_state")
-        return "FINISHED"
+        return self.motion_state
 
     async def set_claw(self, force: int, amplitude: int) -> None:
         self.write_calls.append(("set_claw", force, amplitude))
