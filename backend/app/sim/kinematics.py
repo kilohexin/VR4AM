@@ -70,6 +70,29 @@ def forward_matrix(q: Sequence[float], model: LM3Model) -> np.ndarray:
     return _chain(q, model)[0]
 
 
+def chain_points(
+    q: Sequence[float],
+    model: LM3Model,
+) -> dict[str, np.ndarray]:
+    matrix, origins, _ = _chain(q, model)
+    names = (
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+    )
+    return {
+        "base": np.zeros(3, dtype=float),
+        **{
+            name: origin.copy()
+            for name, origin in zip(names, origins, strict=True)
+        },
+        "tcp": matrix[:3, 3].copy(),
+    }
+
+
 def forward_pose(q: Sequence[float], model: LM3Model) -> Pose:
     matrix = forward_matrix(q, model)
     return Pose(

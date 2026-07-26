@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from app.sim.kinematics import forward_matrix, forward_pose, geometric_jacobian
+from app.sim.kinematics import (
+    chain_points,
+    forward_matrix,
+    forward_pose,
+    geometric_jacobian,
+)
 from app.sim.lm3_model import LM3Model
 
 
@@ -44,3 +49,27 @@ def test_home_keeps_tcp_and_forward_while_camera_is_up_and_jaws_are_horizontal()
     assert forward_error <= 5e-7
     np.testing.assert_allclose(camera_up, (0.0, 1.0, 0.0), atol=1e-8)
     assert jaw_axis[1] == pytest.approx(0.0, abs=1e-8)
+
+
+def test_chain_points_expose_base_joints_and_tcp() -> None:
+    model = LM3Model()
+    points = chain_points(model.home_q, model)
+
+    assert tuple(points) == (
+        "base",
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+        "tcp",
+    )
+    assert all(
+        point.shape == (3,) and np.all(np.isfinite(point))
+        for point in points.values()
+    )
+    np.testing.assert_allclose(
+        points["tcp"],
+        forward_matrix(model.home_q, model)[:3, 3],
+    )

@@ -13,6 +13,27 @@ MODEL_CONFIG = (
     / "lm3_visual_kinematics_v1.json"
 )
 
+CHAIN_POINT_NAMES = frozenset(
+    {
+        "base",
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+        "tcp",
+    }
+)
+
+
+@dataclass(frozen=True)
+class CollisionSegment:
+    name: str
+    start: str
+    end: str
+    radius_m: float
+
 
 def _finite_tuple(value: Any, length: int, name: str) -> tuple[float, ...]:
     if not isinstance(value, list) or len(value) != length:
@@ -39,7 +60,13 @@ def _load_config() -> dict[str, Any]:
         raise RuntimeError("invalid_visual_kinematics:version")
     joints = payload.get("joints")
     tool = payload.get("tool")
-    if not isinstance(joints, list) or len(joints) != 6 or not isinstance(tool, dict):
+    collision = payload.get("collision")
+    if (
+        not isinstance(joints, list)
+        or len(joints) != 6
+        or not isinstance(tool, dict)
+        or not isinstance(collision, dict)
+    ):
         raise RuntimeError("invalid_visual_kinematics:structure")
     names = [joint.get("name") for joint in joints if isinstance(joint, dict)]
     axes = [joint.get("axis") for joint in joints if isinstance(joint, dict)]
@@ -60,12 +87,63 @@ def _load_config() -> dict[str, Any]:
         "max_joint_accel_radps2",
     ):
         _positive_float(payload, key)
+    _positive_float(collision, "safety_margin_m")
+    segments = collision.get("segments")
+    check_pairs = collision.get("check_pairs")
+    if not isinstance(segments, list) or not isinstance(check_pairs, list):
+        raise RuntimeError("invalid_visual_kinematics:collision")
+    segment_names: set[str] = set()
+    for segment in segments:
+        if not isinstance(segment, dict):
+            raise RuntimeError("invalid_visual_kinematics:collision_segment")
+        name = segment.get("name")
+        start = segment.get("start")
+        end = segment.get("end")
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in segment_names
+            or start not in CHAIN_POINT_NAMES
+            or end not in CHAIN_POINT_NAMES
+            or start == end
+        ):
+            raise RuntimeError("invalid_visual_kinematics:collision_segment")
+        _positive_float(segment, "radius_m")
+        segment_names.add(name)
+    seen_pairs: set[frozenset[str]] = set()
+    for pair in check_pairs:
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or not all(isinstance(name, str) for name in pair)
+            or pair[0] == pair[1]
+            or pair[0] not in segment_names
+            or pair[1] not in segment_names
+        ):
+            raise RuntimeError("invalid_visual_kinematics:collision_pair")
+        unordered_pair = frozenset(pair)
+        if unordered_pair in seen_pairs:
+            raise RuntimeError("invalid_visual_kinematics:collision_pair")
+        seen_pairs.add(unordered_pair)
     return payload
 
 
 _CONFIG = _load_config()
 _JOINTS = _CONFIG["joints"]
 _TOOL = _CONFIG["tool"]
+_COLLISION = _CONFIG["collision"]
+_COLLISION_SEGMENTS = tuple(
+    CollisionSegment(
+        name=str(segment["name"]),
+        start=str(segment["start"]),
+        end=str(segment["end"]),
+        radius_m=_positive_float(segment, "radius_m"),
+    )
+    for segment in _COLLISION["segments"]
+)
+_COLLISION_CHECK_PAIRS = tuple(
+    (str(pair[0]), str(pair[1])) for pair in _COLLISION["check_pairs"]
+)
 
 
 @dataclass(frozen=True)
@@ -95,4 +173,11 @@ class LM3Model:
     )
     max_joint_accel_radps2: float = _positive_float(
         _CONFIG, "max_joint_accel_radps2"
+    )
+    collision_segments: tuple[CollisionSegment, ...] = _COLLISION_SEGMENTS
+    collision_check_pairs: tuple[tuple[str, str], ...] = (
+        _COLLISION_CHECK_PAIRS
+    )
+    collision_safety_margin_m: float = _positive_float(
+        _COLLISION, "safety_margin_m"
     )

@@ -18,5 +18,30 @@
     "rotation_xyzw": [0.70710688829422, 0.0, 0.0, 0.7071066498756409],
     "tcp_offset_m": [0.0, -0.09, 0.0],
     "forward_axis": [0.0, -1.0, 0.0]
+  },
+  "collision": {
+    "safety_margin_m": 0.008,
+    "segments": [
+      {"name": "base", "start": "base", "end": "joint1", "radius_m": 0.075},
+      {"name": "shoulder", "start": "joint1", "end": "joint2", "radius_m": 0.060},
+      {"name": "upper_arm", "start": "joint2", "end": "joint3", "radius_m": 0.055},
+      {"name": "forearm", "start": "joint3", "end": "joint4", "radius_m": 0.055},
+      {"name": "wrist_1", "start": "joint4", "end": "joint5", "radius_m": 0.045},
+      {"name": "wrist_2", "start": "joint5", "end": "joint6", "radius_m": 0.045},
+      {"name": "tool", "start": "joint6", "end": "tcp", "radius_m": 0.040}
+    ],
+    "check_pairs": [
+      ["base", "forearm"],
+      ["base", "wrist_1"],
+      ["base", "wrist_2"],
+      ["base", "tool"],
+      ["shoulder", "wrist_1"],
+      ["shoulder", "wrist_2"],
+      ["shoulder", "tool"],
+      ["upper_arm", "wrist_1"],
+      ["upper_arm", "wrist_2"],
+      ["upper_arm", "tool"],
+      ["forearm", "tool"]
+    ]
   }
 }
