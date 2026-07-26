@@ -1,3 +1,4 @@
+# Tracked safe default: this configuration never imports or connects the Lebai SDK.
 backend: simulator
 control_hz: 50
 state_hz: 50
