@@ -9,7 +9,6 @@ import {
 } from '../protocol/messages';
 import {
   LM3_HOME_Q,
-  LM3_TCP_OFFSET,
   loadRobotModel,
   type RobotModel,
 } from '../robot/robotModel';
@@ -17,7 +16,10 @@ import {RobotStateBuffer} from '../robot/robotState';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
 import type {XRPresentationSample} from '../xr/session';
 import {ControllerHints} from './controllerHints';
-import {KinematicGraspController} from './kinematicGraspController';
+import {
+  type GraspBlock,
+  KinematicGraspController,
+} from './kinematicGraspController';
 import {WorkspacePlacementController} from './workspacePlacementController';
 import {VrSafetyPanel} from './vrSafetyPanel';
 
@@ -204,7 +206,7 @@ export class SimulationScene {
   private readonly robotVisualRoot = new THREE.Group();
   private readonly grid = new THREE.GridHelper(4, 40, 0x1f839f, 0x183245);
   private readonly targetMarker = new THREE.Group();
-  private readonly graspCube = createGraspCube();
+  private readonly graspBlocks = createGraspBlocks();
   private sessionId = createSessionId();
   private robotModel: RobotModel | null = null;
   private graspController: KinematicGraspController | null = null;
@@ -258,7 +260,9 @@ export class SimulationScene {
     this.robotVisualRoot.name = 'robot-visual-root';
     this.scene.add(this.robotVisualRoot);
     this.createEnvironment();
-    this.robotVisualRoot.add(this.graspCube);
+    this.robotVisualRoot.add(
+      ...this.graspBlocks.map(({object}) => object),
+    );
     this.createTargetMarker();
     this.controllerHints = new ControllerHints(this.scene);
     this.controllerHints.setVisible(false);
@@ -397,7 +401,10 @@ export class SimulationScene {
         this.robotModel.setJointAngles(sample.state.actual_q);
         this.robotModel.setGripper(sample.state.gripper);
         this.robotVisualRoot.updateMatrixWorld(true);
-        this.graspController?.update(sample.state.gripper);
+        this.graspController?.update(
+          sample.state.actual_tcp,
+          sample.state.gripper,
+        );
       }
     }
 
@@ -442,12 +449,10 @@ export class SimulationScene {
       this.robotVisualRoot.add(model.group);
       this.graspController = new KinematicGraspController({
         visualRoot: this.robotVisualRoot,
-        tool: model.tool,
-        cube: this.graspCube,
-        tcpOffset: new THREE.Vector3(...LM3_TCP_OFFSET),
-        tableRestY: 0.025,
-        tableHalfWidth: 0.56,
-        tableHalfDepth: 0.38,
+        blocks: this.graspBlocks,
+        tableTopY: -0.005,
+        tableHalfWidth: 0.61,
+        tableHalfDepth: 0.43,
       });
     } catch (error) {
       if (this.started) this.options.onError(modelLoadErrorMessage(error));
@@ -549,16 +554,29 @@ function createSessionId(): string {
   return `desktop-${token}`;
 }
 
-function createGraspCube(): THREE.Mesh {
-  const cube = new THREE.Mesh(
-    new THREE.BoxGeometry(0.06, 0.06, 0.06),
-    new THREE.MeshStandardMaterial({color: 0xff8a3d, metalness: 0.05, roughness: 0.58}),
-  );
-  cube.name = 'grasp-cube';
-  cube.position.set(0.18, 0.025, -0.32);
-  cube.castShadow = true;
-  cube.receiveShadow = true;
-  return cube;
+export function createGraspBlocks(): GraspBlock[] {
+  const definitions = [
+    ['block-orange', 0xff8a3d, [0.18, 0.025, -0.32]],
+    ['block-blue', 0x39a8ff, [0.32, 0.025, -0.22]],
+    ['block-green', 0x58d68d, [0.04, 0.025, -0.28]],
+    ['block-yellow', 0xffd84d, [0.28, 0.025, -0.38]],
+    ['block-purple', 0xa77bff, [0.10, 0.025, -0.18]],
+  ] as const;
+  return definitions.map(([id, color, position]) => {
+    const object = new THREE.Mesh(
+      new THREE.BoxGeometry(0.06, 0.06, 0.06),
+      new THREE.MeshStandardMaterial({
+        color,
+        metalness: 0.05,
+        roughness: 0.58,
+      }),
+    );
+    object.name = id;
+    object.position.set(position[0], position[1], position[2]);
+    object.castShadow = true;
+    object.receiveShadow = true;
+    return {id, object, sizeM: 0.06};
+  });
 }
 
 export function modelLoadErrorMessage(_error: unknown): string {
