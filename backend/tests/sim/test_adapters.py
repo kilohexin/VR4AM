@@ -38,6 +38,8 @@ async def test_sim_adapter_rejects_self_collision_without_mutating_command(
     import app.robots.sim_adapter as sim_adapter_module
 
     adapter = SimRobotAdapter()
+    adapter.robot.set_target_qd((0.1,) * 6)
+    adapter.command_id = 7
     target = forward_pose(adapter.model.home_q, adapter.model)
     monkeypatch.setattr(
         sim_adapter_module,
@@ -52,7 +54,7 @@ async def test_sim_adapter_rejects_self_collision_without_mutating_command(
         await adapter.command_tcp(target, command_id=8)
 
     assert adapter.robot.target_qd is None
-    assert adapter.command_id is None
+    assert adapter.command_id == 7
 
 
 @pytest.mark.asyncio
