@@ -1,5 +1,16 @@
 # Quest 3 开发与安全操作指南
 
+## 真机实验入口
+
+本文的模拟器流程仍是默认路径。连接真实 LM3 前，必须依次阅读并执行：
+
+- [LM3 真机部署与首次实验流程](./real-robot-deployment.md)
+- [LM3 + LMG-90 + Quest 3 真机验收报告](./real-robot-commissioning-report.md)
+- [真机遥操作批准设计](./superpowers/specs/2026-07-26-real-lm3-teleoperation-design.md)
+- [真机遥操作实施计划](./superpowers/plans/2026-07-26-real-lm3-teleoperation.md)
+
+真机必须从 `readonly` 开始；只有现场验收通过后，才能使用精确确认词 `I_UNDERSTAND_REAL_ROBOT_MOTION` 进入 control。`LEBAI_READONLY`/readonly 的预检结果显示 `real_robot_readonly` 是正常的安全结果，不代表配置失败。模拟器说明不能作为真实 LM3、夹爪、Quest、急停或失联停止的验收证据。
+
 ## 适用范围
 
 本指南适用于 Milestone 1 的纯 VR LM3 仿真。浏览器页面只连接本机 FastAPI 仿真后端，从不连接 LM3 IP，不导入 Lebai SDK，也不产生真实机械臂动作。
