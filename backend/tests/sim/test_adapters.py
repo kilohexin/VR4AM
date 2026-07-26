@@ -1,6 +1,7 @@
 import asyncio
 import builtins
 import importlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +29,30 @@ async def test_sim_adapter_accepts_tcp_and_gripper_commands() -> None:
         assert state.actual_tcp == target
     finally:
         await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_sim_adapter_rejects_self_collision_without_mutating_command(
+    monkeypatch,
+) -> None:
+    import app.robots.sim_adapter as sim_adapter_module
+
+    adapter = SimRobotAdapter()
+    target = forward_pose(adapter.model.home_q, adapter.model)
+    monkeypatch.setattr(
+        sim_adapter_module,
+        "cartesian_servo_step",
+        lambda *args, **kwargs: SimpleNamespace(
+            joint_velocity=(0.1,) * 6,
+            self_collision_limited=True,
+        ),
+    )
+
+    with pytest.raises(BackendCommandError, match="^self_collision$"):
+        await adapter.command_tcp(target, command_id=8)
+
+    assert adapter.robot.target_qd is None
+    assert adapter.command_id is None
 
 
 @pytest.mark.asyncio

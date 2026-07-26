@@ -1737,6 +1737,28 @@ async def test_backend_command_error_faults_and_is_observable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_self_collision_command_error_is_a_soft_constraint() -> None:
+    control, latest, backend, clock = make_control()
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("self_collision")
+    )
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    latest.publish(
+        frame(3, True, p=(0.0, 1.2, -0.31)),
+        clock.now_ns(),
+    )
+
+    await control.tick()
+
+    state = await control.state_message()
+    assert control.mode is TeleopMode.ACTIVE
+    assert control._fault is None
+    assert state.constraint == "self_collision"
+
+
+@pytest.mark.asyncio
 async def test_stop_is_idempotent_and_uses_shutdown_reason() -> None:
     control, _latest, backend, _clock = make_control()
 

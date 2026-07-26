@@ -68,6 +68,20 @@ def test_valid_robot_state_fixture_round_trips() -> None:
     assert len(state.actual_q) == 6
 
 
+def test_self_collision_is_a_valid_robot_state_constraint() -> None:
+    payload = load_fixture("robot-state-valid.json")
+    payload["constraint"] = "self_collision"
+
+    state = RobotStateMessage.model_validate(payload)
+    schema = load_protocol_schema()
+    validator = Draft202012Validator(
+        {**schema, "$ref": "#/$defs/RobotStateMessage"}
+    )
+
+    assert state.constraint == "self_collision"
+    assert not list(validator.iter_errors(payload))
+
+
 @pytest.mark.parametrize("bad_q", [[0, 0, 0, 0], [0, 0, 0, 2], [float("nan"), 0, 0, 1]])
 def test_vr_frame_rejects_invalid_quaternion(bad_q: list[float]) -> None:
     payload = load_fixture("vr-frame-valid.json")

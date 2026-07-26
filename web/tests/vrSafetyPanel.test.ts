@@ -188,6 +188,17 @@ describe('VR safety presentation', () => {
     }, false)).toMatchObject({title, tone: 'red'});
   });
 
+  it('presents self-collision as a recoverable amber constraint', () => {
+    expect(describeVrSafety({
+      ...state('active'),
+      constraint: 'self_collision',
+    }, true)).toMatchObject({
+      title: '机械臂接近自碰撞边界，请将手柄退回',
+      tone: 'amber',
+      shape: 'warning',
+    });
+  });
+
   it('keeps the safety phase presentation while controller support is unknown', () => {
     expect(describeVrSafety(state('locked'), null)).toMatchObject({
       title: '未解锁',

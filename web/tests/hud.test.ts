@@ -13,7 +13,7 @@ describe('Chinese simulator HUD', () => {
     expect(hud.sceneContainer).toBeInstanceOf(HTMLElement);
     expect(document.body.textContent).toContain('LM3 遥操作仿真');
     expect(document.body.textContent).toContain('仅仿真 · SIMULATOR');
-    expect(document.body.textContent).toContain('按住右手 Grip 建立锚点并移动');
+    expect(document.body.textContent).toContain('右 Grip 建立末端零位');
     expect(document.body.textContent).not.toContain('LEBAI');
   });
 
@@ -62,6 +62,27 @@ describe('Chinese simulator HUD', () => {
     expect(document.querySelector('[data-field="mode"]')?.textContent).toBe('FAULT · 故障');
     expect(document.body.textContent).toContain('目标超出工作空间');
     expect(document.body.textContent).not.toContain('READY · 等待解锁');
+  });
+
+  it('shows self-collision as an amber soft constraint instruction', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+
+    hud.setRobotState({
+      mode: 'ACTIVE',
+      backendState: 'IDLE',
+      sampleAgeMs: 1,
+      fault: null,
+      constraint: 'self_collision',
+      recoveryPhase: null,
+    });
+
+    expect(document.body.textContent).toContain(
+      '机械臂接近自碰撞边界，请将手柄退回',
+    );
+    expect(
+      document.querySelector('[data-row="constraint"]')
+        ?.getAttribute('data-active'),
+    ).toBe('true');
   });
 
   it('clears stale backend, age, fault, and latency values on disconnect', () => {

@@ -15,7 +15,11 @@ export interface ControllerState extends Pose {
 }
 
 export type VisibilityState = 'visible' | 'visible-blurred' | 'hidden';
-export type ConstraintKind = 'workspace_boundary' | 'ik_boundary' | 'joint_boundary';
+export type ConstraintKind =
+  | 'workspace_boundary'
+  | 'ik_boundary'
+  | 'joint_boundary'
+  | 'self_collision';
 export type RecoveryPhase = 'stopping' | 'homing' | 'stabilizing';
 
 export interface VRFrame {
@@ -171,6 +175,7 @@ const CONSTRAINT_KINDS: readonly ConstraintKind[] = [
   'workspace_boundary',
   'ik_boundary',
   'joint_boundary',
+  'self_collision',
 ];
 const RECOVERY_PHASES: readonly RecoveryPhase[] = ['stopping', 'homing', 'stabilizing'];
 const CONTROL_TYPES: readonly ClientControlType[] = [

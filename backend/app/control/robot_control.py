@@ -513,6 +513,8 @@ class RobotControl:
                         self._set_constraint("ik_boundary")
                     elif code == "joint_safety_window":
                         self._set_constraint("joint_boundary")
+                    elif code == "self_collision":
+                        self._set_constraint("self_collision")
                     else:
                         raise
                     self.filter.reset(self.last_target)

@@ -12,6 +12,16 @@
       "title": "BackendState",
       "type": "string"
     },
+    "ConstraintKind": {
+      "enum": [
+        "workspace_boundary",
+        "ik_boundary",
+        "joint_boundary",
+        "self_collision"
+      ],
+      "title": "ConstraintKind",
+      "type": "string"
+    },
     "ClientControlMessage": {
       "additionalProperties": false,
       "properties": {
@@ -442,6 +452,18 @@
           ],
           "default": null,
           "title": "Fault"
+        },
+        "constraint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConstraintKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Constraint"
         }
       },
       "required": [

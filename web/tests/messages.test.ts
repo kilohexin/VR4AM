@@ -26,6 +26,7 @@ describe('protocol guards', () => {
   it('accepts the shared protocol fixtures', () => {
     expect(isVRFrame(vrFixture)).toBe(true);
     expect(isRobotStateMessage(robotFixture)).toBe(true);
+    expect(isRobotStateMessage({...robotFixture, constraint: 'self_collision'})).toBe(true);
   });
 
   it('accepts every valid control type and optional nullable fields', () => {

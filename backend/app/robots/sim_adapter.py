@@ -64,6 +64,8 @@ class SimRobotAdapter:
                 )
             except IKError as exc:
                 raise BackendCommandError(str(exc)) from exc
+            if result.self_collision_limited:
+                raise BackendCommandError("self_collision")
             self.robot.set_target_qd(result.joint_velocity)
             self.command_id = command_id
 

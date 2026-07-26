@@ -17,7 +17,12 @@ FaultResetRejectReason = Literal[
     "unrecoverable_fault",
     "control_loop_unavailable",
 ]
-ConstraintKind = Literal["workspace_boundary", "ik_boundary", "joint_boundary"]
+ConstraintKind = Literal[
+    "workspace_boundary",
+    "ik_boundary",
+    "joint_boundary",
+    "self_collision",
+]
 RecoveryPhase = Literal["stopping", "homing", "stabilizing"]
 
 

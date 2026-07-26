@@ -9,6 +9,7 @@ from app.schemas.messages import Pose
 from app.sim.ik import IKError
 from app.sim.kinematics import forward_pose, geometric_jacobian
 from app.sim.lm3_model import LM3Model
+from app.sim.self_collision import is_self_colliding
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class CartesianServoResult:
     position_error_m: float
     orientation_error_rad: float
     joint_limited: bool
+    self_collision_limited: bool
 
 
 def _clip_norm(values: np.ndarray, maximum: float) -> np.ndarray:
@@ -106,7 +108,12 @@ def cartesian_servo_step(
     upper = np.asarray(model.home_q) + model.joint_window_rad
     next_q = np.clip(candidate, lower, upper)
     joint_limited = not np.allclose(candidate, next_q, atol=1e-12, rtol=0.0)
-    bounded_velocity = (next_q - q) / dt
+    self_collision_limited = is_self_colliding(next_q, model)
+    if self_collision_limited:
+        next_q = q.copy()
+        bounded_velocity = np.zeros(6, dtype=float)
+    else:
+        bounded_velocity = (next_q - q) / dt
     solved = forward_pose(next_q, model)
     solved_position_error, solved_orientation_error = _pose_errors(target, solved)
     return CartesianServoResult(
@@ -115,4 +122,5 @@ def cartesian_servo_step(
         position_error_m=float(np.linalg.norm(solved_position_error)),
         orientation_error_rad=float(np.linalg.norm(solved_orientation_error)),
         joint_limited=joint_limited,
+        self_collision_limited=self_collision_limited,
     )

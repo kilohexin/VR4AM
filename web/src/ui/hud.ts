@@ -255,6 +255,7 @@ export function readableConstraint(constraint: ConstraintKind | null): string {
     workspace_boundary: '已到达操作边界',
     ik_boundary: '当前方向暂时不可达',
     joint_boundary: '已到达关节操作边界',
+    self_collision: '机械臂接近自碰撞边界，请将手柄退回',
   }[constraint];
 }
 
