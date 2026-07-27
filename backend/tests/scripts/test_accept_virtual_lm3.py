@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.acceptance.scenarios import ScenarioResult
 
@@ -185,3 +186,27 @@ def test_parse_test_counts_supports_pytest_and_vitest() -> None:
         "Tests  5 failed | 253 passed (258)"
     ) == (253, 5)
     assert module.parse_test_counts("built in 1.07s") == (None, None)
+
+
+def test_git_provenance_preserves_first_dirty_path_character(
+    monkeypatch,
+) -> None:
+    module = _load_module()
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        if argv[-2:] == ["status", "--porcelain"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=" M README.md\n?? docs/new.md\n",
+            )
+        if argv[-2:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout="a" * 40 + "\n")
+        raise AssertionError(f"unexpected git command: {argv}")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    provenance = module._git_provenance(ROOT)
+
+    assert provenance["commit"] == "a" * 40
+    assert provenance["dirty_paths"] == ["README.md", "docs/new.md"]

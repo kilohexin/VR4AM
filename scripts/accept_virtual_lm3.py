@@ -159,7 +159,7 @@ def _git_output(repo_root: Path, *args: str) -> str:
     )
     if completed.returncode != 0:
         return ""
-    return completed.stdout.strip()
+    return completed.stdout.rstrip("\r\n")
 
 
 def _git_provenance(repo_root: Path) -> dict[str, object]:
