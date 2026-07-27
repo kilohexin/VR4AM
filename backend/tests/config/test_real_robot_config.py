@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import os
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,24 @@ def test_tracked_default_remains_simulator(
     settings = Settings.load()
     assert settings.backend == "simulator"
     assert settings.lebai is None
+
+
+def test_settings_load_accepts_explicit_path_without_mutating_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_config(
+        tmp_path,
+        REAL_CONFIG_TEMPLATE.format(mode="readonly"),
+    )
+    monkeypatch.delenv("VR4ARM_CONFIG", raising=False)
+
+    settings = Settings.load(path)
+
+    assert settings.backend == "lebai"
+    assert settings.lebai is not None
+    assert settings.lebai.mode == "readonly"
+    assert "VR4ARM_CONFIG" not in os.environ
 
 
 @pytest.mark.parametrize(

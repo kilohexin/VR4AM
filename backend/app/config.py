@@ -98,9 +98,11 @@ class Settings:
     home_stable_ms: int
 
     @classmethod
-    def load(cls) -> "Settings":
-        path = Path(os.environ.get("VR4ARM_CONFIG", DEFAULT_CONFIG))
-        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    def load(cls, path: Path | None = None) -> "Settings":
+        selected = path or Path(
+            os.environ.get("VR4ARM_CONFIG", DEFAULT_CONFIG)
+        )
+        payload = yaml.safe_load(selected.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise RuntimeError("invalid_config")
         backend = payload.get("backend")
