@@ -20,7 +20,12 @@ if str(BACKEND) not in sys.path:
 
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.recording.noop import NoopRecorder
-from app.robots.base import BackendCommandError, StopReason
+from app.robots.base import (
+    BackendCommandError,
+    HomeOptions,
+    HomePhase,
+    StopReason,
+)
 from app.robots.sim_adapter import SimRobotAdapter
 from app.schemas.messages import ControllerState, Pose, RobotStateMessage, TeleopMode, VRFrame
 
@@ -35,9 +40,16 @@ EVENT_SCHEDULE = (
     (0.30, "hidden"),
     (0.45, "disconnect"),
     (0.60, "command_fault"),
-    (0.75, "safety_fault"),
+    (0.75, "workspace_boundary"),
     (0.85, "visible_blurred"),
 )
+STOP_EVENT_REASONS = {
+    "tracking_loss": StopReason.STALE,
+    "hidden": StopReason.STALE,
+    "visible_blurred": StopReason.STALE,
+    "disconnect": StopReason.DISCONNECT,
+    "command_fault": StopReason.FAULT,
+}
 
 
 class FakeMonotonicClock:
@@ -87,7 +99,7 @@ class CountingSimAdapter(SimRobotAdapter):
             self.nan_count += 1
         if self.fail_next_command:
             self.fail_next_command = False
-            raise BackendCommandError("ik_unreachable")
+            raise BackendCommandError("backend_command_failed")
         await super().command_tcp(target, command_id)
         self.commands += 1
         if self.robot.target_q is not None and not np.all(np.isfinite(self.robot.target_q)):
@@ -101,6 +113,43 @@ class CountingSimAdapter(SimRobotAdapter):
     async def stop(self, reason: StopReason) -> None:
         self.stop_counts[reason.value] += 1
         await super().stop(reason)
+
+    async def home(
+        self,
+        options: HomeOptions,
+        on_phase: Callable[[HomePhase], None],
+    ) -> None:
+        on_phase("homing")
+        self.robot.set_target_q(
+            self.model.home_q,
+            max_speed_radps=options.max_speed_radps,
+        )
+        stable_steps = max(1, math.ceil(options.stable_seconds / STEP_SECONDS))
+        stable_count = 0
+        for _ in range(math.ceil(options.timeout_s / STEP_SECONDS)):
+            self.robot.step(STEP_SECONDS)
+            position_error = float(
+                np.max(
+                    np.abs(
+                        self.robot.q - np.asarray(self.model.home_q)
+                    )
+                )
+            )
+            velocity = float(np.max(np.abs(self.robot.qd)))
+            if (
+                position_error <= options.position_tolerance_rad
+                and velocity <= options.velocity_tolerance_radps
+            ):
+                if stable_count == 0:
+                    on_phase("stabilizing")
+                stable_count += 1
+                if stable_count >= stable_steps:
+                    return
+            else:
+                stable_count = 0
+            await asyncio.sleep(0)
+        self.robot.stop()
+        raise BackendCommandError("home_timeout")
 
     async def get_state(self) -> RobotStateMessage:
         state = await super().get_state()
@@ -148,6 +197,8 @@ class SoakScenario:
         self.event_index = 0
         self.injected_by_kind = {name: 0 for _fraction, name in EVENT_SCHEDULE}
         self.injected_events = 0
+        self.verified_injected_events = 0
+        self.stop_expected_events = 0
         self.verified_injected_stops = 0
         self.rearm_count = 0
         self.error_count = 0
@@ -178,10 +229,10 @@ class SoakScenario:
         grip: bool,
         tracking_valid: bool = True,
         visibility: str = "visible",
-        safety_violation: bool = False,
+        workspace_boundary: bool = False,
     ) -> VRFrame:
         position, quaternion, trigger = self._controller_sample(step)
-        if safety_violation:
+        if workspace_boundary:
             position = (position[0] + 0.5, position[1], position[2])
         if not _all_finite((*position, *quaternion, trigger)):
             self.adapter.nan_count += 1
@@ -276,7 +327,7 @@ class SoakScenario:
         if self.control.mode in {TeleopMode.STALE, TeleopMode.FAULT}:
             await self._tick_control()
             return
-        if self.recovery_event in {"command_fault", "safety_fault"}:
+        if self.recovery_event == "command_fault":
             reset = await self.control.reset_fault()
             if not reset.accepted:
                 self.invariant_failures.append(
@@ -310,17 +361,18 @@ class SoakScenario:
         self._sample_storage_depth()
 
     async def _inject_event(self, step: int, name: str) -> bool:
-        if name in {"command_fault", "safety_fault"} and self.control.mode is not TeleopMode.ACTIVE:
+        if (
+            name in {"command_fault", "workspace_boundary"}
+            and self.control.mode is not TeleopMode.ACTIVE
+        ):
             return False
-        expected_reason = {
-            "tracking_loss": StopReason.STALE,
-            "hidden": StopReason.STALE,
-            "visible_blurred": StopReason.STALE,
-            "disconnect": StopReason.DISCONNECT,
-            "command_fault": StopReason.FAULT,
-            "safety_fault": StopReason.FAULT,
-        }[name]
-        before = self.adapter.stop_counts[expected_reason.value]
+        expected_reason = STOP_EVENT_REASONS.get(name)
+        before = (
+            self.adapter.stop_counts[expected_reason.value]
+            if expected_reason is not None
+            else self.adapter.stop_counts[StopReason.FAULT.value]
+        )
+        event_verified = True
 
         if name == "disconnect":
             await self.control.on_disconnect()
@@ -340,29 +392,54 @@ class SoakScenario:
                     if name == "visible_blurred"
                     else "visible"
                 ),
-                safety_violation=name == "safety_fault",
+                workspace_boundary=name == "workspace_boundary",
             )
             self._publish(frame)
             await self._tick_control()
-            expected_mode = (
-                TeleopMode.STALE
-                if expected_reason is StopReason.STALE
-                else TeleopMode.FAULT
-            )
+            if name == "workspace_boundary":
+                expected_mode = TeleopMode.ACTIVE
+            else:
+                expected_mode = (
+                    TeleopMode.STALE
+                    if expected_reason is StopReason.STALE
+                    else TeleopMode.FAULT
+                )
             if self.control.mode is not expected_mode:
                 self.invariant_failures.append(f"{name}_gate_not_closed")
+                event_verified = False
             published = await self._publish_state()
             if published.mode is not expected_mode:
                 self.invariant_failures.append(f"{name}_mode_not_observable")
+                event_verified = False
+            if (
+                name == "workspace_boundary"
+                and published.constraint != "workspace_boundary"
+            ):
+                self.invariant_failures.append(
+                    "workspace_boundary_constraint_not_observable"
+                )
+                event_verified = False
 
         self.injected_by_kind[name] += 1
         self.injected_events += 1
-        after = self.adapter.stop_counts[expected_reason.value]
-        if after == before + 1:
-            self.verified_injected_stops += 1
+        if expected_reason is not None:
+            self.stop_expected_events += 1
+            after = self.adapter.stop_counts[expected_reason.value]
+            if after == before + 1:
+                self.verified_injected_stops += 1
+            else:
+                self.invariant_failures.append(f"{name}_stop_count")
+                event_verified = False
         else:
-            self.invariant_failures.append(f"{name}_stop_count")
-        self.recovery_event = name
+            after = self.adapter.stop_counts[StopReason.FAULT.value]
+            if after != before:
+                self.invariant_failures.append(
+                    "workspace_boundary_unexpected_fault_stop"
+                )
+                event_verified = False
+        if event_verified:
+            self.verified_injected_events += 1
+        self.recovery_event = name if expected_reason is not None else None
         return True
 
     async def _advance(self) -> None:
@@ -416,7 +493,9 @@ class SoakScenario:
             self.invariant_failures.append("control_step_count_mismatch")
         if self.virtual_steps != self.total_steps:
             self.invariant_failures.append("virtual_step_count_mismatch")
-        if self.injected_events != self.verified_injected_stops:
+        if self.injected_events != self.verified_injected_events:
+            self.invariant_failures.append("injected_event_unverified")
+        if self.stop_expected_events != self.verified_injected_stops:
             self.invariant_failures.append("injected_stop_unverified")
         if self.adapter.nan_count != 0:
             self.invariant_failures.append("non_finite_value")
@@ -436,6 +515,8 @@ class SoakScenario:
             "error_count": self.error_count,
             "final_mode": self.control.mode.value,
             "injected_events": self.injected_events,
+            "verified_injected_events": self.verified_injected_events,
+            "stop_expected_events": self.stop_expected_events,
             "verified_injected_stops": self.verified_injected_stops,
             "injected_by_kind": dict(self.injected_by_kind),
             "stop_counts": dict(self.adapter.stop_counts),

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from app.control.safety import SafetyLimiter, SafetyViolation
+from app.control.safety import SafetyLimiter
 from app.schemas.messages import Pose
 
 
@@ -67,11 +67,15 @@ def test_rejects_invalid_dt_without_polluting_velocity_state(invalid_dt: float) 
     assert abs(sum(a * b for a, b in zip(actual.q, expected.q, strict=True))) == pytest.approx(1.0)
 
 
-def test_rejects_anchor_envelope_violation() -> None:
-    limiter = SafetyLimiter(anchor=(0, 0, 0))
-    with pytest.raises(SafetyViolation, match="workspace_violation") as exc_info:
-        limiter.limit(Pose(p=(0, 0, 0), q=IDENTITY), Pose(p=(0.26, 0, 0), q=IDENTITY), 0.02)
-    assert exc_info.value.code == "workspace_violation"
+def test_projects_anchor_envelope_violation_to_soft_boundary() -> None:
+    limiter = SafetyLimiter(anchor=(0, 0, 0), workspace_radius=0.25)
+    projection = limiter.project_workspace(
+        Pose(p=(0.26, 0, 0), q=IDENTITY)
+    )
+
+    assert projection.constrained is True
+    assert projection.hold is False
+    assert projection.pose.p == pytest.approx((0.25, 0.0, 0.0))
 
 
 def test_optional_box_envelope_constrains_each_axis_without_changing_defaults() -> None:

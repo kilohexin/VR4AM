@@ -36,7 +36,13 @@ GRIPPER_PERIOD_NS = 100_000_000
 GRIPPER_MIN_DELTA = 0.02
 VR_FRAME_STALE_MS = 100.0
 RECOVERABLE_FAULTS = frozenset(
-    {"workspace_violation", "ik_unreachable", "ik_singular", "joint_safety_window"}
+    {
+        "workspace_violation",
+        "ik_unreachable",
+        "ik_singular",
+        "joint_safety_window",
+        "backend_command_failed",
+    }
 )
 HomeRejectReason = Literal[
     "fault_present",

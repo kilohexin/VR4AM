@@ -612,6 +612,7 @@ def test_fault_reset_recoverable_whitelist_is_exact() -> None:
             "ik_unreachable",
             "ik_singular",
             "joint_safety_window",
+            "backend_command_failed",
         }
     )
 
@@ -1281,7 +1282,9 @@ async def test_hard_stale_publishes_stale_before_stop_complete_disarms() -> None
 @pytest.mark.asyncio
 async def test_hard_stale_preserves_fault_until_fault_is_published() -> None:
     control, latest, backend, clock = make_control()
-    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("backend_command_failed")
+    )
     await connect_release_arm(control, latest, clock)
     latest.publish(frame(2, True), clock.now_ns())
     await control.tick()
@@ -1321,7 +1324,9 @@ async def test_disarm_cannot_bypass_unpublished_stale_mode() -> None:
 @pytest.mark.asyncio
 async def test_disarm_cannot_bypass_unpublished_fault_mode() -> None:
     control, latest, backend, clock = make_control()
-    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("backend_command_failed")
+    )
     await connect_release_arm(control, latest, clock)
     latest.publish(frame(2, True), clock.now_ns())
     await control.tick()
@@ -1341,7 +1346,9 @@ async def test_disarm_cannot_bypass_unpublished_fault_mode() -> None:
 @pytest.mark.asyncio
 async def test_new_session_preserves_unpublished_fault_priority_and_detail() -> None:
     control, latest, backend, clock = make_control()
-    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("backend_command_failed")
+    )
     await control.connect()
     latest.publish(frame(1, False, session_id="old"), clock.now_ns())
     await control.tick()
@@ -1361,12 +1368,12 @@ async def test_new_session_preserves_unpublished_fault_priority_and_detail() -> 
 
     assert backend.stops[-1] == StopReason.DISCONNECT
     assert control.mode == TeleopMode.FAULT
-    assert control._fault == "ik_unreachable"
+    assert control._fault == "backend_command_failed"
     assert control._pending_stop_completion is True
     assert control.last_target is None
     fault_state = await control.state_message()
     assert fault_state.mode == TeleopMode.FAULT
-    assert fault_state.fault == "ik_unreachable"
+    assert fault_state.fault == "backend_command_failed"
     assert control.mode == TeleopMode.DISARMED
     with pytest.raises(RuntimeError, match="arm_blocked_by_fault"):
         await control.arm()
@@ -1374,7 +1381,7 @@ async def test_new_session_preserves_unpublished_fault_priority_and_detail() -> 
     latest.publish(frame(2, False, session_id="new"), clock.now_ns())
     await control.tick()
     assert control.mode is TeleopMode.DISARMED
-    assert control._fault == "ik_unreachable"
+    assert control._fault == "backend_command_failed"
     with pytest.raises(RuntimeError, match="arm_blocked_by_fault"):
         await control.arm()
 
@@ -1780,7 +1787,9 @@ async def test_control_loop_task_cancellation_remains_cancellation_without_fault
 @pytest.mark.asyncio
 async def test_backend_command_error_faults_and_is_observable() -> None:
     control, latest, backend, clock = make_control()
-    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("backend_command_failed")
+    )
     await connect_release_arm(control, latest, clock)
     latest.publish(frame(2, True), clock.now_ns())
     await control.tick()

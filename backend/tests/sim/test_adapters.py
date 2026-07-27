@@ -76,7 +76,11 @@ async def test_sim_adapter_translates_ik_errors_without_mutating_command(
     def fail_ik(*args, **kwargs):
         raise IKError(error_code)
 
-    monkeypatch.setattr(sim_adapter_module, "solve_ik", fail_ik)
+    monkeypatch.setattr(
+        sim_adapter_module,
+        "cartesian_servo_step",
+        fail_ik,
+    )
 
     with pytest.raises(BackendCommandError, match=f"^{error_code}$"):
         await adapter.command_tcp(target, command_id=99)

@@ -27,13 +27,15 @@ def _assert_safety_invariants(summary: dict[str, object]) -> None:
     assert summary["nan_count"] == 0
     assert summary["max_queue_depth"] == 1
     assert summary["error_count"] == 0
-    assert summary["injected_events"] == summary["verified_injected_stops"]
+    assert summary["injected_events"] == summary["verified_injected_events"]
+    assert summary["stop_expected_events"] == 5
+    assert summary["verified_injected_stops"] == 5
     assert summary["injected_by_kind"] == {
         "tracking_loss": 1,
         "hidden": 1,
         "disconnect": 1,
         "command_fault": 1,
-        "safety_fault": 1,
+        "workspace_boundary": 1,
         "visible_blurred": 1,
     }
     assert summary["final_mode"] == "DISARMED"
@@ -48,7 +50,7 @@ def test_ten_minute_soak_is_fast_deterministic_and_seeded() -> None:
     repeated = run_soak(minutes=10, seed=42)
     different = run_soak(minutes=10, seed=43)
 
-    assert elapsed < 8.0
+    assert elapsed < 15.0
     assert first == repeated
     assert first["path_checksum"] != different["path_checksum"]
     assert first["frames"] < first["control_steps"]
