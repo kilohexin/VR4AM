@@ -103,8 +103,10 @@ it('keeps right tracking valid when the left pose is unavailable', () => {
     p: [0, 0, 0],
     q: [0, 0, 0, 1],
     trackingValid: false,
+    thumbstickX: 0,
     thumbstickY: 0,
     thumbstickPressed: false,
+    grip: false,
   });
   expect(sample.right).toMatchObject({trackingValid: true, stopButton: true});
 });

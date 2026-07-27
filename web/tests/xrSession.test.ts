@@ -340,8 +340,10 @@ describe('XRSessionController lifecycle', () => {
         p: [-0.1, 0.2, 0.3],
         q: [0, 0, 0, 1],
         trackingValid: true,
+        thumbstickX: 0,
         thumbstickY: -0.75,
         thumbstickPressed: true,
+        grip: false,
       },
       right: expect.objectContaining({
         p: [0.4, 0.5, 0.6],
@@ -351,6 +353,7 @@ describe('XRSessionController lifecycle', () => {
         trigger: 0.25,
       }),
       headY: 1.68,
+      headQ: null,
     }, 110);
     expect(frames).toHaveLength(1);
     expect(frames.at(-1)).toMatchObject({
@@ -405,6 +408,7 @@ describe('XRSessionController lifecycle', () => {
       left: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
       right: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
       headY: null,
+      headQ: null,
     }, expect.any(Number));
 
     host.loop?.(140, poseFrame());
@@ -443,6 +447,7 @@ describe('XRSessionController lifecycle', () => {
       left: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
       right: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
       headY: null,
+      headQ: null,
     }, expect.any(Number));
     expect(host.stopXR).toHaveBeenCalledOnce();
     expect(statuses.at(-1)).toEqual({state: 'idle'});
@@ -514,6 +519,7 @@ describe('XRSessionController lifecycle', () => {
       left: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
       right: expect.objectContaining({p: [0, 0, 0], trackingValid: false}),
       headY: null,
+      headQ: null,
     }, expect.any(Number));
     const counts = {frames: frames.length, controls: controls.length, statuses: statuses.length};
     session.visibilityState = 'hidden';
