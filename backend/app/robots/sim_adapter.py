@@ -15,17 +15,27 @@ from app.robots.base import (
     StopReason,
 )
 from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
-from app.sim.cartesian_servo import cartesian_servo_step
+from app.sim.cartesian_servo import (
+    CartesianServoResult,
+    cartesian_servo_step,
+)
 from app.sim.ik import IKError
 from app.sim.kinematics import forward_pose
 from app.sim.lm3_model import LM3Model
 from app.sim.virtual_robot import VirtualRobot
 
 
+CartesianServo = Callable[..., CartesianServoResult]
+
+
 class SimRobotAdapter:
     STEP_SECONDS = 0.02
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        servo: CartesianServo = cartesian_servo_step,
+    ) -> None:
         self.model = LM3Model()
         self.robot = VirtualRobot(self.model)
         self.gripper = 0.0
@@ -34,6 +44,7 @@ class SimRobotAdapter:
         self.fault: str | None = None
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
+        self._servo = servo
 
     async def start(self) -> None:
         await self.connect()
@@ -62,7 +73,7 @@ class SimRobotAdapter:
     async def command_tcp(self, target: Pose, command_id: int) -> None:
         async with self._lock:
             try:
-                result = cartesian_servo_step(
+                result = self._servo(
                     target,
                     self.robot.q,
                     self.model,

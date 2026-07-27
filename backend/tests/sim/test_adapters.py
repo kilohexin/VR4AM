@@ -32,23 +32,17 @@ async def test_sim_adapter_accepts_tcp_and_gripper_commands() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sim_adapter_rejects_self_collision_without_mutating_command(
-    monkeypatch,
-) -> None:
-    import app.robots.sim_adapter as sim_adapter_module
+async def test_sim_adapter_rejects_self_collision_without_mutating_command() -> None:
+    def collide(*args, **kwargs):
+        return SimpleNamespace(
+            joint_velocity=(0.1,) * 6,
+            self_collision_limited=True,
+        )
 
-    adapter = SimRobotAdapter()
+    adapter = SimRobotAdapter(servo=collide)
     adapter.robot.set_target_qd((0.1,) * 6)
     adapter.command_id = 7
     target = forward_pose(adapter.model.home_q, adapter.model)
-    monkeypatch.setattr(
-        sim_adapter_module,
-        "cartesian_servo_step",
-        lambda *args, **kwargs: SimpleNamespace(
-            joint_velocity=(0.1,) * 6,
-            self_collision_limited=True,
-        ),
-    )
 
     with pytest.raises(BackendCommandError, match="^self_collision$"):
         await adapter.command_tcp(target, command_id=8)
@@ -63,30 +57,34 @@ async def test_sim_adapter_rejects_self_collision_without_mutating_command(
     ["ik_unreachable", "ik_singular", "joint_safety_window"],
 )
 async def test_sim_adapter_translates_ik_errors_without_mutating_command(
-    monkeypatch, error_code: str
+    error_code: str,
 ) -> None:
-    import app.robots.sim_adapter as sim_adapter_module
+    def fail_ik(*args, **kwargs):
+        raise IKError(error_code)
 
-    adapter = SimRobotAdapter()
+    adapter = SimRobotAdapter(servo=fail_ik)
     original_target = adapter.robot.q + 0.1
     adapter.robot.set_target_q(original_target)
     adapter.command_id = 7
     target = forward_pose(adapter.model.home_q, adapter.model)
-
-    def fail_ik(*args, **kwargs):
-        raise IKError(error_code)
-
-    monkeypatch.setattr(
-        sim_adapter_module,
-        "cartesian_servo_step",
-        fail_ik,
-    )
 
     with pytest.raises(BackendCommandError, match=f"^{error_code}$"):
         await adapter.command_tcp(target, command_id=99)
 
     assert adapter.robot.target_q == pytest.approx(original_target)
     assert adapter.command_id == 7
+
+
+@pytest.mark.asyncio
+async def test_sim_adapter_uses_injected_cartesian_servo() -> None:
+    def fail_servo(*args, **kwargs):
+        raise IKError("ik_unreachable")
+
+    adapter = SimRobotAdapter(servo=fail_servo)
+    target = forward_pose(adapter.model.home_q, adapter.model)
+
+    with pytest.raises(BackendCommandError, match="^ik_unreachable$"):
+        await adapter.command_tcp(target, command_id=1)
 
 
 @pytest.mark.asyncio

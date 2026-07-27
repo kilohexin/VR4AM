@@ -28,6 +28,8 @@ def _assert_safety_invariants(summary: dict[str, object]) -> None:
     assert summary["max_queue_depth"] == 1
     assert summary["error_count"] == 0
     assert summary["injected_events"] == summary["verified_injected_events"]
+    assert summary["injected_events"] == 7
+    assert summary["verified_injected_events"] == 7
     assert summary["stop_expected_events"] == 5
     assert summary["verified_injected_stops"] == 5
     assert summary["injected_by_kind"] == {
@@ -35,6 +37,7 @@ def _assert_safety_invariants(summary: dict[str, object]) -> None:
         "hidden": 1,
         "disconnect": 1,
         "command_fault": 1,
+        "ik_boundary": 1,
         "workspace_boundary": 1,
         "visible_blurred": 1,
     }

@@ -262,10 +262,7 @@ async def test_simulator_ik_error_publishes_soft_constraint_without_disarming(
     def fail_ik(*args, **kwargs):
         raise IKError("ik_unreachable")
 
-    monkeypatch.setattr(
-        "app.robots.sim_adapter.cartesian_servo_step",
-        fail_ik,
-    )
+    monkeypatch.setattr(adapter, "_servo", fail_ik)
     latest.publish(_frame(4, True, p=(0.0, 1.2, -0.31)), clock.now_ns())
 
     await control.tick()

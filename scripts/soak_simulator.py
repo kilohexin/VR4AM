@@ -40,6 +40,7 @@ EVENT_SCHEDULE = (
     (0.30, "hidden"),
     (0.45, "disconnect"),
     (0.60, "command_fault"),
+    (0.68, "ik_boundary"),
     (0.75, "workspace_boundary"),
     (0.85, "visible_blurred"),
 )
@@ -92,6 +93,7 @@ class CountingSimAdapter(SimRobotAdapter):
         self.commands = 0
         self.nan_count = 0
         self.fail_next_command = False
+        self.fail_next_soft_constraint = False
         self.stop_counts = {reason.value: 0 for reason in StopReason}
 
     async def command_tcp(self, target: Pose, command_id: int) -> None:
@@ -100,6 +102,9 @@ class CountingSimAdapter(SimRobotAdapter):
         if self.fail_next_command:
             self.fail_next_command = False
             raise BackendCommandError("backend_command_failed")
+        if self.fail_next_soft_constraint:
+            self.fail_next_soft_constraint = False
+            raise BackendCommandError("ik_unreachable")
         await super().command_tcp(target, command_id)
         self.commands += 1
         if self.robot.target_q is not None and not np.all(np.isfinite(self.robot.target_q)):
@@ -362,7 +367,7 @@ class SoakScenario:
 
     async def _inject_event(self, step: int, name: str) -> bool:
         if (
-            name in {"command_fault", "workspace_boundary"}
+            name in {"command_fault", "ik_boundary", "workspace_boundary"}
             and self.control.mode is not TeleopMode.ACTIVE
         ):
             return False
@@ -381,6 +386,8 @@ class SoakScenario:
         else:
             if name == "command_fault":
                 self.adapter.fail_next_command = True
+            elif name == "ik_boundary":
+                self.adapter.fail_next_soft_constraint = True
             frame = self._make_frame(
                 step,
                 grip=True,
@@ -396,7 +403,7 @@ class SoakScenario:
             )
             self._publish(frame)
             await self._tick_control()
-            if name == "workspace_boundary":
+            if name in {"ik_boundary", "workspace_boundary"}:
                 expected_mode = TeleopMode.ACTIVE
             else:
                 expected_mode = (
@@ -411,12 +418,16 @@ class SoakScenario:
             if published.mode is not expected_mode:
                 self.invariant_failures.append(f"{name}_mode_not_observable")
                 event_verified = False
+            expected_constraint = {
+                "ik_boundary": "ik_boundary",
+                "workspace_boundary": "workspace_boundary",
+            }.get(name)
             if (
-                name == "workspace_boundary"
-                and published.constraint != "workspace_boundary"
+                expected_constraint is not None
+                and published.constraint != expected_constraint
             ):
                 self.invariant_failures.append(
-                    "workspace_boundary_constraint_not_observable"
+                    f"{name}_constraint_not_observable"
                 )
                 event_verified = False
 
@@ -434,7 +445,7 @@ class SoakScenario:
             after = self.adapter.stop_counts[StopReason.FAULT.value]
             if after != before:
                 self.invariant_failures.append(
-                    "workspace_boundary_unexpected_fault_stop"
+                    f"{name}_unexpected_fault_stop"
                 )
                 event_verified = False
         if event_verified:
