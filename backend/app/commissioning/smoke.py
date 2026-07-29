@@ -2,61 +2,107 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import math
 import os
 import platform
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Sequence
 
 import yaml
+from scipy.spatial.transform import Rotation
 
+from app.commissioning.actions import (
+    GripperAction,
+    HomeAction,
+    RotationAction,
+    SmokeAction,
+    SmokeOptions,
+    SmokeResult,
+    StopAction,
+    TranslationAction,
+)
 from app.config import REAL_ROBOT_CONFIRMATION, Settings
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.main import _build_limiter, _build_mapper, build_backend
 from app.recording.commissioning import CommissioningRecorder
-from app.robots.base import HomeOptions
+from app.robots.base import HomeOptions, RobotBackend
 from app.robots.lebai_adapter import ClientFactory
 from app.robots.lebai_sdk_bridge import connect_real_client
-from app.schemas.messages import ControllerState, VRFrame
+from app.schemas.messages import (
+    BackendState,
+    ControllerState,
+    RobotStateMessage,
+    VRFrame,
+)
 from app.timebase import MonotonicClock
 
-Axis = Literal["x", "y", "z"]
 COMMISSIONING_LOG_ROOT = (
     Path(__file__).resolve().parents[3] / "logs" / "commissioning"
 )
-
-
-@dataclass(frozen=True)
-class SmokeOptions:
-    config_path: Path
-    axis: Axis
-    distance_m: float
-    confirmation: str
+_IDENTITY_Q = (0.0, 0.0, 0.0, 1.0)
+_ORIGIN = (0.0, 0.0, 0.0)
 
 
 def parse_smoke_args(argv: Sequence[str] | None = None) -> SmokeOptions:
     parser = argparse.ArgumentParser(
-        description="Run one guarded LM3 Cartesian smoke move.",
+        description="Run one guarded LM3 commissioning action.",
     )
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--axis", choices=("x", "y", "z"), required=True)
-    parser.add_argument("--distance-m", type=float, default=0.005)
-    parser.add_argument("--confirm", required=True)
+    commands = parser.add_subparsers(dest="command", required=True)
+    _add_safety_inputs(commands.add_parser("translate"))
+    translate = commands.choices["translate"]
+    translate.add_argument("--axis", choices=("x", "y", "z"), required=True)
+    translate.add_argument("--distance-m", type=float, required=True)
+
+    _add_safety_inputs(commands.add_parser("rotate"))
+    rotate = commands.choices["rotate"]
+    rotate.add_argument(
+        "--axis", choices=("roll", "pitch", "yaw"), required=True
+    )
+    rotate.add_argument("--angle-deg", type=float, required=True)
+
+    _add_safety_inputs(commands.add_parser("gripper"))
+    gripper = commands.choices["gripper"]
+    gripper.add_argument("--target", choices=("open", "close"), required=True)
+
+    _add_safety_inputs(commands.add_parser("home"))
+    _add_safety_inputs(commands.add_parser("stop"))
     args = parser.parse_args(argv)
-    distance = float(args.distance_m)
-    if not math.isfinite(distance) or distance <= 0:
-        raise ValueError("smoke_distance_must_be_positive_finite")
-    if distance > 0.005:
-        raise ValueError("smoke_distance_exceeds_0.005_m")
-    if args.confirm != REAL_ROBOT_CONFIRMATION:
+    confirmation = str(args.confirm)
+    if confirmation != REAL_ROBOT_CONFIRMATION:
         raise ValueError("smoke_confirmation_required")
-    return SmokeOptions(
-        config_path=args.config,
-        axis=args.axis,
-        distance_m=distance,
-        confirmation=args.confirm,
-    )
+
+    action: SmokeAction
+    if args.command == "translate":
+        distance = float(args.distance_m)
+        if (
+            not math.isfinite(distance)
+            or distance == 0
+            or abs(distance) > 0.005
+        ):
+            raise ValueError("smoke_translation_out_of_bounds")
+        action = TranslationAction(args.axis, distance)
+    elif args.command == "rotate":
+        angle = float(args.angle_deg)
+        if (
+            not math.isfinite(angle)
+            or angle == 0
+            or abs(angle) > 2.0
+        ):
+            raise ValueError("smoke_rotation_out_of_bounds")
+        action = RotationAction(args.axis, angle)
+    elif args.command == "gripper":
+        action = GripperAction(args.target)
+    elif args.command == "home":
+        action = HomeAction()
+    else:
+        action = StopAction()
+    return SmokeOptions(Path(args.config), action, confirmation)
+
+
+def _add_safety_inputs(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--confirm", required=True)
 
 
 def _configured_mode(config_path: Path) -> object:
@@ -69,11 +115,25 @@ def _configured_mode(config_path: Path) -> object:
     return real.get("mode")
 
 
+def _action_name(action: SmokeAction) -> str:
+    if isinstance(action, TranslationAction):
+        return "translate"
+    if isinstance(action, RotationAction):
+        return "rotate"
+    if isinstance(action, GripperAction):
+        return "gripper"
+    if isinstance(action, HomeAction):
+        return "home"
+    return "stop"
+
+
 def _frame(
     seq: int,
     *,
     grip: bool,
-    p: tuple[float, float, float],
+    p: tuple[float, float, float] = _ORIGIN,
+    q: tuple[float, float, float, float] = _IDENTITY_Q,
+    trigger: float = 0.0,
 ) -> VRFrame:
     return VRFrame(
         v=1,
@@ -83,19 +143,101 @@ def _frame(
         client_mono_ms=float(seq),
         tracking_valid=True,
         visibility="visible",
-        right=ControllerState(
-            p=p,
-            q=(0.0, 0.0, 0.0, 1.0),
-            grip=grip,
-            trigger=0.0,
-        ),
+        right=ControllerState(p=p, q=q, grip=grip, trigger=trigger),
     )
+
+
+async def _wait_for_stable_state(
+    backend: RobotBackend,
+    timeout_s: float,
+) -> RobotStateMessage:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    stable_since: float | None = None
+    while True:
+        state = await backend.get_state()
+        now = loop.time()
+        # RobotStateMessage intentionally does not expose joint velocity.  The
+        # RealLebaiAdapter stop path has already verified qd <= 0.02 rad/s for
+        # 300 ms; this post-action poll keeps the reported state idle and fresh.
+        if state.robot_state is BackendState.IDLE:
+            if stable_since is None:
+                stable_since = now
+            elif now - stable_since >= 0.3:
+                return state
+        else:
+            stable_since = None
+        if now >= deadline:
+            raise RuntimeError("smoke_stability_timeout")
+        await asyncio.sleep(min(0.02, deadline - now))
+
+
+async def _run_motion_action(
+    control: RobotControl,
+    latest: LatestVRFrame,
+    clock: MonotonicClock,
+    settings: Settings,
+    action: TranslationAction | RotationAction | GripperAction,
+) -> None:
+    # The released sample is deliberately ticked before arming so the
+    # RobotControl session guards remain the sole authority for motion.
+    observed_trigger = await control.initialize_observed_gripper()
+    latest.publish(
+        _frame(1, grip=False, trigger=observed_trigger),
+        clock.now_ns(),
+    )
+    await control.tick()
+    await control.arm()
+
+    latest.publish(
+        _frame(2, grip=True, trigger=observed_trigger),
+        clock.now_ns(),
+    )
+    await control.tick()
+
+    if isinstance(action, TranslationAction):
+        if settings.lebai is None:
+            raise RuntimeError("missing_lebai_settings")
+        hand_distance = action.distance_m / settings.lebai.control.translation_scale
+        offset = [0.0, 0.0, 0.0]
+        offset[{"x": 0, "y": 1, "z": 2}[action.axis]] = hand_distance
+        frame = _frame(3, grip=True, p=tuple(offset), trigger=observed_trigger)
+    elif isinstance(action, RotationAction):
+        controller_axis = {"roll": "x", "pitch": "y", "yaw": "z"}[action.axis]
+        q = tuple(
+            float(value)
+            for value in Rotation.from_euler(
+                controller_axis, action.angle_deg, degrees=True
+            ).as_quat()
+        )
+        frame = _frame(3, grip=True, q=q, trigger=observed_trigger)
+    else:
+        if settings.lebai is None:
+            raise RuntimeError("missing_lebai_settings")
+        await asyncio.sleep(1 / settings.lebai.gripper.command_hz)
+        trigger = 0.0 if action.target == "open" else 1.0
+        frame = _frame(3, grip=True, trigger=trigger)
+    latest.publish(frame, clock.now_ns())
+    await control.tick()
+
+    if isinstance(action, (TranslationAction, RotationAction)):
+        if settings.lebai is None:
+            raise RuntimeError("missing_lebai_settings")
+        await asyncio.sleep(
+            settings.lebai.control.pvat_horizon_s
+            + 1 / settings.lebai.control.pvat_send_hz
+        )
+    latest.publish(
+        _frame(4, grip=False, trigger=observed_trigger),
+        clock.now_ns(),
+    )
+    await control.tick()
 
 
 async def run_smoke(
     options: SmokeOptions,
     client_factory: ClientFactory = connect_real_client,
-) -> int:
+) -> SmokeResult:
     if options.confirmation != REAL_ROBOT_CONFIRMATION:
         raise ValueError("smoke_confirmation_required")
     if _configured_mode(options.config_path) != "control":
@@ -119,14 +261,14 @@ async def run_smoke(
 
     if settings.lebai is None or settings.lebai.mode != "control":
         raise RuntimeError("smoke_requires_control_mode")
+    action_name = _action_name(options.action)
     recorder = CommissioningRecorder(
         COMMISSIONING_LOG_ROOT,
         metadata={
             "backend": "LEBAI",
             "real_robot_mode": "control",
-            "workflow": "single_axis_5mm_smoke",
-            "axis": options.axis,
-            "distance_m": options.distance_m,
+            "workflow": "single_guarded_commissioning_action",
+            "action": action_name,
             "python_version": platform.python_version(),
         },
     )
@@ -156,9 +298,7 @@ async def run_smoke(
             clock.now_ns(),
         )
         if not preflight.ready:
-            raise RuntimeError(
-                f"smoke_preflight_failed:{preflight.reason}"
-            )
+            raise RuntimeError(f"smoke_preflight_failed:{preflight.reason}")
 
         control = RobotControl(
             backend=backend,
@@ -177,34 +317,20 @@ async def run_smoke(
             ),
         )
         await control.connect()
-        origin = (0.0, 0.0, 0.0)
-        latest.publish(_frame(1, grip=False, p=origin), clock.now_ns())
-        await control.tick()
-        await control.arm()
-        latest.publish(_frame(2, grip=True, p=origin), clock.now_ns())
-        await control.tick()
-
-        hand_distance = (
-            options.distance_m / settings.lebai.control.translation_scale
-        )
-        offset = [0.0, 0.0, 0.0]
-        offset[{"x": 0, "y": 1, "z": 2}[options.axis]] = hand_distance
-        latest.publish(
-            _frame(3, grip=True, p=tuple(offset)),
-            clock.now_ns(),
-        )
-        await control.tick()
-        await asyncio.sleep(
-            settings.lebai.control.pvat_horizon_s
-            + 1 / settings.lebai.control.pvat_send_hz
-        )
-        latest.publish(_frame(4, grip=False, p=tuple(offset)), clock.now_ns())
-        await control.tick()
-        print(
-            "Smoke move complete. Verify the actual direction before testing "
-            "another axis."
-        )
-        return 0
+        before = await backend.get_state()
+        if isinstance(options.action, (TranslationAction, RotationAction, GripperAction)):
+            await _run_motion_action(control, latest, clock, settings, options.action)
+        elif isinstance(options.action, HomeAction):
+            latest.publish(_frame(1, grip=False), clock.now_ns())
+            home = await control.home()
+            if not home.accepted:
+                raise RuntimeError(f"smoke_home_failed:{home.reason}")
+        else:
+            await control.disarm()
+        after = await _wait_for_stable_state(backend, settings.home_timeout_s)
+        result = SmokeResult(action_name, before, after, stable=True)
+        print(json.dumps(result.to_dict(), separators=(",", ":")))
+        return result
     except BaseException as error:
         primary_error = error
         raise
@@ -231,4 +357,5 @@ async def run_smoke(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    return asyncio.run(run_smoke(parse_smoke_args(argv)))
+    asyncio.run(run_smoke(parse_smoke_args(argv)))
+    return 0

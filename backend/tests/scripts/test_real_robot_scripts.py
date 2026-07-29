@@ -59,10 +59,11 @@ async def test_preflight_requires_readonly_config_before_connect(
     factory.assert_not_awaited()
 
 
-def test_smoke_rejects_distance_over_five_mm(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="^smoke_distance_exceeds_0.005_m$"):
+def test_smoke_rejects_translation_over_five_mm(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="^smoke_translation_out_of_bounds$"):
         parse_smoke_args(
             [
+                "translate",
                 "--config",
                 str(_config(tmp_path, "control")),
                 "--axis",
@@ -79,6 +80,7 @@ def test_smoke_rejects_wrong_confirmation(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="^smoke_confirmation_required$"):
         parse_smoke_args(
             [
+                "translate",
                 "--config",
                 str(_config(tmp_path, "control")),
                 "--axis",
@@ -97,6 +99,7 @@ async def test_smoke_rejects_readonly_mode_without_connecting(
 ) -> None:
     options = parse_smoke_args(
         [
+            "translate",
             "--config",
             str(_config(tmp_path, "readonly")),
             "--axis",
@@ -129,6 +132,7 @@ async def test_smoke_rejects_missing_home_before_connecting(
     )
     options = parse_smoke_args(
         [
+            "translate",
             "--config",
             str(path),
             "--axis",
@@ -161,6 +165,7 @@ async def test_smoke_rejects_missing_tcp_before_connecting(
     )
     options = parse_smoke_args(
         [
+            "translate",
             "--config",
             str(path),
             "--axis",
@@ -188,6 +193,7 @@ async def test_smoke_rejects_non_idle_robot_before_any_write(
     client.robot_state = "MOVING"
     options = parse_smoke_args(
         [
+            "translate",
             "--config",
             str(_config(tmp_path, "control")),
             "--axis",
@@ -221,6 +227,7 @@ async def test_smoke_runs_one_pvat_move_and_verified_stop(
     client = FakeLebaiClient.idle()
     options = parse_smoke_args(
         [
+            "translate",
             "--config",
             str(_config(tmp_path, "control")),
             "--axis",
@@ -240,6 +247,8 @@ async def test_smoke_runs_one_pvat_move_and_verified_stop(
     result = await run_smoke(options, AsyncMock(return_value=client))
 
     methods = [call[0] for call in client.write_calls]
-    assert result == 0
+    assert result.action == "translate"
+    assert result.stable is True
+    assert result.after.robot_state.value == "IDLE"
     assert "move_pvat" in methods
     assert "stop_move" in methods

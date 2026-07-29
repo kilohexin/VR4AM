@@ -173,6 +173,19 @@ class RobotControl:
         if self._fault is None:
             self._clear_stop_episode()
 
+    async def initialize_observed_gripper(self) -> float:
+        if (
+            self._running
+            or self.machine.mode not in {TeleopMode.READY, TeleopMode.DISARMED}
+        ):
+            raise RuntimeError("gripper_initialize_requires_stopped")
+        if self._fault is not None or self._shutdown_started:
+            raise RuntimeError("gripper_initialize_unavailable")
+        state = await self.backend.get_state()
+        self._last_gripper_sent = state.gripper
+        self._last_gripper_sent_ns = self.clock.now_ns()
+        return state.gripper
+
     async def start(self) -> None:
         async with self._lifecycle_lock:
             if self._shutdown_started:

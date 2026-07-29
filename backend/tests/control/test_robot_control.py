@@ -1554,6 +1554,38 @@ async def test_gripper_has_strict_10hz_ceiling_delta_threshold_and_no_queue() ->
 
 
 @pytest.mark.asyncio
+async def test_initialize_observed_gripper_avoids_a_spurious_first_command() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+
+    observed = await control.initialize_observed_gripper()
+
+    assert observed == pytest.approx(0.0)
+    assert backend.gripper_commands == []
+
+    latest.publish(frame(1, False, trigger=observed), clock.now_ns())
+    await control.tick()
+    await control.arm()
+    latest.publish(frame(2, True, trigger=observed), clock.now_ns())
+    await control.tick()
+    clock.advance_ms(100)
+    latest.publish(frame(3, True, trigger=1.0), clock.now_ns())
+    await control.tick()
+
+    assert backend.gripper_commands == pytest.approx([1.0])
+
+
+@pytest.mark.asyncio
+async def test_initialize_observed_gripper_rejects_a_running_control_loop() -> None:
+    control, _latest, _backend, _clock = make_control()
+    await control.connect()
+    control._running = True
+
+    with pytest.raises(RuntimeError, match="^gripper_initialize_requires_stopped$"):
+        await control.initialize_observed_gripper()
+
+
+@pytest.mark.asyncio
 async def test_latched_fault_blocks_new_gripper_commands_after_stop_completion() -> None:
     control, latest, backend, clock = make_control()
     await enter_published_recoverable_fault(control, "workspace_violation")
