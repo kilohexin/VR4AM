@@ -467,20 +467,81 @@ describe('XR render-loop handoff', () => {
       recoveryPhase: null,
     } satisfies ArmSafetySnapshot;
     const update = vi.fn();
+    const runtimeSummary = {
+      backend: null,
+      realRobotMode: null,
+      actualTcp: null,
+      gripper: null,
+      latencyMs: null,
+      hardwareVerified: false,
+    } as const;
     const scene = {
       armSafetyState: snapshot,
       questControllerSupported: null,
+      runtimeSummary,
       vrSafetyPanel: {update},
     };
 
     SimulationScene.prototype.setQuestControllerSupport.call(scene as never, false);
     expect(scene.questControllerSupported).toBe(false);
-    expect(update).toHaveBeenLastCalledWith(snapshot, false);
+    expect(update).toHaveBeenLastCalledWith(snapshot, false, runtimeSummary);
 
     const stopped = {...snapshot, phase: 'stopped', mode: 'DISARMED'} satisfies ArmSafetySnapshot;
     SimulationScene.prototype.setArmSafetyState.call(scene as never, stopped);
     expect(scene.armSafetyState).toBe(stopped);
-    expect(update).toHaveBeenLastCalledWith(stopped, false);
+    expect(update).toHaveBeenLastCalledWith(stopped, false, runtimeSummary);
+  });
+
+  it('keeps the GLB on authoritative actual joints when diagnostics runtime summary changes', () => {
+    const actualQ = [0.11, -0.22, 0.33, -0.44, 0.55, -0.66];
+    const setJointAngles = vi.fn();
+    const update = vi.fn();
+    const scene = {
+      armSafetyState: {
+        phase: 'locked', connected: true, connectionState: 'connected', eligible: false,
+        armed: false, pending: false, mode: 'READY', fault: null, faultRecoverable: false,
+        faultResetPending: false, constraint: null, recoveryPhase: null,
+      },
+      questControllerSupported: true,
+      vrSafetyPanel: {update},
+      runtimeSummary: {
+        backend: null, realRobotMode: null, actualTcp: null, gripper: null, latencyMs: null,
+        hardwareVerified: false,
+      },
+      clockAnchor: {estimate: vi.fn().mockReturnValue(1)},
+      options: {
+        stateBuffer: {
+          sample: vi.fn().mockReturnValue({
+            state: {
+              actual_q: actualQ,
+              actual_tcp: {p: [0.2, 0.3, 0.4], q: [0, 0, 0, 1]},
+              gripper: 0.4,
+            },
+          }),
+        },
+      },
+      robotModel: {setJointAngles, setGripper: vi.fn()},
+      robotVisualRoot: new THREE.Group(),
+      graspController: {update: vi.fn()},
+      targetMarker: new THREE.Group(),
+      controllerPosition: new THREE.Vector3(),
+      controllerQuaternion: new THREE.Quaternion(),
+    };
+
+    (SimulationScene.prototype.setRuntimeSummary as Function).call(scene, {
+      backend: 'LEBAI_FAKE',
+      realRobotMode: null,
+      actualTcp: {p: [0.9, 0.8, 0.7], q: [0, 0, 0, 1]},
+      gripper: 0.9,
+      latencyMs: 18,
+      hardwareVerified: false,
+    });
+    expect(setJointAngles).not.toHaveBeenCalled();
+
+    (SimulationScene.prototype as unknown as {updateScene(this: typeof scene, nowMs: number): void})
+      .updateScene.call(scene, 10);
+
+    expect(setJointAngles).toHaveBeenCalledWith(actualQ);
   });
 
   it('disposes owned XR visuals before generic scene traversal', () => {

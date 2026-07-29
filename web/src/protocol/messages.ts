@@ -46,6 +46,7 @@ export type TeleopMode =
 
 export type BackendState = 'DISCONNECTED' | 'IDLE' | 'MOVING' | 'HOLD' | 'FAULT';
 export type RuntimeBackend = 'SIMULATOR' | 'LEBAI' | 'LEBAI_FAKE';
+export type RealRobotMode = 'readonly' | 'control';
 
 export interface RobotStateMessage {
   v: typeof PROTOCOL_VERSION;
@@ -62,6 +63,45 @@ export interface RobotStateMessage {
   constraint?: ConstraintKind | null;
   recovery_phase?: RecoveryPhase | null;
   backend?: RuntimeBackend | null;
+  real_robot_mode?: RealRobotMode | null;
+  preflight_ready?: boolean | null;
+  preflight_reason?: string | null;
+}
+
+export type DiagnosticPayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | DiagnosticPayloadValue[]
+  | {readonly [key: string]: DiagnosticPayloadValue};
+
+export interface DiagnosticEvent {
+  event_id: number;
+  server_mono_ns: number;
+  kind: string;
+  critical: boolean;
+  payload: Record<string, DiagnosticPayloadValue>;
+}
+
+export interface DiagnosticsMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: 'diagnostics';
+  server_mono_ns: number;
+  runtime: RuntimeBackend;
+  hardware_verified: false;
+  control_generation: number;
+  actual_qd: JointVector | null;
+  actual_qdd: JointVector | null;
+  target_q: JointVector | null;
+  target_qd: JointVector | null;
+  target_qdd: JointVector | null;
+  target_tcp: Pose | null;
+  sdk_latencies_ms: Record<string, number>;
+  pvat_send_hz: number | null;
+  log_session_dir: string | null;
+  dropped_events: number;
+  recent_events: DiagnosticEvent[];
 }
 
 export type ClientControlType =
@@ -180,6 +220,7 @@ const CONSTRAINT_KINDS: readonly ConstraintKind[] = [
   'self_collision',
 ];
 const RECOVERY_PHASES: readonly RecoveryPhase[] = ['stopping', 'homing', 'stabilizing'];
+const REAL_ROBOT_MODES: readonly RealRobotMode[] = ['readonly', 'control'];
 const CONTROL_TYPES: readonly ClientControlType[] = [
   'hello',
   'arm_request',
@@ -289,6 +330,43 @@ function isNullableNonNegativeNumber(value: unknown): boolean {
   return value === null || isNonNegativeNumber(value);
 }
 
+function isNullableJointVector(value: unknown): boolean {
+  return value === null || isJointVector(value);
+}
+
+function isSdkLatencies(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every(isNonNegativeNumber);
+}
+
+function isDiagnosticPayloadValue(value: unknown): value is DiagnosticPayloadValue {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    isFiniteNumber(value)
+  ) {
+    return true;
+  }
+  if (Array.isArray(value)) return value.every(isDiagnosticPayloadValue);
+  return isRecord(value) && Object.values(value).every(isDiagnosticPayloadValue);
+}
+
+function isDiagnosticEvent(value: unknown): value is DiagnosticEvent {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ['event_id', 'server_mono_ns', 'kind', 'critical', 'payload']) &&
+    isNonNegativeInteger(value.event_id) &&
+    value.event_id >= 1 &&
+    isNonNegativeInteger(value.server_mono_ns) &&
+    typeof value.kind === 'string' &&
+    codePointLength(value.kind) >= 1 &&
+    codePointLength(value.kind) <= 64 &&
+    typeof value.critical === 'boolean' &&
+    isRecord(value.payload) &&
+    Object.values(value.payload).every(isDiagnosticPayloadValue)
+  );
+}
+
 export function isVRFrame(value: unknown): value is VRFrame {
   if (
     !isRecord(value) ||
@@ -319,7 +397,10 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
     !hasExactKeys(
       value,
       ['v', 'type', 'server_mono_ns', 'mode', 'robot_state', 'actual_tcp', 'actual_q', 'gripper'],
-      ['ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase', 'backend'],
+      [
+        'ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase', 'backend',
+        'real_robot_mode', 'preflight_ready', 'preflight_reason',
+      ],
     ) ||
     value.v !== PROTOCOL_VERSION ||
     value.type !== 'robot_state' ||
@@ -357,11 +438,64 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
   ) {
     return false;
   }
+  if (
+    Object.hasOwn(value, 'real_robot_mode') &&
+    value.real_robot_mode !== null &&
+    !isEnumValue(REAL_ROBOT_MODES, value.real_robot_mode)
+  ) {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, 'preflight_ready') &&
+    value.preflight_ready !== null &&
+    typeof value.preflight_ready !== 'boolean'
+  ) {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, 'preflight_reason') &&
+    value.preflight_reason !== null &&
+    typeof value.preflight_reason !== 'string'
+  ) {
+    return false;
+  }
   return (
     !Object.hasOwn(value, 'recovery_phase') ||
     value.recovery_phase === null ||
     isEnumValue(RECOVERY_PHASES, value.recovery_phase)
   );
+}
+
+export function isDiagnosticsMessage(value: unknown): value is DiagnosticsMessage {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      'v', 'type', 'server_mono_ns', 'runtime', 'hardware_verified', 'control_generation',
+      'actual_qd', 'actual_qdd', 'target_q', 'target_qd', 'target_qdd', 'target_tcp',
+      'sdk_latencies_ms', 'pvat_send_hz', 'log_session_dir', 'dropped_events', 'recent_events',
+    ]) ||
+    value.v !== PROTOCOL_VERSION ||
+    value.type !== 'diagnostics' ||
+    !isNonNegativeInteger(value.server_mono_ns) ||
+    !isEnumValue(['SIMULATOR', 'LEBAI', 'LEBAI_FAKE'], value.runtime) ||
+    value.hardware_verified !== false ||
+    !isNonNegativeInteger(value.control_generation) ||
+    !isNullableJointVector(value.actual_qd) ||
+    !isNullableJointVector(value.actual_qdd) ||
+    !isNullableJointVector(value.target_q) ||
+    !isNullableJointVector(value.target_qd) ||
+    !isNullableJointVector(value.target_qdd) ||
+    !(value.target_tcp === null || isPose(value.target_tcp)) ||
+    !isSdkLatencies(value.sdk_latencies_ms) ||
+    !isNullableNonNegativeNumber(value.pvat_send_hz) ||
+    !(value.log_session_dir === null || typeof value.log_session_dir === 'string') ||
+    !isNonNegativeInteger(value.dropped_events) ||
+    !Array.isArray(value.recent_events) ||
+    !value.recent_events.every(isDiagnosticEvent)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export function isClientControlMessage(value: unknown): value is ClientControlMessage {

@@ -1,8 +1,10 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import validDiagnostics from '../../schemas/fixtures/diagnostics-valid.json';
 import robotFixture from '../../schemas/fixtures/robot-state-valid.json';
 import vrFixture from '../../schemas/fixtures/vr-frame-valid.json';
 import type {
   ClientControlMessage,
+  DiagnosticsMessage,
   FaultResetResultMessage,
   HomeResultMessage,
   RobotStateMessage,
@@ -200,6 +202,32 @@ describe('TeleopSocket', () => {
     sockets[0].message(JSON.stringify(robotFixture));
 
     expect(states).toEqual([robotFixture]);
+  });
+
+  it('delivers diagnostics only through the final owner-socket callback', () => {
+    const diagnostics: DiagnosticsMessage[] = [];
+    const sockets: FakeSocket[] = [];
+    const client = new TeleopSocket(
+      'wss://test',
+      () => {},
+      () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      () => {},
+      () => {},
+      () => {},
+      () => {},
+      (message) => diagnostics.push(message),
+    );
+    client.connect();
+    sockets[0].open();
+
+    sockets[0].message(JSON.stringify({...validDiagnostics, hardware_verified: true}));
+    sockets[0].message(JSON.stringify(validDiagnostics));
+
+    expect(diagnostics).toEqual([validDiagnostics]);
   });
 
   it('delivers protocol-valid arm acknowledgements and rejections', () => {

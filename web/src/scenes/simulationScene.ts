@@ -21,7 +21,7 @@ import {
   KinematicGraspController,
 } from './kinematicGraspController';
 import {WorkspacePlacementController} from './workspacePlacementController';
-import {VrSafetyPanel} from './vrSafetyPanel';
+import {type RobotRuntimeSummary, VrSafetyPanel} from './vrSafetyPanel';
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
 
@@ -235,6 +235,14 @@ export class SimulationScene {
     recoveryPhase: null,
   };
   private questControllerSupported: boolean | null = null;
+  private runtimeSummary: RobotRuntimeSummary = {
+    backend: null,
+    realRobotMode: null,
+    actualTcp: null,
+    gripper: null,
+    latencyMs: null,
+    hardwareVerified: false,
+  };
   private started = false;
 
   constructor(
@@ -267,7 +275,7 @@ export class SimulationScene {
     this.controllerHints = new ControllerHints(this.scene);
     this.controllerHints.setVisible(false);
     this.vrSafetyPanel = new VrSafetyPanel(this.robotVisualRoot);
-    this.vrSafetyPanel.update(this.armSafetyState, this.questControllerSupported);
+    this.vrSafetyPanel.update(this.armSafetyState, this.questControllerSupported, this.runtimeSummary);
   }
 
   start(): void {
@@ -293,12 +301,17 @@ export class SimulationScene {
 
   setArmSafetyState(snapshot: ArmSafetySnapshot): void {
     this.armSafetyState = snapshot;
-    this.vrSafetyPanel.update(snapshot, this.questControllerSupported);
+    this.vrSafetyPanel.update(snapshot, this.questControllerSupported, this.runtimeSummary);
   }
 
   setQuestControllerSupport(supported: boolean | null): void {
     this.questControllerSupported = supported;
-    this.vrSafetyPanel.update(this.armSafetyState, supported);
+    this.vrSafetyPanel.update(this.armSafetyState, supported, this.runtimeSummary);
+  }
+
+  setRuntimeSummary(summary: RobotRuntimeSummary): void {
+    this.runtimeSummary = summary;
+    this.vrSafetyPanel.update(this.armSafetyState, this.questControllerSupported, summary);
   }
 
   resize(): void {

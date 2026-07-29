@@ -511,6 +511,27 @@ describe('ArmPanel simulator safety', () => {
     }));
   });
 
+  it('changes runtime copy without changing arm eligibility or pending state', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.observeGrip(false);
+    const before = panel.safetyState;
+
+    panel.setRuntimeIdentity('LEBAI_FAKE');
+    expect(panel.armButton.textContent).toContain('解锁数字孪生');
+    expect(panel.safetyState).toMatchObject({
+      eligible: before.eligible,
+      armed: before.armed,
+      pending: before.pending,
+    });
+
+    panel.setRuntimeIdentity('LEBAI');
+    expect(panel.armButton.textContent).toContain('解锁真机');
+    panel.armButton.click();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({type: 'arm_request'}));
+    expect(panel.isArmPending).toBe(true);
+  });
+
   it('uses the first B to stop and a later released-Grip B to request Home', () => {
     const send = vi.fn();
     const panel = new ArmPanel(document.querySelector('#panel')!, send);

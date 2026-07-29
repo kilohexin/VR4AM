@@ -85,6 +85,20 @@ describe('Chinese simulator HUD', () => {
     ).toBe('true');
   });
 
+  it('updates the runtime identity copy for simulator, twin, and real modes', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+
+    hud.setRuntimeIdentity('SIMULATOR', null);
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('仅仿真 · SIMULATOR');
+    hud.setRuntimeIdentity('LEBAI_FAKE', null);
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('数字孪生 · LEBAI_FAKE');
+    expect(document.querySelector('.simulator-label')?.getAttribute('data-backend')).toBe('LEBAI_FAKE');
+    hud.setRuntimeIdentity('LEBAI', 'readonly');
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('真机只读 · LEBAI');
+    hud.setRuntimeIdentity('LEBAI', 'control');
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('真机控制 · LEBAI');
+  });
+
   it('clears stale backend, age, fault, and latency values on disconnect', () => {
     const hud = new Hud(document.querySelector('#app')!);
     hud.setConnectionStatus({state: 'connected'});

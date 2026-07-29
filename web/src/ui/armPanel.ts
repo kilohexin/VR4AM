@@ -8,6 +8,7 @@ import {
   type HomeRejectReason,
   type HomeResultMessage,
   type RecoveryPhase,
+  type RuntimeBackend,
   type TeleopMode,
 } from '../protocol/messages';
 import type {XRSessionStatus} from '../xr/session';
@@ -91,6 +92,7 @@ export class ArmPanel {
   private safetyPublishQueued = false;
   private readonly armLabel: HTMLElement;
   private readonly stopLabel: HTMLElement;
+  private runtimeArmLabel = '解锁仿真';
 
   constructor(
     container: Element,
@@ -178,6 +180,15 @@ export class ArmPanel {
     this.connectionState = status.state;
     this.connected = status.state === 'connected';
     this.resetToLocked();
+  }
+
+  setRuntimeIdentity(backend: RuntimeBackend | null): void {
+    this.runtimeArmLabel = backend === 'LEBAI'
+      ? '解锁真机'
+      : backend === 'LEBAI_FAKE'
+        ? '解锁数字孪生'
+        : '解锁仿真';
+    this.syncButtonState();
   }
 
   setFault(fault: string | null): void {
@@ -443,7 +454,7 @@ export class ArmPanel {
       ? '解锁被拒绝'
       : this.isArmPending
         ? '正在解锁'
-        : '解锁仿真';
+        : this.runtimeArmLabel;
     this.armButton.title = this.armFeedback ?? '';
     this.armButton.setAttribute(
       'aria-label',
@@ -455,7 +466,7 @@ export class ArmPanel {
             ? '正在等待后端确认解锁'
             : this.armed
               ? '仿真已解锁'
-              : '解锁仿真',
+              : this.runtimeArmLabel,
     );
     if (this.pendingFaultResetId !== null) {
       this.stopLabel.textContent = this.recoveryPhase === 'stopping'

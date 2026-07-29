@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import * as THREE from 'three';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {describeVrSafety, VrSafetyPanel} from '../src/scenes/vrSafetyPanel';
+import {
+  describeVrSafety,
+  type RobotRuntimeSummary,
+  VrSafetyPanel,
+} from '../src/scenes/vrSafetyPanel';
 import type {ArmSafetyPhase, ArmSafetySnapshot} from '../src/ui/armPanel';
 
 const state = (phase: ArmSafetyPhase): ArmSafetySnapshot => ({
@@ -26,13 +30,14 @@ describe('VR safety presentation', () => {
     ['armed', '已解锁', '按住 Grip 移动', 'cyan', 'shield'],
     ['active', '运动中', '松开 Grip 停止 · B 紧急停止', 'cyan', 'shield'],
     ['stopped', '已停止', '保持 Grip 松开：A 解锁，B 回 Home', 'red', 'stop'],
-    ['fault', '无法在线复位', '请重启后端并检查原因', 'red', 'warning'],
+    ['fault', '无法在线复位', '保持安全距离，检查 L Master/急停', 'red', 'warning'],
     ['disconnected', '连接已中断', '保持 Grip 松开', 'red', 'warning'],
   ] as const)('maps %s to readable text and a shape', (phase, title, instruction, tone, shape) => {
     expect(describeVrSafety(state(phase), true)).toEqual({
       title,
       instruction,
       footer: 'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
+      statusLine: 'SIMULATOR · TCP — · —',
       tone,
       shape,
     });
@@ -148,7 +153,7 @@ describe('VR safety presentation', () => {
       faultRecoverable: false,
     }, true)).toMatchObject({
       title: '无法在线复位',
-      instruction: '请重启后端并检查原因',
+      instruction: '保持安全距离，检查 L Master/急停',
       tone: 'red',
     });
   });
@@ -161,7 +166,7 @@ describe('VR safety presentation', () => {
       faultRecoverable: false,
     }, true)).toMatchObject({
       title: '数据陈旧',
-      instruction: '保持 Grip 松开',
+      instruction: '机械臂已停止，请检查网络',
       tone: 'red',
     });
   });
@@ -171,6 +176,7 @@ describe('VR safety presentation', () => {
       title: '手柄不受支持',
       instruction: '当前配置不支持 A/B 安全控制',
       footer: 'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
+      statusLine: 'SIMULATOR · TCP — · —',
       tone: 'red',
       shape: 'warning',
     });
@@ -196,6 +202,31 @@ describe('VR safety presentation', () => {
       title: '机械臂接近自碰撞边界，请将手柄退回',
       tone: 'amber',
       shape: 'warning',
+    });
+  });
+
+  it.each([
+    ['workspace_boundary', '向反方向退回'],
+    ['ik_boundary', '保持 Grip，退回上一个位置'],
+  ] as const)('uses the specific safe recovery instruction for %s', (constraint, instruction) => {
+    expect(describeVrSafety({...state('active'), constraint}, true)).toMatchObject({
+      instruction,
+      tone: 'amber',
+    });
+  });
+
+  it('renders a compact real-arm runtime summary without joint telemetry', () => {
+    const summary: RobotRuntimeSummary = {
+      backend: 'LEBAI',
+      realRobotMode: 'control',
+      actualTcp: {p: [0.312, -0.041, 0.428], q: [0, 0, 0, 1]},
+      gripper: 0.4,
+      latencyMs: 18,
+      hardwareVerified: false,
+    };
+
+    expect(describeVrSafety(state('locked'), true, summary)).toMatchObject({
+      statusLine: '真机已连接 · CONTROL · TCP 0.312/−0.041/0.428 · 18 ms',
     });
   });
 

@@ -1,9 +1,11 @@
 import {describe, expect, it} from 'vitest';
+import validDiagnostics from '../../schemas/fixtures/diagnostics-valid.json';
 import robotFixture from '../../schemas/fixtures/robot-state-valid.json';
 import vrFixture from '../../schemas/fixtures/vr-frame-valid.json';
 import {
   isClientControlMessage,
   isConnectionRejectedMessage,
+  isDiagnosticsMessage,
   isFaultResetResultMessage,
   isHomeResultMessage,
   isRobotStateMessage,
@@ -11,6 +13,16 @@ import {
 } from '../src/protocol/messages';
 
 describe('protocol guards', () => {
+  it('accepts only strict diagnostics messages with unverified hardware', () => {
+    expect(isDiagnosticsMessage(validDiagnostics)).toBe(true);
+    expect(isDiagnosticsMessage({...validDiagnostics, hardware_verified: true})).toBe(false);
+    expect(isDiagnosticsMessage({...validDiagnostics, runtime: 'LEBAI_MOCK'})).toBe(false);
+    expect(isDiagnosticsMessage({
+      ...validDiagnostics,
+      sdk_latencies_ms: {get_kin_data: Number.NaN},
+    })).toBe(false);
+  });
+
   it('accepts only the exact controller-occupied rejection contract', () => {
     const valid = {
       v: 1,
@@ -28,6 +40,13 @@ describe('protocol guards', () => {
     expect(isRobotStateMessage(robotFixture)).toBe(true);
     expect(isRobotStateMessage({...robotFixture, constraint: 'self_collision'})).toBe(true);
     expect(isRobotStateMessage({...robotFixture, backend: 'LEBAI_FAKE'})).toBe(true);
+    expect(isRobotStateMessage({
+      ...robotFixture,
+      backend: 'LEBAI',
+      real_robot_mode: 'readonly',
+      preflight_ready: false,
+      preflight_reason: 'commissioning_not_ready',
+    })).toBe(true);
   });
 
   it('accepts every valid control type and optional nullable fields', () => {

@@ -1,7 +1,9 @@
 import type {
   BackendState,
   ConstraintKind,
+  RealRobotMode,
   RecoveryPhase,
+  RuntimeBackend,
   TeleopMode,
 } from '../protocol/messages';
 import type {TeleopConnectionStatus} from '../transport/teleopSocket';
@@ -24,8 +26,10 @@ export interface RobotHudState {
 export class Hud {
   readonly sceneContainer: HTMLElement;
   readonly actionContainer: HTMLElement;
+  readonly diagnosticsContainer: HTMLElement;
 
   private readonly modeValue: HTMLElement;
+  private readonly runtimeIdentityValue: HTMLElement;
   private readonly backendStateValue: HTMLElement;
   private readonly connectionValue: HTMLElement;
   private readonly trackingValue: HTMLElement;
@@ -93,6 +97,7 @@ export class Hud {
             <span class="status-label">边界/恢复</span>
             <span class="status-value" data-field="constraint">无</span>
           </div>
+          <div class="diagnostics-rail" aria-label="LM3 diagnostics"></div>
         </aside>
       </main>
       <footer class="help-strip">
@@ -103,7 +108,9 @@ export class Hud {
 
     this.sceneContainer = requireElement(root, '.scene-canvas');
     this.actionContainer = requireElement(root, '.command-actions-host');
+    this.diagnosticsContainer = requireElement(root, '.diagnostics-rail');
     this.modeValue = requireElement(root, '[data-field="mode"]');
+    this.runtimeIdentityValue = requireElement(root, '.simulator-label');
     this.backendStateValue = requireElement(root, '[data-field="backend-state"]');
     this.connectionValue = requireElement(root, '[data-field="connection"]');
     this.trackingValue = requireElement(root, '[data-field="tracking"]');
@@ -144,6 +151,14 @@ export class Hud {
       this.constraintRow.dataset.active = 'false';
       this.setController({tracking: false, grip: false, trigger: 0});
     }
+  }
+
+  setRuntimeIdentity(
+    backend: RuntimeBackend | null,
+    realMode: RealRobotMode | null,
+  ): void {
+    this.runtimeIdentityValue.textContent = runtimeIdentityLabel(backend, realMode);
+    this.runtimeIdentityValue.dataset.backend = backend ?? 'SIMULATOR';
   }
 
   setController(state: ControllerHudState): void {
@@ -247,6 +262,14 @@ export function readableFault(fault: string | null): string {
     backend_error: '仿真后端错误',
   };
   return labels[fault] ?? '未知仿真故障';
+}
+
+function runtimeIdentityLabel(backend: RuntimeBackend | null, realMode: RealRobotMode | null): string {
+  if (backend === 'LEBAI_FAKE') return '数字孪生 · LEBAI_FAKE';
+  if (backend === 'LEBAI') {
+    return realMode === 'control' ? '真机控制 · LEBAI' : '真机只读 · LEBAI';
+  }
+  return '仅仿真 · SIMULATOR';
 }
 
 export function readableConstraint(constraint: ConstraintKind | null): string {
