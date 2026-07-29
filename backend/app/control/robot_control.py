@@ -162,6 +162,10 @@ class RobotControl:
     def mode(self) -> TeleopMode:
         return self.machine.mode
 
+    @property
+    def control_generation(self) -> int:
+        return self._control_generation
+
     async def connect(self) -> None:
         self.machine.connect()
         if self._fault is not None:

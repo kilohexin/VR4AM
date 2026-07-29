@@ -48,6 +48,18 @@ def _receive_until(ws, message_type: str, limit: int = 8) -> dict[str, object]:
     raise AssertionError(f"未收到 {message_type}")
 
 
+def receive_until_types(ws, required: set[str]) -> dict[str, dict[str, object]]:
+    received: dict[str, dict[str, object]] = {}
+    for _ in range(20):
+        payload = ws.receive_json()
+        message_type = payload.get("type")
+        if isinstance(message_type, str) and message_type in required:
+            received[message_type] = payload
+        if required <= received.keys():
+            return received
+    raise AssertionError(f"missing message types: {required - received.keys()}")
+
+
 def _disarmed_robot_state() -> RobotStateMessage:
     return RobotStateMessage(
         server_mono_ns=123,
@@ -75,6 +87,29 @@ def _receive_reset_sequence(ws, limit: int = 8) -> list[dict[str, object]]:
         if message.get("type") == "fault_reset_result":
             return messages
     raise AssertionError("未收到 fault_reset_result")
+
+
+def test_diagnostics_are_sent_only_to_owner_and_sender_tasks_are_cleaned_up() -> None:
+    app = create_app(backend_label="LEBAI_FAKE")
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/v1/teleop") as owner:
+            owner.send_json({"v": 1, "type": "hello", "request_id": "owner"})
+            assert owner.receive_json()["type"] == "hello_ack"
+            messages = receive_until_types(owner, {"robot_state", "diagnostics"})
+
+            assert messages["diagnostics"]["runtime"] == "LEBAI_FAKE"
+            assert messages["diagnostics"]["hardware_verified"] is False
+            assert app.state.teleop_owner is not None
+
+            with client.websocket_connect("/ws/v1/teleop") as intruder:
+                rejection = intruder.receive_json()
+                assert rejection["type"] == "connection_rejected"
+                close = intruder.receive()
+                assert close["type"] == "websocket.close"
+                assert close["code"] == 4409
+
+        assert app.state.teleop_owner is None
+        assert app.state.teleop_sender_tasks == set()
 
 
 def test_hello_and_frame_ack() -> None:

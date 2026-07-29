@@ -6,7 +6,6 @@ import platform
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Literal
 
 from fastapi import FastAPI
 
@@ -16,6 +15,8 @@ from app.config import Settings
 from app.control.coordinate_mapper import CoordinateMapper
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.control.safety import SafetyLimiter
+from app.diagnostics.recorder import DiagnosticsRecorder
+from app.diagnostics.store import DiagnosticsStore
 from app.recording.base import RecorderSink
 from app.recording.commissioning import CommissioningRecorder
 from app.recording.noop import NoopRecorder
@@ -23,12 +24,10 @@ from app.robots.base import BackendPreflight, HomeOptions, RobotBackend
 from app.robots.lebai_adapter import ClientFactory, RealLebaiAdapter
 from app.robots.lebai_sdk_bridge import connect_real_client
 from app.robots.sim_adapter import SimRobotAdapter
+from app.schemas.messages import RuntimeBackend
 from app.timebase import MonotonicClock
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-RuntimeBackend = Literal["SIMULATOR", "LEBAI", "LEBAI_FAKE"]
-
-
 def build_recorder(settings: Settings) -> RecorderSink:
     if settings.backend == "simulator":
         return NoopRecorder()
@@ -132,7 +131,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        recorder = build_recorder(runtime_settings)
+        diagnostics = DiagnosticsStore()
+        recorder = DiagnosticsRecorder(build_recorder(runtime_settings), diagnostics)
         backend = build_backend(
             runtime_settings,
             recorder,
@@ -165,6 +165,9 @@ def create_app(
         app.state.latest = latest
         app.state.control = control
         app.state.recorder = recorder
+        app.state.diagnostics = diagnostics
+        app.state.runtime_backend = runtime_backend
+        app.state.log_session_dir = recorder.log_session_dir
         app.state.teleop_sender_tasks = set()
         app.state.teleop_owner = None
         app.state.teleop_owner_lock = asyncio.Lock()

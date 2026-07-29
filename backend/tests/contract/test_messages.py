@@ -7,7 +7,12 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ValidationError
 
 from app.schemas import messages
-from app.schemas.messages import ClientControlMessage, RobotStateMessage, VRFrame
+from app.schemas.messages import (
+    ClientControlMessage,
+    DiagnosticsMessage,
+    RobotStateMessage,
+    VRFrame,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -70,6 +75,31 @@ def test_valid_robot_state_fixture_round_trips() -> None:
     assert state.real_robot_mode is None
     assert state.preflight_ready is None
     assert state.preflight_reason is None
+
+
+def test_diagnostics_fixture_round_trips_exactly() -> None:
+    payload = load_fixture("diagnostics-valid.json")
+    message = DiagnosticsMessage.model_validate(payload)
+
+    assert message.model_dump(mode="json") == payload
+
+
+@pytest.mark.parametrize("bad_value", [-0.1, float("nan"), float("inf")])
+def test_diagnostics_rejects_invalid_sdk_latency(bad_value: float) -> None:
+    payload = load_fixture("diagnostics-valid.json")
+    payload["sdk_latencies_ms"]["get_kin_data"] = bad_value
+
+    with pytest.raises(ValidationError):
+        DiagnosticsMessage.model_validate(payload)
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+def test_diagnostics_rejects_non_finite_pvat_rate(bad_value: float) -> None:
+    payload = load_fixture("diagnostics-valid.json")
+    payload["pvat_send_hz"] = bad_value
+
+    with pytest.raises(ValidationError):
+        DiagnosticsMessage.model_validate(payload)
 
 
 def test_robot_state_accepts_optional_real_backend_diagnostics() -> None:

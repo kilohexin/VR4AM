@@ -9,7 +9,13 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from app.control.robot_control import LatestVRFrame, RobotControl
-from app.schemas.messages import ClientControlMessage, TeleopMode, VRFrame
+from app.diagnostics.store import DiagnosticsStore
+from app.schemas.messages import (
+    ClientControlMessage,
+    RuntimeBackend,
+    TeleopMode,
+    VRFrame,
+)
 
 router = APIRouter()
 
@@ -47,6 +53,46 @@ async def _delayed_state_sender(
 ) -> None:
     await start_sender.wait()
     await state_sender(websocket, control, send_lock)
+
+
+async def diagnostics_sender(
+    websocket: WebSocket,
+    control: RobotControl,
+    store: DiagnosticsStore,
+    runtime: RuntimeBackend,
+    log_session_dir: str | None,
+    send_lock: asyncio.Lock,
+) -> None:
+    while True:
+        message = store.message(
+            runtime=runtime,
+            hardware_verified=False,
+            server_mono_ns=control.clock.now_ns(),
+            control_generation=control.control_generation,
+            log_session_dir=log_session_dir,
+        )
+        await _send_json(websocket, message.model_dump(mode="json"), send_lock)
+        await asyncio.sleep(0.2)
+
+
+async def _delayed_diagnostics_sender(
+    websocket: WebSocket,
+    control: RobotControl,
+    store: DiagnosticsStore,
+    runtime: RuntimeBackend,
+    log_session_dir: str | None,
+    start_sender: asyncio.Event,
+    send_lock: asyncio.Lock,
+) -> None:
+    await start_sender.wait()
+    await diagnostics_sender(
+        websocket,
+        control,
+        store,
+        runtime,
+        log_session_dir,
+        send_lock,
+    )
 
 
 async def _protocol_error(websocket: WebSocket, send_lock: asyncio.Lock) -> None:
@@ -223,28 +269,51 @@ async def _run_coupled_session(
         _delayed_state_sender(websocket, control, start_sender, send_lock),
         name="teleop-state-50hz",
     )
+    tasks: list[asyncio.Task[None]] = [receiver, sender]
     sender_tasks.add(sender)
+    app_state = getattr(getattr(websocket, "app", None), "state", None)
+    diagnostics = getattr(app_state, "diagnostics", None)
+    runtime = getattr(app_state, "runtime_backend", None)
+    if isinstance(diagnostics, DiagnosticsStore) and runtime in {
+        "SIMULATOR",
+        "LEBAI",
+        "LEBAI_FAKE",
+    }:
+        diagnostics_task = asyncio.create_task(
+            _delayed_diagnostics_sender(
+                websocket,
+                control,
+                diagnostics,
+                runtime,
+                getattr(app_state, "log_session_dir", None),
+                start_sender,
+                send_lock,
+            ),
+            name="teleop-diagnostics-5hz",
+        )
+        tasks.append(diagnostics_task)
+        sender_tasks.add(diagnostics_task)
     wait_error: BaseException | None = None
     try:
         with anyio.CancelScope(shield=True):
             await asyncio.wait(
-                {receiver, sender}, return_when=asyncio.FIRST_COMPLETED
+                tasks, return_when=asyncio.FIRST_COMPLETED
             )
     except BaseException as error:
         wait_error = error
     finally:
         try:
-            for task in (receiver, sender):
+            for task in tasks:
                 if not task.done():
                     task.cancel()
             with anyio.CancelScope(shield=True):
                 results = await asyncio.gather(
-                    receiver,
-                    sender,
+                    *tasks,
                     return_exceptions=True,
                 )
         finally:
-            sender_tasks.discard(sender)
+            for task in tasks:
+                sender_tasks.discard(task)
     if wait_error is not None:
         raise wait_error
     for result in results:

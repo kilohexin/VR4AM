@@ -1,0 +1,27 @@
+{
+  "v": 1,
+  "type": "diagnostics",
+  "server_mono_ns": 1000000000,
+  "runtime": "LEBAI_FAKE",
+  "hardware_verified": false,
+  "control_generation": 2,
+  "actual_qd": [0, 0, 0, 0, 0, 0],
+  "actual_qdd": [0, 0, 0, 0, 0, 0],
+  "target_q": [0, -0.7853981633974483, 1.5707963267948966, -0.7853981633974483, 1.5707963267948966, -1.5707963267948966],
+  "target_qd": [0, 0, 0, 0, 0, 0],
+  "target_qdd": [0, 0, 0, 0, 0, 0],
+  "target_tcp": {"p": [0.3, 0, 0.4], "q": [0, 0, 0, 1]},
+  "sdk_latencies_ms": {"get_kin_data": 4.5, "move_pvat": 7.0},
+  "pvat_send_hz": 25.0,
+  "log_session_dir": null,
+  "dropped_events": 0,
+  "recent_events": [
+    {
+      "event_id": 1,
+      "server_mono_ns": 900000000,
+      "kind": "pvat_sent",
+      "critical": false,
+      "payload": {"command_id": 17}
+    }
+  ]
+}
