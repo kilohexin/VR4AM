@@ -195,7 +195,10 @@ class DigitalTwinLebaiClient:
         self._advance()
         self._motion = None
         self._running_motion_id = None
-        if not self._faults.stop_failure:
+        if self._faults.stop_failure:
+            self._qd = (0.01,) * 6
+            self._qdd = (0.0,) * 6
+        else:
             self._qd = (0.0,) * 6
             self._qdd = (0.0,) * 6
         self._write_calls.append(("stop_move",))
@@ -206,7 +209,10 @@ class DigitalTwinLebaiClient:
         self._advance()
         self._motion = None
         self._running_motion_id = None
-        if not self._faults.stop_failure:
+        if self._faults.stop_failure:
+            self._qd = (0.01,) * 6
+            self._qdd = (0.0,) * 6
+        else:
             self._qd = (0.0,) * 6
             self._qdd = (0.0,) * 6
         self._write_calls.append(("stop_sys",))

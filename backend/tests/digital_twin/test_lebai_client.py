@@ -70,3 +70,31 @@ async def test_disconnect_rejects_reads_and_writes() -> None:
     assert await client.is_connected() is False
     with pytest.raises(RuntimeError, match="digital_twin_disconnected"):
         await client.get_kin_data()
+
+
+@pytest.mark.asyncio
+async def test_stop_move_fault_retains_nonzero_velocity_after_zero_velocity_pvat() -> None:
+    client = DigitalTwinLebaiClient.idle(
+        control_settings(),
+        faults=DigitalTwinFaults(stop_failure=True),
+    )
+    await client.move_pvat(list(IDLE_Q), [0.0] * 6, [0.0] * 6, 0.08)
+
+    await client.stop_move()
+
+    kin_data = await client.get_kin_data()
+    assert np.linalg.norm(kin_data["actual_joint_speed"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_stop_sys_fault_retains_nonzero_velocity_after_zero_velocity_pvat() -> None:
+    client = DigitalTwinLebaiClient.idle(
+        control_settings(),
+        faults=DigitalTwinFaults(stop_failure=True),
+    )
+    await client.move_pvat(list(IDLE_Q), [0.0] * 6, [0.0] * 6, 0.08)
+
+    await client.stop_sys()
+
+    kin_data = await client.get_kin_data()
+    assert np.linalg.norm(kin_data["actual_joint_speed"]) > 0
