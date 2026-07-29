@@ -8,6 +8,50 @@ import type {
 
 type LatencyView = Readonly<{currentMs: number | null; p95Ms: number | null}>;
 
+type DiagnosticsRuntimeRender = (
+  state: RobotStateMessage,
+  diagnostics: DiagnosticsMessage | null,
+  latency: LatencyView,
+) => void;
+
+export class DiagnosticsUpdateCoordinator {
+  private state: RobotStateMessage | null = null;
+  private diagnostics: DiagnosticsMessage | null = null;
+
+  constructor(
+    private readonly panel: Pick<DiagnosticsPanel, 'update' | 'clear'>,
+    private readonly onRuntimeRender: DiagnosticsRuntimeRender,
+    private readonly readLatency: () => LatencyView,
+  ) {}
+
+  onRobotState(
+    state: RobotStateMessage,
+    acknowledge: (sequence: number | null) => void,
+  ): void {
+    this.state = state;
+    acknowledge(state.ack_seq ?? null);
+    this.render();
+  }
+
+  onDiagnostics(diagnostics: DiagnosticsMessage): void {
+    this.diagnostics = diagnostics;
+    this.render();
+  }
+
+  clear(): void {
+    this.state = null;
+    this.diagnostics = null;
+    this.panel.clear();
+  }
+
+  private render(): void {
+    if (!this.state) return;
+    const latency = this.readLatency();
+    this.panel.update(this.state, this.diagnostics, latency);
+    this.onRuntimeRender(this.state, this.diagnostics, latency);
+  }
+}
+
 export class DiagnosticsPanel {
   constructor(private readonly root: HTMLElement) {
     this.root.classList.add('diagnostics-panel');

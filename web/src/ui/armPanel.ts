@@ -179,6 +179,7 @@ export class ArmPanel {
   setConnectionStatus(status: TeleopConnectionStatus): void {
     this.connectionState = status.state;
     this.connected = status.state === 'connected';
+    if (status.state !== 'connected') this.setRuntimeIdentity(null);
     this.resetToLocked();
   }
 

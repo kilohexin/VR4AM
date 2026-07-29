@@ -139,6 +139,7 @@ export class Hud {
     this.connectionValue.textContent = labels[status.state];
     this.connectionValue.dataset.tone = status.state === 'connected' ? 'healthy' : 'muted';
     if (status.state !== 'connected') {
+      this.setRuntimeIdentity(null, null);
       this.modeValue.textContent = 'DISCONNECTED · 未连接';
       this.modeValue.parentElement?.setAttribute('data-tone', 'muted');
       this.backendStateValue.textContent = 'DISCONNECTED';

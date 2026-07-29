@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import {beforeEach, describe, expect, it} from 'vitest';
+import {beforeEach, describe, expect, it, vi} from 'vitest';
 import validDiagnostics from '../../schemas/fixtures/diagnostics-valid.json';
 import robotFixture from '../../schemas/fixtures/robot-state-valid.json';
 import type {DiagnosticsMessage, RobotStateMessage} from '../src/protocol/messages';
-import {DiagnosticsPanel} from '../src/ui/diagnosticsPanel';
+import {DiagnosticsPanel, DiagnosticsUpdateCoordinator} from '../src/ui/diagnosticsPanel';
 
 beforeEach(() => {
   document.body.innerHTML = '<aside id="diagnostics"></aside>';
@@ -88,5 +88,24 @@ describe('DiagnosticsPanel', () => {
     expect(root.textContent).toContain('Diagnostics unavailable');
     expect(root.textContent).not.toContain('pvat_sent');
     expect(root.textContent).not.toContain('LEBAI_FAKE');
+  });
+
+  it('renders diagnostics once for an acknowledged RobotState callback', () => {
+    const panel = {update: vi.fn(), clear: vi.fn()};
+    const runtimeUpdate = vi.fn();
+    const coordinator = new DiagnosticsUpdateCoordinator(
+      panel,
+      runtimeUpdate,
+      () => ({currentMs: 18, p95Ms: 27}),
+    );
+    const acknowledgement = vi.fn();
+    const state = {...robotFixture, ack_seq: 7} as RobotStateMessage;
+
+    coordinator.onRobotState(state, acknowledgement);
+
+    expect(acknowledgement).toHaveBeenCalledOnce();
+    expect(acknowledgement).toHaveBeenCalledWith(7);
+    expect(panel.update).toHaveBeenCalledOnce();
+    expect(runtimeUpdate).toHaveBeenCalledOnce();
   });
 });

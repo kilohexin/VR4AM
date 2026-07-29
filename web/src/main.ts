@@ -14,7 +14,7 @@ import {TeleopSocket} from './transport/teleopSocket';
 import {ArmPanel} from './ui/armPanel';
 import {Hud} from './ui/hud';
 import {LatencyTracker} from './ui/latency';
-import {DiagnosticsPanel} from './ui/diagnosticsPanel';
+import {DiagnosticsPanel, DiagnosticsUpdateCoordinator} from './ui/diagnosticsPanel';
 import {XRSessionController, type XRSessionStatus} from './xr/session';
 
 const app = document.querySelector<HTMLElement>('#app');
@@ -25,8 +25,11 @@ const diagnosticsPanel = new DiagnosticsPanel(hud.diagnosticsContainer);
 const stateBuffer = new RobotStateBuffer();
 const latency = new LatencyTracker(512);
 const pendingFrames = new Map<number, number>();
-let latestRobotState: RobotStateMessage | null = null;
-let latestDiagnostics: DiagnosticsMessage | null = null;
+const diagnosticsUpdates = new DiagnosticsUpdateCoordinator(
+  diagnosticsPanel,
+  applyDiagnosticsRuntime,
+  () => ({currentMs: latency.current, p95Ms: latency.p95()}),
+);
 
 let scene: SimulationScene;
 let armPanel: ArmPanel;
@@ -46,9 +49,9 @@ const socket = new TeleopSocket(
     armPanel?.setConnectionStatus(status);
     xrController?.setConstraint(null);
     if (status.state !== 'connected') {
-      latestRobotState = null;
-      latestDiagnostics = null;
-      diagnosticsPanel.clear();
+      hud.setRuntimeIdentity(null, null);
+      armPanel?.setRuntimeIdentity(null);
+      diagnosticsUpdates.clear();
       scene?.setRuntimeSummary(emptyRuntimeSummary());
     }
   },
@@ -129,7 +132,6 @@ function sendFrame(frame: VRFrame): void {
 }
 
 function onRobotState(state: RobotStateMessage): void {
-  latestRobotState = state;
   const constraint = state.constraint ?? null;
   const recoveryPhase = state.recovery_phase ?? null;
   scene.applyRobotState(state);
@@ -146,13 +148,11 @@ function onRobotState(state: RobotStateMessage): void {
     constraint,
     recoveryPhase,
   });
-  recordAcknowledgement(state.ack_seq ?? null);
-  updateDiagnostics();
+  diagnosticsUpdates.onRobotState(state, recordAcknowledgement);
 }
 
 function onDiagnostics(diagnostics: DiagnosticsMessage): void {
-  latestDiagnostics = diagnostics;
-  updateDiagnostics();
+  diagnosticsUpdates.onDiagnostics(diagnostics);
 }
 
 function recordAcknowledgement(sequence: number | null): void {
@@ -163,26 +163,23 @@ function recordAcknowledgement(sequence: number | null): void {
     if (pendingSequence <= sequence) pendingFrames.delete(pendingSequence);
   }
   hud.setLatency(latency.current, latency.p95());
-  updateDiagnostics();
 }
 
-function updateDiagnostics(): void {
-  const state = latestRobotState;
-  if (!state) return;
-  const backend = latestDiagnostics?.runtime ?? state.backend ?? null;
+function applyDiagnosticsRuntime(
+  state: RobotStateMessage,
+  diagnostics: DiagnosticsMessage | null,
+  latencyView: Readonly<{currentMs: number | null; p95Ms: number | null}>,
+): void {
+  const backend = diagnostics?.runtime ?? state.backend ?? null;
   const realRobotMode = state.real_robot_mode ?? null;
   hud.setRuntimeIdentity(backend, realRobotMode);
   armPanel?.setRuntimeIdentity(backend);
-  diagnosticsPanel.update(state, latestDiagnostics, {
-    currentMs: latency.current,
-    p95Ms: latency.p95(),
-  });
   scene?.setRuntimeSummary({
     backend,
     realRobotMode,
     actualTcp: state.actual_tcp,
     gripper: state.gripper,
-    latencyMs: latency.current,
+    latencyMs: latencyView.currentMs,
     hardwareVerified: false,
   });
 }

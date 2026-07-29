@@ -532,6 +532,16 @@ describe('ArmPanel simulator safety', () => {
     expect(panel.isArmPending).toBe(true);
   });
 
+  it('resets real-arm copy to a null-safe unlock label on disconnect', () => {
+    const panel = new ArmPanel(document.querySelector('#panel')!, vi.fn());
+    panel.setRuntimeIdentity('LEBAI');
+    expect(panel.armButton.textContent).toContain('解锁真机');
+
+    panel.setConnectionStatus({state: 'disconnected'});
+
+    expect(panel.armButton.textContent).toContain('解锁仿真');
+  });
+
   it('uses the first B to stop and a later released-Grip B to request Home', () => {
     const send = vi.fn();
     const panel = new ArmPanel(document.querySelector('#panel')!, send);

@@ -99,6 +99,17 @@ describe('Chinese simulator HUD', () => {
     expect(document.querySelector('.simulator-label')?.textContent).toBe('真机控制 · LEBAI');
   });
 
+  it('resets a real control identity to a null-safe copy on disconnect', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+    hud.setRuntimeIdentity('LEBAI', 'control');
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('真机控制 · LEBAI');
+
+    hud.setConnectionStatus({state: 'disconnected'});
+
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('仅仿真 · SIMULATOR');
+    expect(document.querySelector('.simulator-label')?.getAttribute('data-backend')).toBe('SIMULATOR');
+  });
+
   it('clears stale backend, age, fault, and latency values on disconnect', () => {
     const hud = new Hud(document.querySelector('#app')!);
     hud.setConnectionStatus({state: 'connected'});
