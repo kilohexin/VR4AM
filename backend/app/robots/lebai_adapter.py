@@ -215,13 +215,15 @@ class RealLebaiAdapter:
             raise BackendCommandError("robot_disconnected")
         self._pump.invalidate()
         self._previous_sent_qd = None
-        async with self._sdk_lock:
-            try:
+        try:
+            async with self._sdk_lock:
                 await asyncio.wait_for(client.stop_move(), timeout=0.20)
-            except TimeoutError:
-                raise BackendCommandError("sdk_timeout:stop_move") from None
-            except Exception:
-                raise BackendCommandError("sdk_call_failed:stop_move") from None
+        except TimeoutError:
+            await self._safety_escalate_stop_sys(client)
+            raise BackendCommandError("sdk_timeout:stop_move") from None
+        except Exception:
+            await self._safety_escalate_stop_sys(client)
+            raise BackendCommandError("sdk_call_failed:stop_move") from None
         started_ns = self._clock()
         stable_since_ns: int | None = None
         while True:
@@ -246,32 +248,27 @@ class RealLebaiAdapter:
             else:
                 stable_since_ns = None
             if now_ns - started_ns >= 500_000_000:
-                async with self._sdk_lock:
-                    try:
-                        connected = await asyncio.wait_for(
-                            client.is_connected(),
-                            timeout=0.20,
-                        )
-                    except Exception:
-                        connected = False
-                    if connected:
-                        try:
-                            await asyncio.wait_for(
-                                client.stop_sys(),
-                                timeout=0.20,
-                            )
-                        except TimeoutError:
-                            raise BackendCommandError(
-                                "sdk_timeout:stop_sys"
-                            ) from None
-                        except Exception:
-                            raise BackendCommandError(
-                                "sdk_call_failed:stop_sys"
-                            ) from None
+                await self._safety_escalate_stop_sys(client)
                 self._latched_fault = "stop_incomplete"
                 self._motion_accepted = False
                 raise BackendCommandError("stop_incomplete")
             await self._sleep(0.02)
+
+    async def _safety_escalate_stop_sys(self, client: LebaiClient) -> None:
+        async with self._sdk_lock:
+            try:
+                connected = await asyncio.wait_for(
+                    client.is_connected(),
+                    timeout=0.20,
+                )
+            except Exception:
+                connected = False
+            if not connected:
+                return
+            try:
+                await asyncio.wait_for(client.stop_sys(), timeout=0.20)
+            except Exception:
+                return
 
     async def home(
         self,

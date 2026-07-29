@@ -127,6 +127,34 @@ def _action_name(action: SmokeAction) -> str:
     return "stop"
 
 
+def _validate_smoke_action(action: SmokeAction) -> None:
+    if isinstance(action, TranslationAction):
+        if (
+            action.axis not in {"x", "y", "z"}
+            or not math.isfinite(action.distance_m)
+            or action.distance_m == 0
+            or abs(action.distance_m) > 0.005
+        ):
+            raise ValueError("smoke_translation_out_of_bounds")
+        return
+    if isinstance(action, RotationAction):
+        if (
+            action.axis not in {"roll", "pitch", "yaw"}
+            or not math.isfinite(action.angle_deg)
+            or action.angle_deg == 0
+            or abs(action.angle_deg) > 2.0
+        ):
+            raise ValueError("smoke_rotation_out_of_bounds")
+        return
+    if isinstance(action, GripperAction):
+        if action.target not in {"open", "close"}:
+            raise ValueError("smoke_gripper_target_invalid")
+        return
+    if isinstance(action, (HomeAction, StopAction)):
+        return
+    raise ValueError("smoke_action_invalid")
+
+
 def _frame(
     seq: int,
     *,
@@ -240,6 +268,7 @@ async def run_smoke(
 ) -> SmokeResult:
     if options.confirmation != REAL_ROBOT_CONFIRMATION:
         raise ValueError("smoke_confirmation_required")
+    _validate_smoke_action(options.action)
     if _configured_mode(options.config_path) != "control":
         raise RuntimeError("smoke_requires_control_mode")
 

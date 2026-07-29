@@ -89,6 +89,34 @@ def _control_config(tmp_path: Path) -> Path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("action", "error"),
+    [
+        (TranslationAction("x", 1.0), "smoke_translation_out_of_bounds"),
+        (RotationAction("yaw", 90.0), "smoke_rotation_out_of_bounds"),
+    ],
+)
+async def test_run_smoke_rejects_unbounded_constructed_actions_before_connecting(
+    tmp_path: Path,
+    action: SmokeAction,
+    error: str,
+) -> None:
+    factory = AsyncMock()
+
+    with pytest.raises(ValueError, match=rf"^{error}$"):
+        await run_smoke(
+            SmokeOptions(
+                config_path=tmp_path / "does-not-need-to-exist.yaml",
+                action=action,
+                confirmation=REAL_ROBOT_CONFIRMATION,
+            ),
+            factory,
+        )
+
+    factory.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("action", "expected_methods"),
     [
         (TranslationAction("x", 0.005), {"move_pvat", "stop_move"}),

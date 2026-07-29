@@ -188,6 +188,58 @@ async def test_stop_escalates_once_when_joint_speed_never_settles() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_move_failure_escalates_after_the_failed_stop_move() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+
+    async def failed_stop_move() -> None:
+        client.write_calls.append(("stop_move",))
+        raise RuntimeError("simulated_stop_move_failure")
+
+    client.stop_move = failed_stop_move  # type: ignore[method-assign]
+
+    try:
+        with pytest.raises(
+            BackendCommandError,
+            match="^sdk_call_failed:stop_move$",
+        ):
+            await adapter.stop(StopReason.STALE)
+
+        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_sys_error", [RuntimeError("failed"), TimeoutError()])
+async def test_stop_move_failure_retains_primary_error_when_escalation_fails(
+    stop_sys_error: Exception,
+) -> None:
+    adapter, client, _ = await _connected_control_adapter()
+
+    async def failed_stop_move() -> None:
+        client.write_calls.append(("stop_move",))
+        raise RuntimeError("simulated_stop_move_failure")
+
+    async def failed_stop_sys() -> None:
+        client.write_calls.append(("stop_sys",))
+        raise stop_sys_error
+
+    client.stop_move = failed_stop_move  # type: ignore[method-assign]
+    client.stop_sys = failed_stop_sys  # type: ignore[method-assign]
+
+    try:
+        with pytest.raises(
+            BackendCommandError,
+            match="^sdk_call_failed:stop_move$",
+        ):
+            await adapter.stop(StopReason.STALE)
+
+        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_home_uses_configured_joint_pose_and_acceleration() -> None:
     adapter, client, _ = await _connected_control_adapter()
     phases: list[str] = []
