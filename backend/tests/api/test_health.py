@@ -131,6 +131,7 @@ def test_simulator_app_never_imports_lebai_sdk(
         assert client.get("/health").json() == {
             "status": "ok",
             "backend": "SIMULATOR",
+            "hardware_verified": False,
             "real_robot_mode": None,
             "real_robot_enabled": False,
             "preflight_ready": True,
@@ -210,6 +211,7 @@ def test_readonly_health_reports_not_enabled(
     assert payload == {
         "status": "ok",
         "backend": "LEBAI",
+        "hardware_verified": False,
         "real_robot_mode": "readonly",
         "real_robot_enabled": False,
         "preflight_ready": False,

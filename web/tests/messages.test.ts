@@ -27,6 +27,7 @@ describe('protocol guards', () => {
     expect(isVRFrame(vrFixture)).toBe(true);
     expect(isRobotStateMessage(robotFixture)).toBe(true);
     expect(isRobotStateMessage({...robotFixture, constraint: 'self_collision'})).toBe(true);
+    expect(isRobotStateMessage({...robotFixture, backend: 'LEBAI_FAKE'})).toBe(true);
   });
 
   it('accepts every valid control type and optional nullable fields', () => {
@@ -171,6 +172,7 @@ describe('protocol guards', () => {
     expect(isVRFrame({...vrFixture, visibility: 'occluded'})).toBe(false);
     expect(isRobotStateMessage({...robotFixture, mode: 'CONNECTED'})).toBe(false);
     expect(isRobotStateMessage({...robotFixture, robot_state: 'STOPPED'})).toBe(false);
+    expect(isRobotStateMessage({...robotFixture, backend: 'LEBAI_MOCK'})).toBe(false);
   });
 
   it('rejects malformed scalar constraints and invalid quaternion norms', () => {

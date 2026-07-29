@@ -95,6 +95,33 @@ def test_robot_state_accepts_optional_real_backend_diagnostics() -> None:
     assert not list(validator.iter_errors(payload))
 
 
+def test_robot_state_accepts_digital_twin_backend_diagnostics() -> None:
+    payload = load_fixture("robot-state-valid.json")
+    payload["backend"] = "LEBAI_FAKE"
+
+    state = RobotStateMessage.model_validate(payload)
+    schema = load_protocol_schema()
+    validator = Draft202012Validator(
+        {**schema, "$ref": "#/$defs/RobotStateMessage"}
+    )
+
+    assert state.backend == "LEBAI_FAKE"
+    assert not list(validator.iter_errors(payload))
+
+
+def test_robot_state_contract_rejects_unknown_runtime_backend() -> None:
+    payload = load_fixture("robot-state-valid.json")
+    payload["backend"] = "LEBAI_MOCK"
+    schema = load_protocol_schema()
+    validator = Draft202012Validator(
+        {**schema, "$ref": "#/$defs/RobotStateMessage"}
+    )
+
+    with pytest.raises(ValidationError):
+        RobotStateMessage.model_validate(payload)
+    assert list(validator.iter_errors(payload))
+
+
 def test_self_collision_is_a_valid_robot_state_constraint() -> None:
     payload = load_fixture("robot-state-valid.json")
     payload["constraint"] = "self_collision"

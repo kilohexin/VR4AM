@@ -487,7 +487,8 @@
             {
               "enum": [
                 "SIMULATOR",
-                "LEBAI"
+                "LEBAI",
+                "LEBAI_FAKE"
               ],
               "type": "string"
             },

@@ -5,7 +5,7 @@ import math
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from scipy.spatial.transform import Rotation
 
@@ -73,12 +73,14 @@ class RealLebaiAdapter:
         clock: Callable[[], int] = time.monotonic_ns,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         event_callback: EventCallback | None = None,
+        backend_label: Literal["LEBAI", "LEBAI_FAKE"] = "LEBAI",
     ) -> None:
         self.settings = settings
         self._client_factory = client_factory
         self._clock = clock
         self._sleep = sleep
         self._event_callback = event_callback
+        self._backend_label = backend_label
         self._client: LebaiClientProtocol | None = None
         self._sdk_lock = asyncio.Lock()
         self._snapshot: LebaiSnapshot | None = None
@@ -382,6 +384,7 @@ class RealLebaiAdapter:
             gripper=snapshot.gripper,
             sample_age_ms=0.0,
             fault=self._latched_fault or snapshot.estop,
+            backend=self._backend_label,
         )
 
     async def preflight(self) -> BackendPreflight:

@@ -6,6 +6,7 @@ import platform
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI
 
@@ -25,6 +26,7 @@ from app.robots.sim_adapter import SimRobotAdapter
 from app.timebase import MonotonicClock
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+RuntimeBackend = Literal["SIMULATOR", "LEBAI", "LEBAI_FAKE"]
 
 
 def build_recorder(settings: Settings) -> RecorderSink:
@@ -47,15 +49,19 @@ def build_backend(
     settings: Settings,
     recorder: RecorderSink,
     client_factory: ClientFactory = connect_real_client,
+    backend_label: RuntimeBackend = "LEBAI",
 ) -> RobotBackend:
     if settings.backend == "simulator":
         return SimRobotAdapter()
     if settings.lebai is None:
         raise RuntimeError("missing_lebai_settings")
+    if backend_label not in {"LEBAI", "LEBAI_FAKE"}:
+        raise RuntimeError("invalid_lebai_backend_label")
     return RealLebaiAdapter(
         settings.lebai,
         client_factory=client_factory,
         event_callback=recorder.write_event,
+        backend_label=backend_label,
     )
 
 
@@ -117,13 +123,22 @@ def create_app(
     *,
     settings: Settings | None = None,
     client_factory: ClientFactory = connect_real_client,
+    backend_label: RuntimeBackend | None = None,
 ) -> FastAPI:
     runtime_settings = settings if settings is not None else Settings.load()
+    runtime_backend = backend_label or (
+        "SIMULATOR" if runtime_settings.backend == "simulator" else "LEBAI"
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         recorder = build_recorder(runtime_settings)
-        backend = build_backend(runtime_settings, recorder, client_factory)
+        backend = build_backend(
+            runtime_settings,
+            recorder,
+            client_factory,
+            runtime_backend,
+        )
         latest = LatestVRFrame()
         control = RobotControl(
             backend=backend,
@@ -153,9 +168,8 @@ def create_app(
         app.state.teleop_sender_tasks = set()
         app.state.teleop_owner = None
         app.state.teleop_owner_lock = asyncio.Lock()
-        app.state.backend_name = (
-            "SIMULATOR" if runtime_settings.backend == "simulator" else "LEBAI"
-        )
+        app.state.backend_name = runtime_backend
+        app.state.hardware_verified = False
         app.state.real_robot_mode = (
             None
             if runtime_settings.lebai is None

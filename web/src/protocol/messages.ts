@@ -45,6 +45,7 @@ export type TeleopMode =
   | 'DISARMED';
 
 export type BackendState = 'DISCONNECTED' | 'IDLE' | 'MOVING' | 'HOLD' | 'FAULT';
+export type RuntimeBackend = 'SIMULATOR' | 'LEBAI' | 'LEBAI_FAKE';
 
 export interface RobotStateMessage {
   v: typeof PROTOCOL_VERSION;
@@ -60,6 +61,7 @@ export interface RobotStateMessage {
   fault?: string | null;
   constraint?: ConstraintKind | null;
   recovery_phase?: RecoveryPhase | null;
+  backend?: RuntimeBackend | null;
 }
 
 export type ClientControlType =
@@ -317,7 +319,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
     !hasExactKeys(
       value,
       ['v', 'type', 'server_mono_ns', 'mode', 'robot_state', 'actual_tcp', 'actual_q', 'gripper'],
-      ['ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase'],
+      ['ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase', 'backend'],
     ) ||
     value.v !== PROTOCOL_VERSION ||
     value.type !== 'robot_state' ||
@@ -345,6 +347,13 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
     Object.hasOwn(value, 'constraint') &&
     value.constraint !== null &&
     !isEnumValue(CONSTRAINT_KINDS, value.constraint)
+  ) {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, 'backend') &&
+    value.backend !== null &&
+    !isEnumValue(['SIMULATOR', 'LEBAI', 'LEBAI_FAKE'], value.backend)
   ) {
     return false;
   }
