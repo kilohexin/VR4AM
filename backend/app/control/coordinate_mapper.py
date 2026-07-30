@@ -1,24 +1,33 @@
 from __future__ import annotations
 
 import numpy as np
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Rotation
 
 from app.schemas.messages import Pose
 
-DEFAULT_R_BX = np.array([[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-
 
 class CoordinateMapper:
-    def __init__(self, translation_scale: float = 0.8, rotation_scale: float = 1.0, r_bx: np.ndarray = DEFAULT_R_BX):
+    def __init__(
+        self,
+        translation_scale: float = 1.0,
+        rotation_scale: float = 1.0,
+        rotation_dead_zone_deg: float = 2.0,
+    ) -> None:
+        if not np.isclose(rotation_scale, 1.0):
+            raise ValueError("rotation_scale_must_equal_one")
         self.translation_scale = translation_scale
         self.rotation_scale = rotation_scale
-        self.r_bx = np.asarray(r_bx, dtype=float)
-        if not np.allclose(self.r_bx.T @ self.r_bx, np.eye(3), atol=1e-8) or not np.isclose(np.linalg.det(self.r_bx), 1.0):
-            raise ValueError("r_bx must be a proper rotation")
+        self.rotation_dead_zone_rad = np.deg2rad(rotation_dead_zone_deg)
         self._hand_anchor: Pose | None = None
         self._tcp_anchor: Pose | None = None
 
-    def capture(self, hand: Pose, tcp: Pose) -> None:
+    def capture(
+        self,
+        hand: Pose,
+        tcp: Pose,
+        head_q: tuple[float, float, float, float] | None = None,
+    ) -> None:
+        _ = head_q  # Retained for protocol compatibility; deltas already use XR scene axes.
         self._hand_anchor = hand.model_copy(deep=True)
         self._tcp_anchor = tcp.model_copy(deep=True)
 
@@ -29,15 +38,15 @@ class CoordinateMapper:
     def target(self, hand: Pose) -> Pose:
         if self._hand_anchor is None or self._tcp_anchor is None:
             raise RuntimeError("anchor_not_captured")
-        p = np.asarray(self._tcp_anchor.p) + self.r_bx @ (
-            self.translation_scale * (np.asarray(hand.p) - np.asarray(self._hand_anchor.p))
+        p = np.asarray(self._tcp_anchor.p) + self.translation_scale * (
+            np.asarray(hand.p) - np.asarray(self._hand_anchor.p)
         )
-        r_now = Rotation.from_quat(hand.q).as_matrix()
-        r_anchor = Rotation.from_quat(self._hand_anchor.q).as_matrix()
-        delta_x = r_now @ r_anchor.T
-        delta_b = Rotation.from_matrix(self.r_bx @ delta_x @ self.r_bx.T)
-        if self.rotation_scale != 1.0:
-            slerp = Slerp([0.0, 1.0], Rotation.concatenate([Rotation.identity(), delta_b]))
-            delta_b = slerp([self.rotation_scale])[0]
-        target_rotation = delta_b * Rotation.from_quat(self._tcp_anchor.q)
+        r_now = Rotation.from_quat(hand.q)
+        r_anchor = Rotation.from_quat(self._hand_anchor.q)
+        delta_world = r_now * r_anchor.inv()
+        rotation_vector = delta_world.as_rotvec()
+        angle = float(np.linalg.norm(rotation_vector))
+        if angle <= self.rotation_dead_zone_rad:
+            delta_world = Rotation.identity()
+        target_rotation = delta_world * Rotation.from_quat(self._tcp_anchor.q)
         return Pose(p=tuple(p), q=tuple(target_rotation.as_quat()))

@@ -7,7 +7,12 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ValidationError
 
 from app.schemas import messages
-from app.schemas.messages import ClientControlMessage, RobotStateMessage, VRFrame
+from app.schemas.messages import (
+    ClientControlMessage,
+    DiagnosticsMessage,
+    RobotStateMessage,
+    VRFrame,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -66,6 +71,99 @@ def test_valid_robot_state_fixture_round_trips() -> None:
     state = RobotStateMessage.model_validate(load_fixture("robot-state-valid.json"))
     assert state.mode == "ARMED"
     assert len(state.actual_q) == 6
+    assert state.backend is None
+    assert state.real_robot_mode is None
+    assert state.preflight_ready is None
+    assert state.preflight_reason is None
+
+
+def test_diagnostics_fixture_round_trips_exactly() -> None:
+    payload = load_fixture("diagnostics-valid.json")
+    message = DiagnosticsMessage.model_validate(payload)
+
+    assert message.model_dump(mode="json") == payload
+
+
+@pytest.mark.parametrize("bad_value", [-0.1, float("nan"), float("inf")])
+def test_diagnostics_rejects_invalid_sdk_latency(bad_value: float) -> None:
+    payload = load_fixture("diagnostics-valid.json")
+    payload["sdk_latencies_ms"]["get_kin_data"] = bad_value
+
+    with pytest.raises(ValidationError):
+        DiagnosticsMessage.model_validate(payload)
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+def test_diagnostics_rejects_non_finite_pvat_rate(bad_value: float) -> None:
+    payload = load_fixture("diagnostics-valid.json")
+    payload["pvat_send_hz"] = bad_value
+
+    with pytest.raises(ValidationError):
+        DiagnosticsMessage.model_validate(payload)
+
+
+def test_robot_state_accepts_optional_real_backend_diagnostics() -> None:
+    payload = load_fixture("robot-state-valid.json")
+    payload.update(
+        {
+            "backend": "LEBAI",
+            "real_robot_mode": "readonly",
+            "preflight_ready": False,
+            "preflight_reason": "real_robot_readonly",
+        }
+    )
+
+    state = RobotStateMessage.model_validate(payload)
+    schema = load_protocol_schema()
+    validator = Draft202012Validator(
+        {**schema, "$ref": "#/$defs/RobotStateMessage"}
+    )
+
+    assert state.backend == "LEBAI"
+    assert state.real_robot_mode == "readonly"
+    assert state.preflight_ready is False
+    assert not list(validator.iter_errors(payload))
+
+
+def test_robot_state_accepts_digital_twin_backend_diagnostics() -> None:
+    payload = load_fixture("robot-state-valid.json")
+    payload["backend"] = "LEBAI_FAKE"
+
+    state = RobotStateMessage.model_validate(payload)
+    schema = load_protocol_schema()
+    validator = Draft202012Validator(
+        {**schema, "$ref": "#/$defs/RobotStateMessage"}
+    )
+
+    assert state.backend == "LEBAI_FAKE"
+    assert not list(validator.iter_errors(payload))
+
+
+def test_robot_state_contract_rejects_unknown_runtime_backend() -> None:
+    payload = load_fixture("robot-state-valid.json")
+    payload["backend"] = "LEBAI_MOCK"
+    schema = load_protocol_schema()
+    validator = Draft202012Validator(
+        {**schema, "$ref": "#/$defs/RobotStateMessage"}
+    )
+
+    with pytest.raises(ValidationError):
+        RobotStateMessage.model_validate(payload)
+    assert list(validator.iter_errors(payload))
+
+
+def test_self_collision_is_a_valid_robot_state_constraint() -> None:
+    payload = load_fixture("robot-state-valid.json")
+    payload["constraint"] = "self_collision"
+
+    state = RobotStateMessage.model_validate(payload)
+    schema = load_protocol_schema()
+    validator = Draft202012Validator(
+        {**schema, "$ref": "#/$defs/RobotStateMessage"}
+    )
+
+    assert state.constraint == "self_collision"
+    assert not list(validator.iter_errors(payload))
 
 
 @pytest.mark.parametrize("bad_q", [[0, 0, 0, 0], [0, 0, 0, 2], [float("nan"), 0, 0, 1]])
@@ -191,6 +289,70 @@ def test_reset_fault_is_a_valid_v1_control_message() -> None:
     schema = load_protocol_schema()
     validator = Draft202012Validator({**schema, "$ref": "#/$defs/ClientControlMessage"})
     assert not list(validator.iter_errors(message.model_dump(mode="json")))
+
+
+def test_home_request_is_a_valid_v1_control_message() -> None:
+    message = ClientControlMessage.model_validate(
+        {"v": 1, "type": "home_request", "request_id": "home-1"}
+    )
+    assert message.type == "home_request"
+
+    schema = load_protocol_schema()
+    validator = Draft202012Validator({**schema, "$ref": "#/$defs/ClientControlMessage"})
+    assert not list(validator.iter_errors(message.model_dump(mode="json")))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "v": 1,
+            "type": "home_result",
+            "request_id": "home-1",
+            "accepted": True,
+            "mode": "DISARMED",
+        },
+        {
+            "v": 1,
+            "type": "home_result",
+            "request_id": "home-2",
+            "accepted": False,
+            "reason": "home_failed",
+            "message": "仿真无法返回初始姿态，请稍后重试。",
+        },
+    ],
+)
+def test_home_result_schema_accepts_exact_discriminated_variants(payload: dict) -> None:
+    schema = load_protocol_schema()
+    validator = Draft202012Validator({**schema, "$ref": "#/$defs/HomeResultMessage"})
+    assert not list(validator.iter_errors(payload))
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_home_result_schema_rejects_extra_fields(accepted: bool) -> None:
+    payload = (
+        {
+            "v": 1,
+            "type": "home_result",
+            "request_id": "home-1",
+            "accepted": True,
+            "mode": "DISARMED",
+            "extra": True,
+        }
+        if accepted
+        else {
+            "v": 1,
+            "type": "home_result",
+            "request_id": "home-2",
+            "accepted": False,
+            "reason": "grip_pressed",
+            "message": "请先松开手柄抓握键，再请求 Home。",
+            "extra": True,
+        }
+    )
+    schema = load_protocol_schema()
+    validator = Draft202012Validator({**schema, "$ref": "#/$defs/HomeResultMessage"})
+    assert list(validator.iter_errors(payload))
 
 
 @pytest.mark.parametrize(

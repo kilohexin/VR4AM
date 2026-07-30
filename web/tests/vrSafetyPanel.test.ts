@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import * as THREE from 'three';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {describeVrSafety, VrSafetyPanel} from '../src/scenes/vrSafetyPanel';
+import {
+  describeVrSafety,
+  type RobotRuntimeSummary,
+  VrSafetyPanel,
+} from '../src/scenes/vrSafetyPanel';
 import type {ArmSafetyPhase, ArmSafetySnapshot} from '../src/ui/armPanel';
 
 const state = (phase: ArmSafetyPhase): ArmSafetySnapshot => ({
@@ -15,6 +19,8 @@ const state = (phase: ArmSafetyPhase): ArmSafetySnapshot => ({
   fault: phase === 'fault' ? 'ik_unreachable' : null,
   faultRecoverable: false,
   faultResetPending: false,
+  constraint: null,
+  recoveryPhase: null,
 } as const);
 
 describe('VR safety presentation', () => {
@@ -22,15 +28,16 @@ describe('VR safety presentation', () => {
     ['locked', '未解锁', '松开 Grip 后按 A', 'muted', 'shield'],
     ['pending', '解锁中', '等待仿真确认', 'cyan', 'shield'],
     ['armed', '已解锁', '按住 Grip 移动', 'cyan', 'shield'],
-    ['active', '运动中', '松开 Grip 停止', 'cyan', 'shield'],
-    ['stopped', '已停止', '松开 Grip 后按 A', 'red', 'stop'],
-    ['fault', '无法在线复位', '请重启后端并检查原因', 'red', 'warning'],
+    ['active', '运动中', '松开 Grip 停止 · B 紧急停止', 'cyan', 'shield'],
+    ['stopped', '已停止', '保持 Grip 松开：A 解锁，B 回 Home', 'red', 'stop'],
+    ['fault', '无法在线复位', '保持安全距离，检查 L Master/急停', 'red', 'warning'],
     ['disconnected', '连接已中断', '保持 Grip 松开', 'red', 'warning'],
   ] as const)('maps %s to readable text and a shape', (phase, title, instruction, tone, shape) => {
     expect(describeVrSafety(state(phase), true)).toEqual({
       title,
       instruction,
-      footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度',
+      footer: 'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
+      statusLine: 'SIMULATOR · TCP — · —',
       tone,
       shape,
     });
@@ -104,7 +111,7 @@ describe('VR safety presentation', () => {
       faultRecoverable: true,
     }, true)).toMatchObject({
       title,
-      instruction: '松开 Grip，按 B 复位',
+      instruction: '松开 Grip，按 B 复位并回 Home',
       tone: 'red',
       shape: 'warning',
     });
@@ -122,6 +129,23 @@ describe('VR safety presentation', () => {
     });
   });
 
+  it('shows the Home recovery instruction for a pending Home or active recovery phase', () => {
+    expect(describeVrSafety({...state('stopped'), homePending: true}, true)).toMatchObject({
+      title: '正在返回 Home',
+      instruction: '请保持 Grip 松开',
+    });
+    expect(describeVrSafety({
+      ...state('fault'),
+      fault: 'workspace_violation',
+      faultRecoverable: true,
+      faultResetPending: true,
+      recoveryPhase: 'homing',
+    }, true)).toMatchObject({
+      title: '正在返回 Home',
+      instruction: '请保持 Grip 松开',
+    });
+  });
+
   it('shows explicit restart guidance for an unrecoverable fault', () => {
     expect(describeVrSafety({
       ...state('fault'),
@@ -129,7 +153,7 @@ describe('VR safety presentation', () => {
       faultRecoverable: false,
     }, true)).toMatchObject({
       title: '无法在线复位',
-      instruction: '请重启后端并检查原因',
+      instruction: '保持安全距离，检查 L Master/急停',
       tone: 'red',
     });
   });
@@ -142,7 +166,7 @@ describe('VR safety presentation', () => {
       faultRecoverable: false,
     }, true)).toMatchObject({
       title: '数据陈旧',
-      instruction: '保持 Grip 松开',
+      instruction: '机械臂已停止，请检查网络',
       tone: 'red',
     });
   });
@@ -151,7 +175,8 @@ describe('VR safety presentation', () => {
     expect(describeVrSafety(state('locked'), false)).toEqual({
       title: '手柄不受支持',
       instruction: '当前配置不支持 A/B 安全控制',
-      footer: 'A 解锁 · B 停止 · Grip 移动 · 左摇杆调高度',
+      footer: 'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
+      statusLine: 'SIMULATOR · TCP — · —',
       tone: 'red',
       shape: 'warning',
     });
@@ -167,6 +192,42 @@ describe('VR safety presentation', () => {
       fault: 'workspace_violation',
       ...faultState,
     }, false)).toMatchObject({title, tone: 'red'});
+  });
+
+  it('presents self-collision as a recoverable amber constraint', () => {
+    expect(describeVrSafety({
+      ...state('active'),
+      constraint: 'self_collision',
+    }, true)).toMatchObject({
+      title: '机械臂接近自碰撞边界，请将手柄退回',
+      tone: 'amber',
+      shape: 'warning',
+    });
+  });
+
+  it.each([
+    ['workspace_boundary', '向反方向退回'],
+    ['ik_boundary', '保持 Grip，退回上一个位置'],
+  ] as const)('uses the specific safe recovery instruction for %s', (constraint, instruction) => {
+    expect(describeVrSafety({...state('active'), constraint}, true)).toMatchObject({
+      instruction,
+      tone: 'amber',
+    });
+  });
+
+  it('renders a compact real-arm runtime summary without joint telemetry', () => {
+    const summary: RobotRuntimeSummary = {
+      backend: 'LEBAI',
+      realRobotMode: 'control',
+      actualTcp: {p: [0.312, -0.041, 0.428], q: [0, 0, 0, 1]},
+      gripper: 0.4,
+      latencyMs: 18,
+      hardwareVerified: false,
+    };
+
+    expect(describeVrSafety(state('locked'), true, summary)).toMatchObject({
+      statusLine: '真机已连接 · CONTROL · TCP 0.312/−0.041/0.428 · 18 ms',
+    });
   });
 
   it('keeps the safety phase presentation while controller support is unknown', () => {
@@ -196,6 +257,13 @@ describe('VR safety sprite resources', () => {
 
     expect(panel.sprite.visible).toBe(false);
     expect(panel.sprite.parent).toBe(parent);
+    expect(panel.sprite.position.toArray()).toEqual([-0.82, 1.52, -0.72]);
+    expect(describeVrSafety(state('stopped'), true).footer).toBe(
+      'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
+    );
+    expect(describeVrSafety(state('stopped'), true).instruction).toBe(
+      '保持 Grip 松开：A 解锁，B 回 Home',
+    );
     const texture = (panel.sprite.material as THREE.SpriteMaterial).map as THREE.CanvasTexture;
     expect(texture.image).toMatchObject({width: 1024, height: 256});
 

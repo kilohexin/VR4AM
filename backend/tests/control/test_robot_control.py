@@ -7,8 +7,10 @@ import pytest
 
 import app.control.robot_control as robot_control_module
 from app.control.robot_control import LatestVRFrame, RobotControl
+from app.control.safety import SafetyLimiter
 from app.recording.noop import NoopRecorder
-from app.robots.base import BackendCommandError, StopReason
+from app.recording.commissioning import RecorderUnavailable
+from app.robots.base import BackendCommandError, BackendPreflight, StopReason
 from app.schemas.messages import (
     BackendState,
     ControllerState,
@@ -39,6 +41,18 @@ class FakeBackend:
         self.connect_count = 0
         self.disconnect_count = 0
         self.robot_state = BackendState.IDLE
+        self.home_phases: list[str] = []
+        self.actual_tcp = Pose(p=(0.3, 0.0, 0.3), q=(0, 0, 0, 1))
+        self.actual_q = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self.preflight_result = BackendPreflight(
+            ready=True,
+            reason=None,
+            robot_state=BackendState.IDLE,
+            actual_tcp=self.actual_tcp,
+            actual_q=self.actual_q,
+            tcp_matches=True,
+            capabilities=("command_tcp", "home", "gripper"),
+        )
 
     async def connect(self) -> None:
         self.connect_count += 1
@@ -56,14 +70,45 @@ class FakeBackend:
     async def stop(self, reason: StopReason) -> None:
         self.stops.append(reason)
 
+    async def home(self, options, on_phase) -> None:
+        on_phase("homing")
+        self.home_phases.append("homing")
+        on_phase("stabilizing")
+        self.home_phases.append("stabilizing")
+
     async def get_state(self) -> RobotStateMessage:
         return RobotStateMessage(
             server_mono_ns=1,
             mode=TeleopMode.READY,
             robot_state=self.robot_state,
-            actual_tcp=Pose(p=(0.3, 0.0, 0.3), q=(0, 0, 0, 1)),
-            actual_q=(0, 0, 0, 0, 0, 0),
+            actual_tcp=self.actual_tcp,
+            actual_q=self.actual_q,
             gripper=self.gripper,
+        )
+
+    async def preflight(self) -> BackendPreflight:
+        return self.preflight_result
+
+
+class RecordingRecorder(NoopRecorder):
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+        self.fail_critical_with: RecorderUnavailable | None = None
+
+    async def write_critical_event(
+        self,
+        kind: str,
+        payload: object,
+        server_mono_ns: int,
+    ) -> None:
+        if self.fail_critical_with is not None:
+            raise self.fail_critical_with
+        self.events.append(
+            {
+                "kind": kind,
+                "payload": payload,
+                "server_mono_ns": server_mono_ns,
+            }
         )
 
 
@@ -90,11 +135,21 @@ def frame(
     )
 
 
-def make_control() -> tuple[RobotControl, LatestVRFrame, FakeBackend, FakeClock]:
+def make_control(
+    *,
+    recorder: NoopRecorder | None = None,
+    limiter=None,
+) -> tuple[RobotControl, LatestVRFrame, FakeBackend, FakeClock]:
     latest = LatestVRFrame()
     backend = FakeBackend()
     clock = FakeClock()
-    control = RobotControl(backend=backend, latest=latest, clock=clock, recorder=NoopRecorder())
+    control = RobotControl(
+        backend=backend,
+        latest=latest,
+        clock=clock,
+        recorder=recorder or NoopRecorder(),
+        limiter=limiter,
+    )
     return control, latest, backend, clock
 
 
@@ -107,6 +162,16 @@ async def connect_release_arm(
     latest.publish(frame(1, False), clock.now_ns())
     await control.tick()
     await control.arm()
+
+
+async def activate(
+    control: RobotControl,
+    latest: LatestVRFrame,
+    clock: FakeClock,
+) -> None:
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
 
 
 async def enter_published_recoverable_fault(
@@ -142,6 +207,329 @@ def assert_fault_motion_state_is_retained(control: RobotControl) -> None:
     assert np.allclose(control.limiter.linear_velocity, (0.1, 0.2, 0.3))
     assert np.allclose(control.limiter.angular_velocity, (0.4, 0.5, 0.6))
     assert control.last_target is not None
+
+
+@pytest.mark.asyncio
+async def test_manual_home_requires_released_grip_and_ends_disarmed() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    result = await control.home()
+
+    assert result == robot_control_module.HomeResult(True)
+    assert backend.stops[-1] is StopReason.HOME
+    assert backend.home_phases == ["homing", "stabilizing"]
+    assert control.mode is TeleopMode.DISARMED
+    assert control.mapper._hand_anchor is None
+    assert control.last_target is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "tcp_mismatch",
+        "tcp_outside_startup_envelope",
+        "joint_outside_soft_limits",
+        "robot_disconnected",
+        "robot_not_idle",
+        "estop:hard_estop",
+    ],
+)
+async def test_manual_home_records_fresh_preflight_and_never_moves_when_it_fails(
+    reason: str,
+) -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    backend.preflight_result = BackendPreflight(
+        ready=False,
+        reason=reason,
+        robot_state=(
+            BackendState.FAULT
+            if reason in {"robot_disconnected", "robot_not_idle"}
+            else BackendState.IDLE
+        ),
+        actual_tcp=backend.actual_tcp,
+        actual_q=backend.actual_q,
+        tcp_matches=reason != "tcp_mismatch",
+        capabilities=("command_tcp", "home", "gripper"),
+    )
+
+    result = await control.home()
+
+    assert result.accepted is False
+    assert result.reason == "home_failed"
+    assert backend.home_phases == []
+    preflight_events = [
+        event for event in recorder.events if event["kind"] == "preflight_result"
+    ]
+    assert preflight_events[-1]["payload"] == {
+        "ready": False,
+        "reason": reason,
+        "robot_state": backend.preflight_result.robot_state.value,
+        "tcp_matches": reason != "tcp_mismatch",
+        "capabilities": ["command_tcp", "home", "gripper"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("grip", "tracking_valid", "visibility", "age_ms"),
+    [
+        (False, True, "visible", 100.0),
+        (False, False, "visible", 0.0),
+        (False, True, "hidden", 0.0),
+        (True, True, "visible", 0.0),
+    ],
+)
+async def test_manual_home_rejects_invalid_release_sample_without_backend_calls(
+    grip: bool,
+    tracking_valid: bool,
+    visibility: str,
+    age_ms: float,
+) -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(
+        frame(
+            1,
+            grip,
+            tracking_valid=tracking_valid,
+            visibility=visibility,
+        ),
+        clock.now_ns(),
+    )
+    clock.advance_ms(age_ms)
+
+    result = await control.home()
+
+    assert result.reason == "grip_pressed"
+    assert backend.stops == []
+    assert backend.home_phases == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_tick_does_not_stale_stop_delayed_home() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    home_started = asyncio.Event()
+    allow_home = asyncio.Event()
+
+    async def delayed_home(options, on_phase) -> None:
+        on_phase("homing")
+        home_started.set()
+        await allow_home.wait()
+        on_phase("stabilizing")
+
+    backend.home = delayed_home  # type: ignore[method-assign]
+    home = asyncio.create_task(control.home())
+    try:
+        await home_started.wait()
+        clock.advance_ms(150)
+
+        await control.tick()
+
+        assert StopReason.STALE not in backend.stops
+        assert control.mode is TeleopMode.READY
+    finally:
+        allow_home.set()
+
+    assert await home == robot_control_module.HomeResult(True)
+    assert control.mode is TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_manual_home_generation_aba_cannot_clear_newer_motion_state() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    actual_tcp = await backend.get_state()
+    hand = Pose(p=(0.0, 1.2, -0.3), q=(0, 0, 0, 1))
+    control.mapper.capture(hand, actual_tcp.actual_tcp)
+    control.last_target = actual_tcp.actual_tcp
+    home_started = asyncio.Event()
+    allow_home = asyncio.Event()
+
+    async def delayed_home(options, on_phase) -> None:
+        on_phase("homing")
+        home_started.set()
+        await allow_home.wait()
+
+    backend.home = delayed_home  # type: ignore[method-assign]
+    home = asyncio.create_task(control.home())
+    await home_started.wait()
+    control._advance_control_generation()
+    control._advance_control_generation()
+    allow_home.set()
+
+    result = await home
+
+    assert result.reason == "not_stopped"
+    assert control.mapper._hand_anchor is not None
+    assert control.last_target == actual_tcp.actual_tcp
+    assert backend.stops == [StopReason.HOME, StopReason.HOME]
+
+
+@pytest.mark.asyncio
+async def test_manual_home_and_fault_reset_share_one_recovery_operation() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    first_home_started = asyncio.Event()
+    allow_first_home = asyncio.Event()
+    home_calls = 0
+    active_homes = 0
+    max_active_homes = 0
+
+    async def serialized_home(options, on_phase) -> None:
+        nonlocal home_calls, active_homes, max_active_homes
+        home_calls += 1
+        active_homes += 1
+        max_active_homes = max(max_active_homes, active_homes)
+        try:
+            on_phase("homing")
+            if home_calls == 1:
+                first_home_started.set()
+                await allow_first_home.wait()
+            on_phase("stabilizing")
+        finally:
+            active_homes -= 1
+
+    backend.home = serialized_home  # type: ignore[method-assign]
+    manual_home = asyncio.create_task(control.home())
+    await first_home_started.wait()
+    await control._enter_fault("ik_unreachable")
+    await control.state_message()
+    reset = asyncio.create_task(control.reset_fault())
+    await asyncio.sleep(0)
+
+    assert home_calls == 1
+    assert not reset.done()
+
+    allow_first_home.set()
+    manual_result = await manual_home
+    reset_result = await reset
+
+    assert manual_result.reason == "fault_present"
+    assert reset_result == robot_control_module.FaultResetResult(True)
+    assert max_active_homes == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_home_exception_stops_started_home_motion() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+
+    async def failing_home(options, on_phase) -> None:
+        on_phase("homing")
+        raise RuntimeError("private home failure")
+
+    backend.home = failing_home  # type: ignore[method-assign]
+
+    result = await control.home()
+
+    assert result == robot_control_module.HomeResult(
+        False,
+        "home_failed",
+        "仿真无法返回初始姿态，请稍后重试。",
+    )
+    assert backend.stops == [StopReason.HOME, StopReason.HOME]
+    assert control.mode is TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_manual_home_cancellation_stops_started_home_motion() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    home_started = asyncio.Event()
+
+    async def cancellable_home(options, on_phase) -> None:
+        on_phase("homing")
+        home_started.set()
+        await asyncio.Future()
+
+    backend.home = cancellable_home  # type: ignore[method-assign]
+    home = asyncio.create_task(control.home())
+    await home_started.wait()
+    home.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await home
+
+    assert backend.stops == [StopReason.HOME, StopReason.HOME]
+    assert control.mode is TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_fault_reset_home_exception_stops_started_home_motion() -> None:
+    control, _latest, backend, _clock = make_control()
+    await enter_published_recoverable_fault(control)
+
+    async def failing_home(options, on_phase) -> None:
+        on_phase("homing")
+        raise RuntimeError("private reset home failure")
+
+    backend.home = failing_home  # type: ignore[method-assign]
+
+    result = await control.reset_fault()
+
+    assert result == robot_control_module.FaultResetResult(
+        False,
+        "stop_incomplete",
+        "仿真无法返回初始姿态，故障保持锁定。",
+    )
+    assert backend.stops == [StopReason.FAULT, StopReason.FAULT, StopReason.HOME]
+    assert control._fault == "ik_unreachable"
+    assert control.mode is TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_manual_home_bounds_state_read_and_rejects_idle_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    loop_times = iter((0.0, 0.25, 1.0))
+    timeouts: list[float] = []
+
+    class FakeLoop:
+        def time(self) -> float:
+            return next(loop_times)
+
+    async def recording_wait_for(awaitable, timeout: float):
+        timeouts.append(timeout)
+        return await awaitable
+
+    monkeypatch.setattr(
+        robot_control_module.asyncio,
+        "get_running_loop",
+        lambda: FakeLoop(),
+    )
+    monkeypatch.setattr(robot_control_module.asyncio, "wait_for", recording_wait_for)
+
+    result = await control.home()
+
+    assert result == robot_control_module.HomeResult(
+        False,
+        "home_failed",
+        "等待仿真停止超时。",
+    )
+    assert timeouts == [pytest.approx(0.75)]
+    assert backend.home_phases == []
 
 
 @pytest.mark.asyncio
@@ -275,6 +663,7 @@ def test_fault_reset_recoverable_whitelist_is_exact() -> None:
             "ik_unreachable",
             "ik_singular",
             "joint_safety_window",
+            "backend_command_failed",
         }
     )
 
@@ -610,8 +999,12 @@ async def test_reset_fault_contains_second_stop_exception_without_partial_clear(
     )
     assert "secret" not in (result.message or "")
     assert backend.stops == [StopReason.FAULT, StopReason.FAULT]
-    assert control.mode is TeleopMode.DISARMED
-    assert_fault_motion_state_is_retained(control)
+    assert control.mode is TeleopMode.FAULT
+    assert control._fault == "stop_unverified"
+    assert control.mapper._hand_anchor is None
+    assert control.filter.value is None
+    assert control.limiter.anchor is None
+    assert control.last_target is None
 
 
 def test_latest_frame_has_capacity_one_and_rejects_same_session_rollback() -> None:
@@ -837,6 +1230,29 @@ async def test_failed_disconnect_stop_does_not_create_stop_credit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_disconnect_stop_revokes_authority_and_latches_unrecoverable_fault() -> None:
+    control, latest, backend, clock = make_control()
+    await activate(control, latest, clock)
+
+    async def fail_disconnect(reason: StopReason) -> None:
+        backend.stops.append(reason)
+        raise BackendCommandError("sdk_call_failed:stop_move")
+
+    backend.stop = fail_disconnect  # type: ignore[method-assign]
+
+    with pytest.raises(BackendCommandError, match="^sdk_call_failed:stop_move$"):
+        await control.on_disconnect()
+
+    assert control.mode is TeleopMode.FAULT
+    assert control._fault == "stop_unverified"
+    assert control.mapper._hand_anchor is None
+    assert control.last_target is None
+    assert control._pending_stop_completion is True
+    with pytest.raises(RuntimeError, match="^arm_blocked_by_fault$"):
+        await control.arm()
+
+
+@pytest.mark.asyncio
 async def test_grip_release_holds_and_stops_motion() -> None:
     control, latest, backend, clock = make_control()
     await connect_release_arm(control, latest, clock)
@@ -944,7 +1360,9 @@ async def test_hard_stale_publishes_stale_before_stop_complete_disarms() -> None
 @pytest.mark.asyncio
 async def test_hard_stale_preserves_fault_until_fault_is_published() -> None:
     control, latest, backend, clock = make_control()
-    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("backend_command_failed")
+    )
     await connect_release_arm(control, latest, clock)
     latest.publish(frame(2, True), clock.now_ns())
     await control.tick()
@@ -984,7 +1402,9 @@ async def test_disarm_cannot_bypass_unpublished_stale_mode() -> None:
 @pytest.mark.asyncio
 async def test_disarm_cannot_bypass_unpublished_fault_mode() -> None:
     control, latest, backend, clock = make_control()
-    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("backend_command_failed")
+    )
     await connect_release_arm(control, latest, clock)
     latest.publish(frame(2, True), clock.now_ns())
     await control.tick()
@@ -1004,7 +1424,9 @@ async def test_disarm_cannot_bypass_unpublished_fault_mode() -> None:
 @pytest.mark.asyncio
 async def test_new_session_preserves_unpublished_fault_priority_and_detail() -> None:
     control, latest, backend, clock = make_control()
-    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("backend_command_failed")
+    )
     await control.connect()
     latest.publish(frame(1, False, session_id="old"), clock.now_ns())
     await control.tick()
@@ -1024,12 +1446,12 @@ async def test_new_session_preserves_unpublished_fault_priority_and_detail() -> 
 
     assert backend.stops[-1] == StopReason.DISCONNECT
     assert control.mode == TeleopMode.FAULT
-    assert control._fault == "ik_unreachable"
+    assert control._fault == "backend_command_failed"
     assert control._pending_stop_completion is True
     assert control.last_target is None
     fault_state = await control.state_message()
     assert fault_state.mode == TeleopMode.FAULT
-    assert fault_state.fault == "ik_unreachable"
+    assert fault_state.fault == "backend_command_failed"
     assert control.mode == TeleopMode.DISARMED
     with pytest.raises(RuntimeError, match="arm_blocked_by_fault"):
         await control.arm()
@@ -1037,7 +1459,7 @@ async def test_new_session_preserves_unpublished_fault_priority_and_detail() -> 
     latest.publish(frame(2, False, session_id="new"), clock.now_ns())
     await control.tick()
     assert control.mode is TeleopMode.DISARMED
-    assert control._fault == "ik_unreachable"
+    assert control._fault == "backend_command_failed"
     with pytest.raises(RuntimeError, match="arm_blocked_by_fault"):
         await control.arm()
 
@@ -1182,31 +1604,138 @@ async def test_reconnect_requires_release_and_explicit_arm() -> None:
 @pytest.mark.asyncio
 async def test_gripper_has_strict_10hz_ceiling_delta_threshold_and_no_queue() -> None:
     control, latest, backend, clock = make_control()
-    await control.connect()
+    await activate(control, latest, clock)
 
-    latest.publish(frame(1, False, trigger=0.70), clock.now_ns())
+    latest.publish(frame(3, True, trigger=0.70), clock.now_ns())
     await control.tick()
     clock.advance_ms(50)
-    latest.publish(frame(2, False, trigger=0.90), clock.now_ns())
+    latest.publish(frame(4, True, trigger=0.90), clock.now_ns())
     await control.tick()
     clock.advance_ms(49)
-    latest.publish(frame(3, False, trigger=0.80), clock.now_ns())
+    latest.publish(frame(5, True, trigger=0.80), clock.now_ns())
     await control.tick()
     clock.advance_ms(1)
-    latest.publish(frame(4, False, trigger=0.75), clock.now_ns())
+    latest.publish(frame(6, True, trigger=0.75), clock.now_ns())
     await control.tick()
 
     assert backend.gripper_commands == pytest.approx([0.70, 0.75])
 
     clock.advance_ms(100)
-    latest.publish(frame(5, False, trigger=0.77), clock.now_ns())
+    latest.publish(frame(7, True, trigger=0.77), clock.now_ns())
     await control.tick()
     assert backend.gripper_commands == pytest.approx([0.70, 0.75])
 
     clock.advance_ms(100)
-    latest.publish(frame(6, False, trigger=0.771), clock.now_ns())
+    latest.publish(frame(8, True, trigger=0.771), clock.now_ns())
     await control.tick()
     assert backend.gripper_commands == pytest.approx([0.70, 0.75, 0.771])
+
+
+@pytest.mark.asyncio
+async def test_control_connect_initializes_observed_gripper_without_a_write() -> None:
+    control, latest, backend, clock = make_control()
+    backend.gripper = 0.35
+    await control.connect()
+
+    assert backend.gripper_commands == []
+
+    latest.publish(frame(1, False, trigger=0.35), clock.now_ns())
+    await control.tick()
+    await control.arm()
+    latest.publish(frame(2, True, trigger=0.35), clock.now_ns())
+    await control.tick()
+    clock.advance_ms(100)
+    latest.publish(frame(3, True, trigger=1.0), clock.now_ns())
+    await control.tick()
+
+    assert backend.gripper_commands == pytest.approx([1.0])
+
+
+@pytest.mark.asyncio
+async def test_unarmed_frames_never_write_gripper_even_when_trigger_changes() -> None:
+    control, latest, backend, clock = make_control()
+    backend.gripper = 0.25
+    await control.connect()
+
+    latest.publish(frame(1, False, trigger=0.60), clock.now_ns())
+    await control.tick()
+    clock.advance_ms(100)
+    latest.publish(frame(2, False, trigger=0.90), clock.now_ns())
+    await control.tick()
+
+    assert control.mode is TeleopMode.READY
+    assert backend.gripper_commands == []
+    assert backend.gripper == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_failed_preflight_session_never_writes_gripper() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False, trigger=0.0), clock.now_ns())
+    await control.tick()
+    backend.preflight_result = BackendPreflight(
+        ready=False,
+        reason="tcp_mismatch",
+        robot_state=BackendState.IDLE,
+        actual_tcp=backend.actual_tcp,
+        actual_q=backend.actual_q,
+        tcp_matches=False,
+        capabilities=("command_tcp", "home", "gripper"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^arm_blocked_by_preflight:tcp_mismatch$",
+    ):
+        await control.arm()
+    clock.advance_ms(100)
+    latest.publish(frame(2, False, trigger=1.0), clock.now_ns())
+    await control.tick()
+
+    assert control.mode is TeleopMode.READY
+    assert backend.gripper_commands == []
+
+
+@pytest.mark.asyncio
+async def test_current_preflight_and_active_session_allow_one_gripper_write() -> None:
+    control, latest, backend, clock = make_control()
+    await activate(control, latest, clock)
+    clock.advance_ms(100)
+
+    latest.publish(frame(3, True, trigger=1.0), clock.now_ns())
+    await control.tick()
+
+    assert control.mode is TeleopMode.ACTIVE
+    assert backend.gripper_commands == pytest.approx([1.0])
+
+
+@pytest.mark.asyncio
+async def test_explicit_commissioning_gripper_command_requires_active_authority_and_writes_once() -> None:
+    unarmed, _latest, unarmed_backend, _clock = make_control()
+    await unarmed.connect()
+
+    with pytest.raises(RuntimeError, match="^gripper_command_requires_armed$"):
+        await unarmed.command_gripper(0.0)
+    assert unarmed_backend.gripper_commands == []
+
+    control, latest, backend, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True, trigger=0.0), clock.now_ns())
+    await control.tick()
+    await control.command_gripper(0.0)
+
+    assert backend.gripper_commands == pytest.approx([0.0])
+
+
+@pytest.mark.asyncio
+async def test_initialize_observed_gripper_rejects_a_running_control_loop() -> None:
+    control, _latest, _backend, _clock = make_control()
+    await control.connect()
+    control._running = True
+
+    with pytest.raises(RuntimeError, match="^gripper_initialize_requires_stopped$"):
+        await control.initialize_observed_gripper()
 
 
 @pytest.mark.asyncio
@@ -1238,8 +1767,8 @@ async def test_failed_control_loop_blocks_new_gripper_commands() -> None:
     latest.publish(frame(2, False, trigger=0.80), clock.now_ns())
     await control.tick()
 
-    assert backend.gripper_commands == pytest.approx([0.20])
-    assert backend.gripper == pytest.approx(0.20)
+    assert backend.gripper_commands == []
+    assert backend.gripper == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio
@@ -1254,8 +1783,8 @@ async def test_shutdown_started_blocks_new_gripper_commands() -> None:
     latest.publish(frame(2, False, trigger=0.80), clock.now_ns())
     await control.tick()
 
-    assert backend.gripper_commands == pytest.approx([0.20])
-    assert backend.gripper == pytest.approx(0.20)
+    assert backend.gripper_commands == []
+    assert backend.gripper == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio
@@ -1409,7 +1938,7 @@ async def test_unexpected_control_loop_exception_fails_stop_without_masking_or_r
     assert control.last_target is None
     fault_state = await control.state_message()
     assert fault_state.mode == TeleopMode.FAULT
-    assert fault_state.fault == "control_loop_error"
+    assert fault_state.fault == "stop_unverified"
     assert "secret recorder detail" not in (fault_state.fault or "")
     with pytest.raises(RuntimeError, match="control_faulted"):
         await control.start()
@@ -1443,7 +1972,9 @@ async def test_control_loop_task_cancellation_remains_cancellation_without_fault
 @pytest.mark.asyncio
 async def test_backend_command_error_faults_and_is_observable() -> None:
     control, latest, backend, clock = make_control()
-    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_unreachable"))
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("backend_command_failed")
+    )
     await connect_release_arm(control, latest, clock)
     latest.publish(frame(2, True), clock.now_ns())
     await control.tick()
@@ -1455,6 +1986,28 @@ async def test_backend_command_error_faults_and_is_observable() -> None:
     assert control.mode == TeleopMode.FAULT
     assert (await control.state_message()).mode == TeleopMode.FAULT
     assert control.mode == TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_self_collision_command_error_is_a_soft_constraint() -> None:
+    control, latest, backend, clock = make_control()
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("self_collision")
+    )
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    latest.publish(
+        frame(3, True, p=(0.0, 1.2, -0.31)),
+        clock.now_ns(),
+    )
+
+    await control.tick()
+
+    state = await control.state_message()
+    assert control.mode is TeleopMode.ACTIVE
+    assert control._fault is None
+    assert state.constraint == "self_collision"
 
 
 @pytest.mark.asyncio
@@ -1524,3 +2077,120 @@ async def test_concurrent_stop_waits_for_old_run_and_prevents_restart() -> None:
     assert control._task is None
     assert old_task.done()
     assert backend.stops == [StopReason.SHUTDOWN]
+
+
+@pytest.mark.asyncio
+async def test_arm_rejects_failed_backend_preflight_without_motion() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, grip=False), clock.now_ns())
+    await control.tick()
+    backend.preflight_result = BackendPreflight(
+        ready=False,
+        reason="tcp_mismatch",
+        robot_state=BackendState.IDLE,
+        actual_tcp=backend.actual_tcp,
+        actual_q=backend.actual_q,
+        tcp_matches=False,
+        capabilities=("pvat",),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^arm_blocked_by_preflight:tcp_mismatch$",
+    ):
+        await control.arm()
+
+    assert control.mode is TeleopMode.READY
+    assert backend.targets == []
+
+
+@pytest.mark.asyncio
+async def test_stop_records_request_before_backend_and_confirmation_after() -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await activate(control, latest, clock)
+    latest.publish(frame(10, grip=False), clock.now_ns())
+
+    await control.tick()
+
+    kinds = [str(event["kind"]) for event in recorder.events]
+    assert kinds.index("stop_requested") < kinds.index("stop_confirmed")
+    assert backend.stops[-1] is StopReason.GRIP_RELEASED
+
+
+@pytest.mark.asyncio
+async def test_critical_recorder_failure_never_prevents_physical_stop() -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await activate(control, latest, clock)
+    recorder.fail_critical_with = RecorderUnavailable("critical_log_queue_full")
+
+    await control.disarm()
+
+    assert backend.stops[-1] is StopReason.GRIP_RELEASED
+    assert control.mode is TeleopMode.FAULT
+    assert control._fault == "recording_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_disarm_stop_error_revokes_active_authority_in_finally() -> None:
+    control, latest, backend, clock = make_control()
+    await activate(control, latest, clock)
+
+    async def fail_stop(reason: StopReason) -> None:
+        backend.stops.append(reason)
+        raise BackendCommandError("sdk_timeout:stop_move")
+
+    backend.stop = fail_stop  # type: ignore[method-assign]
+
+    with pytest.raises(BackendCommandError, match="^sdk_timeout:stop_move$"):
+        await control.disarm()
+
+    assert control.mode is TeleopMode.FAULT
+    assert control._fault == "stop_unverified"
+    assert control.mapper._hand_anchor is None
+    assert control.last_target is None
+    assert control._pending_stop_completion is True
+
+
+@pytest.mark.asyncio
+async def test_fault_backend_state_never_completes_an_unverified_stop() -> None:
+    control, _latest, backend, _clock = make_control()
+    await control.connect()
+    control.machine.fault()
+    control._fault = "stop_unverified"
+    control._pending_stop_completion = True
+    backend.robot_state = BackendState.FAULT
+
+    state = await control.state_message()
+
+    assert state.mode is TeleopMode.FAULT
+    assert state.fault == "stop_unverified"
+    assert control.mode is TeleopMode.FAULT
+    assert control._pending_stop_completion is True
+
+
+@pytest.mark.asyncio
+async def test_out_of_real_envelope_holds_target_and_retreat_resumes() -> None:
+    limiter = SafetyLimiter(
+        workspace_half_extent_m=0.005,
+        max_rotation_from_anchor_rad=np.deg2rad(30),
+    )
+    control, latest, backend, clock = make_control(limiter=limiter)
+    await activate(control, latest, clock)
+    safe_target = control.last_target
+
+    latest.publish(frame(3, True, p=(0.02, 1.2, -0.3)), clock.now_ns())
+    await control.tick()
+
+    assert backend.targets == []
+    assert control.last_target == safe_target
+    assert (await control.state_message()).constraint == "workspace_boundary"
+    assert control.mode is TeleopMode.ACTIVE
+
+    latest.publish(frame(4, True, p=(0.001, 1.2, -0.3)), clock.now_ns())
+    await control.tick()
+
+    assert [command_id for command_id, _target in backend.targets] == [4]
+    assert control.mode is TeleopMode.ACTIVE

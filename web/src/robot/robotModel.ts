@@ -1,18 +1,27 @@
 import * as THREE from 'three';
 import {GLTFLoader} from 'three/examples/jsm/loaders/GLTFLoader.js';
+import visualKinematics from '../../../config/lm3_visual_kinematics_v1.json';
 
-const JOINTS = [
-  {name: 'Joint1', axis: 'y'},
-  {name: 'Joint2', axis: 'z'},
-  {name: 'Joint3', axis: 'z'},
-  {name: 'Joint4', axis: 'z'},
-  {name: 'Joint5', axis: 'y'},
-  {name: 'Joint6', axis: 'z'},
-] as const;
+type Axis = 'x' | 'y' | 'z';
+
+const JOINTS = visualKinematics.joints.map(({name, axis}) => {
+  if (axis !== 'x' && axis !== 'y' && axis !== 'z') {
+    throw new Error(`无效关节轴: ${name}`);
+  }
+  return {name, axis: axis as Axis};
+});
+
+export const LM3_HOME_Q = visualKinematics.home_q as readonly number[];
+export const LM3_TCP_OFFSET: readonly [number, number, number] = [
+  visualKinematics.tool.tcp_offset_m[0],
+  visualKinematics.tool.tcp_offset_m[1],
+  visualKinematics.tool.tcp_offset_m[2],
+];
 
 export interface RobotModel {
   group: THREE.Group;
   robot: THREE.Object3D;
+  tool: THREE.Object3D;
   setJointAngles(q: readonly number[]): void;
   setGripper(value: number): void;
 }
@@ -41,6 +50,8 @@ function createRobotModel(
   }
 
   const jointNodes = joints as THREE.Object3D[];
+  const tool = scene.getObjectByName(visualKinematics.tool.node);
+  if (!tool) throw new Error(`缺少工具节点: ${visualKinematics.tool.node}`);
   const originalRotations = jointNodes.map((joint) => joint.rotation.clone());
   const gripper = createGripperController(scene, animations);
   const group = new THREE.Group();
@@ -50,6 +61,7 @@ function createRobotModel(
   return {
     group,
     robot: scene,
+    tool,
     setJointAngles(q: readonly number[]): void {
       if (q.length !== JOINTS.length) {
         throw new Error('需要 6 个关节角');

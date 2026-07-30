@@ -1,9 +1,12 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import validDiagnostics from '../../schemas/fixtures/diagnostics-valid.json';
 import robotFixture from '../../schemas/fixtures/robot-state-valid.json';
 import vrFixture from '../../schemas/fixtures/vr-frame-valid.json';
 import type {
   ClientControlMessage,
+  DiagnosticsMessage,
   FaultResetResultMessage,
+  HomeResultMessage,
   RobotStateMessage,
   VRFrame,
 } from '../src/protocol/messages';
@@ -201,6 +204,32 @@ describe('TeleopSocket', () => {
     expect(states).toEqual([robotFixture]);
   });
 
+  it('delivers diagnostics only through the final owner-socket callback', () => {
+    const diagnostics: DiagnosticsMessage[] = [];
+    const sockets: FakeSocket[] = [];
+    const client = new TeleopSocket(
+      'wss://test',
+      () => {},
+      () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      () => {},
+      () => {},
+      () => {},
+      () => {},
+      (message) => diagnostics.push(message),
+    );
+    client.connect();
+    sockets[0].open();
+
+    sockets[0].message(JSON.stringify({...validDiagnostics, hardware_verified: true}));
+    sockets[0].message(JSON.stringify(validDiagnostics));
+
+    expect(diagnostics).toEqual([validDiagnostics]);
+  });
+
   it('delivers protocol-valid arm acknowledgements and rejections', () => {
     const feedback: unknown[] = [];
     const sockets: FakeSocket[] = [];
@@ -289,6 +318,50 @@ describe('TeleopSocket', () => {
     expect(states).toEqual([robotFixture]);
     expect(armFeedback).toEqual([{v: 1, type: 'arm_ack', request_id: 'arm-1'}]);
     expect(connectionStates).toEqual([{state: 'connected'}]);
+  });
+
+  it('delivers only valid Home results through the Home callback', () => {
+    const homeResults: HomeResultMessage[] = [];
+    const faultResults: FaultResetResultMessage[] = [];
+    const sockets: FakeSocket[] = [];
+    const client = new TeleopSocket(
+      'wss://test',
+      () => {},
+      () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      () => {},
+      () => {},
+      (message) => faultResults.push(message),
+      (message) => homeResults.push(message),
+    );
+    client.connect();
+    sockets[0].open();
+
+    const accepted = {
+      v: 1,
+      type: 'home_result',
+      request_id: 'home-1',
+      accepted: true,
+      mode: 'DISARMED',
+    };
+    const rejected = {
+      v: 1,
+      type: 'home_result',
+      request_id: 'home-2',
+      accepted: false,
+      reason: 'grip_pressed',
+      message: '请先松开手柄抓握键，再请求 Home。',
+    };
+
+    sockets[0].message(JSON.stringify(accepted));
+    sockets[0].message(JSON.stringify({...accepted, extra: true}));
+    sockets[0].message(JSON.stringify(rejected));
+
+    expect(homeResults).toEqual([accepted, rejected]);
+    expect(faultResults).toEqual([]);
   });
 
   it('reconnects exponentially with a two-second cap and never auto-arms', () => {

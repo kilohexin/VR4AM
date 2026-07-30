@@ -12,6 +12,9 @@ function createScene(count = 6): THREE.Group {
     node.name = `Joint${index}`;
     root.add(node);
   }
+  const tool = new THREE.Group();
+  tool.name = 'robotgrabber';
+  root.add(tool);
   return root;
 }
 

@@ -5,6 +5,7 @@ const TRIGGER_BUTTON_INDEX = 0;
 const ARM_BUTTON_INDEX = 4;
 const STOP_BUTTON_INDEX = 5;
 const THUMBSTICK_BUTTON_INDEX = 3;
+const THUMBSTICK_X_AXIS_INDEX = 2;
 const THUMBSTICK_Y_AXIS_INDEX = 3;
 const GRIP_THRESHOLD = 0.5;
 const QUEST_PROFILE_PREFIXES = ['meta-quest-touch', 'oculus-touch'] as const;
@@ -16,7 +17,9 @@ export interface TrackedPoseSample {
 }
 
 export interface LeftControllerSample extends TrackedPoseSample {
+  thumbstickX: number;
   thumbstickY: number;
+  grip: boolean;
   thumbstickPressed: boolean;
 }
 
@@ -68,7 +71,9 @@ function readLeftController(
 
   return {
     ...pose,
+    thumbstickX: normalizeAxis(source.gamepad?.axes?.[THUMBSTICK_X_AXIS_INDEX]),
     thumbstickY: normalizeAxis(source.gamepad?.axes?.[THUMBSTICK_Y_AXIS_INDEX]),
+    grip: pressed(source.gamepad?.buttons?.[GRIP_BUTTON_INDEX]),
     thumbstickPressed: pressed(source.gamepad?.buttons?.[THUMBSTICK_BUTTON_INDEX]),
   };
 }
@@ -129,7 +134,9 @@ export function invalidControllerSample(): ControllerSample {
 function invalidLeftControllerSample(): LeftControllerSample {
   return {
     ...invalidTrackedPoseSample(),
+    thumbstickX: 0,
     thumbstickY: 0,
+    grip: false,
     thumbstickPressed: false,
   };
 }

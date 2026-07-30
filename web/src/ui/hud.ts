@@ -1,4 +1,11 @@
-import type {BackendState, TeleopMode} from '../protocol/messages';
+import type {
+  BackendState,
+  ConstraintKind,
+  RealRobotMode,
+  RecoveryPhase,
+  RuntimeBackend,
+  TeleopMode,
+} from '../protocol/messages';
 import type {TeleopConnectionStatus} from '../transport/teleopSocket';
 
 export interface ControllerHudState {
@@ -12,13 +19,17 @@ export interface RobotHudState {
   backendState: BackendState;
   sampleAgeMs: number | null;
   fault: string | null;
+  constraint: ConstraintKind | null;
+  recoveryPhase: RecoveryPhase | null;
 }
 
 export class Hud {
   readonly sceneContainer: HTMLElement;
   readonly actionContainer: HTMLElement;
+  readonly diagnosticsContainer: HTMLElement;
 
   private readonly modeValue: HTMLElement;
+  private readonly runtimeIdentityValue: HTMLElement;
   private readonly backendStateValue: HTMLElement;
   private readonly connectionValue: HTMLElement;
   private readonly trackingValue: HTMLElement;
@@ -31,6 +42,8 @@ export class Hud {
   private readonly p95LatencyValue: HTMLElement;
   private readonly faultValue: HTMLElement;
   private readonly faultRow: HTMLElement;
+  private readonly constraintValue: HTMLElement;
+  private readonly constraintRow: HTMLElement;
   private readonly sceneNotice: HTMLElement;
 
   constructor(root: Element) {
@@ -79,17 +92,25 @@ export class Hud {
             <span class="status-label">故障</span>
             <span class="status-value" data-field="fault">无</span>
           </div>
+          <div class="status-row constraint-row" data-row="constraint">
+            ${icon('target')}
+            <span class="status-label">边界/恢复</span>
+            <span class="status-value" data-field="constraint">无</span>
+          </div>
+          <div class="diagnostics-rail" aria-label="LM3 diagnostics"></div>
         </aside>
       </main>
       <footer class="help-strip">
         ${icon('info')}
-        <span>按住右手 Grip 建立锚点并移动 · Trigger 控制夹爪 · 松开 Grip 停止</span>
+        <span>右 Grip 建立末端零位 · Trigger 控制夹爪 · 左摇杆平移工作台 · 左 Grip+摇杆调高度</span>
       </footer>
     `;
 
     this.sceneContainer = requireElement(root, '.scene-canvas');
     this.actionContainer = requireElement(root, '.command-actions-host');
+    this.diagnosticsContainer = requireElement(root, '.diagnostics-rail');
     this.modeValue = requireElement(root, '[data-field="mode"]');
+    this.runtimeIdentityValue = requireElement(root, '.simulator-label');
     this.backendStateValue = requireElement(root, '[data-field="backend-state"]');
     this.connectionValue = requireElement(root, '[data-field="connection"]');
     this.trackingValue = requireElement(root, '[data-field="tracking"]');
@@ -102,6 +123,8 @@ export class Hud {
     this.p95LatencyValue = requireElement(root, '[data-field="latency-p95"]');
     this.faultValue = requireElement(root, '[data-field="fault"]');
     this.faultRow = requireElement(root, '[data-row="fault"]');
+    this.constraintValue = requireElement(root, '[data-field="constraint"]');
+    this.constraintRow = requireElement(root, '[data-row="constraint"]');
     this.sceneNotice = requireElement(root, '.scene-notice');
   }
 
@@ -116,6 +139,7 @@ export class Hud {
     this.connectionValue.textContent = labels[status.state];
     this.connectionValue.dataset.tone = status.state === 'connected' ? 'healthy' : 'muted';
     if (status.state !== 'connected') {
+      this.setRuntimeIdentity(null, null);
       this.modeValue.textContent = 'DISCONNECTED · 未连接';
       this.modeValue.parentElement?.setAttribute('data-tone', 'muted');
       this.backendStateValue.textContent = 'DISCONNECTED';
@@ -124,8 +148,18 @@ export class Hud {
       this.setLatency(null, null);
       this.faultValue.textContent = readableFault(null);
       this.faultRow.dataset.active = 'false';
+      this.constraintValue.textContent = '无';
+      this.constraintRow.dataset.active = 'false';
       this.setController({tracking: false, grip: false, trigger: 0});
     }
+  }
+
+  setRuntimeIdentity(
+    backend: RuntimeBackend | null,
+    realMode: RealRobotMode | null,
+  ): void {
+    this.runtimeIdentityValue.textContent = runtimeIdentityLabel(backend, realMode);
+    this.runtimeIdentityValue.dataset.backend = backend ?? 'SIMULATOR';
   }
 
   setController(state: ControllerHudState): void {
@@ -148,6 +182,10 @@ export class Hud {
     this.sampleAgeValue.textContent = formatMilliseconds(state.sampleAgeMs);
     this.faultValue.textContent = readableFault(state.fault);
     this.faultRow.dataset.active = state.fault ? 'true' : 'false';
+    this.constraintValue.textContent = state.recoveryPhase
+      ? readableRecoveryPhase(state.recoveryPhase)
+      : readableConstraint(state.constraint);
+    this.constraintRow.dataset.active = state.recoveryPhase || state.constraint ? 'true' : 'false';
   }
 
   setLatency(current: number | null, p95: number | null): void {
@@ -225,6 +263,32 @@ export function readableFault(fault: string | null): string {
     backend_error: '仿真后端错误',
   };
   return labels[fault] ?? '未知仿真故障';
+}
+
+function runtimeIdentityLabel(backend: RuntimeBackend | null, realMode: RealRobotMode | null): string {
+  if (backend === 'LEBAI_FAKE') return '数字孪生 · LEBAI_FAKE';
+  if (backend === 'LEBAI') {
+    return realMode === 'control' ? '真机控制 · LEBAI' : '真机只读 · LEBAI';
+  }
+  return '仅仿真 · SIMULATOR';
+}
+
+export function readableConstraint(constraint: ConstraintKind | null): string {
+  if (!constraint) return '无';
+  return {
+    workspace_boundary: '已到达操作边界',
+    ik_boundary: '当前方向暂时不可达',
+    joint_boundary: '已到达关节操作边界',
+    self_collision: '机械臂接近自碰撞边界，请将手柄退回',
+  }[constraint];
+}
+
+function readableRecoveryPhase(phase: RecoveryPhase): string {
+  return {
+    stopping: '正在确认停止',
+    homing: '正在回到初始姿态',
+    stabilizing: '正在确认 Home 稳定',
+  }[phase];
 }
 
 type IconName = 'shield' | 'robot' | 'link' | 'target' | 'hand' | 'trigger' | 'clock' | 'gauge' | 'warning' | 'info';

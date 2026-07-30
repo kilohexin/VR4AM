@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -10,6 +11,7 @@ PROTOCOL_VERSION = 1
 Vec3 = tuple[float, float, float]
 Quat = tuple[float, float, float, float]
 JointVector = tuple[float, float, float, float, float, float]
+RuntimeBackend = Literal["SIMULATOR", "LEBAI", "LEBAI_FAKE"]
 FaultResetRejectReason = Literal[
     "no_fault",
     "stop_incomplete",
@@ -17,6 +19,13 @@ FaultResetRejectReason = Literal[
     "unrecoverable_fault",
     "control_loop_unavailable",
 ]
+ConstraintKind = Literal[
+    "workspace_boundary",
+    "ik_boundary",
+    "joint_boundary",
+    "self_collision",
+]
+RecoveryPhase = Literal["stopping", "homing", "stabilizing"]
 
 
 class StrictMessage(BaseModel):
@@ -27,6 +36,14 @@ def _finite(values: tuple[float, ...], name: str) -> tuple[float, ...]:
     if not all(math.isfinite(value) for value in values):
         raise ValueError(f"{name} must contain only finite values")
     return values
+
+
+def _normalize_quaternion(value: Quat, name: str = "quaternion") -> Quat:
+    _finite(value, name)
+    norm = math.sqrt(sum(component * component for component in value))
+    if not 0.9 <= norm <= 1.1:
+        raise ValueError(f"{name} norm must be between 0.9 and 1.1")
+    return tuple(component / norm for component in value)  # type: ignore[return-value]
 
 
 class Pose(StrictMessage):
@@ -41,11 +58,7 @@ class Pose(StrictMessage):
     @field_validator("q")
     @classmethod
     def validate_quaternion(cls, value: Quat) -> Quat:
-        _finite(value, "quaternion")
-        norm = math.sqrt(sum(component * component for component in value))
-        if not 0.9 <= norm <= 1.1:
-            raise ValueError("quaternion norm must be between 0.9 and 1.1")
-        return tuple(component / norm for component in value)  # type: ignore[return-value]
+        return _normalize_quaternion(value)
 
 
 class ControllerState(Pose):
@@ -62,6 +75,12 @@ class VRFrame(StrictMessage):
     tracking_valid: bool
     visibility: Literal["visible", "visible-blurred", "hidden"]
     right: ControllerState
+    head_q: Quat | None = None
+
+    @field_validator("head_q")
+    @classmethod
+    def validate_head_quaternion(cls, value: Quat | None) -> Quat | None:
+        return None if value is None else _normalize_quaternion(value, "head quaternion")
 
 
 class TeleopMode(StrEnum):
@@ -95,10 +114,90 @@ class RobotStateMessage(StrictMessage):
     gripper: Annotated[float, Field(ge=0.0, le=1.0)]
     sample_age_ms: float | None = Field(default=None, ge=0)
     fault: str | None = None
+    constraint: ConstraintKind | None = None
+    recovery_phase: RecoveryPhase | None = None
+    backend: Literal["SIMULATOR", "LEBAI", "LEBAI_FAKE"] | None = None
+    real_robot_mode: Literal["readonly", "control"] | None = None
+    preflight_ready: bool | None = None
+    preflight_reason: str | None = None
+
+
+class DiagnosticEvent(StrictMessage):
+    event_id: int = Field(ge=1)
+    server_mono_ns: int = Field(ge=0)
+    kind: str = Field(min_length=1, max_length=64)
+    critical: bool
+    payload: dict[str, object]
+
+    @field_validator("payload")
+    @classmethod
+    def validate_payload(cls, value: dict[str, object]) -> dict[str, object]:
+        _validate_json_payload(value)
+        return value
+
+
+class DiagnosticsMessage(StrictMessage):
+    v: Literal[1] = 1
+    type: Literal["diagnostics"] = "diagnostics"
+    server_mono_ns: int = Field(ge=0)
+    runtime: RuntimeBackend
+    hardware_verified: Literal[False] = False
+    control_generation: int = Field(ge=0)
+    actual_qd: JointVector | None = None
+    actual_qdd: JointVector | None = None
+    target_q: JointVector | None = None
+    target_qd: JointVector | None = None
+    target_qdd: JointVector | None = None
+    target_tcp: Pose | None = None
+    sdk_latencies_ms: dict[str, float]
+    pvat_send_hz: float | None = Field(default=None, ge=0)
+    log_session_dir: str | None = None
+    dropped_events: int = Field(ge=0)
+    recent_events: tuple[DiagnosticEvent, ...]
+
+    @field_validator("sdk_latencies_ms")
+    @classmethod
+    def validate_sdk_latencies(
+        cls,
+        value: dict[str, float],
+    ) -> dict[str, float]:
+        for latency in value.values():
+            if not math.isfinite(latency) or latency < 0:
+                raise ValueError("SDK latencies must be finite and nonnegative")
+        return value
+
+    @field_validator("pvat_send_hz")
+    @classmethod
+    def validate_pvat_send_hz(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("PVAT send rate must be finite")
+        return value
+
+
+def _validate_json_payload(value: object) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("diagnostic payload must contain only finite values")
+    if isinstance(value, dict):
+        for item in value.values():
+            _validate_json_payload(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_json_payload(item)
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("diagnostic payload must be JSON safe") from None
 
 
 class ClientControlMessage(StrictMessage):
     v: Literal[1]
-    type: Literal["hello", "arm_request", "disarm", "reset_fault", "ping"]
+    type: Literal[
+        "hello",
+        "arm_request",
+        "disarm",
+        "reset_fault",
+        "home_request",
+        "ping",
+    ]
     request_id: str = Field(min_length=1, max_length=64)
     client_mono_ms: float | None = Field(default=None, ge=0)

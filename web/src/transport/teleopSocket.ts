@@ -1,12 +1,16 @@
 import {
   isArmFeedbackMessage,
   isConnectionRejectedMessage,
+  isDiagnosticsMessage,
   isFaultResetResultMessage,
+  isHomeResultMessage,
   isRobotStateMessage,
   PROTOCOL_VERSION,
   type ClientControlMessage,
   type ArmFeedbackMessage,
+  type DiagnosticsMessage,
   type FaultResetResultMessage,
+  type HomeResultMessage,
   type RobotStateMessage,
   type VRFrame,
 } from '../protocol/messages';
@@ -43,6 +47,8 @@ export class TeleopSocket {
     private readonly onConnectionChange: (status: TeleopConnectionStatus) => void = () => {},
     private readonly onArmFeedback: (message: ArmFeedbackMessage) => void = () => {},
     private readonly onFaultResetResult: (message: FaultResetResultMessage) => void = () => {},
+    private readonly onHomeResult: (message: HomeResultMessage) => void = () => {},
+    private readonly onDiagnostics: (message: DiagnosticsMessage) => void = () => {},
   ) {}
 
   connect(): void {
@@ -118,6 +124,8 @@ export class TeleopSocket {
           this.onRobotState(message);
         } else if (isArmFeedbackMessage(message)) this.onArmFeedback(message);
         else if (isFaultResetResultMessage(message)) this.onFaultResetResult(message);
+        else if (isHomeResultMessage(message)) this.onHomeResult(message);
+        else if (isDiagnosticsMessage(message)) this.onDiagnostics(message);
       } catch {
         // Malformed or unsupported messages are ignored at the transport boundary.
       }

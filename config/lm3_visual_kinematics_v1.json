@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "home_q": [0.0, -0.7853981633974483, 1.5707963267948966, -0.7853981633974483, 1.5707963267948966, -1.5707963267948966],
+  "joint_window_rad": 3.141592653589793,
+  "max_joint_speed_radps": 1.5,
+  "max_joint_accel_radps2": 4.0,
+  "joints": [
+    {"name": "Joint1", "axis": "y", "offset_m": [0.0, 0.20332999527454376, 0.0]},
+    {"name": "Joint2", "axis": "z", "offset_m": [0.0, 0.012500002980232239, -0.08833000063896179]},
+    {"name": "Joint3", "axis": "z", "offset_m": [0.0, 0.2800000011920929, 0.04602999985218048]},
+    {"name": "Joint4", "axis": "z", "offset_m": [0.0, 0.25999999046325684, -0.07833000272512436]},
+    {"name": "Joint5", "axis": "y", "offset_m": [0.0, 0.029999971389770508, 0.0]},
+    {"name": "Joint6", "axis": "z", "offset_m": [0.0, 0.06832998991012573, -0.03793000429868698]}
+  ],
+  "tool": {
+    "node": "robotgrabber",
+    "root_offset_m": [0.0, 0.0, -0.030000001192092896],
+    "rotation_xyzw": [0.70710688829422, 0.0, 0.0, 0.7071066498756409],
+    "tcp_offset_m": [0.0, -0.09, 0.0],
+    "forward_axis": [0.0, -1.0, 0.0]
+  },
+  "collision": {
+    "safety_margin_m": 0.008,
+    "segments": [
+      {"name": "base", "start": "base", "end": "joint1", "radius_m": 0.075},
+      {"name": "shoulder", "start": "joint1", "end": "joint2", "radius_m": 0.060},
+      {"name": "upper_arm", "start": "joint2", "end": "joint3", "radius_m": 0.055},
+      {"name": "forearm", "start": "joint3", "end": "joint4", "radius_m": 0.055},
+      {"name": "wrist_1", "start": "joint4", "end": "joint5", "radius_m": 0.045},
+      {"name": "wrist_2", "start": "joint5", "end": "joint6", "radius_m": 0.045},
+      {"name": "tool", "start": "joint6", "end": "tcp", "radius_m": 0.040}
+    ],
+    "check_pairs": [
+      ["base", "forearm"],
+      ["base", "wrist_1"],
+      ["base", "wrist_2"],
+      ["base", "tool"],
+      ["shoulder", "wrist_1"],
+      ["shoulder", "wrist_2"],
+      ["shoulder", "tool"],
+      ["upper_arm", "wrist_1"],
+      ["upper_arm", "wrist_2"],
+      ["upper_arm", "tool"],
+      ["forearm", "tool"]
+    ]
+  }
+}

@@ -9,14 +9,32 @@ def test_virtual_robot_moves_over_time_without_jumping() -> None:
     model = LM3Model()
     robot = VirtualRobot(model)
     goal_q = np.asarray(model.home_q) + 0.2
+    dt = 0.02
 
     robot.set_target_q(goal_q)
-    robot.step(0.02)
+    robot.step(dt)
 
-    assert np.max(np.abs(np.asarray(robot.q) - np.asarray(model.home_q))) <= 0.00041
+    position_acceleration = model.max_joint_accel_radps2 / 2.0
+    assert np.max(np.abs(np.asarray(robot.q) - np.asarray(model.home_q))) <= (
+        position_acceleration * dt**2 + 1e-12
+    )
     for _ in range(600):
         robot.step(0.02)
     assert robot.q == pytest.approx(goal_q, abs=2e-3)
+
+
+def test_velocity_mode_accelerates_to_and_integrates_the_requested_speed_once() -> None:
+    robot = VirtualRobot(LM3Model())
+    requested = np.full(6, 0.6)
+    robot.set_target_qd(requested)
+
+    for _ in range(25):
+        robot.step(0.02)
+
+    assert robot.target_q is None
+    assert robot.target_qd == pytest.approx(requested)
+    assert robot.qd == pytest.approx(requested)
+    assert np.min(robot.q - np.asarray(robot.model.home_q)) > 0.15
 
 
 def test_virtual_robot_respects_speed_and_acceleration_limits() -> None:
@@ -38,7 +56,8 @@ def test_retarget_and_final_convergence_remain_acceleration_limited() -> None:
     model = LM3Model()
     robot = VirtualRobot(model)
     dt = 0.02
-    max_acceleration = model.max_joint_accel_radps2 + 1e-12
+    position_acceleration = model.max_joint_accel_radps2 / 2.0
+    max_acceleration = position_acceleration + 1e-12
     robot.set_target_q(np.asarray(model.home_q) + 1.0)
 
     for _ in range(24):
@@ -46,8 +65,12 @@ def test_retarget_and_final_convergence_remain_acceleration_limited() -> None:
         robot.step(dt)
         assert np.max(np.abs((robot.qd - previous_qd) / dt)) <= max_acceleration
 
-    assert robot.qd == pytest.approx([0.48] * 6)
-    next_limited_qd = robot.qd - model.max_joint_accel_radps2 * dt
+    expected_velocity = min(
+        24 * position_acceleration * dt,
+        model.max_joint_speed_radps,
+    )
+    assert robot.qd == pytest.approx([expected_velocity] * 6)
+    next_limited_qd = robot.qd - position_acceleration * dt
     retarget = robot.q + next_limited_qd * dt
     robot.set_target_q(retarget)
 

@@ -12,6 +12,16 @@
       "title": "BackendState",
       "type": "string"
     },
+    "ConstraintKind": {
+      "enum": [
+        "workspace_boundary",
+        "ik_boundary",
+        "joint_boundary",
+        "self_collision"
+      ],
+      "title": "ConstraintKind",
+      "type": "string"
+    },
     "ClientControlMessage": {
       "additionalProperties": false,
       "properties": {
@@ -26,6 +36,7 @@
             "arm_request",
             "disarm",
             "reset_fault",
+            "home_request",
             "ping"
           ],
           "title": "Type",
@@ -144,6 +155,94 @@
         },
         {
           "$ref": "#/$defs/FaultResetRejected"
+        }
+      ]
+    },
+    "HomeAccepted": {
+      "additionalProperties": false,
+      "properties": {
+        "v": {
+          "const": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "home_result",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "maxLength": 64,
+          "type": "string"
+        },
+        "accepted": {
+          "const": true,
+          "type": "boolean"
+        },
+        "mode": {
+          "const": "DISARMED",
+          "type": "string"
+        }
+      },
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "accepted",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "HomeRejected": {
+      "additionalProperties": false,
+      "properties": {
+        "v": {
+          "const": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "home_result",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "maxLength": 64,
+          "type": "string"
+        },
+        "accepted": {
+          "const": false,
+          "type": "boolean"
+        },
+        "reason": {
+          "enum": [
+            "fault_present",
+            "grip_pressed",
+            "not_stopped",
+            "control_loop_unavailable",
+            "home_failed"
+          ],
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "v",
+        "type",
+        "request_id",
+        "accepted",
+        "reason",
+        "message"
+      ],
+      "type": "object"
+    },
+    "HomeResultMessage": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/HomeAccepted"
+        },
+        {
+          "$ref": "#/$defs/HomeRejected"
         }
       ]
     },
@@ -353,6 +452,92 @@
           ],
           "default": null,
           "title": "Fault"
+        },
+        "constraint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConstraintKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Constraint"
+        },
+        "recovery_phase": {
+          "anyOf": [
+            {
+              "enum": [
+                "stopping",
+                "homing",
+                "stabilizing"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recovery Phase"
+        },
+        "backend": {
+          "anyOf": [
+            {
+              "enum": [
+                "SIMULATOR",
+                "LEBAI",
+                "LEBAI_FAKE"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Backend"
+        },
+        "real_robot_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "readonly",
+                "control"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Real Robot Mode"
+        },
+        "preflight_ready": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preflight Ready"
+        },
+        "preflight_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preflight Reason"
         }
       },
       "required": [

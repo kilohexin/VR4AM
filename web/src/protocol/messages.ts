@@ -15,6 +15,12 @@ export interface ControllerState extends Pose {
 }
 
 export type VisibilityState = 'visible' | 'visible-blurred' | 'hidden';
+export type ConstraintKind =
+  | 'workspace_boundary'
+  | 'ik_boundary'
+  | 'joint_boundary'
+  | 'self_collision';
+export type RecoveryPhase = 'stopping' | 'homing' | 'stabilizing';
 
 export interface VRFrame {
   v: typeof PROTOCOL_VERSION;
@@ -25,6 +31,7 @@ export interface VRFrame {
   tracking_valid: boolean;
   visibility: VisibilityState;
   right: ControllerState;
+  head_q?: Quat | null;
 }
 
 export type TeleopMode =
@@ -38,6 +45,8 @@ export type TeleopMode =
   | 'DISARMED';
 
 export type BackendState = 'DISCONNECTED' | 'IDLE' | 'MOVING' | 'HOLD' | 'FAULT';
+export type RuntimeBackend = 'SIMULATOR' | 'LEBAI' | 'LEBAI_FAKE';
+export type RealRobotMode = 'readonly' | 'control';
 
 export interface RobotStateMessage {
   v: typeof PROTOCOL_VERSION;
@@ -51,9 +60,57 @@ export interface RobotStateMessage {
   gripper: number;
   sample_age_ms?: number | null;
   fault?: string | null;
+  constraint?: ConstraintKind | null;
+  recovery_phase?: RecoveryPhase | null;
+  backend?: RuntimeBackend | null;
+  real_robot_mode?: RealRobotMode | null;
+  preflight_ready?: boolean | null;
+  preflight_reason?: string | null;
 }
 
-export type ClientControlType = 'hello' | 'arm_request' | 'disarm' | 'reset_fault' | 'ping';
+export type DiagnosticPayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | DiagnosticPayloadValue[]
+  | {readonly [key: string]: DiagnosticPayloadValue};
+
+export interface DiagnosticEvent {
+  event_id: number;
+  server_mono_ns: number;
+  kind: string;
+  critical: boolean;
+  payload: Record<string, DiagnosticPayloadValue>;
+}
+
+export interface DiagnosticsMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: 'diagnostics';
+  server_mono_ns: number;
+  runtime: RuntimeBackend;
+  hardware_verified: false;
+  control_generation: number;
+  actual_qd: JointVector | null;
+  actual_qdd: JointVector | null;
+  target_q: JointVector | null;
+  target_qd: JointVector | null;
+  target_qdd: JointVector | null;
+  target_tcp: Pose | null;
+  sdk_latencies_ms: Record<string, number>;
+  pvat_send_hz: number | null;
+  log_session_dir: string | null;
+  dropped_events: number;
+  recent_events: DiagnosticEvent[];
+}
+
+export type ClientControlType =
+  | 'hello'
+  | 'arm_request'
+  | 'disarm'
+  | 'reset_fault'
+  | 'home_request'
+  | 'ping';
 
 export interface ClientControlMessage {
   v: typeof PROTOCOL_VERSION;
@@ -108,6 +165,30 @@ export type FaultResetResultMessage =
       message: string;
     };
 
+export type HomeRejectReason =
+  | 'fault_present'
+  | 'grip_pressed'
+  | 'not_stopped'
+  | 'control_loop_unavailable'
+  | 'home_failed';
+
+export type HomeResultMessage =
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'home_result';
+      request_id: string;
+      accepted: true;
+      mode: 'DISARMED';
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'home_result';
+      request_id: string;
+      accepted: false;
+      reason: HomeRejectReason;
+      message: string;
+    };
+
 type UnknownRecord = Record<string, unknown>;
 
 const TELEOP_MODES: readonly TeleopMode[] = [
@@ -132,11 +213,20 @@ const VISIBILITY_STATES: readonly VisibilityState[] = [
   'visible-blurred',
   'hidden',
 ];
+const CONSTRAINT_KINDS: readonly ConstraintKind[] = [
+  'workspace_boundary',
+  'ik_boundary',
+  'joint_boundary',
+  'self_collision',
+];
+const RECOVERY_PHASES: readonly RecoveryPhase[] = ['stopping', 'homing', 'stabilizing'];
+const REAL_ROBOT_MODES: readonly RealRobotMode[] = ['readonly', 'control'];
 const CONTROL_TYPES: readonly ClientControlType[] = [
   'hello',
   'arm_request',
   'disarm',
   'reset_fault',
+  'home_request',
   'ping',
 ];
 const FAULT_RESET_REJECT_REASONS: readonly FaultResetRejectReason[] = [
@@ -145,6 +235,13 @@ const FAULT_RESET_REJECT_REASONS: readonly FaultResetRejectReason[] = [
   'backend_moving',
   'unrecoverable_fault',
   'control_loop_unavailable',
+];
+const HOME_REJECT_REASONS: readonly HomeRejectReason[] = [
+  'fault_present',
+  'grip_pressed',
+  'not_stopped',
+  'control_loop_unavailable',
+  'home_failed',
 ];
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -233,29 +330,64 @@ function isNullableNonNegativeNumber(value: unknown): boolean {
   return value === null || isNonNegativeNumber(value);
 }
 
-export function isVRFrame(value: unknown): value is VRFrame {
+function isNullableJointVector(value: unknown): boolean {
+  return value === null || isJointVector(value);
+}
+
+function isSdkLatencies(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every(isNonNegativeNumber);
+}
+
+function isDiagnosticPayloadValue(value: unknown): value is DiagnosticPayloadValue {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    isFiniteNumber(value)
+  ) {
+    return true;
+  }
+  if (Array.isArray(value)) return value.every(isDiagnosticPayloadValue);
+  return isRecord(value) && Object.values(value).every(isDiagnosticPayloadValue);
+}
+
+function isDiagnosticEvent(value: unknown): value is DiagnosticEvent {
   return (
     isRecord(value) &&
-    hasExactKeys(value, [
-      'v',
-      'type',
-      'session_id',
-      'seq',
-      'client_mono_ms',
-      'tracking_valid',
-      'visibility',
-      'right',
-    ]) &&
-    value.v === PROTOCOL_VERSION &&
-    value.type === 'vr_frame' &&
-    typeof value.session_id === 'string' &&
-    codePointLength(value.session_id) >= 1 &&
-    codePointLength(value.session_id) <= 64 &&
-    isNonNegativeInteger(value.seq) &&
-    isNonNegativeNumber(value.client_mono_ms) &&
-    typeof value.tracking_valid === 'boolean' &&
-    isEnumValue(VISIBILITY_STATES, value.visibility) &&
-    isControllerState(value.right)
+    hasExactKeys(value, ['event_id', 'server_mono_ns', 'kind', 'critical', 'payload']) &&
+    isNonNegativeInteger(value.event_id) &&
+    value.event_id >= 1 &&
+    isNonNegativeInteger(value.server_mono_ns) &&
+    typeof value.kind === 'string' &&
+    codePointLength(value.kind) >= 1 &&
+    codePointLength(value.kind) <= 64 &&
+    typeof value.critical === 'boolean' &&
+    isRecord(value.payload) &&
+    Object.values(value.payload).every(isDiagnosticPayloadValue)
+  );
+}
+
+export function isVRFrame(value: unknown): value is VRFrame {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      'v', 'type', 'session_id', 'seq', 'client_mono_ms', 'tracking_valid', 'visibility', 'right',
+    ], ['head_q']) ||
+    value.v !== PROTOCOL_VERSION ||
+    value.type !== 'vr_frame' ||
+    typeof value.session_id !== 'string' ||
+    codePointLength(value.session_id) < 1 ||
+    codePointLength(value.session_id) > 64 ||
+    !isNonNegativeInteger(value.seq) ||
+    !isNonNegativeNumber(value.client_mono_ms) ||
+    typeof value.tracking_valid !== 'boolean' ||
+    !isEnumValue(VISIBILITY_STATES, value.visibility) ||
+    !isControllerState(value.right)
+  ) {
+    return false;
+  }
+  return (
+    !Object.hasOwn(value, 'head_q') || value.head_q === null || isQuat(value.head_q)
   );
 }
 
@@ -265,7 +397,10 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
     !hasExactKeys(
       value,
       ['v', 'type', 'server_mono_ns', 'mode', 'robot_state', 'actual_tcp', 'actual_q', 'gripper'],
-      ['ack_seq', 'sample_age_ms', 'fault'],
+      [
+        'ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase', 'backend',
+        'real_robot_mode', 'preflight_ready', 'preflight_reason',
+      ],
     ) ||
     value.v !== PROTOCOL_VERSION ||
     value.type !== 'robot_state' ||
@@ -286,7 +421,81 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
   ) {
     return false;
   }
-  return !Object.hasOwn(value, 'fault') || value.fault === null || typeof value.fault === 'string';
+  if (Object.hasOwn(value, 'fault') && value.fault !== null && typeof value.fault !== 'string') {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, 'constraint') &&
+    value.constraint !== null &&
+    !isEnumValue(CONSTRAINT_KINDS, value.constraint)
+  ) {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, 'backend') &&
+    value.backend !== null &&
+    !isEnumValue(['SIMULATOR', 'LEBAI', 'LEBAI_FAKE'], value.backend)
+  ) {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, 'real_robot_mode') &&
+    value.real_robot_mode !== null &&
+    !isEnumValue(REAL_ROBOT_MODES, value.real_robot_mode)
+  ) {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, 'preflight_ready') &&
+    value.preflight_ready !== null &&
+    typeof value.preflight_ready !== 'boolean'
+  ) {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, 'preflight_reason') &&
+    value.preflight_reason !== null &&
+    typeof value.preflight_reason !== 'string'
+  ) {
+    return false;
+  }
+  return (
+    !Object.hasOwn(value, 'recovery_phase') ||
+    value.recovery_phase === null ||
+    isEnumValue(RECOVERY_PHASES, value.recovery_phase)
+  );
+}
+
+export function isDiagnosticsMessage(value: unknown): value is DiagnosticsMessage {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      'v', 'type', 'server_mono_ns', 'runtime', 'hardware_verified', 'control_generation',
+      'actual_qd', 'actual_qdd', 'target_q', 'target_qd', 'target_qdd', 'target_tcp',
+      'sdk_latencies_ms', 'pvat_send_hz', 'log_session_dir', 'dropped_events', 'recent_events',
+    ]) ||
+    value.v !== PROTOCOL_VERSION ||
+    value.type !== 'diagnostics' ||
+    !isNonNegativeInteger(value.server_mono_ns) ||
+    !isEnumValue(['SIMULATOR', 'LEBAI', 'LEBAI_FAKE'], value.runtime) ||
+    value.hardware_verified !== false ||
+    !isNonNegativeInteger(value.control_generation) ||
+    !isNullableJointVector(value.actual_qd) ||
+    !isNullableJointVector(value.actual_qdd) ||
+    !isNullableJointVector(value.target_q) ||
+    !isNullableJointVector(value.target_qd) ||
+    !isNullableJointVector(value.target_qdd) ||
+    !(value.target_tcp === null || isPose(value.target_tcp)) ||
+    !isSdkLatencies(value.sdk_latencies_ms) ||
+    !isNullableNonNegativeNumber(value.pvat_send_hz) ||
+    !(value.log_session_dir === null || typeof value.log_session_dir === 'string') ||
+    !isNonNegativeInteger(value.dropped_events) ||
+    !Array.isArray(value.recent_events) ||
+    !value.recent_events.every(isDiagnosticEvent)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export function isClientControlMessage(value: unknown): value is ClientControlMessage {
@@ -358,6 +567,33 @@ export function isFaultResetResultMessage(value: unknown): value is FaultResetRe
     value.accepted === false &&
     hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'reason', 'message']) &&
     isEnumValue(FAULT_RESET_REJECT_REASONS, value.reason) &&
+    typeof value.message === 'string'
+  );
+}
+
+export function isHomeResultMessage(value: unknown): value is HomeResultMessage {
+  if (
+    !isRecord(value) ||
+    value.v !== PROTOCOL_VERSION ||
+    value.type !== 'home_result' ||
+    typeof value.request_id !== 'string' ||
+    codePointLength(value.request_id) < 1 ||
+    codePointLength(value.request_id) > 64
+  ) {
+    return false;
+  }
+
+  if (value.accepted === true) {
+    return (
+      hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'mode']) &&
+      value.mode === 'DISARMED'
+    );
+  }
+
+  return (
+    value.accepted === false &&
+    hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'reason', 'message']) &&
+    isEnumValue(HOME_REJECT_REASONS, value.reason) &&
     typeof value.message === 'string'
   );
 }

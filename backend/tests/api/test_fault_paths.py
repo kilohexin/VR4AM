@@ -8,7 +8,12 @@ from typing import Literal
 from unittest.mock import AsyncMock
 
 import pytest
-from starlette.exceptions import StarletteDeprecationWarning
+try:
+    from starlette.exceptions import StarletteDeprecationWarning
+except ImportError:
+    class StarletteDeprecationWarning(DeprecationWarning):
+        """Compatibility category for Starlette versions that removed it."""
+
 
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.main import create_app
@@ -249,7 +254,7 @@ def test_disconnect_clears_session_and_reconnect_requires_release_plus_arm() -> 
 
 
 @pytest.mark.asyncio
-async def test_simulator_ik_error_publishes_one_fault_then_disarms(
+async def test_simulator_ik_error_publishes_soft_constraint_without_disarming(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     control, latest, adapter, clock = await _active_control()
@@ -257,17 +262,18 @@ async def test_simulator_ik_error_publishes_one_fault_then_disarms(
     def fail_ik(*args, **kwargs):
         raise IKError("ik_unreachable")
 
-    monkeypatch.setattr("app.robots.sim_adapter.solve_ik", fail_ik)
+    monkeypatch.setattr(adapter, "_servo", fail_ik)
     latest.publish(_frame(4, True, p=(0.0, 1.2, -0.31)), clock.now_ns())
 
     await control.tick()
 
-    assert control.mode is TeleopMode.FAULT
-    assert adapter.stop_reasons.count(StopReason.FAULT) == 1
+    assert control.mode is TeleopMode.ACTIVE
+    assert adapter.stop_reasons.count(StopReason.FAULT) == 0
     published = await control.state_message()
-    assert published.mode is TeleopMode.FAULT
-    assert published.fault == "ik_unreachable"
-    assert control.mode is TeleopMode.DISARMED
+    assert published.mode is TeleopMode.ACTIVE
+    assert published.constraint == "ik_boundary"
+    assert published.fault is None
+    assert control.mode is TeleopMode.ACTIVE
 
 
 @pytest.mark.asyncio

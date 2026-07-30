@@ -3,21 +3,39 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from typing import Callable
 
 import numpy as np
 
-from app.robots.base import BackendCommandError, StopReason
+from app.robots.base import (
+    BackendCommandError,
+    BackendPreflight,
+    HomeOptions,
+    HomePhase,
+    StopReason,
+)
 from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
-from app.sim.ik import IKError, solve_ik
+from app.sim.cartesian_servo import (
+    CartesianServoResult,
+    cartesian_servo_step,
+)
+from app.sim.ik import IKError
 from app.sim.kinematics import forward_pose
 from app.sim.lm3_model import LM3Model
 from app.sim.virtual_robot import VirtualRobot
 
 
+CartesianServo = Callable[..., CartesianServoResult]
+
+
 class SimRobotAdapter:
     STEP_SECONDS = 0.02
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        servo: CartesianServo = cartesian_servo_step,
+    ) -> None:
         self.model = LM3Model()
         self.robot = VirtualRobot(self.model)
         self.gripper = 0.0
@@ -26,6 +44,7 @@ class SimRobotAdapter:
         self.fault: str | None = None
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
+        self._servo = servo
 
     async def start(self) -> None:
         await self.connect()
@@ -54,10 +73,18 @@ class SimRobotAdapter:
     async def command_tcp(self, target: Pose, command_id: int) -> None:
         async with self._lock:
             try:
-                result = solve_ik(target, self.robot.q, self.model)
+                result = self._servo(
+                    target,
+                    self.robot.q,
+                    self.model,
+                    dt=self.STEP_SECONDS,
+                )
             except IKError as exc:
                 raise BackendCommandError(str(exc)) from exc
-            self.robot.set_target_q(result.q)
+            if result.self_collision_limited:
+                self.robot.stop()
+                raise BackendCommandError("self_collision")
+            self.robot.set_target_qd(result.joint_velocity)
             self.command_id = command_id
 
     async def set_gripper(self, value: float) -> None:
@@ -68,6 +95,51 @@ class SimRobotAdapter:
     async def stop(self, reason: StopReason) -> None:
         async with self._lock:
             self.robot.stop()
+
+    async def home(
+        self,
+        options: HomeOptions,
+        on_phase: Callable[[HomePhase], None],
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + options.timeout_s
+        stable_since: float | None = None
+        on_phase("homing")
+        async with self._lock:
+            self.robot.set_target_q(
+                self.model.home_q,
+                max_speed_radps=options.max_speed_radps,
+            )
+
+        while True:
+            now = loop.time()
+            async with self._lock:
+                if self.robot.target_q is None:
+                    raise BackendCommandError("home_interrupted")
+                position_error = float(
+                    np.max(np.abs(self.robot.q - np.asarray(self.model.home_q)))
+                )
+                velocity = float(np.max(np.abs(self.robot.qd)))
+
+            within_tolerance = (
+                position_error <= options.position_tolerance_rad
+                and velocity <= options.velocity_tolerance_radps
+            )
+            if within_tolerance:
+                if stable_since is None:
+                    stable_since = now
+                    on_phase("stabilizing")
+                elif now - stable_since >= options.stable_seconds:
+                    return
+            elif stable_since is not None:
+                stable_since = None
+                on_phase("homing")
+
+            if now >= deadline:
+                async with self._lock:
+                    self.robot.stop()
+                raise BackendCommandError("home_timeout")
+            await asyncio.sleep(self.STEP_SECONDS)
 
     async def get_state(self) -> RobotStateMessage:
         async with self._lock:
@@ -87,3 +159,15 @@ class SimRobotAdapter:
                 sample_age_ms=None,
                 fault=self.fault,
             )
+
+    async def preflight(self) -> BackendPreflight:
+        state = await self.get_state()
+        return BackendPreflight(
+            ready=True,
+            reason=None,
+            robot_state=state.robot_state,
+            actual_tcp=state.actual_tcp,
+            actual_q=state.actual_q,
+            tcp_matches=True,
+            capabilities=("command_tcp", "home", "gripper"),
+        )

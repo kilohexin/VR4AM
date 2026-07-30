@@ -511,6 +511,210 @@ describe('ArmPanel simulator safety', () => {
     }));
   });
 
+  it('changes runtime copy without changing arm eligibility or pending state', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.observeGrip(false);
+    const before = panel.safetyState;
+
+    panel.setRuntimeIdentity('LEBAI_FAKE');
+    expect(panel.armButton.textContent).toContain('解锁数字孪生');
+    expect(panel.safetyState).toMatchObject({
+      eligible: before.eligible,
+      armed: before.armed,
+      pending: before.pending,
+    });
+
+    panel.setRuntimeIdentity('LEBAI');
+    expect(panel.armButton.textContent).toContain('解锁真机');
+    panel.armButton.click();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({type: 'arm_request'}));
+    expect(panel.isArmPending).toBe(true);
+  });
+
+  it('resets real-arm copy to a null-safe unlock label on disconnect', () => {
+    const panel = new ArmPanel(document.querySelector('#panel')!, vi.fn());
+    panel.setRuntimeIdentity('LEBAI');
+    expect(panel.armButton.textContent).toContain('解锁真机');
+
+    panel.setConnectionStatus({state: 'disconnected'});
+
+    expect(panel.armButton.textContent).toContain('解锁仿真');
+  });
+
+  it('uses the first B to stop and a later released-Grip B to request Home', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.setConnectionStatus({state: 'connected'});
+    panel.observeGrip(false);
+    panel.setMode('READY');
+    panel.requestArm('xr');
+    panel.setMode('ARMED');
+
+    panel.requestStopOrReset('xr');
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({type: 'disarm'}));
+    panel.setMode('DISARMED');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('xr');
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'home_request',
+      request_id: expect.stringMatching(/^xr-home_request-/),
+    }));
+    expect(panel.safetyState.homePending).toBe(true);
+    expect(panel.armButton.disabled).toBe(true);
+    expect(panel.stopButton.disabled).toBe(true);
+  });
+
+  it('keeps B stop-priority when Home is pending and authoritative mode becomes ACTIVE', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.setConnectionStatus({state: 'connected'});
+    panel.setMode('DISARMED');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('xr');
+    expect(panel.safetyState.homePending).toBe(true);
+
+    panel.setMode('ACTIVE');
+    expect(panel.stopButton.disabled).toBe(false);
+    expect(panel.stopButton.textContent).toContain('停止');
+    panel.requestStopOrReset('xr');
+
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'disarm',
+      request_id: expect.stringMatching(/^xr-disarm-/),
+    }));
+    panel.handleHomeResult({
+      v: 1,
+      type: 'home_result',
+      request_id: 'stale-home',
+      accepted: true,
+      mode: 'DISARMED',
+    });
+    expect(panel.safetyState).toMatchObject({mode: 'ACTIVE', homePending: true, armed: false});
+  });
+
+  it.each(['ARMED', 'HOLD'] as const)(
+    'keeps B enabled as Stop during homing when authoritative mode is %s',
+    (mode) => {
+      const send = vi.fn();
+      const panel = new ArmPanel(document.querySelector('#panel')!, send);
+      panel.setConnectionStatus({state: 'connected'});
+      panel.setRecoveryPhase('homing');
+      panel.setMode(mode);
+
+      expect(panel.stopButton.disabled).toBe(false);
+      expect(panel.stopButton.textContent).toContain('停止');
+      panel.requestStopOrReset('desktop');
+
+      expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+        type: 'disarm',
+        request_id: expect.stringMatching(/^desktop-disarm-/),
+      }));
+    },
+  );
+
+  it('correlates Home results and keeps a rejected Home stopped with fixed local feedback', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.setConnectionStatus({state: 'connected'});
+    panel.setMode('DISARMED');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('desktop');
+    const requestId = send.mock.calls[0][0].request_id;
+
+    panel.requestStopOrReset('desktop');
+    expect(panel.requestArm('desktop')).toBe(false);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    panel.handleHomeResult({
+      v: 1,
+      type: 'home_result',
+      request_id: 'stale-home',
+      accepted: true,
+      mode: 'DISARMED',
+    });
+    expect(panel.safetyState.homePending).toBe(true);
+
+    panel.handleHomeResult({
+      v: 1,
+      type: 'home_result',
+      request_id: requestId,
+      accepted: false,
+      reason: 'grip_pressed',
+      message: 'raw backend Home detail',
+    });
+
+    expect(panel.safetyState).toMatchObject({
+      phase: 'stopped',
+      mode: 'DISARMED',
+      homePending: false,
+      eligible: false,
+      armed: false,
+    });
+    expect(panel.feedbackText).toBe('请保持 Grip 松开后重试。');
+    expect(panel.stopButton.title).toBe('请保持 Grip 松开后重试。');
+    expect(document.body.textContent).not.toContain('raw backend Home detail');
+  });
+
+  it('locks after a matching accepted Home result until a fresh Grip release', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.setConnectionStatus({state: 'connected'});
+    panel.setMode('DISARMED');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('desktop');
+    const requestId = send.mock.calls[0][0].request_id;
+
+    panel.handleHomeResult({
+      v: 1,
+      type: 'home_result',
+      request_id: requestId,
+      accepted: true,
+      mode: 'DISARMED',
+    });
+
+    expect(panel.safetyState).toMatchObject({homePending: false, eligible: false, armed: false});
+    expect(panel.requestArm('desktop')).toBe(false);
+    panel.observeGrip(false);
+    expect(panel.requestArm('desktop')).toBe(true);
+  });
+
+  it('replaces stale reset feedback with the matching Home rejection feedback', () => {
+    const send = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send);
+    panel.setConnectionStatus({state: 'connected'});
+    panel.setFault('workspace_violation');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('desktop');
+    const resetRequestId = send.mock.calls[0][0].request_id;
+    panel.handleFaultResetResult({
+      v: 1,
+      type: 'fault_reset_result',
+      request_id: resetRequestId,
+      accepted: false,
+      reason: 'stop_incomplete',
+      message: 'raw reset detail',
+    });
+    expect(panel.feedbackText).toBe('停止尚未完成，请稍后重试。');
+
+    panel.setFault(null);
+    panel.setMode('DISARMED');
+    panel.observeGrip(false);
+    panel.requestStopOrReset('desktop');
+    const homeRequestId = send.mock.calls.at(-1)![0].request_id;
+    panel.handleHomeResult({
+      v: 1,
+      type: 'home_result',
+      request_id: homeRequestId,
+      accepted: false,
+      reason: 'home_failed',
+      message: 'raw Home detail',
+    });
+
+    expect(panel.feedbackText).toBe('无法返回 Home，请稍后重试。');
+    expect(panel.stopButton.title).toBe('无法返回 Home，请稍后重试。');
+  });
+
   it('accepts only the matching reset result and requires a new released-Grip sample', () => {
     const send = vi.fn();
     const panel = new ArmPanel(document.querySelector('#panel')!, send);

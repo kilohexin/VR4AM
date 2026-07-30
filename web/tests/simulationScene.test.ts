@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import {describe, expect, it, vi} from 'vitest';
 import {
+  createGraspBlocks,
   createVRFrame,
   DesktopInputSafety,
   disposeObjectResources,
@@ -11,6 +12,37 @@ import {
 } from '../src/scenes/simulationScene';
 import type {ArmSafetySnapshot} from '../src/ui/armPanel';
 import type {XRPresentationSample} from '../src/xr/session';
+
+describe('grasp block resources', () => {
+  it('creates five exact colored 60 mm blocks at deterministic positions', () => {
+    const blocks = createGraspBlocks();
+
+    expect(blocks.map(({id}) => id)).toEqual([
+      'block-orange',
+      'block-blue',
+      'block-green',
+      'block-yellow',
+      'block-purple',
+    ]);
+    expect(blocks.map(({object}) => (
+      (object as THREE.Mesh).material as THREE.MeshStandardMaterial
+    ).color.getHex())).toEqual([
+      0xff8a3d,
+      0x39a8ff,
+      0x58d68d,
+      0xffd84d,
+      0xa77bff,
+    ]);
+    expect(blocks.map(({object}) => object.position.toArray())).toEqual([
+      [0.18, 0.025, -0.32],
+      [0.32, 0.025, -0.22],
+      [0.04, 0.025, -0.28],
+      [0.28, 0.025, -0.38],
+      [0.10, 0.025, -0.18],
+    ]);
+    expect(blocks.every(({sizeM}) => sizeM === 0.06)).toBe(true);
+  });
+});
 
 describe('desktop VR frame path', () => {
   it('uses the shared VRFrame shape with metre poses and xyzw quaternion order', () => {
@@ -141,6 +173,43 @@ describe('scene connection and model lifetime helpers', () => {
 });
 
 describe('XR render-loop handoff', () => {
+  it('feeds authoritative TCP and gripper state to grasping together', () => {
+    const actualTcp = {
+      p: [0.2, 0.3, -0.1] as [number, number, number],
+      q: [0, 0, 0, 1] as [number, number, number, number],
+    };
+    const updateGrasp = vi.fn();
+    const scene = {
+      clockAnchor: {estimate: vi.fn().mockReturnValue(123n)},
+      options: {
+        stateBuffer: {
+          sample: vi.fn().mockReturnValue({
+            state: {
+              actual_q: [0, 0, 0, 0, 0, 0],
+              actual_tcp: actualTcp,
+              gripper: 0.72,
+            },
+          }),
+        },
+      },
+      robotModel: {
+        setJointAngles: vi.fn(),
+        setGripper: vi.fn(),
+      },
+      robotVisualRoot: new THREE.Group(),
+      graspController: {update: updateGrasp},
+      targetMarker: new THREE.Group(),
+      controllerPosition: new THREE.Vector3(),
+      controllerQuaternion: new THREE.Quaternion(),
+    };
+
+    (SimulationScene.prototype as unknown as {
+      updateScene(this: typeof scene, nowMs: number): void;
+    }).updateScene.call(scene, 10);
+
+    expect(updateGrasp).toHaveBeenCalledWith(actualTcp, 0.72);
+  });
+
   it('keeps lights and grid in the fixed scene while placing robot visuals under the height root', () => {
     const fixedScene = new THREE.Scene();
     const robotVisualRoot = new THREE.Group();
@@ -175,44 +244,53 @@ describe('XR render-loop handoff', () => {
     'forwards both hands and enables height for phase=%s pending=%s grip=%s only when safe',
     (phase, pending, grip, expectedEnabled) => {
       const updateHints = vi.fn();
-      const updateHeight = vi.fn().mockReturnValue(0.93);
+      const updatePlacement = vi.fn().mockReturnValue([0.1, 0.93, -0.2]);
       const scene = {
         controllerHints: {update: updateHints},
-        tableHeight: {update: updateHeight},
+        workspacePlacement: {update: updatePlacement},
         robotVisualRoot: new THREE.Group(),
-        armSafetyState: {phase, pending},
+        armSafetyState: {phase, pending, faultResetPending: false},
       };
       const sample = presentationSample({grip});
 
       SimulationScene.prototype.updateXRPresentation.call(scene as never, sample, 425);
 
       expect(updateHints).toHaveBeenCalledWith(sample.left, sample.right);
-      expect(updateHeight).toHaveBeenCalledWith({
+      expect(updatePlacement).toHaveBeenCalledWith({
         headY: 1.68,
+        axisX: 0,
         axisY: -0.75,
+        heightModifier: false,
         resetPressed: true,
         enabled: expectedEnabled,
         nowMs: 425,
       });
+      expect(scene.robotVisualRoot.position.toArray()).toEqual([0.1, 0.93, -0.2]);
       expect(scene.robotVisualRoot.position.y).toBe(0.93);
     },
   );
 
   it('disables height input when left-hand tracking is lost while still forwarding both hints', () => {
     const updateHints = vi.fn();
-    const updateHeight = vi.fn().mockReturnValue(0.95);
+    const updatePlacement = vi.fn().mockReturnValue([0.1, 0.95, -0.2]);
     const scene = {
       controllerHints: {update: updateHints},
-      tableHeight: {update: updateHeight},
+      workspacePlacement: {update: updatePlacement},
       robotVisualRoot: new THREE.Group(),
-      armSafetyState: {phase: 'locked', pending: false},
+      armSafetyState: {
+        phase: 'locked',
+        pending: false,
+        faultResetPending: false,
+      },
     };
     const sample = presentationSample({leftTrackingValid: false});
 
     SimulationScene.prototype.updateXRPresentation.call(scene as never, sample, 510);
 
     expect(updateHints).toHaveBeenCalledWith(sample.left, sample.right);
-    expect(updateHeight).toHaveBeenCalledWith(expect.objectContaining({enabled: false}));
+    expect(updatePlacement).toHaveBeenCalledWith(
+      expect.objectContaining({enabled: false}),
+    );
   });
 
   it('shows the safety panel only after the XR session is installed', async () => {
@@ -235,7 +313,7 @@ describe('XR render-loop handoff', () => {
       renderer: {xr: {setSession}, setAnimationLoop},
       vrSafetyPanel: {setVisible},
       controllerHints: {setVisible: setHintsVisible},
-      tableHeight: {beginSession},
+      workspacePlacement: {beginSession},
     };
 
     const starting = (SimulationScene.prototype.startXR as Function).call(scene, session, loop);
@@ -271,7 +349,7 @@ describe('XR render-loop handoff', () => {
       },
       vrSafetyPanel: {setVisible},
       controllerHints: {setVisible: setHintsVisible},
-      tableHeight: {beginSession},
+      workspacePlacement: {beginSession},
     };
 
     await expect((SimulationScene.prototype.startXR as Function).call(
@@ -306,7 +384,7 @@ describe('XR render-loop handoff', () => {
       renderer: {xr: {setSession}, setAnimationLoop},
       vrSafetyPanel: {setVisible},
       controllerHints: {setVisible: setHintsVisible},
-      tableHeight: {endSession},
+      workspacePlacement: {endSession},
       robotVisualRoot,
     };
 
@@ -355,7 +433,7 @@ describe('XR render-loop handoff', () => {
       renderer: {xr: {setSession}, setAnimationLoop},
       vrSafetyPanel: {setVisible},
       controllerHints: {setVisible: setHintsVisible},
-      tableHeight: {endSession},
+      workspacePlacement: {endSession},
       robotVisualRoot,
     };
 
@@ -385,22 +463,85 @@ describe('XR render-loop handoff', () => {
       fault: null,
       faultRecoverable: false,
       faultResetPending: false,
+      constraint: null,
+      recoveryPhase: null,
     } satisfies ArmSafetySnapshot;
     const update = vi.fn();
+    const runtimeSummary = {
+      backend: null,
+      realRobotMode: null,
+      actualTcp: null,
+      gripper: null,
+      latencyMs: null,
+      hardwareVerified: false,
+    } as const;
     const scene = {
       armSafetyState: snapshot,
       questControllerSupported: null,
+      runtimeSummary,
       vrSafetyPanel: {update},
     };
 
     SimulationScene.prototype.setQuestControllerSupport.call(scene as never, false);
     expect(scene.questControllerSupported).toBe(false);
-    expect(update).toHaveBeenLastCalledWith(snapshot, false);
+    expect(update).toHaveBeenLastCalledWith(snapshot, false, runtimeSummary);
 
     const stopped = {...snapshot, phase: 'stopped', mode: 'DISARMED'} satisfies ArmSafetySnapshot;
     SimulationScene.prototype.setArmSafetyState.call(scene as never, stopped);
     expect(scene.armSafetyState).toBe(stopped);
-    expect(update).toHaveBeenLastCalledWith(stopped, false);
+    expect(update).toHaveBeenLastCalledWith(stopped, false, runtimeSummary);
+  });
+
+  it('keeps the GLB on authoritative actual joints when diagnostics runtime summary changes', () => {
+    const actualQ = [0.11, -0.22, 0.33, -0.44, 0.55, -0.66];
+    const setJointAngles = vi.fn();
+    const update = vi.fn();
+    const scene = {
+      armSafetyState: {
+        phase: 'locked', connected: true, connectionState: 'connected', eligible: false,
+        armed: false, pending: false, mode: 'READY', fault: null, faultRecoverable: false,
+        faultResetPending: false, constraint: null, recoveryPhase: null,
+      },
+      questControllerSupported: true,
+      vrSafetyPanel: {update},
+      runtimeSummary: {
+        backend: null, realRobotMode: null, actualTcp: null, gripper: null, latencyMs: null,
+        hardwareVerified: false,
+      },
+      clockAnchor: {estimate: vi.fn().mockReturnValue(1)},
+      options: {
+        stateBuffer: {
+          sample: vi.fn().mockReturnValue({
+            state: {
+              actual_q: actualQ,
+              actual_tcp: {p: [0.2, 0.3, 0.4], q: [0, 0, 0, 1]},
+              gripper: 0.4,
+            },
+          }),
+        },
+      },
+      robotModel: {setJointAngles, setGripper: vi.fn()},
+      robotVisualRoot: new THREE.Group(),
+      graspController: {update: vi.fn()},
+      targetMarker: new THREE.Group(),
+      controllerPosition: new THREE.Vector3(),
+      controllerQuaternion: new THREE.Quaternion(),
+    };
+
+    (SimulationScene.prototype.setRuntimeSummary as Function).call(scene, {
+      backend: 'LEBAI_FAKE',
+      realRobotMode: null,
+      actualTcp: {p: [0.9, 0.8, 0.7], q: [0, 0, 0, 1]},
+      gripper: 0.9,
+      latencyMs: 18,
+      hardwareVerified: false,
+    });
+    expect(setJointAngles).not.toHaveBeenCalled();
+
+    (SimulationScene.prototype as unknown as {updateScene(this: typeof scene, nowMs: number): void})
+      .updateScene.call(scene, 10);
+
+    expect(setJointAngles).toHaveBeenCalledWith(actualQ);
   });
 
   it('disposes owned XR visuals before generic scene traversal', () => {
@@ -443,8 +584,10 @@ function presentationSample(options: {grip?: boolean; leftTrackingValid?: boolea
       p: [-0.2, 1.1, -0.4],
       q: [0, 0, 0, 1],
       trackingValid: options.leftTrackingValid ?? true,
+      thumbstickX: 0,
       thumbstickY: -0.75,
       thumbstickPressed: true,
+      grip: false,
     },
     right: {
       p: [0.2, 1.1, -0.4],

@@ -1,22 +1,35 @@
 import './styles.css';
 import {disposeAppForUnload} from './appDisposal';
-import {PROTOCOL_VERSION, type RobotStateMessage, type VRFrame} from './protocol/messages';
+import {
+  PROTOCOL_VERSION,
+  type DiagnosticsMessage,
+  type RobotStateMessage,
+  type VRFrame,
+} from './protocol/messages';
 import {RobotStateBuffer} from './robot/robotState';
 import {SimulationScene} from './scenes/simulationScene';
+import type {RobotRuntimeSummary} from './scenes/vrSafetyPanel';
 import {resolveTeleopSocketUrl} from './transport/socketUrl';
 import {TeleopSocket} from './transport/teleopSocket';
 import {ArmPanel} from './ui/armPanel';
 import {Hud} from './ui/hud';
 import {LatencyTracker} from './ui/latency';
+import {DiagnosticsPanel, DiagnosticsUpdateCoordinator} from './ui/diagnosticsPanel';
 import {XRSessionController, type XRSessionStatus} from './xr/session';
 
 const app = document.querySelector<HTMLElement>('#app');
 if (!app) throw new Error('页面缺少仿真界面容器');
 
 const hud = new Hud(app);
+const diagnosticsPanel = new DiagnosticsPanel(hud.diagnosticsContainer);
 const stateBuffer = new RobotStateBuffer();
 const latency = new LatencyTracker(512);
 const pendingFrames = new Map<number, number>();
+const diagnosticsUpdates = new DiagnosticsUpdateCoordinator(
+  diagnosticsPanel,
+  applyDiagnosticsRuntime,
+  () => ({currentMs: latency.current, p95Ms: latency.p95()}),
+);
 
 let scene: SimulationScene;
 let armPanel: ArmPanel;
@@ -34,9 +47,18 @@ const socket = new TeleopSocket(
     hud.setConnectionStatus(status);
     hud.setLatency(null, null);
     armPanel?.setConnectionStatus(status);
+    xrController?.setConstraint(null);
+    if (status.state !== 'connected') {
+      hud.setRuntimeIdentity(null, null);
+      armPanel?.setRuntimeIdentity(null);
+      diagnosticsUpdates.clear();
+      scene?.setRuntimeSummary(emptyRuntimeSummary());
+    }
   },
   (message) => armPanel?.handleArmFeedback(message),
   (message) => armPanel?.handleFaultResetResult(message),
+  (message) => armPanel?.handleHomeResult(message),
+  (message) => onDiagnostics(message),
 );
 
 armPanel = new ArmPanel(
@@ -110,16 +132,27 @@ function sendFrame(frame: VRFrame): void {
 }
 
 function onRobotState(state: RobotStateMessage): void {
+  const constraint = state.constraint ?? null;
+  const recoveryPhase = state.recovery_phase ?? null;
   scene.applyRobotState(state);
   armPanel.setFault(state.fault ?? null);
+  armPanel.setConstraint(constraint);
+  armPanel.setRecoveryPhase(recoveryPhase);
   armPanel.setMode(state.mode);
+  xrController.setConstraint(constraint);
   hud.setRobotState({
     mode: state.mode,
     backendState: state.robot_state,
     sampleAgeMs: state.sample_age_ms ?? null,
     fault: state.fault ?? null,
+    constraint,
+    recoveryPhase,
   });
-  recordAcknowledgement(state.ack_seq ?? null);
+  diagnosticsUpdates.onRobotState(state, recordAcknowledgement);
+}
+
+function onDiagnostics(diagnostics: DiagnosticsMessage): void {
+  diagnosticsUpdates.onDiagnostics(diagnostics);
 }
 
 function recordAcknowledgement(sequence: number | null): void {
@@ -130,4 +163,34 @@ function recordAcknowledgement(sequence: number | null): void {
     if (pendingSequence <= sequence) pendingFrames.delete(pendingSequence);
   }
   hud.setLatency(latency.current, latency.p95());
+}
+
+function applyDiagnosticsRuntime(
+  state: RobotStateMessage,
+  diagnostics: DiagnosticsMessage | null,
+  latencyView: Readonly<{currentMs: number | null; p95Ms: number | null}>,
+): void {
+  const backend = diagnostics?.runtime ?? state.backend ?? null;
+  const realRobotMode = state.real_robot_mode ?? null;
+  hud.setRuntimeIdentity(backend, realRobotMode);
+  armPanel?.setRuntimeIdentity(backend);
+  scene?.setRuntimeSummary({
+    backend,
+    realRobotMode,
+    actualTcp: state.actual_tcp,
+    gripper: state.gripper,
+    latencyMs: latencyView.currentMs,
+    hardwareVerified: false,
+  });
+}
+
+function emptyRuntimeSummary(): RobotRuntimeSummary {
+  return {
+    backend: null,
+    realRobotMode: null,
+    actualTcp: null,
+    gripper: null,
+    latencyMs: null,
+    hardwareVerified: false,
+  };
 }

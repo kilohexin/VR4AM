@@ -1,4 +1,4 @@
-import type {VRFrame, VisibilityState} from '../protocol/messages';
+import type {ConstraintKind, Quat, VRFrame, VisibilityState} from '../protocol/messages';
 import {createVRFrame} from '../scenes/simulationScene';
 import {
   invalidControllerSample,
@@ -9,6 +9,15 @@ import {
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
 const TEARDOWN_ERROR = 'VR 退出失败，桌面模式已恢复，请刷新页面后重试。';
+
+interface HapticActuator {
+  pulse(value: number, duration: number): Promise<boolean>;
+}
+
+type HapticGamepad = Gamepad & {
+  hapticActuators?: readonly HapticActuator[];
+  vibrationActuator?: HapticActuator | null;
+};
 
 export interface XRRenderHost {
   startXR(session: XRSession, loop: XRFrameRequestCallback): Promise<void>;
@@ -21,6 +30,7 @@ export interface XRPresentationSample {
   left: LeftControllerSample;
   right: ControllerSample;
   headY: number | null;
+  headQ?: Quat | null;
 }
 
 export type XRSessionStatus =
@@ -69,6 +79,7 @@ interface SessionContext {
 
 export class XRSessionController {
   private current: SessionContext | null = null;
+  private lastConstraint: ConstraintKind | null = null;
   private entering = false;
   private disposed = false;
   private cleanupPromise: Promise<void> | null = null;
@@ -79,6 +90,19 @@ export class XRSessionController {
 
   get isActive(): boolean {
     return this.current !== null && !this.current.ending;
+  }
+
+  setConstraint(constraint: ConstraintKind | null): void {
+    if (constraint === this.lastConstraint) return;
+    const shouldPulse = constraint !== null;
+    this.lastConstraint = constraint;
+    if (!shouldPulse) return;
+
+    const source = [...(this.current?.session.inputSources ?? [])]
+      .find((candidate) => candidate.handedness === 'right');
+    const gamepad = source?.gamepad as HapticGamepad | undefined;
+    const actuator = gamepad?.hapticActuators?.[0] ?? gamepad?.vibrationActuator;
+    if (actuator) void actuator.pulse(0.35, 40).catch(() => undefined);
   }
 
   async enterVR(): Promise<void> {
@@ -232,10 +256,15 @@ export class XRSessionController {
     if (context.suspended || context.session.visibilityState !== 'visible') return;
     const pair = readControllers(frame, context.referenceSpace, context.session.inputSources);
     const viewerPose = frame.getViewerPose(context.referenceSpace);
+    const headOrientation = viewerPose?.transform.orientation;
+    const headQ: Quat | null = headOrientation
+      ? [headOrientation.x, headOrientation.y, headOrientation.z, headOrientation.w]
+      : null;
     this.options.host.updateXRPresentation({
       left: pair.left,
       right: pair.right,
       headY: viewerPose?.transform.position.y ?? null,
+      headQ,
     }, nowMs);
     this.options.host.renderXR(nowMs);
     if (nowMs - context.lastFrameMs < FRAME_INTERVAL_MS) return;
@@ -245,7 +274,7 @@ export class XRSessionController {
       this.options.onDisarm();
       this.options.onLockReset();
     }
-    this.emitFrame(context, nowMs, sample, 'visible');
+    this.emitFrame(context, nowMs, sample, 'visible', false, headQ);
   }
 
   private onVisibilityChange(context: SessionContext): void {
@@ -281,6 +310,7 @@ export class XRSessionController {
     sample: ControllerSample,
     visibility: VisibilityState,
     force = false,
+    headQ: Quat | null = null,
   ): void {
     if (!this.ownsLiveContext(context)) return;
     if (!force) context.lastFrameMs = nowMs;
@@ -302,6 +332,7 @@ export class XRSessionController {
       trackingValid: sample.trackingValid,
       position: sample.p,
       quaternion: sample.q,
+      ...(headQ ? {headQ} : {}),
       grip: sample.grip,
       trigger: sample.trigger,
       visibility,
@@ -361,6 +392,7 @@ export class XRSessionController {
   }
 
   private signalSafety(context?: SessionContext): void {
+    this.lastConstraint = null;
     if (context) this.options.host.updateXRPresentation(invalidPresentationSample(), this.now());
     this.options.onDisarm();
     this.options.onLockReset();
@@ -402,11 +434,14 @@ function invalidPresentationSample(): XRPresentationSample {
       p: [0, 0, 0],
       q: [0, 0, 0, 1],
       trackingValid: false,
+      thumbstickX: 0,
       thumbstickY: 0,
+      grip: false,
       thumbstickPressed: false,
     },
     right: invalidControllerSample(),
     headY: null,
+    headQ: null,
   };
 }
 

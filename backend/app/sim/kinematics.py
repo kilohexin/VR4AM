@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 from collections.abc import Sequence
 
@@ -8,25 +10,104 @@ from app.schemas.messages import Pose
 from app.sim.lm3_model import LM3Model
 
 
-def _mdh(theta: float, d: float, a: float, alpha: float) -> np.ndarray:
-    ca, sa, ct, st = np.cos(alpha), np.sin(alpha), np.cos(theta), np.sin(theta)
-    return np.array([[ct, -st, 0, a], [st * ca, ct * ca, -sa, -d * sa], [st * sa, ct * sa, ca, d * ca], [0, 0, 0, 1]], dtype=float)
+def _checked_joints(q: Sequence[float]) -> np.ndarray:
+    values = np.asarray(q, dtype=float)
+    if values.shape != (6,):
+        raise ValueError("LM3 requires six joints")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("LM3 joint values must be finite")
+    return values
+
+
+def _axis_vector(axis: str) -> np.ndarray:
+    result = np.zeros(3, dtype=float)
+    result["xyz".index(axis)] = 1.0
+    return result
+
+
+def _translation(offset: Sequence[float]) -> np.ndarray:
+    transform = np.eye(4)
+    transform[:3, 3] = np.asarray(offset, dtype=float)
+    return transform
+
+
+def _rotation(matrix: np.ndarray) -> np.ndarray:
+    transform = np.eye(4)
+    transform[:3, :3] = matrix
+    return transform
+
+
+def _chain(
+    q: Sequence[float], model: LM3Model
+) -> tuple[np.ndarray, tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
+    values = _checked_joints(q)
+    transform = np.eye(4)
+    origins: list[np.ndarray] = []
+    axes_world: list[np.ndarray] = []
+    for value, axis, offset in zip(
+        values, model.joint_axes, model.joint_offsets_m, strict=True
+    ):
+        transform = transform @ _translation(offset)
+        axis_local = _axis_vector(axis)
+        origins.append(transform[:3, 3].copy())
+        axes_world.append(transform[:3, :3] @ axis_local)
+        transform = transform @ _rotation(
+            Rotation.from_rotvec(axis_local * value).as_matrix()
+        )
+    transform = transform @ _translation(model.tool_root_offset_m)
+    transform = transform @ _rotation(
+        Rotation.from_quat(model.tool_rotation_xyzw).as_matrix()
+    )
+    transform = transform @ _translation(model.tcp_offset_m)
+    if not np.all(np.isfinite(transform)) or not math.isclose(
+        float(np.linalg.det(transform[:3, :3])), 1.0, abs_tol=1e-8
+    ):
+        raise ValueError("invalid LM3 transform")
+    return transform, tuple(origins), tuple(axes_world)
 
 
 def forward_matrix(q: Sequence[float], model: LM3Model) -> np.ndarray:
-    if len(q) != 6:
-        raise ValueError("LM3 requires six joints")
-    joint_values = tuple(float(value) for value in q)
-    if not all(math.isfinite(value) for value in joint_values):
-        raise ValueError("LM3 joint values must be finite")
-    transform = np.eye(4)
-    for theta, d, a, alpha in zip(joint_values, model.d_m, model.a_prev_m, model.alpha_prev_rad):
-        transform = transform @ _mdh(float(theta), d, a, alpha)
-    tcp = np.eye(4)
-    tcp[:3, 3] = model.tcp_offset_m
-    return transform @ tcp
+    return _chain(q, model)[0]
+
+
+def chain_points(
+    q: Sequence[float],
+    model: LM3Model,
+) -> dict[str, np.ndarray]:
+    matrix, origins, _ = _chain(q, model)
+    names = (
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+    )
+    return {
+        "base": np.zeros(3, dtype=float),
+        **{
+            name: origin.copy()
+            for name, origin in zip(names, origins, strict=True)
+        },
+        "tcp": matrix[:3, 3].copy(),
+    }
 
 
 def forward_pose(q: Sequence[float], model: LM3Model) -> Pose:
     matrix = forward_matrix(q, model)
-    return Pose(p=tuple(matrix[:3, 3]), q=tuple(Rotation.from_matrix(matrix[:3, :3]).as_quat()))
+    return Pose(
+        p=tuple(float(value) for value in matrix[:3, 3]),
+        q=tuple(float(value) for value in Rotation.from_matrix(matrix[:3, :3]).as_quat()),
+    )
+
+
+def geometric_jacobian(q: Sequence[float], model: LM3Model) -> np.ndarray:
+    matrix, origins, axes_world = _chain(q, model)
+    tcp = matrix[:3, 3]
+    jacobian = np.zeros((6, 6), dtype=float)
+    for index, (origin, axis_world) in enumerate(zip(origins, axes_world, strict=True)):
+        jacobian[:3, index] = np.cross(axis_world, tcp - origin)
+        jacobian[3:, index] = axis_world
+    if not np.all(np.isfinite(jacobian)):
+        raise ValueError("invalid LM3 jacobian")
+    return jacobian

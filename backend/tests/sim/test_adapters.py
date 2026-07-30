@@ -1,6 +1,7 @@
 import asyncio
 import builtins
 import importlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,31 +32,59 @@ async def test_sim_adapter_accepts_tcp_and_gripper_commands() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sim_adapter_rejects_self_collision_without_mutating_command() -> None:
+    def collide(*args, **kwargs):
+        return SimpleNamespace(
+            joint_velocity=(0.1,) * 6,
+            self_collision_limited=True,
+        )
+
+    adapter = SimRobotAdapter(servo=collide)
+    adapter.robot.set_target_qd((0.1,) * 6)
+    adapter.command_id = 7
+    target = forward_pose(adapter.model.home_q, adapter.model)
+
+    with pytest.raises(BackendCommandError, match="^self_collision$"):
+        await adapter.command_tcp(target, command_id=8)
+
+    assert adapter.robot.target_qd is None
+    assert adapter.command_id == 7
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error_code",
     ["ik_unreachable", "ik_singular", "joint_safety_window"],
 )
 async def test_sim_adapter_translates_ik_errors_without_mutating_command(
-    monkeypatch, error_code: str
+    error_code: str,
 ) -> None:
-    import app.robots.sim_adapter as sim_adapter_module
+    def fail_ik(*args, **kwargs):
+        raise IKError(error_code)
 
-    adapter = SimRobotAdapter()
+    adapter = SimRobotAdapter(servo=fail_ik)
     original_target = adapter.robot.q + 0.1
     adapter.robot.set_target_q(original_target)
     adapter.command_id = 7
     target = forward_pose(adapter.model.home_q, adapter.model)
-
-    def fail_ik(*args, **kwargs):
-        raise IKError(error_code)
-
-    monkeypatch.setattr(sim_adapter_module, "solve_ik", fail_ik)
 
     with pytest.raises(BackendCommandError, match=f"^{error_code}$"):
         await adapter.command_tcp(target, command_id=99)
 
     assert adapter.robot.target_q == pytest.approx(original_target)
     assert adapter.command_id == 7
+
+
+@pytest.mark.asyncio
+async def test_sim_adapter_uses_injected_cartesian_servo() -> None:
+    def fail_servo(*args, **kwargs):
+        raise IKError("ik_unreachable")
+
+    adapter = SimRobotAdapter(servo=fail_servo)
+    target = forward_pose(adapter.model.home_q, adapter.model)
+
+    with pytest.raises(BackendCommandError, match="^ik_unreachable$"):
+        await adapter.command_tcp(target, command_id=1)
 
 
 @pytest.mark.asyncio
@@ -119,22 +148,17 @@ async def test_sim_adapter_run_uses_fixed_steps_and_absolute_deadlines(monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("method_name", "args"),
-    [
-        ("connect", ()),
-        ("disconnect", ()),
-        ("command_tcp", (None, 1)),
-        ("set_gripper", (0.5,)),
-        ("stop", (StopReason.SHUTDOWN,)),
-        ("get_state", ()),
-    ],
-)
-async def test_real_adapter_is_hard_disabled(method_name: str, args: tuple[object, ...]) -> None:
-    method = getattr(RealLebaiAdapter(), method_name)
+async def test_sim_adapter_preflight_is_ready_without_changing_state() -> None:
+    adapter = SimRobotAdapter()
+    before = await adapter.get_state()
 
-    with pytest.raises(BackendCommandError, match="^real_robot_disabled$"):
-        await method(*args)
+    preflight = await adapter.preflight()
+
+    after = await adapter.get_state()
+    assert preflight.ready is True
+    assert preflight.reason is None
+    assert preflight.actual_q == before.actual_q
+    assert after.actual_q == before.actual_q
 
 
 def test_real_adapter_module_discovery_does_not_import_lebai_sdk(monkeypatch) -> None:

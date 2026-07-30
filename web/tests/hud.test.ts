@@ -13,7 +13,7 @@ describe('Chinese simulator HUD', () => {
     expect(hud.sceneContainer).toBeInstanceOf(HTMLElement);
     expect(document.body.textContent).toContain('LM3 遥操作仿真');
     expect(document.body.textContent).toContain('仅仿真 · SIMULATOR');
-    expect(document.body.textContent).toContain('按住右手 Grip 建立锚点并移动');
+    expect(document.body.textContent).toContain('右 Grip 建立末端零位');
     expect(document.body.textContent).not.toContain('LEBAI');
   });
 
@@ -22,7 +22,10 @@ describe('Chinese simulator HUD', () => {
 
     hud.setConnectionStatus({state: 'connected'});
     hud.setController({tracking: true, grip: false, trigger: 0.4});
-    hud.setRobotState({mode: 'ACTIVE', backendState: 'MOVING', sampleAgeMs: 15, fault: null});
+    hud.setRobotState({
+      mode: 'ACTIVE', backendState: 'MOVING', sampleAgeMs: 15, fault: null,
+      constraint: null, recoveryPhase: null,
+    });
     hud.setLatency(24, 48);
 
     expect(document.body.textContent).toContain('ACTIVE · 遥操作中');
@@ -38,6 +41,8 @@ describe('Chinese simulator HUD', () => {
       backendState: 'FAULT',
       sampleAgeMs: 120,
       fault: 'ik_unreachable',
+      constraint: null,
+      recoveryPhase: null,
     });
     expect(document.body.textContent).toContain('目标不可达');
   });
@@ -50,11 +55,59 @@ describe('Chinese simulator HUD', () => {
       backendState: 'IDLE',
       sampleAgeMs: 1,
       fault: 'workspace_violation',
+      constraint: null,
+      recoveryPhase: null,
     });
 
     expect(document.querySelector('[data-field="mode"]')?.textContent).toBe('FAULT · 故障');
     expect(document.body.textContent).toContain('目标超出工作空间');
     expect(document.body.textContent).not.toContain('READY · 等待解锁');
+  });
+
+  it('shows self-collision as an amber soft constraint instruction', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+
+    hud.setRobotState({
+      mode: 'ACTIVE',
+      backendState: 'IDLE',
+      sampleAgeMs: 1,
+      fault: null,
+      constraint: 'self_collision',
+      recoveryPhase: null,
+    });
+
+    expect(document.body.textContent).toContain(
+      '机械臂接近自碰撞边界，请将手柄退回',
+    );
+    expect(
+      document.querySelector('[data-row="constraint"]')
+        ?.getAttribute('data-active'),
+    ).toBe('true');
+  });
+
+  it('updates the runtime identity copy for simulator, twin, and real modes', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+
+    hud.setRuntimeIdentity('SIMULATOR', null);
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('仅仿真 · SIMULATOR');
+    hud.setRuntimeIdentity('LEBAI_FAKE', null);
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('数字孪生 · LEBAI_FAKE');
+    expect(document.querySelector('.simulator-label')?.getAttribute('data-backend')).toBe('LEBAI_FAKE');
+    hud.setRuntimeIdentity('LEBAI', 'readonly');
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('真机只读 · LEBAI');
+    hud.setRuntimeIdentity('LEBAI', 'control');
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('真机控制 · LEBAI');
+  });
+
+  it('resets a real control identity to a null-safe copy on disconnect', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+    hud.setRuntimeIdentity('LEBAI', 'control');
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('真机控制 · LEBAI');
+
+    hud.setConnectionStatus({state: 'disconnected'});
+
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('仅仿真 · SIMULATOR');
+    expect(document.querySelector('.simulator-label')?.getAttribute('data-backend')).toBe('SIMULATOR');
   });
 
   it('clears stale backend, age, fault, and latency values on disconnect', () => {
@@ -65,6 +118,8 @@ describe('Chinese simulator HUD', () => {
       backendState: 'MOVING',
       sampleAgeMs: 31,
       fault: 'workspace_violation',
+      constraint: null,
+      recoveryPhase: null,
     });
     hud.setLatency(18, 42);
 
@@ -86,6 +141,8 @@ describe('Chinese simulator HUD', () => {
       backendState: 'MOVING',
       sampleAgeMs: 31,
       fault: null,
+      constraint: null,
+      recoveryPhase: null,
     });
 
     hud.setConnectionStatus({state: 'occupied', message: '占用'});
@@ -125,7 +182,10 @@ describe('Chinese simulator HUD', () => {
   ])('maps backend fault %s to readable Chinese', (fault, message) => {
     const hud = new Hud(document.querySelector('#app')!);
 
-    hud.setRobotState({mode: 'FAULT', backendState: 'FAULT', sampleAgeMs: 1, fault});
+    hud.setRobotState({
+      mode: 'FAULT', backendState: 'FAULT', sampleAgeMs: 1, fault,
+      constraint: null, recoveryPhase: null,
+    });
 
     expect(document.body.textContent).toContain(message);
     expect(document.body.textContent).not.toContain(fault);

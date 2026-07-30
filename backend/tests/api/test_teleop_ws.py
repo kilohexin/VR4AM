@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from starlette.exceptions import StarletteDeprecationWarning
+try:
+    from starlette.exceptions import StarletteDeprecationWarning
+except ImportError:
+    class StarletteDeprecationWarning(DeprecationWarning):
+        """Compatibility category for Starlette versions that removed it."""
+
 
 STARLETTE_HTTPX_WARNING_PATTERN = (
     r"\AUsing `httpx` with `starlette\.testclient` is deprecated; "
@@ -23,7 +28,7 @@ with warnings.catch_warnings():
     from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.control.robot_control import FaultResetResult
+from app.control.robot_control import FaultResetResult, HomeResult
 from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -41,6 +46,18 @@ def _receive_until(ws, message_type: str, limit: int = 8) -> dict[str, object]:
         if message.get("type") == message_type:
             return message
     raise AssertionError(f"未收到 {message_type}")
+
+
+def receive_until_types(ws, required: set[str]) -> dict[str, dict[str, object]]:
+    received: dict[str, dict[str, object]] = {}
+    for _ in range(20):
+        payload = ws.receive_json()
+        message_type = payload.get("type")
+        if isinstance(message_type, str) and message_type in required:
+            received[message_type] = payload
+        if required <= received.keys():
+            return received
+    raise AssertionError(f"missing message types: {required - received.keys()}")
 
 
 def _disarmed_robot_state() -> RobotStateMessage:
@@ -70,6 +87,29 @@ def _receive_reset_sequence(ws, limit: int = 8) -> list[dict[str, object]]:
         if message.get("type") == "fault_reset_result":
             return messages
     raise AssertionError("未收到 fault_reset_result")
+
+
+def test_diagnostics_are_sent_only_to_owner_and_sender_tasks_are_cleaned_up() -> None:
+    app = create_app(backend_label="LEBAI_FAKE")
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/v1/teleop") as owner:
+            owner.send_json({"v": 1, "type": "hello", "request_id": "owner"})
+            assert owner.receive_json()["type"] == "hello_ack"
+            messages = receive_until_types(owner, {"robot_state", "diagnostics"})
+
+            assert messages["diagnostics"]["runtime"] == "LEBAI_FAKE"
+            assert messages["diagnostics"]["hardware_verified"] is False
+            assert app.state.teleop_owner is not None
+
+            with client.websocket_connect("/ws/v1/teleop") as intruder:
+                rejection = intruder.receive_json()
+                assert rejection["type"] == "connection_rejected"
+                close = intruder.receive()
+                assert close["type"] == "websocket.close"
+                assert close["code"] == 4409
+
+        assert app.state.teleop_owner is None
+        assert app.state.teleop_sender_tasks == set()
 
 
 def test_hello_and_frame_ack() -> None:
@@ -146,6 +186,24 @@ def test_disarm_is_delegated_to_robot_control() -> None:
             ws.send_json({"v": 1, "type": "disarm", "request_id": "d1"})
             assert ws.receive_json()["type"] == "disarm_ack"
         assert app.state.control.disarm.await_count == 1
+
+
+def test_home_request_returns_correlated_result() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.control.home = AsyncMock(return_value=HomeResult(True))
+        with client.websocket_connect("/ws/v1/teleop") as ws:
+            ws.send_json({"v": 1, "type": "home_request", "request_id": "home-1"})
+            result = ws.receive_json()
+
+    assert result == {
+        "v": 1,
+        "type": "home_result",
+        "request_id": "home-1",
+        "accepted": True,
+        "mode": "DISARMED",
+    }
+    app.state.control.home.assert_awaited_once_with()
 
 
 def test_accepted_fault_reset_sends_authoritative_state_before_exact_result() -> None:
@@ -413,7 +471,7 @@ def test_new_owner_after_disconnect_still_requires_release_and_explicit_arm() ->
             assert _receive_until(second, "arm_ack")["request_id"] == "explicit"
 
 
-def test_state_sender_runs_at_20hz_without_blocking_ping_receiver() -> None:
+def test_state_sender_runs_at_50hz_without_blocking_ping_receiver() -> None:
     with TestClient(create_app()) as client, client.websocket_connect(
         "/ws/v1/teleop"
     ) as ws:
@@ -426,11 +484,11 @@ def test_state_sender_runs_at_20hz_without_blocking_ping_receiver() -> None:
 
         assert pong["request_id"] == "p1"
         delta = (second_state["server_mono_ns"] - first_state["server_mono_ns"]) / 1e9
-        assert 0.03 <= delta <= 0.12
+        assert 0.012 <= delta <= 0.08
 
 
 @pytest.mark.asyncio
-async def test_state_sender_sleeps_exactly_fifty_ms(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_state_sender_sleeps_exactly_twenty_ms(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api import teleop_ws
 
     sent: list[dict[str, object]] = []
@@ -459,7 +517,59 @@ async def test_state_sender_sleeps_exactly_fifty_ms(monkeypatch: pytest.MonkeyPa
         await teleop_ws.state_sender(FakeWebSocket(), FakeControl())
 
     assert len(sent) == 3
-    assert sleeps == [0.05, 0.05, 0.05]
+    assert sleeps == [0.02, 0.02, 0.02]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend", "runtime", "expected_period_s"),
+    [
+        ("simulator", "SIMULATOR", 0.02),
+        ("lebai", "LEBAI", 0.04),
+        ("lebai", "LEBAI_FAKE", 0.04),
+    ],
+)
+async def test_state_sender_selects_runtime_configured_state_rate(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    runtime: str,
+    expected_period_s: float,
+) -> None:
+    from app.api import teleop_ws
+
+    sleeps: list[float] = []
+    settings = SimpleNamespace(
+        backend=backend,
+        state_hz=50,
+        lebai=SimpleNamespace(control=SimpleNamespace(state_hz=25)),
+    )
+
+    class FakeWebSocket:
+        app = SimpleNamespace(
+            state=SimpleNamespace(settings=settings, runtime_backend=runtime)
+        )
+
+        async def send_json(self, _payload: dict[str, object]) -> None:
+            return None
+
+    class FakeMessage:
+        def model_dump(self, *, mode: str) -> dict[str, object]:
+            return {"type": "robot_state", "mode": mode}
+
+    class FakeControl:
+        async def state_message(self) -> FakeMessage:
+            return FakeMessage()
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(teleop_ws.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await teleop_ws.state_sender(FakeWebSocket(), FakeControl())
+
+    assert sleeps == [expected_period_s]
 
 
 @pytest.mark.asyncio

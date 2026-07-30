@@ -7,3 +7,6 @@ node_modules/
 dist/
 *.egg-info/
 *.log
+config/real-robot.local.yaml
+logs/commissioning/
+artifacts/acceptance/

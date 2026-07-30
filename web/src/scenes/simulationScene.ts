@@ -7,13 +7,21 @@ import {
   type VRFrame,
   type Vec3,
 } from '../protocol/messages';
-import {loadRobotModel, type RobotModel} from '../robot/robotModel';
+import {
+  LM3_HOME_Q,
+  loadRobotModel,
+  type RobotModel,
+} from '../robot/robotModel';
 import {RobotStateBuffer} from '../robot/robotState';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
 import type {XRPresentationSample} from '../xr/session';
 import {ControllerHints} from './controllerHints';
-import {TableHeightController} from './tableHeightController';
-import {VrSafetyPanel} from './vrSafetyPanel';
+import {
+  type GraspBlock,
+  KinematicGraspController,
+} from './kinematicGraspController';
+import {WorkspacePlacementController} from './workspacePlacementController';
+import {type RobotRuntimeSummary, VrSafetyPanel} from './vrSafetyPanel';
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
 
@@ -24,13 +32,14 @@ export interface VRFrameInput {
   trackingValid: boolean;
   position: Vec3;
   quaternion: Quat;
+  headQ?: Quat;
   grip: boolean;
   trigger: number;
   visibility?: VisibilityState;
 }
 
 export function createVRFrame(input: VRFrameInput): VRFrame {
-  return {
+  const frame: VRFrame = {
     v: PROTOCOL_VERSION,
     type: 'vr_frame',
     session_id: input.sessionId,
@@ -45,6 +54,8 @@ export function createVRFrame(input: VRFrameInput): VRFrame {
       trigger: clamp(input.trigger, 0, 1),
     },
   };
+  if (input.headQ) frame.head_q = [...input.headQ];
+  return frame;
 }
 
 export interface DesktopInputSnapshot {
@@ -195,8 +206,10 @@ export class SimulationScene {
   private readonly robotVisualRoot = new THREE.Group();
   private readonly grid = new THREE.GridHelper(4, 40, 0x1f839f, 0x183245);
   private readonly targetMarker = new THREE.Group();
+  private readonly graspBlocks = createGraspBlocks();
   private sessionId = createSessionId();
   private robotModel: RobotModel | null = null;
+  private graspController: KinematicGraspController | null = null;
   private animationHandle: number | null = null;
   private sequence = 0;
   private lastFrameMs = Number.NEGATIVE_INFINITY;
@@ -206,7 +219,7 @@ export class SimulationScene {
   private readonly controllerQuaternion = new THREE.Quaternion(0, 0, 0, 1);
   private readonly vrSafetyPanel: VrSafetyPanel;
   private readonly controllerHints: ControllerHints;
-  private readonly tableHeight = new TableHeightController(window.localStorage);
+  private readonly workspacePlacement = new WorkspacePlacementController(window.localStorage);
   private armSafetyState: ArmSafetySnapshot = {
     phase: 'disconnected',
     connected: false,
@@ -218,8 +231,18 @@ export class SimulationScene {
     fault: null,
     faultRecoverable: false,
     faultResetPending: false,
+    constraint: null,
+    recoveryPhase: null,
   };
   private questControllerSupported: boolean | null = null;
+  private runtimeSummary: RobotRuntimeSummary = {
+    backend: null,
+    realRobotMode: null,
+    actualTcp: null,
+    gripper: null,
+    latencyMs: null,
+    hardwareVerified: false,
+  };
   private started = false;
 
   constructor(
@@ -245,11 +268,14 @@ export class SimulationScene {
     this.robotVisualRoot.name = 'robot-visual-root';
     this.scene.add(this.robotVisualRoot);
     this.createEnvironment();
+    this.robotVisualRoot.add(
+      ...this.graspBlocks.map(({object}) => object),
+    );
     this.createTargetMarker();
     this.controllerHints = new ControllerHints(this.scene);
     this.controllerHints.setVisible(false);
     this.vrSafetyPanel = new VrSafetyPanel(this.robotVisualRoot);
-    this.vrSafetyPanel.update(this.armSafetyState, this.questControllerSupported);
+    this.vrSafetyPanel.update(this.armSafetyState, this.questControllerSupported, this.runtimeSummary);
   }
 
   start(): void {
@@ -275,12 +301,17 @@ export class SimulationScene {
 
   setArmSafetyState(snapshot: ArmSafetySnapshot): void {
     this.armSafetyState = snapshot;
-    this.vrSafetyPanel.update(snapshot, this.questControllerSupported);
+    this.vrSafetyPanel.update(snapshot, this.questControllerSupported, this.runtimeSummary);
   }
 
   setQuestControllerSupport(supported: boolean | null): void {
     this.questControllerSupported = supported;
-    this.vrSafetyPanel.update(this.armSafetyState, supported);
+    this.vrSafetyPanel.update(this.armSafetyState, supported, this.runtimeSummary);
+  }
+
+  setRuntimeSummary(summary: RobotRuntimeSummary): void {
+    this.runtimeSummary = summary;
+    this.vrSafetyPanel.update(this.armSafetyState, this.questControllerSupported, summary);
   }
 
   resize(): void {
@@ -299,7 +330,7 @@ export class SimulationScene {
     this.vrSafetyPanel.setVisible(false);
     this.controllerHints.setVisible(false);
     await this.renderer.xr.setSession(session);
-    this.tableHeight.beginSession();
+    this.workspacePlacement.beginSession();
     this.renderer.setAnimationLoop(loop);
     this.controllerHints.setVisible(true);
     this.vrSafetyPanel.setVisible(true);
@@ -310,8 +341,8 @@ export class SimulationScene {
     try {
       await this.renderer.xr.setSession(null);
     } finally {
-      this.tableHeight.endSession();
-      this.robotVisualRoot.position.y = 0;
+      this.workspacePlacement.endSession();
+      this.robotVisualRoot.position.set(0, 0, 0);
       this.controllerHints.setVisible(false);
       this.vrSafetyPanel.setVisible(false);
       this.sessionId = createSessionId();
@@ -325,16 +356,23 @@ export class SimulationScene {
 
   updateXRPresentation(sample: XRPresentationSample, nowMs: number): void {
     this.controllerHints.update(sample.left, sample.right);
-    const adjustable = (this.armSafetyState.phase === 'locked' || this.armSafetyState.phase === 'stopped')
+    const adjustable = (
+      this.armSafetyState.phase === 'locked'
+      || this.armSafetyState.phase === 'stopped'
+      || this.armSafetyState.phase === 'fault'
+    )
       && !this.armSafetyState.pending
+      && !this.armSafetyState.faultResetPending
       && !sample.right.grip;
-    this.robotVisualRoot.position.y = this.tableHeight.update({
+    this.robotVisualRoot.position.fromArray(this.workspacePlacement.update({
       headY: sample.headY,
+      axisX: sample.left.thumbstickX,
       axisY: sample.left.thumbstickY,
+      heightModifier: sample.left.grip,
       resetPressed: sample.left.thumbstickPressed,
       enabled: adjustable && sample.left.trackingValid,
       nowMs,
-    });
+    }));
   }
 
   renderXR(nowMs: number): void {
@@ -375,6 +413,11 @@ export class SimulationScene {
       if (sample) {
         this.robotModel.setJointAngles(sample.state.actual_q);
         this.robotModel.setGripper(sample.state.gripper);
+        this.robotVisualRoot.updateMatrixWorld(true);
+        this.graspController?.update(
+          sample.state.actual_tcp,
+          sample.state.gripper,
+        );
       }
     }
 
@@ -413,9 +456,17 @@ export class SimulationScene {
         return;
       }
       this.robotModel = model;
-      model.setJointAngles([0.2, -0.8, -0.8, -0.4, 0.6, 0]);
-      fitRobotToWorkbench(model.group);
+      model.setJointAngles(LM3_HOME_Q);
+      model.group.scale.setScalar(1);
+      model.group.position.set(0, 0, 0);
       this.robotVisualRoot.add(model.group);
+      this.graspController = new KinematicGraspController({
+        visualRoot: this.robotVisualRoot,
+        blocks: this.graspBlocks,
+        tableTopY: -0.005,
+        tableHalfWidth: 0.61,
+        tableHalfDepth: 0.43,
+      });
     } catch (error) {
       if (this.started) this.options.onError(modelLoadErrorMessage(error));
     }
@@ -511,24 +562,34 @@ export class SimulationScene {
   private readonly preventContextMenu = (event: MouseEvent): void => event.preventDefault();
 }
 
-function fitRobotToWorkbench(group: THREE.Group): void {
-  group.updateMatrixWorld(true);
-  const bounds = new THREE.Box3().setFromObject(group);
-  const size = bounds.getSize(new THREE.Vector3());
-  const scale = size.y > 0 ? 0.68 / size.y : 1;
-  group.scale.setScalar(scale);
-  group.updateMatrixWorld(true);
-  const fitted = new THREE.Box3().setFromObject(group);
-  const center = fitted.getCenter(new THREE.Vector3());
-  group.position.x -= center.x;
-  group.position.x += 0.04;
-  group.position.z -= center.z;
-  group.position.y -= fitted.min.y;
-}
-
 function createSessionId(): string {
   const token = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}`;
   return `desktop-${token}`;
+}
+
+export function createGraspBlocks(): GraspBlock[] {
+  const definitions = [
+    ['block-orange', 0xff8a3d, [0.18, 0.025, -0.32]],
+    ['block-blue', 0x39a8ff, [0.32, 0.025, -0.22]],
+    ['block-green', 0x58d68d, [0.04, 0.025, -0.28]],
+    ['block-yellow', 0xffd84d, [0.28, 0.025, -0.38]],
+    ['block-purple', 0xa77bff, [0.10, 0.025, -0.18]],
+  ] as const;
+  return definitions.map(([id, color, position]) => {
+    const object = new THREE.Mesh(
+      new THREE.BoxGeometry(0.06, 0.06, 0.06),
+      new THREE.MeshStandardMaterial({
+        color,
+        metalness: 0.05,
+        roughness: 0.58,
+      }),
+    );
+    object.name = id;
+    object.position.set(position[0], position[1], position[2]);
+    object.castShadow = true;
+    object.receiveShadow = true;
+    return {id, object, sizeM: 0.06};
+  });
 }
 
 export function modelLoadErrorMessage(_error: unknown): string {
