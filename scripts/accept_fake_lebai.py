@@ -52,6 +52,17 @@ class CommandResult:
     output_tail: str
 
 
+class GateConstructionError(RuntimeError):
+    def __init__(self, stage: str, cause: Exception) -> None:
+        super().__init__(f"{stage}: {cause}")
+        self.stage = stage
+        self.cause = cause
+
+
+class GitProvenanceError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class FakeLebaiAcceptanceReport:
     generated_at: str
@@ -61,9 +72,10 @@ class FakeLebaiAcceptanceReport:
     scenarios: tuple[FakeLebaiScenarioResult, ...]
     hardware_pending: tuple[str, ...]
     passed: bool
+    failure: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": 1,
             "generated_at": self.generated_at,
             "runtime": "LEBAI_FAKE",
@@ -88,6 +100,9 @@ class FakeLebaiAcceptanceReport:
             "hardware_pending": list(self.hardware_pending),
             "passed": self.passed,
         }
+        if self.failure is not None:
+            payload["failure"] = self.failure
+        return payload
 
 
 CommandRunner = Callable[[str, Sequence[str], Path], CommandResult]
@@ -134,17 +149,25 @@ def run_command(
 
 
 def _git_output(repo_root: Path, *args: str) -> str:
-    completed = subprocess.run(
-        ["git", *args],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as error:
+        raise GitProvenanceError(
+            f"git_invocation_failed:{' '.join(args)}:{error}"
+        ) from error
     if completed.returncode != 0:
-        return ""
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise GitProvenanceError(
+            f"git_command_failed:{' '.join(args)}:{completed.returncode}:{detail}"
+        )
     return completed.stdout.rstrip("\r\n")
 
 
@@ -197,6 +220,21 @@ def _model_provenance(repo_root: Path) -> dict[str, object]:
     }
 
 
+def _failure_report(error: Exception) -> FakeLebaiAcceptanceReport:
+    stage = error.stage if isinstance(error, GateConstructionError) else "gate"
+    cause = error.cause if isinstance(error, GateConstructionError) else error
+    return FakeLebaiAcceptanceReport(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        git={"commit": None, "dirty": None, "dirty_paths": []},
+        model={},
+        commands=(),
+        scenarios=(),
+        hardware_pending=HARDWARE_PENDING,
+        passed=False,
+        failure={"stage": stage, "message": str(cause)},
+    )
+
+
 def run_gate(
     repo_root: Path,
     command_runner: CommandRunner = run_command,
@@ -222,18 +260,32 @@ def run_gate(
     commands = tuple(
         command_runner(name, argv, cwd) for name, argv, cwd in command_specs
     )
-    scenarios = tuple(asyncio.run(run_fake_lebai_scenarios()))
+    try:
+        scenarios = tuple(asyncio.run(run_fake_lebai_scenarios()))
+    except Exception as error:
+        raise GateConstructionError("scenario", error) from error
+    try:
+        model = _model_provenance(repo_root)
+    except Exception as error:
+        raise GateConstructionError("provenance", error) from error
+    try:
+        git = _git_provenance(repo_root)
+        git_failure = None
+    except GitProvenanceError as error:
+        git = {"commit": None, "dirty": None, "dirty_paths": []}
+        git_failure = {"stage": "provenance", "message": str(error)}
     passed = all(command.returncode == 0 for command in commands) and all(
         scenario.passed for scenario in scenarios
-    )
+    ) and git_failure is None
     return FakeLebaiAcceptanceReport(
         generated_at=datetime.now(timezone.utc).isoformat(),
-        git=_git_provenance(repo_root),
-        model=_model_provenance(repo_root),
+        git=git,
+        model=model,
         commands=commands,
         scenarios=scenarios,
         hardware_pending=HARDWARE_PENDING,
         passed=passed,
+        failure=git_failure,
     )
 
 
@@ -271,6 +323,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = run_gate(ROOT)
         write_report(report, output)
     except Exception as error:
+        failure_report = _failure_report(error)
+        try:
+            write_report(failure_report, output)
+        except Exception as report_error:
+            print(
+                f"Fake Lebai failure report could not be written: {report_error}",
+                file=sys.stderr,
+            )
         print(f"Fake Lebai acceptance failed: {error}", file=sys.stderr)
         return 1
     print(

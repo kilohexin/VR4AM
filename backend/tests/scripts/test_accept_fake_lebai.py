@@ -5,6 +5,9 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -150,3 +153,108 @@ def test_git_porcelain_z_records_paths_with_spaces_and_rename_pairs(
             "docs/space name.md",
         ],
     }
+
+
+@pytest.mark.parametrize(
+    ("git_args", "failure"),
+    [
+        (("status", "--porcelain=v1", "-z"), "returncode"),
+        (("rev-parse", "HEAD"), "returncode"),
+        (("status", "--porcelain=v1", "-z"), "exception"),
+        (("rev-parse", "HEAD"), "exception"),
+    ],
+)
+def test_git_failures_fail_the_gate_and_cli(
+    monkeypatch,
+    tmp_path: Path,
+    git_args: tuple[str, ...],
+    failure: str,
+) -> None:
+    """A failed Git subprocess must not be represented as clean provenance."""
+    module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "run_fake_lebai_scenarios",
+        lambda: _passing_scenarios(module),
+    )
+
+    def fake_subprocess(argv, **kwargs):
+        del kwargs
+        args = tuple(argv[1:])
+        if args == git_args:
+            if failure == "exception":
+                raise OSError("git unavailable")
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="git failed",
+            )
+        if args == ("status", "--porcelain=v1", "-z"):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args == ("rev-parse", "HEAD"):
+            return SimpleNamespace(returncode=0, stdout="a" * 40, stderr="")
+        raise AssertionError(f"unexpected git command: {argv}")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_subprocess)
+    report = module.run_gate(ROOT, command_runner=_command_runner(module))
+    original_run_gate = module.run_gate
+    monkeypatch.setattr(
+        module,
+        "run_gate",
+        lambda repo_root: original_run_gate(
+            repo_root,
+            command_runner=_command_runner(module),
+        ),
+    )
+
+    assert report.passed is False
+    assert report.to_dict()["git"]["dirty"] is None
+    assert module.main(["--output", str(tmp_path / "git-failed.json")]) == 1
+
+
+@pytest.mark.parametrize("failure_stage", ["scenario", "provenance"])
+def test_cli_replaces_stale_success_report_when_gate_construction_fails(
+    monkeypatch,
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    """A construction exception must atomically replace stale success JSON."""
+    module = _load_module()
+    output = tmp_path / "fake-lebai-latest.json"
+    output.write_text(
+        json.dumps({"schema_version": 1, "passed": True}),
+        encoding="utf-8",
+    )
+    original_run_gate = module.run_gate
+
+    if failure_stage == "scenario":
+        async def failing_scenarios():
+            raise RuntimeError("scenario exploded")
+
+        monkeypatch.setattr(module, "run_fake_lebai_scenarios", failing_scenarios)
+    else:
+        monkeypatch.setattr(
+            module,
+            "_model_provenance",
+            lambda _root: (_ for _ in ()).throw(
+                RuntimeError("provenance exploded")
+            ),
+        )
+
+    monkeypatch.setattr(
+        module,
+        "run_gate",
+        lambda repo_root: original_run_gate(
+            repo_root,
+            command_runner=_command_runner(module),
+        ),
+    )
+
+    assert module.main(["--output", str(output)]) == 1
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    assert payload["passed"] is False
+    assert payload["hardware_verified"] is False
+    assert payload["failure"]["stage"] == failure_stage
+    assert failure_stage in payload["failure"]["message"]
+    assert not output.with_suffix(".json.tmp").exists()
