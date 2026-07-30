@@ -94,6 +94,52 @@ async def test_control_command_uses_vendor_ik_and_pvat_in_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_adapter_forwards_injected_pump_scheduler() -> None:
+    client = FakeLebaiClient.idle()
+    clock = FakeClock()
+    pump_sleeps: list[float] = []
+
+    async def pump_sleep(seconds: float) -> None:
+        pump_sleeps.append(seconds)
+        await clock.sleep(seconds)
+
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        pump_clock=lambda: clock.value / 1_000_000_000,
+        pump_sleep=pump_sleep,
+    )
+    client.ik_results = deque(
+        [
+            [0.0032, -1.0, 1.0, 0.0, 1.57, 0.0],
+            [0.0040, -1.0, 1.0, 0.0, 1.57, 0.0],
+        ]
+    )
+    await adapter.connect()
+    try:
+        await adapter.command_tcp(_target(0.301), command_id=1)
+        await _wait_until(
+            lambda: [call[0] for call in client.write_calls].count(
+                "move_pvat"
+            )
+            == 1
+        )
+        await adapter.command_tcp(_target(0.302), command_id=2)
+        await _wait_until(
+            lambda: [call[0] for call in client.write_calls].count(
+                "move_pvat"
+            )
+            == 2
+        )
+
+        assert pump_sleeps[:2] == pytest.approx([0.04, 0.04])
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_stop_invalidates_delayed_ik_before_any_pvat_write() -> None:
     adapter, client, _ = await _connected_control_adapter(block_ik=True)
     client.ik_results = deque(

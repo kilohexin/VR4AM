@@ -74,6 +74,8 @@ class RealLebaiAdapter:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         event_callback: EventCallback | None = None,
         backend_label: Literal["LEBAI", "LEBAI_FAKE"] = "LEBAI",
+        pump_clock: Callable[[], float] | None = None,
+        pump_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.settings = settings
         self._client_factory = client_factory
@@ -105,6 +107,8 @@ class RealLebaiAdapter:
         self._pump = PvatPump(
             self._send_target,
             period_s=1 / settings.control.pvat_send_hz,
+            clock=pump_clock,
+            sleep=pump_sleep,
         )
         self._previous_sent_qd: JointVector | None = None
         self._constraint: str | None = None

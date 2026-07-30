@@ -21,6 +21,63 @@ async def _wait_until(predicate, timeout: float = 0.5) -> None:
     await asyncio.wait_for(wait(), timeout)
 
 
+class FakeScheduler:
+    def __init__(self) -> None:
+        self.value = 10.0
+        self.sleep_calls: list[float] = []
+
+    def now(self) -> float:
+        return self.value
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleep_calls.append(seconds)
+        self.value += seconds
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_injected_clock_and_sleep_control_pump_pacing() -> None:
+    scheduler = FakeScheduler()
+    handled: list[int] = []
+
+    async def handler(request: PvatRequest) -> None:
+        handled.append(request.command_id)
+
+    pump = PvatPump(
+        handler,
+        period_s=0.04,
+        clock=scheduler.now,
+        sleep=scheduler.sleep,
+    )
+    await pump.start()
+    pump.submit(_pose(), 1)
+    await _wait_until(lambda: handled == [1])
+    pump.submit(_pose(0.001), 2)
+    await _wait_until(
+        lambda: handled == [1, 2] and len(scheduler.sleep_calls) >= 2
+    )
+    await pump.stop()
+
+    assert scheduler.sleep_calls[:2] == pytest.approx([0.04, 0.04])
+    assert scheduler.value == pytest.approx(10.08)
+
+
+@pytest.mark.asyncio
+async def test_default_scheduler_api_remains_compatible() -> None:
+    handled: list[int] = []
+
+    async def handler(request: PvatRequest) -> None:
+        handled.append(request.command_id)
+
+    pump = PvatPump(handler, period_s=0.001)
+    await pump.start()
+    pump.submit(_pose(), 1)
+    await _wait_until(lambda: handled == [1])
+    await pump.stop()
+
+    assert handled == [1]
+
+
 @pytest.mark.asyncio
 async def test_latest_request_replaces_unsent_request() -> None:
     handled: list[PvatRequest] = []

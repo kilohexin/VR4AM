@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from app.robots.base import BackendCommandError
 from app.schemas.messages import Pose
 
+Clock = Callable[[], float]
+Sleep = Callable[[float], Awaitable[None]]
+
 
 @dataclass(frozen=True)
 class PvatRequest:
@@ -21,11 +24,15 @@ class PvatPump:
         handler: Callable[[PvatRequest], Awaitable[None]],
         *,
         period_s: float,
+        clock: Clock | None = None,
+        sleep: Sleep = asyncio.sleep,
     ) -> None:
         if period_s <= 0:
             raise ValueError("period_s_must_be_positive")
         self._handler = handler
         self.period_s = period_s
+        self._clock = clock or _event_loop_time
+        self._sleep = sleep
         self._pending: PvatRequest | None = None
         self._generation = 0
         self._wake = asyncio.Event()
@@ -93,8 +100,7 @@ class PvatPump:
             self._wake.clear()
 
     async def _run(self) -> None:
-        loop = asyncio.get_running_loop()
-        next_deadline = loop.time()
+        next_deadline = self._clock()
         try:
             while self._running:
                 request = await self._take_latest()
@@ -117,10 +123,10 @@ class PvatPump:
                         return
                 next_deadline = max(
                     next_deadline + self.period_s,
-                    loop.time(),
+                    self._clock(),
                 )
-                await asyncio.sleep(
-                    max(0.0, next_deadline - loop.time())
+                await self._sleep(
+                    max(0.0, next_deadline - self._clock())
                 )
         finally:
             if self._task is asyncio.current_task():
@@ -136,3 +142,7 @@ class PvatPump:
         if self._pending is None:
             self._wake.clear()
         return request
+
+
+def _event_loop_time() -> float:
+    return asyncio.get_running_loop().time()

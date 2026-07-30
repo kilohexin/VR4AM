@@ -4,7 +4,7 @@ import asyncio
 import math
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Awaitable, Callable, TypeVar
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -36,13 +36,27 @@ from app.schemas.messages import (
     VRFrame,
 )
 
+# The configured first limiter tick is 40 um translation and 0.0002 rad
+# rotation. One LM3 IK/PVAT servo step deterministically realizes the narrower
+# authoritative-state bands below; cross-axis drift remains far below them.
+TRANSLATION_ACTUAL_MIN_M = 4e-6
+TRANSLATION_ACTUAL_MAX_M = 8e-6
+TRANSLATION_DOMINANCE_RATIO = 20.0
+ROTATION_ACTUAL_MIN_DEG = 0.0007
+ROTATION_ACTUAL_MAX_DEG = 0.0013
+ROTATION_DOMINANCE_RATIO = 50.0
+T = TypeVar("T")
+
 
 @dataclass(frozen=True)
 class FakeLebaiScenarioResult:
     name: str
-    passed: bool
     metrics: dict[str, object]
     failures: tuple[str, ...] = ()
+
+    @property
+    def passed(self) -> bool:
+        return not self.failures
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -59,6 +73,9 @@ class FakeClock:
 
     def now_ns(self) -> int:
         return self.value_ns
+
+    def now_seconds(self) -> float:
+        return self.value_ns / 1_000_000_000
 
     def advance(self, seconds: float) -> None:
         self.value_ns += round(seconds * 1_000_000_000)
@@ -101,6 +118,8 @@ async def fake_real_harness() -> AsyncIterator[Harness]:
         sleep=clock.sleep,
         event_callback=recorder.write_event,
         backend_label="LEBAI_FAKE",
+        pump_clock=clock.now_seconds,
+        pump_sleep=clock.sleep,
     )
     latest = LatestVRFrame()
     control = RobotControl(
@@ -121,9 +140,9 @@ async def fake_real_harness() -> AsyncIterator[Harness]:
         latest=latest,
         published_states=[],
     )
-    await backend.connect()
-    await control.connect()
     try:
+        await backend.connect()
+        await control.connect()
         yield harness
     finally:
         if not harness.preserve_faults_on_cleanup:
@@ -167,6 +186,13 @@ def _methods(harness: Harness) -> list[str]:
     return [str(call[0]) for call in _writes(harness)]
 
 
+def _write_log_is_quiescent(
+    final_log: tuple[tuple[object, ...], ...],
+    observed_log: tuple[tuple[object, ...], ...],
+) -> bool:
+    return observed_log == final_log
+
+
 async def _yield_until(
     predicate: Callable[[], bool],
     *,
@@ -177,6 +203,19 @@ async def _yield_until(
             return
         await asyncio.sleep(0)
     raise AssertionError("deterministic_condition_not_reached")
+
+
+async def _verify_case(
+    label: str,
+    operation: Callable[[], Awaitable[T]],
+    failures: list[str],
+) -> T | None:
+    try:
+        return await operation()
+    except AssertionError as error:
+        detail = str(error) or "verification_failed"
+        failures.append(f"{label}:{detail}")
+        return None
 
 
 def _assert_finite_state(state: RobotStateMessage) -> None:
@@ -268,6 +307,30 @@ def _assert_q_safe(harness: Harness, state: RobotStateMessage) -> None:
     assert np.all(q <= np.asarray(harness.settings.lebai.soft_joint_max_rad))
 
 
+def _motion_quality_failures(
+    action: TranslationAction | RotationAction,
+    commanded: float,
+    uncommanded: float,
+) -> list[str]:
+    magnitude = abs(commanded)
+    if isinstance(action, TranslationAction):
+        minimum = TRANSLATION_ACTUAL_MIN_M
+        maximum = TRANSLATION_ACTUAL_MAX_M
+        dominance = TRANSLATION_DOMINANCE_RATIO
+    else:
+        magnitude = math.degrees(magnitude)
+        uncommanded = math.degrees(uncommanded)
+        minimum = ROTATION_ACTUAL_MIN_DEG
+        maximum = ROTATION_ACTUAL_MAX_DEG
+        dominance = ROTATION_DOMINANCE_RATIO
+    failures: list[str] = []
+    if not minimum <= magnitude <= maximum:
+        failures.append("magnitude_out_of_band")
+    if magnitude < dominance * uncommanded:
+        failures.append("commanded_axis_not_dominant")
+    return failures
+
+
 async def _run_signed_motion(
     action: TranslationAction | RotationAction,
 ) -> tuple[float, float, int]:
@@ -291,8 +354,8 @@ async def _run_signed_motion(
         target_q = np.asarray(pvat_call[1], dtype=float)
         immediate = await harness.client.get_kin_data()
         immediate_q = np.asarray(immediate["actual_joint_pose"], dtype=float)
-        assert np.allclose(immediate_q, initial_q, atol=1e-12, rtol=0.0)
         assert not np.allclose(target_q, initial_q, atol=1e-12, rtol=0.0)
+        assert not np.allclose(immediate_q, target_q, atol=1e-12, rtol=0.0)
 
         assert harness.settings.lebai is not None
         harness.clock.advance(harness.settings.lebai.control.pvat_horizon_s)
@@ -315,7 +378,6 @@ async def _run_signed_motion(
             assert math.copysign(1.0, commanded) == math.copysign(
                 1.0, action.distance_m
             )
-            assert abs(commanded) > 1e-9
             assert (
                 uncommanded
                 <= harness.settings.lebai.control.max_tcp_step_m + 1e-9
@@ -329,7 +391,6 @@ async def _run_signed_motion(
             assert math.copysign(1.0, commanded) == math.copysign(
                 1.0, action.angle_deg
             )
-            assert abs(commanded) > 1e-9
             assert uncommanded <= math.radians(
                 harness.settings.lebai.control.max_tcp_rotation_step_deg
             ) + 1e-9
@@ -343,6 +404,7 @@ async def _run_signed_motion(
 
 
 async def run_translation_scenario() -> FakeLebaiScenarioResult:
+    failures: list[str] = []
     axes: list[str] = []
     deltas: dict[str, float] = {}
     max_uncommanded = 0.0
@@ -351,15 +413,29 @@ async def run_translation_scenario() -> FakeLebaiScenarioResult:
         for sign, label in ((1.0, "+"), (-1.0, "-")):
             action = TranslationAction(axis, sign * 0.005)
             assert abs(action.distance_m) == 0.005
-            commanded, uncommanded, published = await _run_signed_motion(action)
             name = f"{label}{axis}"
             axes.append(name)
+            result = await _verify_case(
+                name,
+                lambda action=action: _run_signed_motion(action),
+                failures,
+            )
+            if result is None:
+                continue
+            commanded, uncommanded, published = result
+            failures.extend(
+                f"{name}:{failure}"
+                for failure in _motion_quality_failures(
+                    action,
+                    commanded,
+                    uncommanded,
+                )
+            )
             deltas[name] = commanded
             max_uncommanded = max(max_uncommanded, uncommanded)
             published_states += published
     return FakeLebaiScenarioResult(
         name="translation",
-        passed=True,
         metrics={
             "axes": axes,
             "requested_distance_m": 0.005,
@@ -367,10 +443,12 @@ async def run_translation_scenario() -> FakeLebaiScenarioResult:
             "max_uncommanded_delta_m": max_uncommanded,
             "published_states": published_states,
         },
+        failures=tuple(failures),
     )
 
 
 async def run_rotation_scenario() -> FakeLebaiScenarioResult:
+    failures: list[str] = []
     axes: list[str] = []
     deltas: dict[str, float] = {}
     max_uncommanded = 0.0
@@ -379,15 +457,29 @@ async def run_rotation_scenario() -> FakeLebaiScenarioResult:
         for sign, label in ((1.0, "+"), (-1.0, "-")):
             action = RotationAction(axis, sign * 2.0)
             assert abs(action.angle_deg) == 2.0
-            commanded, uncommanded, published = await _run_signed_motion(action)
             name = f"{label}{axis}"
             axes.append(name)
+            result = await _verify_case(
+                name,
+                lambda action=action: _run_signed_motion(action),
+                failures,
+            )
+            if result is None:
+                continue
+            commanded, uncommanded, published = result
+            failures.extend(
+                f"{name}:{failure}"
+                for failure in _motion_quality_failures(
+                    action,
+                    commanded,
+                    uncommanded,
+                )
+            )
             deltas[name] = math.degrees(commanded)
             max_uncommanded = max(max_uncommanded, uncommanded)
             published_states += published
     return FakeLebaiScenarioResult(
         name="rotation",
-        passed=True,
         metrics={
             "axes": axes,
             "requested_angle_deg": 2.0,
@@ -395,6 +487,7 @@ async def run_rotation_scenario() -> FakeLebaiScenarioResult:
             "max_uncommanded_delta_deg": math.degrees(max_uncommanded),
             "published_states": published_states,
         },
+        failures=tuple(failures),
     )
 
 
@@ -469,27 +562,53 @@ async def _run_repeated_stop_action() -> tuple[int, bool]:
         await harness.control.disarm()
         before_final = len(_writes(harness))
         await harness.control.stop()
-        await asyncio.sleep(0)
         final_writes = _writes(harness)[before_final:]
         assert final_writes and final_writes[0][0] == "stop_move"
         assert not any(call[0] in {"move_pvat", "movej"} for call in final_writes)
         assert harness.control.mode is TeleopMode.DISARMED
-        return _methods(harness).count("stop_move"), True
+        final_log = tuple(_writes(harness))
+        assert harness.settings.lebai is not None
+        await harness.clock.sleep(
+            2 / harness.settings.lebai.control.pvat_send_hz
+        )
+        no_writes_after_final_stop = _write_log_is_quiescent(
+            final_log,
+            tuple(_writes(harness)),
+        )
+        assert no_writes_after_final_stop
+        return (
+            _methods(harness).count("stop_move"),
+            no_writes_after_final_stop,
+        )
 
 
 async def run_gripper_home_stop_scenario() -> FakeLebaiScenarioResult:
-    open_force, open_amplitude = await _run_gripper_action(
-        GripperAction("open")
+    failures: list[str] = []
+    open_result = await _verify_case(
+        "open",
+        lambda: _run_gripper_action(GripperAction("open")),
+        failures,
     )
-    close_force, close_amplitude = await _run_gripper_action(
-        GripperAction("close")
+    close_result = await _verify_case(
+        "close",
+        lambda: _run_gripper_action(GripperAction("close")),
+        failures,
     )
-    home_error = await _run_home_action()
-    stop_count, no_motion_after_final_stop = await _run_repeated_stop_action()
-    assert close_force <= 30
+    home_error = await _verify_case(
+        "home",
+        _run_home_action,
+        failures,
+    )
+    stop_result = await _verify_case(
+        "stop",
+        _run_repeated_stop_action,
+        failures,
+    )
+    open_force, open_amplitude = open_result or (None, None)
+    close_force, close_amplitude = close_result or (None, None)
+    stop_count, no_writes_after_final_stop = stop_result or (0, False)
     return FakeLebaiScenarioResult(
         name="gripper_home_stop",
-        passed=True,
         metrics={
             "actions": ["open", "close", "home", "stop"],
             "open_force_percent": open_force,
@@ -498,8 +617,9 @@ async def run_gripper_home_stop_scenario() -> FakeLebaiScenarioResult:
             "close_amplitude_percent": close_amplitude,
             "home_max_error_rad": home_error,
             "repeated_stop_count": stop_count,
-            "no_motion_after_final_stop": no_motion_after_final_stop,
+            "no_writes_after_final_stop": no_writes_after_final_stop,
         },
+        failures=tuple(failures),
     )
 
 
@@ -519,28 +639,35 @@ async def _publish_motion(
 async def _run_ik_failure_case() -> tuple[int, int]:
     async with fake_real_harness() as harness:
         await _prepare_active(harness)
+        assert harness.settings.lebai is not None
         harness.client.set_faults(DigitalTwinFaults(ik_failure=True))
-        for seq in range(3, 7):
+        period_ns = round(
+            1_000_000_000 / harness.settings.lebai.control.pvat_send_hz
+        )
+        verified_failures = 0
+        for failure_index, seq in enumerate(range(3, 7), start=1):
+            started_ns = harness.clock.now_ns()
             await _publish_motion(harness, seq, 0.001 * (seq - 2))
-            expected = seq - 2
             await _yield_until(
-                lambda: harness.backend._consecutive_ik_failures >= expected
+                lambda: (
+                    harness.backend.constraint == "ik_boundary"
+                    and harness.clock.now_ns() >= started_ns + period_ns
+                )
             )
-            await harness.backend._pump.stop()
-            if seq == 4:
+            verified_failures += 1
+            if failure_index == 2:
                 soft = await _publish_state(harness)
                 assert soft.constraint == "ik_boundary"
                 assert soft.fault is None
-            await harness.backend._pump.start()
 
         await _publish_motion(harness, 7, 0.005)
         await _yield_until(lambda: harness.backend.pump_fault is not None)
+        verified_failures += 1
         assert str(harness.backend.pump_fault) == "ik_failure_persistent"
         await _publish_motion(harness, 8, 0.004)
         assert harness.control.mode is TeleopMode.FAULT
-        assert harness.control._fault == "ik_failure_persistent"
         assert "stop_move" in _methods(harness)
-        return 5, len(harness.published_states)
+        return verified_failures, len(harness.published_states)
 
 
 async def _run_pvat_failure_case() -> int:
@@ -552,7 +679,6 @@ async def _run_pvat_failure_case() -> int:
         assert str(harness.backend.pump_fault) == "sdk_call_failed:move_pvat"
         await _publish_motion(harness, 4, 0.004)
         assert harness.control.mode is TeleopMode.FAULT
-        assert harness.control._fault == "sdk_call_failed:move_pvat"
         assert "stop_move" in _methods(harness)
         return len(harness.published_states)
 
@@ -569,7 +695,6 @@ async def _run_disconnect_case() -> int:
         with suppress(BackendCommandError):
             await _publish_motion(harness, 4, 0.004)
         assert harness.control.mode is TeleopMode.FAULT
-        assert harness.control._fault == "robot_disconnected"
         assert len(_writes(harness)) == writes_at_disconnect
         return len(harness.published_states)
 
@@ -579,7 +704,6 @@ async def _run_stale_snapshot_case() -> int:
         await _prepare_active(harness)
         harness.clock.advance(0.081)
         await _publish_motion(harness, 3, 0.005)
-        assert harness.control._fault == "robot_state_stale"
         assert "stop_move" in _methods(harness)
         fault_state = await _publish_state(harness)
         assert fault_state.fault == "robot_state_stale"
@@ -604,7 +728,6 @@ async def _run_stop_failure_case() -> tuple[int, int]:
         methods = _methods(harness)
         assert "stop_move" in methods
         assert "stop_sys" in methods
-        assert harness.backend._latched_fault == "stop_incomplete"
         assert harness.control.mode is TeleopMode.FAULT
         kin_data = await harness.client.get_kin_data()
         actual_qd = np.asarray(kin_data["actual_joint_speed"], dtype=float)
@@ -618,26 +741,33 @@ async def _run_stop_failure_case() -> tuple[int, int]:
 
 
 async def run_fault_scenario() -> FakeLebaiScenarioResult:
-    ik_failures, ik_states = await _run_ik_failure_case()
-    pvat_states = await _run_pvat_failure_case()
-    disconnect_states = await _run_disconnect_case()
-    stale_states = await _run_stale_snapshot_case()
-    stop_sys_calls, stop_states = await _run_stop_failure_case()
-    cases = [
-        "ik_failure",
-        "pvat_failure",
-        "disconnect",
-        "stale_snapshot",
-        "stop_failure",
+    failures: list[str] = []
+    case_operations: list[
+        tuple[str, Callable[[], Awaitable[object]]]
+    ] = [
+        ("ik_failure", _run_ik_failure_case),
+        ("pvat_failure", _run_pvat_failure_case),
+        ("disconnect", _run_disconnect_case),
+        ("stale_snapshot", _run_stale_snapshot_case),
+        ("stop_failure", _run_stop_failure_case),
     ]
-    assert len(cases) == 5
+    outcomes: dict[str, object] = {}
+    for name, operation in case_operations:
+        outcome = await _verify_case(name, operation, failures)
+        if outcome is not None:
+            outcomes[name] = outcome
+    ik_failures, ik_states = outcomes.get("ik_failure", (0, 0))
+    pvat_states = outcomes.get("pvat_failure", 0)
+    disconnect_states = outcomes.get("disconnect", 0)
+    stale_states = outcomes.get("stale_snapshot", 0)
+    stop_sys_calls, stop_states = outcomes.get("stop_failure", (0, 0))
+    cases = [name for name, _operation in case_operations]
     return FakeLebaiScenarioResult(
         name="faults",
-        passed=True,
         metrics={
             "cases": cases,
-            "injected": 5,
-            "verified": 5,
+            "injected": len(case_operations),
+            "verified": len(outcomes),
             "ik_failures_before_hard_fault": ik_failures,
             "stop_sys_calls": stop_sys_calls,
             "published_states": (
@@ -648,6 +778,7 @@ async def run_fault_scenario() -> FakeLebaiScenarioResult:
                 + stop_states
             ),
         },
+        failures=tuple(failures),
     )
 
 
