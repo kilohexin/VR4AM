@@ -200,7 +200,7 @@ def test_readonly_health_reports_not_enabled(
 
     monkeypatch.setattr(
         "app.main.build_recorder",
-        lambda _settings: NoopRecorder(),
+        lambda _settings, _runtime_backend=None: NoopRecorder(),
         raising=False,
     )
     with TestClient(

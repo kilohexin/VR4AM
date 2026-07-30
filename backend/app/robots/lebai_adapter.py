@@ -115,6 +115,7 @@ class RealLebaiAdapter:
         self._constraint_error: str | None = None
         self._consecutive_ik_failures = 0
         self._latched_fault: str | None = None
+        self._preflight_ready = False
 
     @property
     def constraint(self) -> str | None:
@@ -140,14 +141,14 @@ class RealLebaiAdapter:
         self._capabilities = detect_capabilities(client)
         try:
             snapshot = await self._read_snapshot()
-            if (
-                self.settings.mode == "control"
-                and self._preflight_from_snapshot(snapshot).ready
-            ):
+            preflight = self._preflight_from_snapshot(snapshot)
+            self._preflight_ready = preflight.ready
+            if self.settings.mode == "control" and preflight.ready:
                 await self._pump.start()
         except BaseException:
             self._client = None
             self._snapshot = None
+            self._preflight_ready = False
             raise
 
     async def disconnect(self) -> None:
@@ -161,6 +162,7 @@ class RealLebaiAdapter:
         self._snapshot = None
         self._client = None
         self._motion_accepted = False
+        self._preflight_ready = False
 
     async def command_tcp(self, target: Pose, command_id: int) -> None:
         self._require_control()
@@ -174,6 +176,8 @@ class RealLebaiAdapter:
             raise BackendCommandError("robot_state_stale")
         if self._pump.fault is not None:
             raise self._pump.fault
+        if not self._preflight_ready:
+            raise BackendCommandError("preflight_not_ready")
         if not self._pump.running:
             raise BackendCommandError("preflight_not_ready")
         self._pump.submit(target, command_id)
@@ -185,6 +189,15 @@ class RealLebaiAdapter:
         client = self._client
         if client is None:
             raise BackendCommandError("robot_disconnected")
+        if not self._preflight_ready:
+            raise BackendCommandError("preflight_not_ready")
+        snapshot = await self._read_snapshot()
+        boundary_fault = self._motion_boundary_fault(snapshot)
+        if boundary_fault is not None:
+            self._preflight_ready = False
+            raise BackendCommandError(
+                f"preflight_not_ready:{boundary_fault}"
+            )
         try:
             normalized = min(1.0, max(0.0, float(value)))
         except (TypeError, ValueError):
@@ -214,51 +227,92 @@ class RealLebaiAdapter:
     async def stop(self, reason: StopReason) -> None:
         if self.settings.mode == "readonly":
             return
-        client = self._client
-        if client is None:
-            raise BackendCommandError("robot_disconnected")
         self._pump.invalidate()
         self._previous_sent_qd = None
+        self._preflight_ready = False
+        client = self._client
+        if client is None:
+            self._latch_unverified_stop()
+            raise BackendCommandError("robot_disconnected")
         try:
             async with self._sdk_lock:
                 await asyncio.wait_for(client.stop_move(), timeout=0.20)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._fail_unverified_stop(client))
+            raise
         except TimeoutError:
-            await self._safety_escalate_stop_sys(client)
+            await self._fail_unverified_stop(client)
             raise BackendCommandError("sdk_timeout:stop_move") from None
         except Exception:
-            await self._safety_escalate_stop_sys(client)
+            await self._fail_unverified_stop(client)
             raise BackendCommandError("sdk_call_failed:stop_move") from None
         started_ns = self._clock()
         stable_since_ns: int | None = None
-        while True:
-            try:
+        try:
+            while True:
                 snapshot = await self._read_snapshot()
-            except BackendCommandError as error:
-                if str(error) == "robot_disconnected":
-                    self._latched_fault = "stop_unverified_disconnected"
-                    self._motion_accepted = False
-                    raise BackendCommandError(
-                        "stop_unverified_disconnected"
-                    ) from None
+                now_ns = self._clock()
+                stationary = (
+                    max(abs(value) for value in snapshot.actual_qd) <= 0.02
+                )
+                if stationary:
+                    if stable_since_ns is None:
+                        stable_since_ns = now_ns
+                    elif now_ns - stable_since_ns >= 300_000_000:
+                        self._motion_accepted = False
+                        return
+                else:
+                    stable_since_ns = None
+                if now_ns - started_ns >= 500_000_000:
+                    self._latched_fault = "stop_incomplete"
+                    await self._fail_unverified_stop(
+                        client,
+                        preserve_fault=True,
+                    )
+                    raise BackendCommandError("stop_incomplete")
+                await self._sleep(0.02)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._fail_unverified_stop(client))
+            raise
+        except BackendCommandError as error:
+            if str(error) == "stop_incomplete":
                 raise
-            now_ns = self._clock()
-            stationary = max(abs(value) for value in snapshot.actual_qd) <= 0.02
-            if stationary:
-                if stable_since_ns is None:
-                    stable_since_ns = now_ns
-                elif now_ns - stable_since_ns >= 300_000_000:
-                    self._motion_accepted = False
-                    return
-            else:
-                stable_since_ns = None
-            if now_ns - started_ns >= 500_000_000:
-                await self._safety_escalate_stop_sys(client)
-                self._latched_fault = "stop_incomplete"
-                self._motion_accepted = False
-                raise BackendCommandError("stop_incomplete")
-            await self._sleep(0.02)
+            await self._fail_unverified_stop(client)
+            if str(error) == "robot_disconnected":
+                raise BackendCommandError(
+                    "stop_unverified_disconnected"
+                ) from None
+            raise
+        except Exception:
+            await self._fail_unverified_stop(client)
+            raise BackendCommandError("stop_unverified") from None
 
-    async def _safety_escalate_stop_sys(self, client: LebaiClient) -> None:
+    def _latch_unverified_stop(self) -> None:
+        self._latched_fault = "stop_unverified"
+        self._motion_accepted = False
+        self._preflight_ready = False
+        self._pump.invalidate()
+        self._previous_sent_qd = None
+
+    async def _fail_unverified_stop(
+        self,
+        client: LebaiClientProtocol,
+        *,
+        preserve_fault: bool = False,
+    ) -> None:
+        if not preserve_fault:
+            self._latch_unverified_stop()
+        else:
+            self._motion_accepted = False
+            self._preflight_ready = False
+            self._pump.invalidate()
+            self._previous_sent_qd = None
+        await self._safety_escalate_stop_sys(client)
+
+    async def _safety_escalate_stop_sys(
+        self,
+        client: LebaiClientProtocol,
+    ) -> None:
         async with self._sdk_lock:
             try:
                 connected = await asyncio.wait_for(
@@ -284,10 +338,11 @@ class RealLebaiAdapter:
         if client is None:
             raise BackendCommandError("robot_disconnected")
         snapshot = await self._read_snapshot()
-        if snapshot.robot_state is not BackendState.IDLE:
-            raise BackendCommandError("home_requires_idle")
-        if snapshot.running_motion is not None:
-            raise BackendCommandError("home_motion_running")
+        preflight = self._preflight_from_snapshot(snapshot)
+        if not preflight.ready:
+            raise BackendCommandError(
+                f"preflight_not_ready:{preflight.reason}"
+            )
         if self._pump.has_pending:
             raise BackendCommandError("home_command_pending")
         self._pump.invalidate()
@@ -367,7 +422,7 @@ class RealLebaiAdapter:
             await self._sleep(0.02)
 
     async def get_state(self) -> RobotStateMessage:
-        if self._pump.fault is not None:
+        if self._pump.fault is not None and self._latched_fault is None:
             raise self._pump.fault
         snapshot = await self._read_snapshot()
         robot_state = (
@@ -391,6 +446,7 @@ class RealLebaiAdapter:
     async def preflight(self) -> BackendPreflight:
         snapshot = await self._read_snapshot()
         result = self._preflight_from_snapshot(snapshot)
+        self._preflight_ready = result.ready
         if (
             result.ready
             and self.settings.mode == "control"
@@ -406,7 +462,9 @@ class RealLebaiAdapter:
     ) -> BackendPreflight:
         tcp_matches = self._tcp_matches(snapshot.tcp_setting)
         reason: str | None = None
-        if snapshot.robot_state is not BackendState.IDLE:
+        if self._latched_fault is not None:
+            reason = self._latched_fault
+        elif snapshot.robot_state is not BackendState.IDLE:
             reason = "robot_not_idle"
         elif snapshot.running_motion is not None:
             reason = "motion_running"
@@ -437,9 +495,28 @@ class RealLebaiAdapter:
 
     async def _send_target(self, request: PvatRequest) -> None:
         snapshot = await self._read_snapshot()
+        if not self._pump.is_current(request.generation):
+            return
         client = self._client
         if client is None:
             raise BackendCommandError("robot_disconnected")
+        runtime_fault = self._runtime_motion_fault(snapshot)
+        if runtime_fault is not None:
+            self._latched_fault = runtime_fault
+            self._preflight_ready = False
+            self._motion_accepted = False
+            self._pump.invalidate()
+            self._previous_sent_qd = None
+            try:
+                await self.stop(StopReason.FAULT)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if self._latched_fault == runtime_fault:
+                    self._latched_fault = "stop_unverified"
+            if self._latched_fault == runtime_fault:
+                raise BackendCommandError(runtime_fault)
+            raise BackendCommandError(self._latched_fault or "stop_unverified")
         try:
             async with self._sdk_lock:
                 try:
@@ -542,12 +619,15 @@ class RealLebaiAdapter:
         client = self._client
         if client is None:
             raise BackendCommandError("robot_disconnected")
+        captured_ns = self._clock()
+        deadline_ns = captured_ns + self._snapshot_max_age_ns()
         latencies: dict[str, float] = {}
         async with self._sdk_lock:
             connected = await self._timed(
                 "is_connected",
                 client.is_connected,
                 latencies,
+                deadline_ns=deadline_ns,
             )
             if not connected:
                 raise BackendCommandError("robot_disconnected")
@@ -555,31 +635,37 @@ class RealLebaiAdapter:
                 "get_robot_state",
                 client.get_robot_state,
                 latencies,
+                deadline_ns=deadline_ns,
             )
             raw_estop = await self._timed(
                 "get_estop_reason",
                 client.get_estop_reason,
                 latencies,
+                deadline_ns=deadline_ns,
             )
             raw_kin = await self._timed(
                 "get_kin_data",
                 client.get_kin_data,
                 latencies,
+                deadline_ns=deadline_ns,
             )
             raw_tcp = await self._timed(
                 "get_tcp",
                 client.get_tcp,
                 latencies,
+                deadline_ns=deadline_ns,
             )
             raw_claw = await self._timed(
                 "get_claw",
                 client.get_claw,
                 latencies,
+                deadline_ns=deadline_ns,
             )
             raw_running = await self._timed(
                 "get_running_motion",
                 client.get_running_motion,
                 latencies,
+                deadline_ns=deadline_ns,
             )
         if not isinstance(raw_kin, Mapping):
             raise BackendCommandError("invalid_sdk_kin_data")
@@ -588,7 +674,7 @@ class RealLebaiAdapter:
         if not isinstance(raw_claw, Mapping):
             raise BackendCommandError("invalid_sdk_claw")
         snapshot = LebaiSnapshot(
-            captured_ns=self._clock(),
+            captured_ns=captured_ns,
             robot_state=map_robot_state(raw_state),
             estop=estop_fault(raw_estop),
             actual_q=joint_vector(
@@ -632,11 +718,27 @@ class RealLebaiAdapter:
         name: str,
         operation: Callable[[], Awaitable[Any]],
         latencies: dict[str, float],
+        *,
+        deadline_ns: int | None = None,
     ) -> Any:
         started = self._clock()
+        deadline_limited = False
         try:
-            return await asyncio.wait_for(operation(), timeout=0.20)
+            timeout_s = 0.20
+            if deadline_ns is not None:
+                remaining_ns = deadline_ns - self._clock()
+                if remaining_ns <= 0:
+                    raise BackendCommandError("robot_state_stale")
+                remaining_s = remaining_ns / 1_000_000_000
+                deadline_limited = remaining_s < timeout_s
+                timeout_s = min(timeout_s, remaining_s)
+            result = await asyncio.wait_for(operation(), timeout=timeout_s)
+            if deadline_ns is not None and self._clock() > deadline_ns:
+                raise BackendCommandError("robot_state_stale")
+            return result
         except TimeoutError:
+            if deadline_limited:
+                raise BackendCommandError("robot_state_stale") from None
             raise BackendCommandError(f"sdk_timeout:{name}") from None
         except BackendCommandError:
             raise
@@ -644,6 +746,34 @@ class RealLebaiAdapter:
             raise BackendCommandError(f"sdk_call_failed:{name}") from None
         finally:
             latencies[name] = max(0.0, (self._clock() - started) / 1_000_000)
+
+    def _snapshot_max_age_ns(self) -> int:
+        return int(
+            (1 / self.settings.control.state_hz + 0.04) * 1_000_000_000
+        )
+
+    def _runtime_motion_fault(self, snapshot: LebaiSnapshot) -> str | None:
+        if snapshot.estop is not None:
+            return snapshot.estop
+        if snapshot.robot_state not in {BackendState.IDLE, BackendState.MOVING}:
+            return f"robot_state_{snapshot.robot_state.value.lower()}"
+        return None
+
+    def _motion_boundary_fault(self, snapshot: LebaiSnapshot) -> str | None:
+        if self._latched_fault is not None:
+            return self._latched_fault
+        runtime_fault = self._runtime_motion_fault(snapshot)
+        if runtime_fault is not None:
+            return runtime_fault
+        if not self._tcp_matches(snapshot.tcp_setting):
+            return "tcp_mismatch"
+        if not self._joints_inside_limits(snapshot.actual_q):
+            return "joint_outside_soft_limits"
+        if not self._tcp_inside_startup_envelope(snapshot.actual_tcp):
+            return "tcp_outside_startup_envelope"
+        if not self._capabilities.control_ready:
+            return "sdk_capability_missing"
+        return None
 
     async def _emit_kinematics(self, snapshot: LebaiSnapshot) -> None:
         if self._event_callback is None:

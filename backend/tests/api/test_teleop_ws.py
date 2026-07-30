@@ -521,6 +521,58 @@ async def test_state_sender_sleeps_exactly_twenty_ms(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend", "runtime", "expected_period_s"),
+    [
+        ("simulator", "SIMULATOR", 0.02),
+        ("lebai", "LEBAI", 0.04),
+        ("lebai", "LEBAI_FAKE", 0.04),
+    ],
+)
+async def test_state_sender_selects_runtime_configured_state_rate(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    runtime: str,
+    expected_period_s: float,
+) -> None:
+    from app.api import teleop_ws
+
+    sleeps: list[float] = []
+    settings = SimpleNamespace(
+        backend=backend,
+        state_hz=50,
+        lebai=SimpleNamespace(control=SimpleNamespace(state_hz=25)),
+    )
+
+    class FakeWebSocket:
+        app = SimpleNamespace(
+            state=SimpleNamespace(settings=settings, runtime_backend=runtime)
+        )
+
+        async def send_json(self, _payload: dict[str, object]) -> None:
+            return None
+
+    class FakeMessage:
+        def model_dump(self, *, mode: str) -> dict[str, object]:
+            return {"type": "robot_state", "mode": mode}
+
+    class FakeControl:
+        async def state_message(self) -> FakeMessage:
+            return FakeMessage()
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(teleop_ws.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await teleop_ws.state_sender(FakeWebSocket(), FakeControl())
+
+    assert sleeps == [expected_period_s]
+
+
+@pytest.mark.asyncio
 async def test_sender_failure_cancels_receiver_and_propagates_after_owner_cleanup() -> None:
     from app.api.teleop_ws import teleop_websocket
 

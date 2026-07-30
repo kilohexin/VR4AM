@@ -144,6 +144,7 @@ class RobotControl:
         self._consecutive_overruns = 0
         self._pending_stop_completion = False
         self._hard_stop_completion = False
+        self._stop_unverified = False
         self._fault: str | None = None
         self._constraint: ConstraintKind | None = None
         self._constraint_valid_since_ns: int | None = None
@@ -167,7 +168,10 @@ class RobotControl:
         return self._control_generation
 
     async def connect(self) -> None:
+        state = await self.backend.get_state()
         self.machine.connect()
+        self._last_gripper_sent = state.gripper
+        self._last_gripper_sent_ns = self.clock.now_ns()
         if self._fault is not None:
             if self._pending_stop_completion:
                 self.machine.fault()
@@ -237,14 +241,25 @@ class RobotControl:
             self._latch_recording_fault()
             raise RuntimeError("arm_blocked_by_preflight:recording_unavailable")
         self.machine.arm()
+        # Connecting only observes the gripper; it does not issue a command.
+        # Make the first authorized delta eligible immediately after Arm.
+        self._last_gripper_sent_ns = None
 
     async def disarm(self) -> None:
         if self.machine.mode in {TeleopMode.STALE, TeleopMode.FAULT}:
             return
         if self.machine.mode == TeleopMode.ACTIVE:
             self.mapper.clear()
-        stopped_with_recording = await self._stop_backend(StopReason.GRIP_RELEASED)
-        self._clear_constraint()
+        try:
+            stopped_with_recording = await self._stop_backend(
+                StopReason.GRIP_RELEASED
+            )
+        finally:
+            self.mapper.clear()
+            self.last_target = None
+            self._clear_constraint()
+            if self._stop_unverified:
+                self.machine.fault()
         if not stopped_with_recording:
             return
         recorded = await self._record_critical(
@@ -271,10 +286,54 @@ class RobotControl:
         try:
             try:
                 await self._stop_backend(StopReason.HOME)
+                if (
+                    self._control_generation
+                    != home_episode.control_generation + 1
+                    or self._recovery_episode().session_id
+                    != home_episode.session_id
+                ):
+                    self._lock_after_home_failure()
+                    return HomeResult(
+                        False,
+                        "not_stopped",
+                        "Control state changed while stopping; retry Home.",
+                    )
+                home_episode = self._recovery_episode()
                 idle_rejection = await self._wait_for_home_idle()
                 if idle_rejection is not None:
                     self._lock_after_home_failure()
                     return idle_rejection
+
+                interrupted = self._home_snapshot_rejection(home_episode)
+                if interrupted is not None:
+                    self._lock_after_home_failure()
+                    return interrupted
+
+                preflight = await self.backend.preflight()
+                recorded = await self._record_critical(
+                    "preflight_result",
+                    {
+                        "ready": preflight.ready,
+                        "reason": preflight.reason,
+                        "robot_state": preflight.robot_state.value,
+                        "tcp_matches": preflight.tcp_matches,
+                        "capabilities": list(preflight.capabilities),
+                    },
+                )
+                if not recorded:
+                    self._latch_recording_fault()
+                    return HomeResult(
+                        False,
+                        "home_failed",
+                        "Home preflight could not be recorded safely.",
+                    )
+                if not preflight.ready:
+                    self._lock_after_home_failure()
+                    return HomeResult(
+                        False,
+                        "home_failed",
+                        f"Home preflight failed: {preflight.reason}.",
+                    )
 
                 interrupted = self._home_snapshot_rejection(home_episode)
                 if interrupted is not None:
@@ -352,7 +411,12 @@ class RobotControl:
             return backend_rejection
         self._recovery_phase = "stopping"
         try:
+            expected_stop_episode = RecoveryEpisode(
+                control_generation=reset_episode.control_generation + 1,
+                session_id=reset_episode.session_id,
+            )
             await self._stop_backend(StopReason.FAULT)
+            reset_episode = expected_stop_episode
         except Exception:
             self._recovery_phase = None
             return FaultResetResult(
@@ -412,10 +476,22 @@ class RobotControl:
         self._disconnect_stop_pending_frame = False
         self._recovery_phase = None
         self._advance_control_generation()
-        await self._stop_backend(StopReason.DISCONNECT)
+        stopped_with_recording = False
+        try:
+            stopped_with_recording = await self._stop_backend(
+                StopReason.DISCONNECT
+            )
+        finally:
+            self.mapper.clear()
+            self.filter.clear()
+            self.limiter.clear()
+            self.last_target = None
+            self._clear_constraint()
+            if self._stop_unverified:
+                self.machine.fault()
+        if not stopped_with_recording:
+            return
         self._disconnect_stop_pending_frame = True
-        self.mapper.clear()
-        self._clear_constraint()
         if self._fault is None:
             self._clear_stop_episode()
         self.machine.disconnect()
@@ -520,6 +596,7 @@ class RobotControl:
                 self._fault is None
                 and not self._loop_failed
                 and not self._shutdown_started
+                and self.machine.mode in {TeleopMode.ARMED, TeleopMode.ACTIVE}
             ):
                 await self._send_latest_gripper(received.frame.right.trigger, now_ns)
             previous_mode = self.machine.mode
@@ -609,6 +686,8 @@ class RobotControl:
 
     async def state_message(self) -> RobotStateMessage:
         state = await self.backend.get_state()
+        if state.fault is not None and self._fault is None:
+            self._latch_backend_fault(state.fault)
         server_mono_ns = self.clock.now_ns()
         received = self.latest.snapshot()
         sample_age_ms = (
@@ -622,7 +701,7 @@ class RobotControl:
                 "ack_seq": self.last_seq,
                 "mode": self.machine.mode,
                 "sample_age_ms": sample_age_ms,
-                "fault": self._fault,
+                "fault": self._fault or state.fault,
                 "constraint": self._constraint,
                 "recovery_phase": self._recovery_phase,
             }
@@ -635,7 +714,11 @@ class RobotControl:
             TeleopMode.STALE,
             TeleopMode.FAULT,
         } and (
-            self._hard_stop_completion or state.robot_state != BackendState.MOVING
+            not self._stop_unverified
+            and (
+                self._hard_stop_completion
+                or state.robot_state is BackendState.IDLE
+            )
         ):
             self._pending_stop_completion = False
             self._hard_stop_completion = False
@@ -643,15 +726,41 @@ class RobotControl:
             self._advance_control_generation()
         return message
 
+    async def command_gripper(self, value: float) -> None:
+        if (
+            self.machine.mode not in {TeleopMode.ARMED, TeleopMode.ACTIVE}
+            or self._fault is not None
+            or self._loop_failed
+            or self._shutdown_started
+        ):
+            raise RuntimeError("gripper_command_requires_armed")
+        preflight = await self.backend.preflight()
+        recorded = await self._record_critical(
+            "preflight_result",
+            {
+                "ready": preflight.ready,
+                "reason": preflight.reason,
+                "robot_state": preflight.robot_state.value,
+                "tcp_matches": preflight.tcp_matches,
+                "capabilities": list(preflight.capabilities),
+            },
+        )
+        if not recorded:
+            self._latch_recording_fault()
+            raise RuntimeError("gripper_command_preflight_failed:recording_unavailable")
+        if not preflight.ready:
+            raise RuntimeError(
+                f"gripper_command_preflight_failed:{preflight.reason}"
+            )
+        await self.backend.set_gripper(value)
+        self._last_gripper_sent = value
+        self._last_gripper_sent_ns = self.clock.now_ns()
+
     async def _send_latest_gripper(self, value: float, now_ns: int) -> None:
         if self._last_gripper_sent is None:
             await self.backend.set_gripper(value)
             self._last_gripper_sent = value
             self._last_gripper_sent_ns = now_ns
-            return
-        if self._last_gripper_sent_ns is None:
-            return
-        if now_ns - self._last_gripper_sent_ns < GRIPPER_PERIOD_NS:
             return
         delta = abs(value - self._last_gripper_sent)
         if delta < GRIPPER_MIN_DELTA or math.isclose(
@@ -659,6 +768,11 @@ class RobotControl:
             GRIPPER_MIN_DELTA,
             rel_tol=0.0,
             abs_tol=1e-12,
+        ):
+            return
+        if (
+            self._last_gripper_sent_ns is not None
+            and now_ns - self._last_gripper_sent_ns < GRIPPER_PERIOD_NS
         ):
             return
         await self.backend.set_gripper(value)
@@ -678,13 +792,21 @@ class RobotControl:
         return True
 
     async def _stop_backend(self, reason: StopReason) -> bool:
+        self._advance_control_generation()
         recorded = await self._record_critical(
             "stop_requested",
             {"reason": reason.value},
         )
         try:
             await self.backend.stop(reason)
-        except BaseException:
+        except BaseException as error:
+            fault = (
+                "stop_incomplete"
+                if isinstance(error, BackendCommandError)
+                and str(error) == "stop_incomplete"
+                else "stop_unverified"
+            )
+            self._latch_stop_unverified(fault)
             if not recorded:
                 self._latch_recording_fault()
             raise
@@ -721,6 +843,44 @@ class RobotControl:
         if changed:
             self._advance_control_generation()
 
+    def _latch_stop_unverified(self, fault: str = "stop_unverified") -> None:
+        changed = not self._stop_unverified or self._fault != fault
+        self._stop_unverified = True
+        self._fault = fault
+        self.mapper.clear()
+        self.filter.clear()
+        self.limiter.clear()
+        self.last_target = None
+        self._clear_constraint()
+        self._recovery_phase = None
+        if self.machine.mode is not TeleopMode.FAULT:
+            self.machine.fault()
+            changed = True
+        if not self._pending_stop_completion:
+            self._pending_stop_completion = True
+            changed = True
+        self._hard_stop_completion = False
+        if changed:
+            self._advance_control_generation()
+
+    def _latch_backend_fault(self, fault: str) -> None:
+        changed = self._fault != fault or self.machine.mode is not TeleopMode.FAULT
+        self._fault = fault
+        self._stop_unverified = True
+        self.mapper.clear()
+        self.filter.clear()
+        self.limiter.clear()
+        self.last_target = None
+        self._clear_constraint()
+        self._recovery_phase = None
+        self.machine.fault()
+        if not self._pending_stop_completion:
+            self._pending_stop_completion = True
+            changed = True
+        self._hard_stop_completion = False
+        if changed:
+            self._advance_control_generation()
+
     async def _safe_stop(self, reason: StopReason) -> None:
         if reason == StopReason.STALE:
             if self.machine.mode == TeleopMode.FAULT:
@@ -749,7 +909,12 @@ class RobotControl:
                 "robot_fault",
                 {"reason": fault},
             )
-            await self._stop_backend(StopReason.FAULT)
+            try:
+                await self._stop_backend(StopReason.FAULT)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
         if not self._pending_stop_completion:
             self._pending_stop_completion = True
             self._advance_control_generation()
@@ -764,6 +929,7 @@ class RobotControl:
         self._hard_stop_completion = False
         if clear_fault:
             self._fault = None
+            self._stop_unverified = False
         if changed:
             self._advance_control_generation()
 

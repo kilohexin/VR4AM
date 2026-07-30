@@ -35,8 +35,14 @@ async def state_sender(
     send_lock: asyncio.Lock | None = None,
 ) -> None:
     send_lock = send_lock or asyncio.Lock()
-    settings = getattr(getattr(websocket, "app", None), "state", None)
-    state_hz = getattr(getattr(settings, "settings", None), "state_hz", 50)
+    app_state = getattr(getattr(websocket, "app", None), "state", None)
+    settings = getattr(app_state, "settings", None)
+    state_hz = getattr(settings, "state_hz", 50)
+    if (
+        getattr(settings, "backend", None) == "lebai"
+        and getattr(settings, "lebai", None) is not None
+    ):
+        state_hz = settings.lebai.control.state_hz
     period_s = 1.0 / state_hz
     while True:
         async with send_lock:

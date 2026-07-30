@@ -69,7 +69,8 @@ def test_translation_result_reports_motion_verification_failure(
 
     assert result.passed is False
     assert len(result.failures) == 6
-    assert all("magnitude" in failure for failure in result.failures)
+    assert sum("magnitude" in failure for failure in result.failures) == 3
+    assert sum("wrong_direction" in failure for failure in result.failures) == 3
 
 
 def test_fault_result_derives_verified_count_from_successful_cases(
@@ -113,22 +114,34 @@ def test_full_write_log_quiescence_detects_any_late_write() -> None:
     )
 
 
-def test_motion_quality_requires_commanded_axis_dominance() -> None:
+def test_motion_quality_uses_requested_magnitude_direction_and_overshoot() -> None:
     from app.acceptance.fake_lebai import _motion_quality_failures
 
-    translation_failures = _motion_quality_failures(
+    microscopic = _motion_quality_failures(
         TranslationAction("x", 0.005),
         commanded=6e-6,
-        uncommanded=4e-7,
+        uncommanded=0.0,
     )
-    rotation_failures = _motion_quality_failures(
+    converged = _motion_quality_failures(
+        TranslationAction("x", 0.005),
+        commanded=0.0048,
+        uncommanded=1e-5,
+    )
+    overshoot = _motion_quality_failures(
+        TranslationAction("x", 0.005),
+        commanded=0.006,
+        uncommanded=0.0,
+    )
+    wrong_direction = _motion_quality_failures(
         RotationAction("yaw", 2.0),
-        commanded=math.radians(0.001),
-        uncommanded=math.radians(0.00003),
+        commanded=math.radians(-1.9),
+        uncommanded=0.0,
     )
 
-    assert translation_failures == ["commanded_axis_not_dominant"]
-    assert rotation_failures == ["commanded_axis_not_dominant"]
+    assert microscopic == ["magnitude_out_of_band"]
+    assert converged == []
+    assert overshoot == ["magnitude_out_of_band"]
+    assert wrong_direction == ["wrong_direction"]
 
 
 def test_harness_disconnects_when_control_connect_fails(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 from pathlib import Path
 
@@ -133,6 +134,35 @@ async def test_each_commissioning_action_uses_one_write_category(
     expected_methods: set[str],
 ) -> None:
     client = FakeLebaiClient.idle()
+    if isinstance(action, (TranslationAction, RotationAction)):
+        requested_pose: dict[str, float] | None = None
+
+        async def converging_ik(
+            pose: dict[str, float],
+            joints: list[float],
+        ) -> object:
+            nonlocal requested_pose
+            requested_pose = dict(pose)
+            client.read_calls.append("kinematics_inverse")
+            client.ik_calls.append((dict(pose), list(joints)))
+            return list(joints)
+
+        original_move_pvat = client.move_pvat
+
+        async def converging_move_pvat(
+            p: list[float],
+            v: list[float],
+            a: list[float],
+            t: float,
+        ) -> object:
+            result = await original_move_pvat(p, v, a, t)
+            assert requested_pose is not None
+            client.kin_data["actual_tcp_pose"] = dict(requested_pose)
+            return result
+
+        client.kinematics_inverse = converging_ik  # type: ignore[method-assign]
+        client.move_pvat = converging_move_pvat  # type: ignore[method-assign]
+
     monkeypatch.setattr(
         "app.commissioning.smoke.COMMISSIONING_LOG_ROOT",
         tmp_path / "logs",
@@ -163,3 +193,89 @@ async def test_each_commissioning_action_uses_one_write_category(
     assert all(call[1] <= 30 for call in claw_calls)
     if action == GripperAction("close"):
         assert claw_calls == [("set_claw", 30, 0)]
+
+
+@pytest.mark.asyncio
+async def test_commissioning_motion_times_out_without_authoritative_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    monkeypatch.setattr(
+        "app.commissioning.smoke.COMMISSIONING_LOG_ROOT",
+        tmp_path / "logs",
+    )
+    monkeypatch.setattr(
+        "app.commissioning.smoke.COMMISSIONING_MOTION_TIMEOUT_S",
+        0.06,
+        raising=False,
+    )
+
+    real_sleep = asyncio.sleep
+
+    async def no_wait(_delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("app.commissioning.smoke.asyncio.sleep", no_wait)
+
+    with pytest.raises(RuntimeError, match="^smoke_motion_timeout$"):
+        await run_smoke(
+            SmokeOptions(
+                config_path=_control_config(tmp_path),
+                action=TranslationAction("x", 0.005),
+                confirmation=REAL_ROBOT_CONFIRMATION,
+            ),
+            AsyncMock(return_value=client),
+        )
+
+    methods = [call[0] for call in client.write_calls]
+    assert "move_pvat" in methods
+    assert "stop_move" in methods
+
+
+@pytest.mark.asyncio
+async def test_commissioning_motion_stops_on_authoritative_overshoot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    original_move_pvat = client.move_pvat
+
+    async def overshooting_move_pvat(
+        p: list[float],
+        v: list[float],
+        a: list[float],
+        t: float,
+    ) -> object:
+        result = await original_move_pvat(p, v, a, t)
+        actual_tcp = dict(client.kin_data["actual_tcp_pose"])
+        actual_tcp["x"] = 0.306
+        client.kin_data["actual_tcp_pose"] = actual_tcp
+        return result
+
+    client.move_pvat = overshooting_move_pvat  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "app.commissioning.smoke.COMMISSIONING_LOG_ROOT",
+        tmp_path / "logs",
+    )
+
+    real_sleep = asyncio.sleep
+
+    async def no_wait(_delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("app.commissioning.smoke.asyncio.sleep", no_wait)
+
+    with pytest.raises(RuntimeError, match="^smoke_motion_overshoot$"):
+        await run_smoke(
+            SmokeOptions(
+                config_path=_control_config(tmp_path),
+                action=TranslationAction("x", 0.005),
+                confirmation=REAL_ROBOT_CONFIRMATION,
+            ),
+            AsyncMock(return_value=client),
+        )
+
+    methods = [call[0] for call in client.write_calls]
+    stop_index = methods.index("stop_move")
+    assert "move_pvat" not in methods[stop_index + 1 :]

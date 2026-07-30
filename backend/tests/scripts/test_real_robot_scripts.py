@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -220,11 +221,46 @@ async def test_smoke_rejects_non_idle_robot_before_any_write(
 
 
 @pytest.mark.asyncio
-async def test_smoke_runs_one_pvat_move_and_verified_stop(
+async def test_smoke_runs_until_authoritative_target_and_verified_stop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = FakeLebaiClient.idle()
+    requested_pose: dict[str, float] | None = None
+
+    async def converging_ik(
+        pose: dict[str, float],
+        joints: list[float],
+    ) -> object:
+        nonlocal requested_pose
+        requested_pose = dict(pose)
+        client.read_calls.append("kinematics_inverse")
+        client.ik_calls.append((dict(pose), list(joints)))
+        return list(joints)
+
+    original_move_pvat = client.move_pvat
+
+    async def converging_move_pvat(
+        p: list[float],
+        v: list[float],
+        a: list[float],
+        t: float,
+    ) -> object:
+        result = await original_move_pvat(p, v, a, t)
+        assert requested_pose is not None
+        actual_pose = dict(requested_pose)
+        actual_pose["z"] = min(float(actual_pose["z"]), 0.405)
+        client.kin_data["actual_tcp_pose"] = actual_pose
+        return result
+
+    client.kinematics_inverse = converging_ik  # type: ignore[method-assign]
+    client.move_pvat = converging_move_pvat  # type: ignore[method-assign]
+    real_sleep = asyncio.sleep
+
+    async def no_wait(_delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("app.commissioning.smoke.asyncio.sleep", no_wait)
     options = parse_smoke_args(
         [
             "translate",

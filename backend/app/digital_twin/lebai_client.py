@@ -53,12 +53,15 @@ class DigitalTwinLebaiClient:
         *,
         clock: Callable[[], int] = time.monotonic_ns,
         faults: DigitalTwinFaults | None = None,
+        initial_q: object | None = None,
     ) -> None:
         self.settings = settings
         self.model = LM3Model()
         self._clock = clock
         self._faults = faults or DigitalTwinFaults()
-        self._q = tuple(float(value) for value in settings.home_q)
+        self._q = _joint_tuple(
+            settings.home_q if initial_q is None else initial_q
+        )
         self._qd = (0.0,) * 6
         self._qdd = (0.0,) * 6
         self._motion: _Motion | None = None
@@ -74,8 +77,14 @@ class DigitalTwinLebaiClient:
         *,
         clock: Callable[[], int] = time.monotonic_ns,
         faults: DigitalTwinFaults | None = None,
+        initial_q: object | None = None,
     ) -> "DigitalTwinLebaiClient":
-        return cls(settings, clock=clock, faults=faults)
+        return cls(
+            settings,
+            clock=clock,
+            faults=faults,
+            initial_q=initial_q,
+        )
 
     def set_faults(self, faults: DigitalTwinFaults) -> None:
         self._faults = faults
@@ -161,7 +170,10 @@ class DigitalTwinLebaiClient:
             pose_from_lebai(pose),
             np.asarray(joints, dtype=float),
             self.model,
-            dt=1 / self.settings.control.pvat_send_hz,
+            # Keep the fake SDK's local IK step below the adapter's joint-step
+            # ceiling with margin.  Using the slower PVAT cadence here can
+            # manufacture a joint jump for an otherwise valid TCP command.
+            dt=0.5 / self.settings.control.loop_hz,
         )
         return list(result.q)
 

@@ -28,19 +28,33 @@ from app.schemas.messages import RuntimeBackend
 from app.timebase import MonotonicClock
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-def build_recorder(settings: Settings) -> RecorderSink:
+
+
+def build_recorder(
+    settings: Settings,
+    runtime_backend: RuntimeBackend | None = None,
+) -> RecorderSink:
     if settings.backend == "simulator":
         return NoopRecorder()
     if settings.lebai is None:
         raise RuntimeError("missing_lebai_settings")
+    runtime = runtime_backend or "LEBAI"
+    metadata: dict[str, object] = {
+        "backend": runtime,
+        "real_robot_mode": settings.lebai.mode,
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+    }
+    if runtime == "LEBAI_FAKE":
+        metadata.update(
+            {
+                "runtime": "DIGITAL_TWIN",
+                "hardware_verified": False,
+            }
+        )
     return CommissioningRecorder(
         REPOSITORY_ROOT / "logs" / "commissioning",
-        metadata={
-            "backend": "LEBAI",
-            "real_robot_mode": settings.lebai.mode,
-            "python_version": platform.python_version(),
-            "platform": platform.platform(),
-        },
+        metadata=metadata,
     )
 
 
@@ -132,7 +146,10 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         diagnostics = DiagnosticsStore()
-        recorder = DiagnosticsRecorder(build_recorder(runtime_settings), diagnostics)
+        recorder = DiagnosticsRecorder(
+            build_recorder(runtime_settings, runtime_backend),
+            diagnostics,
+        )
         backend = build_backend(
             runtime_settings,
             recorder,

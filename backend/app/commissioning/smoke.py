@@ -42,6 +42,9 @@ COMMISSIONING_LOG_ROOT = (
 )
 _IDENTITY_Q = (0.0, 0.0, 0.0, 1.0)
 _ORIGIN = (0.0, 0.0, 0.0)
+COMMISSIONING_MOTION_TIMEOUT_S = 4.0
+TRANSLATION_TOLERANCE_M = 0.0005
+ROTATION_TOLERANCE_DEG = 0.2
 
 
 def parse_smoke_args(argv: Sequence[str] | None = None) -> SmokeOptions:
@@ -223,43 +226,114 @@ async def _run_motion_action(
     )
     await control.tick()
 
+    if settings.lebai is None:
+        raise RuntimeError("missing_lebai_settings")
+    sequence = 3
+    try:
+        if isinstance(action, (TranslationAction, RotationAction)):
+            initial = await control.backend.get_state()
+            target_frame = _commissioning_target_frame(
+                action,
+                settings,
+                trigger=observed_trigger,
+            )
+            period_s = 1 / settings.lebai.control.loop_hz
+            maximum_frames = max(
+                1,
+                math.ceil(COMMISSIONING_MOTION_TIMEOUT_S / period_s),
+            )
+            reached = False
+            for _ in range(maximum_frames):
+                latest.publish(
+                    target_frame.model_copy(
+                        update={
+                            "seq": sequence,
+                            "client_mono_ms": float(sequence),
+                        }
+                    ),
+                    clock.now_ns(),
+                )
+                await control.tick()
+                sequence += 1
+                await asyncio.sleep(period_s)
+                current = await control.backend.get_state()
+                displacement = _authoritative_action_displacement(
+                    initial,
+                    current,
+                    action,
+                )
+                requested, tolerance = _requested_displacement(action)
+                signed_progress = math.copysign(1.0, requested) * displacement
+                if signed_progress < -tolerance:
+                    raise RuntimeError("smoke_motion_wrong_direction")
+                if signed_progress > abs(requested) + tolerance:
+                    raise RuntimeError("smoke_motion_overshoot")
+                if abs(displacement - requested) <= tolerance:
+                    reached = True
+                    break
+            if not reached:
+                raise RuntimeError("smoke_motion_timeout")
+        else:
+            await asyncio.sleep(1 / settings.lebai.gripper.command_hz)
+            trigger = 0.0 if action.target == "open" else 1.0
+            await control.command_gripper(trigger)
+            sequence += 1
+    finally:
+        latest.publish(
+            _frame(sequence, grip=False, trigger=observed_trigger),
+            clock.now_ns(),
+        )
+        await control.tick()
+        await control.disarm()
+
+
+def _commissioning_target_frame(
+    action: TranslationAction | RotationAction,
+    settings: Settings,
+    *,
+    trigger: float,
+) -> VRFrame:
+    if settings.lebai is None:
+        raise RuntimeError("missing_lebai_settings")
     if isinstance(action, TranslationAction):
-        if settings.lebai is None:
-            raise RuntimeError("missing_lebai_settings")
         hand_distance = action.distance_m / settings.lebai.control.translation_scale
         offset = [0.0, 0.0, 0.0]
         offset[{"x": 0, "y": 1, "z": 2}[action.axis]] = hand_distance
-        frame = _frame(3, grip=True, p=tuple(offset), trigger=observed_trigger)
-    elif isinstance(action, RotationAction):
-        controller_axis = {"roll": "x", "pitch": "y", "yaw": "z"}[action.axis]
-        q = tuple(
-            float(value)
-            for value in Rotation.from_euler(
-                controller_axis, action.angle_deg, degrees=True
-            ).as_quat()
-        )
-        frame = _frame(3, grip=True, q=q, trigger=observed_trigger)
-    else:
-        if settings.lebai is None:
-            raise RuntimeError("missing_lebai_settings")
-        await asyncio.sleep(1 / settings.lebai.gripper.command_hz)
-        trigger = 0.0 if action.target == "open" else 1.0
-        frame = _frame(3, grip=True, trigger=trigger)
-    latest.publish(frame, clock.now_ns())
-    await control.tick()
-
-    if isinstance(action, (TranslationAction, RotationAction)):
-        if settings.lebai is None:
-            raise RuntimeError("missing_lebai_settings")
-        await asyncio.sleep(
-            settings.lebai.control.pvat_horizon_s
-            + 1 / settings.lebai.control.pvat_send_hz
-        )
-    latest.publish(
-        _frame(4, grip=False, trigger=observed_trigger),
-        clock.now_ns(),
+        return _frame(0, grip=True, p=tuple(offset), trigger=trigger)
+    controller_axis = {"roll": "x", "pitch": "y", "yaw": "z"}[action.axis]
+    rotation = tuple(
+        float(value)
+        for value in Rotation.from_euler(
+            controller_axis,
+            action.angle_deg,
+            degrees=True,
+        ).as_quat()
     )
-    await control.tick()
+    return _frame(0, grip=True, q=rotation, trigger=trigger)
+
+
+def _authoritative_action_displacement(
+    initial: RobotStateMessage,
+    current: RobotStateMessage,
+    action: TranslationAction | RotationAction,
+) -> float:
+    if isinstance(action, TranslationAction):
+        index = {"x": 0, "y": 1, "z": 2}[action.axis]
+        return current.actual_tcp.p[index] - initial.actual_tcp.p[index]
+    relative = (
+        Rotation.from_quat(current.actual_tcp.q)
+        * Rotation.from_quat(initial.actual_tcp.q).inv()
+    ).as_rotvec()
+    index = {"roll": 0, "pitch": 1, "yaw": 2}[action.axis]
+    return math.degrees(float(relative[index]))
+
+
+def _requested_displacement(
+    action: TranslationAction | RotationAction,
+) -> tuple[float, float]:
+    if isinstance(action, TranslationAction):
+        return action.distance_m, TRANSLATION_TOLERANCE_M
+    return action.angle_deg, ROTATION_TOLERANCE_DEG
 
 
 async def run_smoke(

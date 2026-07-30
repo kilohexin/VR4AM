@@ -73,7 +73,10 @@ def solve_ik(
     target: Pose, seed_q: Sequence[float], model: LM3Model, max_iterations: int = 30
 ) -> IKResult:
     q_ref = np.asarray(model.home_q)
+    lower_q = q_ref - model.joint_window_rad
+    upper_q = q_ref + model.joint_window_rad
     q = np.asarray(seed_q, dtype=float).copy()
+    projected_to_joint_window = False
     if q.shape != (6,):
         raise IKError("invalid_joint_count")
     if not np.all(np.isfinite(q)):
@@ -111,7 +114,13 @@ def solve_ik(
             raise IKError("ik_singular") from exc
         if not np.all(np.isfinite(candidate)):
             raise IKError("ik_singular")
-        if np.any(np.abs(candidate - q_ref) > model.joint_window_rad):
-            raise IKError("joint_safety_window")
+        if np.any(candidate < lower_q) or np.any(candidate > upper_q):
+            projected_to_joint_window = True
+            candidate = np.clip(candidate, lower_q, upper_q)
         q = candidate
+    at_joint_boundary = np.any(
+        np.isclose(np.abs(q - q_ref), model.joint_window_rad, atol=1e-8, rtol=0.0)
+    )
+    if projected_to_joint_window and at_joint_boundary:
+        raise IKError("joint_safety_window")
     raise IKError("ik_unreachable")

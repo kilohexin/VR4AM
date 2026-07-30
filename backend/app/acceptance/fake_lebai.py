@@ -16,6 +16,11 @@ from app.commissioning.actions import (
     StopAction,
     TranslationAction,
 )
+from app.commissioning.smoke import (
+    COMMISSIONING_MOTION_TIMEOUT_S,
+    ROTATION_TOLERANCE_DEG,
+    TRANSLATION_TOLERANCE_M,
+)
 from app.config import Settings
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.digital_twin.lebai_client import (
@@ -36,15 +41,11 @@ from app.schemas.messages import (
     VRFrame,
 )
 
-# The configured first limiter tick is 40 um translation and 0.0002 rad
-# rotation. One LM3 IK/PVAT servo step deterministically realizes the narrower
-# authoritative-state bands below; cross-axis drift remains far below them.
-TRANSLATION_ACTUAL_MIN_M = 4e-6
-TRANSLATION_ACTUAL_MAX_M = 8e-6
 TRANSLATION_DOMINANCE_RATIO = 20.0
-ROTATION_ACTUAL_MIN_DEG = 0.0007
-ROTATION_ACTUAL_MAX_DEG = 0.0013
 ROTATION_DOMINANCE_RATIO = 50.0
+# Exercise all signed Cartesian axes away from the LM3 model's nearly singular
+# nominal Home pose while staying inside the configured soft joint envelope.
+ACCEPTANCE_START_Q = (0.1, -0.3, 2.0, -0.3, 1.5, -1.2)
 T = TypeVar("T")
 
 
@@ -105,6 +106,7 @@ async def fake_real_harness() -> AsyncIterator[Harness]:
     client = DigitalTwinLebaiClient.idle(
         settings.lebai,
         clock=clock.now_ns,
+        initial_q=ACCEPTANCE_START_Q,
     )
 
     async def factory(_ip: str) -> LebaiClientProtocol:
@@ -314,17 +316,23 @@ def _motion_quality_failures(
 ) -> list[str]:
     magnitude = abs(commanded)
     if isinstance(action, TranslationAction):
-        minimum = TRANSLATION_ACTUAL_MIN_M
-        maximum = TRANSLATION_ACTUAL_MAX_M
+        requested = abs(action.distance_m)
+        tolerance = TRANSLATION_TOLERANCE_M
         dominance = TRANSLATION_DOMINANCE_RATIO
     else:
         magnitude = math.degrees(magnitude)
         uncommanded = math.degrees(uncommanded)
-        minimum = ROTATION_ACTUAL_MIN_DEG
-        maximum = ROTATION_ACTUAL_MAX_DEG
+        requested = abs(action.angle_deg)
+        tolerance = ROTATION_TOLERANCE_DEG
         dominance = ROTATION_DOMINANCE_RATIO
     failures: list[str] = []
-    if not minimum <= magnitude <= maximum:
+    if commanded * (
+        action.distance_m
+        if isinstance(action, TranslationAction)
+        else math.radians(action.angle_deg)
+    ) <= 0:
+        failures.append("wrong_direction")
+    elif not requested - tolerance <= magnitude <= requested + tolerance:
         failures.append("magnitude_out_of_band")
     if magnitude < dominance * uncommanded:
         failures.append("commanded_axis_not_dominant")
@@ -338,64 +346,90 @@ async def _run_signed_motion(
         before = await _prepare_active(harness)
         initial_q = np.asarray(before.actual_q, dtype=float)
         pvat_before = _methods(harness).count("move_pvat")
-        harness.latest.publish(
-            _motion_frame(action, harness.settings, 3),
-            harness.clock.now_ns(),
-        )
-        await harness.control.tick()
-        await _yield_until(
-            lambda: _methods(harness).count("move_pvat") > pvat_before
-        )
-        pvat_call = next(
-            call
-            for call in reversed(_writes(harness))
-            if call[0] == "move_pvat"
-        )
-        target_q = np.asarray(pvat_call[1], dtype=float)
-        immediate = await harness.client.get_kin_data()
-        immediate_q = np.asarray(immediate["actual_joint_pose"], dtype=float)
-        assert not np.allclose(target_q, initial_q, atol=1e-12, rtol=0.0)
-        assert not np.allclose(immediate_q, target_q, atol=1e-12, rtol=0.0)
-
         assert harness.settings.lebai is not None
-        harness.clock.advance(harness.settings.lebai.control.pvat_horizon_s)
-        after = await _publish_state(harness)
-        _assert_q_safe(harness, after)
-
-        position_delta = np.asarray(after.actual_tcp.p) - np.asarray(
-            before.actual_tcp.p
+        period_s = 1 / harness.settings.lebai.control.loop_hz
+        maximum_frames = max(
+            1,
+            math.ceil(COMMISSIONING_MOTION_TIMEOUT_S / period_s),
         )
-        rotation_delta = (
-            Rotation.from_quat(after.actual_tcp.q)
-            * Rotation.from_quat(before.actual_tcp.q).inv()
-        ).as_rotvec()
-        if isinstance(action, TranslationAction):
-            index = {"x": 0, "y": 1, "z": 2}[action.axis]
-            commanded = float(position_delta[index])
-            uncommanded = float(
-                np.max(np.abs(np.delete(position_delta, index)))
+        after = before
+        commanded = 0.0
+        uncommanded = 0.0
+        reached = False
+        checked_first_pvat = False
+        for sequence in range(3, 3 + maximum_frames):
+            harness.latest.publish(
+                _motion_frame(action, harness.settings, sequence),
+                harness.clock.now_ns(),
             )
-            assert math.copysign(1.0, commanded) == math.copysign(
-                1.0, action.distance_m
-            )
-            assert (
-                uncommanded
-                <= harness.settings.lebai.control.max_tcp_step_m + 1e-9
-            )
-        else:
-            index = {"roll": 0, "pitch": 1, "yaw": 2}[action.axis]
-            commanded = float(rotation_delta[index])
-            uncommanded = float(
-                np.max(np.abs(np.delete(rotation_delta, index)))
-            )
-            assert math.copysign(1.0, commanded) == math.copysign(
-                1.0, action.angle_deg
-            )
-            assert uncommanded <= math.radians(
-                harness.settings.lebai.control.max_tcp_rotation_step_deg
-            ) + 1e-9
+            await harness.control.tick()
+            await harness.clock.sleep(period_s)
+            if _methods(harness).count("move_pvat") == pvat_before:
+                await asyncio.sleep(0)
+                continue
+            if (
+                not checked_first_pvat
+                and _methods(harness).count("move_pvat") == pvat_before + 1
+            ):
+                pvat_call = next(
+                    call
+                    for call in reversed(_writes(harness))
+                    if call[0] == "move_pvat"
+                )
+                target_q = np.asarray(pvat_call[1], dtype=float)
+                immediate = await harness.client.get_kin_data()
+                immediate_q = np.asarray(
+                    immediate["actual_joint_pose"],
+                    dtype=float,
+                )
+                assert not np.allclose(
+                    target_q,
+                    initial_q,
+                    atol=1e-12,
+                    rtol=0.0,
+                )
+                assert not np.allclose(
+                    immediate_q,
+                    target_q,
+                    atol=1e-12,
+                    rtol=0.0,
+                )
+                checked_first_pvat = True
 
-        await _release_and_disarm(harness, 4)
+            after = await _publish_state(harness)
+            _assert_q_safe(harness, after)
+            position_delta = np.asarray(after.actual_tcp.p) - np.asarray(
+                before.actual_tcp.p
+            )
+            rotation_delta = (
+                Rotation.from_quat(after.actual_tcp.q)
+                * Rotation.from_quat(before.actual_tcp.q).inv()
+            ).as_rotvec()
+            if isinstance(action, TranslationAction):
+                index = {"x": 0, "y": 1, "z": 2}[action.axis]
+                commanded = float(position_delta[index])
+                uncommanded = float(
+                    np.max(np.abs(np.delete(position_delta, index)))
+                )
+                requested = action.distance_m
+                tolerance = TRANSLATION_TOLERANCE_M
+            else:
+                index = {"roll": 0, "pitch": 1, "yaw": 2}[action.axis]
+                commanded = float(rotation_delta[index])
+                uncommanded = float(
+                    np.max(np.abs(np.delete(rotation_delta, index)))
+                )
+                requested = math.radians(action.angle_deg)
+                tolerance = math.radians(ROTATION_TOLERANCE_DEG)
+            signed_progress = math.copysign(1.0, requested) * commanded
+            assert signed_progress >= -tolerance, "wrong_direction"
+            assert signed_progress <= abs(requested) + tolerance, "overshoot"
+            if abs(commanded - requested) <= tolerance:
+                reached = True
+                break
+        assert reached, "motion_timeout"
+
+        await _release_and_disarm(harness, sequence + 1)
         assert all(
             state.mode is not TeleopMode.FAULT
             for state in harness.published_states
@@ -495,18 +529,12 @@ async def _run_gripper_action(action: GripperAction) -> tuple[int, int]:
     async with fake_real_harness() as harness:
         assert harness.settings.lebai is not None
         gripper = harness.settings.lebai.gripper
-        if action.target == "open":
-            await harness.backend.set_gripper(1.0)
         await _prepare_active(harness)
         harness.clock.advance(1 / gripper.command_hz)
         await _publish_state(harness)
         writes_before = len(_writes(harness))
         trigger = 0.0 if action.target == "open" else 1.0
-        harness.latest.publish(
-            _frame(3, grip=True, trigger=trigger),
-            harness.clock.now_ns(),
-        )
-        await harness.control.tick()
+        await harness.control.command_gripper(trigger)
         claw_calls = [
             call
             for call in _writes(harness)[writes_before:]
