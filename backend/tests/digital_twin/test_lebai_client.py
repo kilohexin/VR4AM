@@ -73,7 +73,7 @@ async def test_disconnect_rejects_reads_and_writes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_move_fault_retains_nonzero_velocity_after_zero_velocity_pvat() -> None:
+async def test_stop_move_fault_retains_velocity_above_stationary_threshold() -> None:
     client = DigitalTwinLebaiClient.idle(
         control_settings(),
         faults=DigitalTwinFaults(stop_failure=True),
@@ -83,11 +83,12 @@ async def test_stop_move_fault_retains_nonzero_velocity_after_zero_velocity_pvat
     await client.stop_move()
 
     kin_data = await client.get_kin_data()
-    assert np.linalg.norm(kin_data["actual_joint_speed"]) > 0
+    assert kin_data["actual_joint_speed"] == pytest.approx([0.03] * 6)
+    assert min(kin_data["actual_joint_speed"]) > 0.02
 
 
 @pytest.mark.asyncio
-async def test_stop_sys_fault_retains_nonzero_velocity_after_zero_velocity_pvat() -> None:
+async def test_stop_sys_fault_retains_velocity_above_stationary_threshold() -> None:
     client = DigitalTwinLebaiClient.idle(
         control_settings(),
         faults=DigitalTwinFaults(stop_failure=True),
@@ -97,4 +98,5 @@ async def test_stop_sys_fault_retains_nonzero_velocity_after_zero_velocity_pvat(
     await client.stop_sys()
 
     kin_data = await client.get_kin_data()
-    assert np.linalg.norm(kin_data["actual_joint_speed"]) > 0
+    assert kin_data["actual_joint_speed"] == pytest.approx([0.03] * 6)
+    assert min(kin_data["actual_joint_speed"]) > 0.02

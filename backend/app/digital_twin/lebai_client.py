@@ -196,7 +196,7 @@ class DigitalTwinLebaiClient:
         self._motion = None
         self._running_motion_id = None
         if self._faults.stop_failure:
-            self._qd = (0.01,) * 6
+            self._qd = (0.03,) * 6
             self._qdd = (0.0,) * 6
         else:
             self._qd = (0.0,) * 6
@@ -210,7 +210,7 @@ class DigitalTwinLebaiClient:
         self._motion = None
         self._running_motion_id = None
         if self._faults.stop_failure:
-            self._qd = (0.01,) * 6
+            self._qd = (0.03,) * 6
             self._qdd = (0.0,) * 6
         else:
             self._qd = (0.0,) * 6
