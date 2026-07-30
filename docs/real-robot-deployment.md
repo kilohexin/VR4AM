@@ -146,25 +146,38 @@ PowerShell：
 
 ```powershell
 $env:VR4ARM_REAL_ROBOT_CONFIRM = "I_UNDERSTAND_REAL_ROBOT_MOTION"
-python .\scripts\real_robot_smoke.py `
-  --config $env:VR4ARM_CONFIG `
-  --axis x `
-  --distance-m 0.005 `
-  --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py translate --config $env:VR4ARM_CONFIG --axis x --distance-m 0.005 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py rotate --config $env:VR4ARM_CONFIG --axis roll --angle-deg 2 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py gripper --config $env:VR4ARM_CONFIG --target open --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py home --config $env:VR4ARM_CONFIG --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py stop --config $env:VR4ARM_CONFIG --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
 ```
 
 Linux：
 
 ```bash
 export VR4ARM_REAL_ROBOT_CONFIRM="I_UNDERSTAND_REAL_ROBOT_MOTION"
-python scripts/real_robot_smoke.py \
-  --config "$VR4ARM_CONFIG" \
-  --axis x \
-  --distance-m 0.005 \
-  --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py translate --config "$VR4ARM_CONFIG" --axis x --distance-m 0.005 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py rotate --config "$VR4ARM_CONFIG" --axis roll --angle-deg 2 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py gripper --config "$VR4ARM_CONFIG" --target open --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py home --config "$VR4ARM_CONFIG" --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py stop --config "$VR4ARM_CONFIG" --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
 ```
 
-先测试 `x`，进程结束且确认实际方向和停止后，再以新进程分别测试 `y`、`z`。脚本拒绝超过 `0.005 m` 的距离、错误确认词、只读配置、非 IDLE、TCP/Home 缺失或预检失败。
+Each subcommand is mutually exclusive: run one process, observe the real
+result, and stop before starting the next. The complete staged lab sequence
+is: translate `+x`, `-x`, `+y`, `-y`, `+z`, `-z`; then rotate `+roll`,
+`-roll`, `+pitch`, `-pitch`, `+yaw`, `-yaw`; then test gripper open/close,
+Home, stop/E-stop, and only then a lightweight grasp/release. A negative-axis
+check uses the same magnitude with a signed negative value (for example,
+`--distance-m -0.005` or `--angle-deg -2`); it is never inferred by changing
+the axis name. After every individual move, the observer confirms direction
+and complete stop before the next process.
+
+The staged sequence above is mandatory; do not shorten it to unsigned
+translation-only checks. The script rejects motion beyond the configured
+bound, an incorrect confirmation, readonly configuration, non-IDLE state,
+missing TCP/Home data, or failed preflight.
 
 若方向错误、抖动、意外转动或停止不完整：
 
