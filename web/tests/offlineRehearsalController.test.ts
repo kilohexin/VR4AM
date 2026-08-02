@@ -1,0 +1,572 @@
+import {describe, expect, it} from 'vitest';
+
+import type {
+  ArmFeedbackMessage,
+  ClientControlMessage,
+  DiagnosticsMessage,
+  HomeResultMessage,
+  OfflineRehearsalClientMessage,
+  OfflineRehearsalFeedbackMessage,
+  Pose,
+  RobotStateMessage,
+} from '../src/protocol/messages';
+import {
+  OfflineRehearsalController,
+  type OfflineRehearsalPorts,
+} from '../src/rehearsal/offlineRehearsalController';
+import {
+  REHEARSAL_PHASES,
+  type OfflineControllerSample,
+  type OfflineSceneSnapshot,
+} from '../src/rehearsal/types';
+
+const ANCHOR: Pose = {p: [0.30, 0.20, -0.20], q: [0, 0, 0, 1]};
+
+function robotState(overrides: Partial<RobotStateMessage> = {}): RobotStateMessage {
+  return {
+    v: 1,
+    type: 'robot_state',
+    server_mono_ns: 1_000_000,
+    mode: 'READY',
+    robot_state: 'IDLE',
+    actual_tcp: structuredClone(ANCHOR),
+    actual_q: [0, 0, 0, 0, 0, 0],
+    gripper: 0,
+    fault: null,
+    constraint: null,
+    recovery_phase: null,
+    backend: 'LEBAI_FAKE',
+    real_robot_mode: 'control',
+    preflight_ready: true,
+    preflight_reason: null,
+    ...overrides,
+  };
+}
+
+function diagnostics(overrides: Partial<DiagnosticsMessage> = {}): DiagnosticsMessage {
+  return {
+    v: 1,
+    type: 'diagnostics',
+    server_mono_ns: 1_000_000,
+    runtime: 'LEBAI_FAKE',
+    hardware_verified: false,
+    control_generation: 1,
+    actual_qd: [0, 0, 0, 0, 0, 0],
+    actual_qdd: [0, 0, 0, 0, 0, 0],
+    target_q: null,
+    target_qd: null,
+    target_qdd: null,
+    target_tcp: null,
+    sdk_latencies_ms: {},
+    pvat_send_hz: 25,
+    log_session_dir: null,
+    dropped_events: 0,
+    recent_events: [],
+    ...overrides,
+  };
+}
+
+function harness() {
+  let nowMs = 1000;
+  const controls: ClientControlMessage[] = [];
+  const reports: OfflineRehearsalClientMessage[] = [];
+  const samples: Array<OfflineControllerSample | null> = [];
+  const scene: OfflineSceneSnapshot = {
+    controller: null,
+    carriedBlockId: null,
+    blocks: [{id: 'block-orange', position: [0.18, 0.030, -0.32], sizeM: 0.06}],
+    invalidOverlap: false,
+  };
+  let resets = 0;
+  const ports: OfflineRehearsalPorts = {
+    nowMs: () => nowMs,
+    sendControl: (message) => controls.push(structuredClone(message)),
+    sendRehearsal: (message) => reports.push(structuredClone(message)),
+    setOfflineController: (sample) => {
+      const copy = sample === null ? null : structuredClone(sample);
+      samples.push(copy);
+      scene.controller = copy;
+    },
+    readScene: () => structuredClone(scene),
+    resetScene: () => { resets += 1; },
+  };
+  const controller = new OfflineRehearsalController(ports);
+  return {
+    controller,
+    ports,
+    advance: (milliseconds: number) => { nowMs += milliseconds; },
+    controls,
+    reports,
+    samples,
+    scene,
+    resets: () => resets,
+  };
+}
+
+type Harness = ReturnType<typeof harness>;
+
+function connectReady(test: Harness): void {
+  test.controller.onConnection({state: 'connected'});
+  test.controller.onDiagnostics(diagnostics());
+  test.controller.onRobotState(robotState());
+}
+
+function latestReport<T extends OfflineRehearsalClientMessage['type']>(
+  test: Harness,
+  type: T,
+): Extract<OfflineRehearsalClientMessage, {type: T}> {
+  const result = [...test.reports].reverse().find((message) => message.type === type);
+  if (!result || result.type !== type) throw new Error(`missing ${type}`);
+  return result as Extract<OfflineRehearsalClientMessage, {type: T}>;
+}
+
+function acceptBegin(test: Harness): void {
+  const begin = latestReport(test, 'offline_rehearsal_begin');
+  test.controller.onFeedback({
+    v: 1,
+    type: 'offline_rehearsal_begin_result',
+    request_id: begin.request_id,
+    accepted: true,
+    run_id: 'run-1',
+  });
+}
+
+function acknowledgePhase(test: Harness): void {
+  const phase = latestReport(test, 'offline_rehearsal_phase');
+  test.controller.onFeedback({
+    v: 1,
+    type: 'offline_rehearsal_phase_ack',
+    request_id: phase.request_id,
+    accepted: true,
+    run_id: phase.run_id,
+    phase: phase.phase,
+  });
+}
+
+function acknowledgeFinish(test: Harness): void {
+  const finish = latestReport(test, 'offline_rehearsal_finish');
+  test.controller.onFeedback({
+    v: 1,
+    type: 'offline_rehearsal_finish_result',
+    request_id: finish.request_id,
+    accepted: true,
+    run_id: finish.run_id,
+    outcome: finish.outcome,
+    json_path: 'artifacts/run-1.json',
+    markdown_path: 'artifacts/run-1.md',
+    hardware_verified: false,
+    hardware_pending: [
+      'sdk_connection', 'tcp_home_joint_limits', 'translation_direction',
+      'rotation_direction', 'gripper_direction_force', 'pvat_tracking_latency',
+      'stop_distance_estop', 'lightweight_grasp_release',
+    ],
+  });
+}
+
+function acceptLatestControl(test: Harness): void {
+  const control = test.controls.at(-1);
+  if (!control) throw new Error('missing control');
+  let feedback: ArmFeedbackMessage | HomeResultMessage;
+  if (control.type === 'arm_request') {
+    feedback = {v: 1, type: 'arm_ack', request_id: control.request_id};
+  } else if (control.type === 'home_request') {
+    feedback = {
+      v: 1,
+      type: 'home_result',
+      request_id: control.request_id,
+      accepted: true,
+      mode: 'DISARMED',
+    };
+  } else {
+    throw new Error(`cannot accept ${control.type}`);
+  }
+  test.controller.onFeedback(feedback);
+}
+
+function confirmState(
+  test: Harness,
+  overrides: Partial<RobotStateMessage>,
+  count = 3,
+): void {
+  for (let index = 0; index < count; index += 1) {
+    test.controller.onRobotState(robotState({server_mono_ns: 2_000_000 + index, ...overrides}));
+  }
+}
+
+function beginThroughAnchor(test: Harness): void {
+  connectReady(test);
+  expect(test.controller.start()).toBe(true);
+  acceptBegin(test);
+  acknowledgePhase(test);
+  expect(test.controls.at(-1)?.type).toBe('home_request');
+  acceptLatestControl(test);
+  confirmState(test, {mode: 'DISARMED'});
+  acknowledgePhase(test);
+  expect(test.controls.at(-1)?.type).toBe('arm_request');
+  acceptLatestControl(test);
+  confirmState(test, {mode: 'ACTIVE', robot_state: 'MOVING'});
+  expect(latestReport(test, 'offline_rehearsal_phase').phase).toBe('arm_and_anchor');
+}
+
+function driveCurrentMotionTarget(test: Harness): void {
+  const target = test.controller.snapshot.targetTcp;
+  if (target === null) throw new Error(`missing target in ${test.controller.snapshot.step}`);
+  confirmState(test, {
+    mode: 'ACTIVE',
+    robot_state: 'MOVING',
+    actual_tcp: structuredClone(target),
+  });
+}
+
+function driveMotionPhase(test: Harness, phase: 'translate' | 'rotate'): string[] {
+  let targets = 0;
+  const steps: string[] = [];
+  while (test.controller.snapshot.phase === phase) {
+    const step = test.controller.snapshot.step;
+    if (step === null) throw new Error(`missing ${phase} step`);
+    steps.push(step);
+    driveCurrentMotionTarget(test);
+    targets += 1;
+    if (targets > 12) throw new Error(`${phase} did not terminate`);
+  }
+  expect(targets).toBe(12);
+  expect(latestReport(test, 'offline_rehearsal_phase').phase).toBe(phase);
+  return steps;
+}
+
+function driveGripper(test: Harness): void {
+  let confirmations = 0;
+  while (test.controller.snapshot.phase === 'gripper') {
+    const trigger = test.controller.snapshot.targetTrigger;
+    if (trigger === null) throw new Error('missing gripper target');
+    confirmState(test, {
+      mode: 'ACTIVE',
+      robot_state: 'MOVING',
+      gripper: trigger,
+    });
+    confirmations += 1;
+    if (confirmations > 4) throw new Error('gripper did not terminate');
+  }
+  expect(confirmations).toBe(4);
+}
+
+function setCarriedBlockAtTcp(test: Harness, tcp: Pose, offset: readonly number[] = [0, -0.03, 0]): void {
+  test.scene.carriedBlockId = 'block-orange';
+  test.scene.blocks[0].position = [
+    tcp.p[0] + offset[0],
+    tcp.p[1] + offset[1],
+    tcp.p[2] + offset[2],
+  ];
+}
+
+function drivePickPlace(test: Harness): void {
+  while (test.controller.snapshot.phase === 'pick_place') {
+    const {step, targetTcp, targetTrigger, placementTarget} = test.controller.snapshot;
+    if (step === 'pick_approach') {
+      driveCurrentMotionTarget(test);
+    } else if (step === 'pick_attach') {
+      if (targetTcp === null || targetTrigger === null) throw new Error('missing attach target');
+      setCarriedBlockAtTcp(test, targetTcp);
+      confirmState(test, {
+        mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: targetTcp, gripper: targetTrigger,
+      }, 2);
+      test.scene.carriedBlockId = null;
+      confirmState(test, {
+        mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: targetTcp, gripper: targetTrigger,
+      }, 1);
+      expect(test.controller.snapshot.step).toBe('pick_attach');
+      setCarriedBlockAtTcp(test, targetTcp);
+      confirmState(test, {
+        mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: targetTcp, gripper: targetTrigger,
+      });
+    } else if (step === 'pick_lift' || step === 'pick_transfer' || step === 'pick_lower') {
+      if (targetTcp === null) throw new Error('missing carried target');
+      setCarriedBlockAtTcp(test, targetTcp);
+      confirmState(test, {
+        mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: targetTcp, gripper: 1,
+      });
+    } else if (step === 'pick_release') {
+      if (targetTcp === null || placementTarget === null) throw new Error('missing release target');
+      test.scene.carriedBlockId = null;
+      test.scene.invalidOverlap = false;
+      test.scene.blocks[0].position = structuredClone(placementTarget);
+      confirmState(test, {
+        mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: targetTcp, gripper: 0,
+      });
+    } else {
+      throw new Error(`unknown pick step ${step}`);
+    }
+  }
+}
+
+function rejectLatestPhase(test: Harness): void {
+  const phase = latestReport(test, 'offline_rehearsal_phase');
+  const rejected: OfflineRehearsalFeedbackMessage = {
+    v: 1,
+    type: 'offline_rehearsal_phase_ack',
+    request_id: phase.request_id,
+    accepted: false,
+    run_id: phase.run_id,
+    phase: phase.phase,
+    reason: 'store_rejected',
+  };
+  test.controller.onFeedback(rejected);
+}
+
+function expectFailed(test: Harness, reason: string): void {
+  expect(test.samples.at(-1)).toBeNull();
+  expect(test.controls.at(-1)?.type).toBe('disarm');
+  expect(test.controller.snapshot.phase).toBe('failed');
+  expect(test.controller.snapshot.failure).toBe(reason);
+  expect(test.controller.snapshot.hardwareVerified).toBe(false);
+}
+
+describe('OfflineRehearsalController happy path', () => {
+  it('runs the exact state-confirmed phase sequence and keeps lifecycle reports report-only', () => {
+    const test = harness();
+    beginThroughAnchor(test);
+    expect(test.resets()).toBe(1);
+    expect(test.controller.start()).toBe(false);
+
+    acknowledgePhase(test);
+    expect(driveMotionPhase(test, 'translate')).toEqual([
+      '+x', '+x_return', '-x', '-x_return',
+      '+y', '+y_return', '-y', '-y_return',
+      '+z', '+z_return', '-z', '-z_return',
+    ]);
+    acknowledgePhase(test);
+    expect(driveMotionPhase(test, 'rotate')).toEqual([
+      '+roll', '+roll_return', '-roll', '-roll_return',
+      '+pitch', '+pitch_return', '-pitch', '-pitch_return',
+      '+yaw', '+yaw_return', '-yaw', '-yaw_return',
+    ]);
+    acknowledgePhase(test);
+    driveGripper(test);
+    acknowledgePhase(test);
+    drivePickPlace(test);
+    acknowledgePhase(test);
+
+    expect(test.controller.snapshot.phase).toBe('soft_boundary');
+    confirmState(test, {
+      mode: 'ACTIVE', robot_state: 'HOLD', constraint: 'workspace_boundary',
+    }, 2);
+    confirmState(test, {
+      mode: 'ACTIVE', robot_state: 'MOVING', constraint: null,
+    }, 1);
+    expect(test.controller.snapshot.step).toBe('boundary_outward');
+    confirmState(test, {
+      mode: 'ACTIVE', robot_state: 'HOLD', constraint: 'workspace_boundary',
+    });
+    expect(test.controller.snapshot.step).toBe('boundary_retreat');
+    driveCurrentMotionTarget(test);
+    acknowledgePhase(test);
+
+    expect(test.controller.snapshot.phase).toBe('tracking_loss');
+    expect(test.samples.at(-1)?.trackingValid).toBe(false);
+    confirmState(test, {mode: 'STALE', robot_state: 'IDLE'});
+    acknowledgePhase(test);
+
+    expect(test.controller.snapshot.phase).toBe('recovery_and_home');
+    expect(test.controls.at(-1)?.type).toBe('home_request');
+    acceptLatestControl(test);
+    confirmState(test, {mode: 'DISARMED', robot_state: 'IDLE'});
+    acknowledgePhase(test);
+
+    expect(test.controller.snapshot.phase).toBe('final_stop');
+    expect(test.controls.at(-1)?.type).toBe('disarm');
+    confirmState(test, {mode: 'DISARMED', robot_state: 'IDLE'});
+    acknowledgePhase(test);
+    expect(latestReport(test, 'offline_rehearsal_phase').phase).toBe('finalize');
+    acknowledgePhase(test);
+    expect(latestReport(test, 'offline_rehearsal_finish').outcome).toBe('passed');
+    acknowledgeFinish(test);
+
+    const phaseOrder = test.reports
+      .filter((message) => message.type === 'offline_rehearsal_phase')
+      .map((message) => message.phase);
+    expect(phaseOrder).toEqual(REHEARSAL_PHASES);
+    expect(test.controller.snapshot.phase).toBe('passed');
+    expect(test.controller.snapshot.reportPaths).toEqual({
+      json: 'artifacts/run-1.json', markdown: 'artifacts/run-1.md',
+    });
+    expect(test.samples.at(-1)).toBeNull();
+
+    for (const report of test.reports) {
+      expect(report).not.toHaveProperty('tracking_valid');
+      expect(report).not.toHaveProperty('right');
+      expect(report).not.toHaveProperty('target_tcp');
+      expect(report).not.toHaveProperty('gripper');
+    }
+    expect(test.controls.map((message) => message.type)).toEqual([
+      'home_request', 'arm_request', 'home_request', 'disarm',
+    ]);
+  });
+
+  it('ignores stale request IDs and requires three consecutive authoritative confirmations', () => {
+    const test = harness();
+    connectReady(test);
+    test.controller.start();
+    const begin = latestReport(test, 'offline_rehearsal_begin');
+    test.controller.onFeedback({
+      v: 1, type: 'offline_rehearsal_begin_result', request_id: 'stale',
+      accepted: true, run_id: 'wrong-run',
+    });
+    expect(test.reports).toHaveLength(1);
+    acceptBegin(test);
+    const identity = latestReport(test, 'offline_rehearsal_phase');
+    test.controller.onFeedback({
+      v: 1, type: 'offline_rehearsal_phase_ack', request_id: identity.request_id,
+      accepted: true, run_id: 'wrong-run', phase: 'identity_preflight',
+    });
+    expect(test.controls).toHaveLength(0);
+    acknowledgePhase(test);
+    acceptLatestControl(test);
+    confirmState(test, {mode: 'DISARMED'}, 2);
+    confirmState(test, {mode: 'ACTIVE', robot_state: 'MOVING'}, 1);
+    confirmState(test, {mode: 'DISARMED'}, 2);
+    expect(latestReport(test, 'offline_rehearsal_phase').phase).toBe('identity_preflight');
+    confirmState(test, {mode: 'DISARMED'}, 1);
+    expect(latestReport(test, 'offline_rehearsal_phase').phase).toBe('home');
+    expect(begin.request_id).not.toBe(identity.request_id);
+  });
+});
+
+describe('OfflineRehearsalController fail-closed cleanup', () => {
+  it.each([
+    ['connection_lost', (test: Harness) => test.controller.onConnection({state: 'disconnected'})],
+    ['page_hidden', (test: Harness) => test.controller.requestStop('page_hidden')],
+    ['controller_occupied', (test: Harness) => (
+      test.controller.onConnection({state: 'occupied', message: 'busy'})
+    )],
+    ['robot_fault', (test: Harness) => (
+      test.controller.onRobotState(robotState({mode: 'FAULT', robot_state: 'FAULT', fault: 'fault'}))
+    )],
+    ['unexpected_stale', (test: Harness) => (
+      test.controller.onRobotState(robotState({mode: 'STALE'}))
+    )],
+    ['non_finite_state', (test: Harness) => (
+      test.controller.onRobotState(robotState({actual_tcp: {p: [NaN, 0, 0], q: [0, 0, 0, 1]}}))
+    )],
+    ['phase_timeout', (test: Harness) => {
+      test.advance(8_001);
+      test.controller.onRobotState(robotState());
+    }],
+  ])('fails closed for %s', (reason, trigger) => {
+    const test = harness();
+    connectReady(test);
+    test.controller.start();
+    acceptBegin(test);
+    trigger(test);
+    expectFailed(test, reason);
+  });
+
+  it('fails closed when a phase report or Home request is rejected', () => {
+    const reportFailure = harness();
+    connectReady(reportFailure);
+    reportFailure.controller.start();
+    acceptBegin(reportFailure);
+    rejectLatestPhase(reportFailure);
+    expectFailed(reportFailure, 'report_rejected');
+
+    const homeFailure = harness();
+    connectReady(homeFailure);
+    homeFailure.controller.start();
+    acceptBegin(homeFailure);
+    acknowledgePhase(homeFailure);
+    const home = homeFailure.controls.at(-1);
+    if (!home) throw new Error('missing Home');
+    homeFailure.controller.onFeedback({
+      v: 1, type: 'home_result', request_id: home.request_id, accepted: false,
+      reason: 'home_failed', message: 'failed',
+    });
+    expectFailed(homeFailure, 'home_rejected');
+  });
+
+  it('rejects invalid released placement after consecutive scene observations', () => {
+    const test = harness();
+    beginThroughAnchor(test);
+    acknowledgePhase(test);
+    driveMotionPhase(test, 'translate');
+    acknowledgePhase(test);
+    driveMotionPhase(test, 'rotate');
+    acknowledgePhase(test);
+    driveGripper(test);
+    acknowledgePhase(test);
+
+    while (test.controller.snapshot.step !== 'pick_release') {
+      const {step, targetTcp} = test.controller.snapshot;
+      if (targetTcp === null) throw new Error(`missing target for ${step}`);
+      if (step !== 'pick_approach') setCarriedBlockAtTcp(test, targetTcp);
+      confirmState(test, {
+        mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: targetTcp,
+        gripper: step === 'pick_approach' ? 0 : 1,
+      });
+    }
+    const target = test.controller.snapshot.targetTcp;
+    if (target === null) throw new Error('missing release target');
+    test.scene.carriedBlockId = null;
+    test.scene.invalidOverlap = true;
+    test.scene.blocks[0].position = [0.8, 0.8, 0.8];
+    confirmState(test, {
+      mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: target, gripper: 0,
+    });
+    expectFailed(test, 'invalid_block_placement');
+  });
+
+  it('dispose during begin is terminal and late feedback cannot resume the run', () => {
+    const test = harness();
+    connectReady(test);
+    test.controller.start();
+    const begin = latestReport(test, 'offline_rehearsal_begin');
+    test.controller.dispose();
+    expectFailed(test, 'disposed');
+    test.controller.onFeedback({
+      v: 1, type: 'offline_rehearsal_begin_result', request_id: begin.request_id,
+      accepted: true, run_id: 'late-run',
+    });
+    expect(test.reports).toHaveLength(1);
+    expect(test.controller.start()).toBe(false);
+    expectFailed(test, 'disposed');
+  });
+
+  it('retains failure and marks an unverified stop when FAULT never clears', () => {
+    const test = harness();
+    connectReady(test);
+    test.controller.start();
+    acceptBegin(test);
+    test.controller.requestStop('page_hidden');
+    test.advance(8_001);
+    test.controller.onRobotState(robotState({
+      mode: 'FAULT', robot_state: 'FAULT', fault: 'latched',
+    }));
+    expectFailed(test, 'stop_unverified');
+    expect(test.controller.snapshot.stopVerified).toBe(false);
+  });
+
+  it('submits every remaining failed phase before an aborted finish becomes terminal', () => {
+    const test = harness();
+    connectReady(test);
+    test.controller.start();
+    acceptBegin(test);
+    test.controller.requestStop('page_hidden');
+    confirmState(test, {mode: 'DISARMED', robot_state: 'IDLE'});
+
+    expect(latestReport(test, 'offline_rehearsal_phase')).toMatchObject({
+      phase: 'identity_preflight', status: 'passed',
+    });
+    acknowledgePhase(test);
+    for (const expectedPhase of REHEARSAL_PHASES.slice(1)) {
+      const phase = latestReport(test, 'offline_rehearsal_phase');
+      expect(phase.phase).toBe(expectedPhase);
+      expect(phase.status).toBe('failed');
+      acknowledgePhase(test);
+    }
+    expect(latestReport(test, 'offline_rehearsal_finish').outcome).toBe('aborted');
+    acknowledgeFinish(test);
+
+    expect(test.controller.snapshot.phase).toBe('failed');
+    expect(test.controller.snapshot.failure).toBe('page_hidden');
+    expect(test.controller.snapshot.active).toBe(false);
+    expect(test.controller.snapshot.stopVerified).toBe(true);
+  });
+});
