@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -32,7 +33,10 @@ from app.acceptance.scenarios import (  # noqa: E402
     run_virtual_scenarios,
 )
 from app.config import Settings  # noqa: E402
-from scripts.soak_simulator import run_soak  # noqa: E402
+from scripts.soak_simulator import (  # noqa: E402
+    SoakMeasurement,
+    benchmark_soak,
+)
 
 
 HARDWARE_PENDING = (
@@ -66,6 +70,7 @@ class AcceptanceReport:
     commands: tuple[CommandResult, ...]
     scenarios: tuple[ScenarioResult, ...]
     soak: dict[str, object]
+    soak_performance: dict[str, object]
     hardware_pending: tuple[str, ...]
     passed: bool
 
@@ -93,6 +98,7 @@ class AcceptanceReport:
                 scenario.to_dict() for scenario in self.scenarios
             ],
             "soak": self.soak,
+            "soak_performance": self.soak_performance,
             "hardware_verified": False,
             "hardware_pending": list(self.hardware_pending),
             "passed": self.passed,
@@ -101,9 +107,6 @@ class AcceptanceReport:
 
 CommandRunner = Callable[[str, Sequence[str], Path], CommandResult]
 ScenarioRunner = Callable[[], Awaitable[tuple[ScenarioResult, ...]]]
-SoakRunner = Callable[..., dict[str, object]]
-
-
 def parse_test_counts(output: str) -> tuple[int | None, int | None]:
     passed = [int(value) for value in re.findall(r"(\d+)\s+passed", output)]
     failed = [int(value) for value in re.findall(r"(\d+)\s+failed", output)]
@@ -207,13 +210,82 @@ def _profile_report(real_config: Path | None) -> dict[str, object]:
     }
 
 
+def run_full_soak_process(
+    repo_root: Path,
+    timeout_s: float = 60.0,
+) -> SoakMeasurement:
+    started = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "scripts" / "soak_simulator.py"),
+                "--minutes",
+                "10",
+                "--seed",
+                "42",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("soak_process_timeout") from error
+
+    duration_s = time.perf_counter() - started
+    if completed.returncode != 0:
+        raise RuntimeError(f"soak_process_exit_{completed.returncode}")
+    try:
+        summary = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("soak_process_invalid_json") from error
+    if not isinstance(summary, dict):
+        raise RuntimeError("soak_process_invalid_json")
+    for key in ("control_steps", "error_count"):
+        value = summary.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+        ):
+            raise RuntimeError(f"soak_process_invalid_{key}")
+    if not math.isfinite(duration_s) or duration_s <= 0.0:
+        raise RuntimeError("soak_process_invalid_duration")
+    steps_per_second = float(summary["control_steps"]) / duration_s
+    if not math.isfinite(steps_per_second) or steps_per_second <= 0.0:
+        raise RuntimeError("soak_process_invalid_steps_per_second")
+    return SoakMeasurement(
+        summary=summary,
+        duration_s=duration_s,
+        steps_per_second=steps_per_second,
+    )
+
+
+def _failed_soak_report(error: Exception) -> tuple[dict[str, object], dict[str, object]]:
+    return (
+        {"error_count": 1, "failure": str(error)},
+        {
+            "short_steps_per_second": None,
+            "long_steps_per_second": None,
+            "long_to_short_ratio": None,
+            "warning": False,
+            "passed": False,
+            "failure": str(error),
+        },
+    )
+
+
 def run_gate(
     repo_root: Path,
     real_config: Path | None = None,
     *,
     command_runner: CommandRunner = run_command,
     scenario_runner: ScenarioRunner = run_virtual_scenarios,
-    soak_runner: SoakRunner = run_soak,
 ) -> AcceptanceReport:
     npm = "npm.cmd" if os.name == "nt" else "npm"
     command_specs = (
@@ -238,11 +310,21 @@ def run_gate(
         for name, argv, cwd in command_specs
     )
     scenarios = asyncio.run(scenario_runner())
-    soak = soak_runner(minutes=10.0, seed=42)
+    try:
+        measurement = run_full_soak_process(repo_root)
+        soak = {
+            **measurement.summary,
+            "duration_s": measurement.duration_s,
+            "steps_per_second": measurement.steps_per_second,
+        }
+        soak_performance = benchmark_soak()
+    except Exception as error:
+        soak, soak_performance = _failed_soak_report(error)
     passed = (
         all(command.returncode == 0 for command in commands)
         and all(scenario.passed for scenario in scenarios)
-        and soak.get("error_count") == 0
+        and soak["error_count"] == 0
+        and soak_performance["passed"] is True
     )
     return AcceptanceReport(
         generated_at=datetime.now(timezone.utc).isoformat(),
@@ -252,6 +334,7 @@ def run_gate(
         commands=commands,
         scenarios=scenarios,
         soak=soak,
+        soak_performance=soak_performance,
         hardware_pending=HARDWARE_PENDING,
         passed=passed,
     )

@@ -8,6 +8,7 @@ import random
 import sys
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,13 @@ STOP_EVENT_REASONS = {
     "disconnect": StopReason.DISCONNECT,
     "command_fault": StopReason.FAULT,
 }
+
+
+@dataclass(frozen=True)
+class SoakMeasurement:
+    summary: dict[str, Any]
+    duration_s: float
+    steps_per_second: float
 
 
 class FakeMonotonicClock:
@@ -544,6 +552,55 @@ def run_soak(minutes: float, seed: int, realtime: bool = False) -> dict[str, Any
     return asyncio.run(
         SoakScenario(minutes=float(minutes), seed=int(seed), realtime=realtime).run()
     )
+
+
+def measure_soak(
+    minutes: float,
+    seed: int,
+    *,
+    runner: Callable[[float, int], dict[str, Any]] = run_soak,
+    perf_counter: Callable[[], float] = time.perf_counter,
+) -> SoakMeasurement:
+    started = perf_counter()
+    summary = runner(minutes, seed)
+    duration_s = max(perf_counter() - started, 1e-12)
+    return SoakMeasurement(
+        summary=summary,
+        duration_s=duration_s,
+        steps_per_second=float(summary["control_steps"]) / duration_s,
+    )
+
+
+def _valid_measurement(measurement: SoakMeasurement) -> bool:
+    return (
+        math.isfinite(measurement.duration_s)
+        and measurement.duration_s > 0.0
+        and math.isfinite(measurement.steps_per_second)
+        and measurement.steps_per_second > 0.0
+    )
+
+
+def benchmark_soak(
+    *,
+    runner: Callable[[float, int], dict[str, Any]] = run_soak,
+    perf_counter: Callable[[], float] = time.perf_counter,
+) -> dict[str, float | bool]:
+    runner(0.1, 42)
+    short = measure_soak(0.5, 42, runner=runner, perf_counter=perf_counter)
+    long = measure_soak(2.0, 42, runner=runner, perf_counter=perf_counter)
+    if not _valid_measurement(short) or not _valid_measurement(long):
+        raise ValueError("soak_measurement_must_be_positive_finite")
+
+    ratio = long.steps_per_second / short.steps_per_second
+    if not math.isfinite(ratio) or ratio <= 0.0:
+        raise ValueError("soak_throughput_ratio_must_be_positive_finite")
+    return {
+        "short_steps_per_second": short.steps_per_second,
+        "long_steps_per_second": long.steps_per_second,
+        "long_to_short_ratio": ratio,
+        "warning": long.steps_per_second < 2000.0,
+        "passed": ratio >= 0.70,
+    }
 
 
 def _parse_args() -> argparse.Namespace:

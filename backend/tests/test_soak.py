@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
-import time
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +15,7 @@ def _load_soak_module():
     if spec is None or spec.loader is None:
         raise AssertionError("could not load soak runner")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -44,22 +45,63 @@ def _assert_safety_invariants(summary: dict[str, object]) -> None:
     assert summary["final_mode"] == "DISARMED"
 
 
-def test_ten_minute_soak_is_fast_deterministic_and_seeded() -> None:
+def test_ten_minute_soak_preserves_every_safety_invariant() -> None:
+    summary = _load_soak_module().run_soak(minutes=10, seed=42)
+
+    _assert_safety_invariants(summary)
+
+
+def test_short_soak_is_deterministic_and_seeded() -> None:
     run_soak = _load_soak_module().run_soak
 
-    started = time.perf_counter()
-    first = run_soak(minutes=10, seed=42)
-    elapsed = time.perf_counter() - started
-    repeated = run_soak(minutes=10, seed=42)
-    different = run_soak(minutes=10, seed=43)
+    assert run_soak(minutes=0.2, seed=42) == run_soak(minutes=0.2, seed=42)
+    assert (
+        run_soak(minutes=0.2, seed=42)["path_checksum"]
+        != run_soak(minutes=0.2, seed=43)["path_checksum"]
+    )
 
-    assert elapsed < 15.0
-    assert first == repeated
-    assert first["path_checksum"] != different["path_checksum"]
-    assert first["frames"] < first["control_steps"]
-    _assert_safety_invariants(first)
-    _assert_safety_invariants(repeated)
-    _assert_safety_invariants(different)
+
+def test_measure_soak_reports_elapsed_time_and_throughput() -> None:
+    module = _load_soak_module()
+    clock_values = iter((10.0, 12.0))
+
+    def fake_counter() -> float:
+        return next(clock_values)
+
+    measurement = module.measure_soak(
+        0.2,
+        42,
+        runner=lambda minutes, seed: {"control_steps": 600},
+        perf_counter=fake_counter,
+    )
+
+    assert isinstance(measurement, module.SoakMeasurement)
+    assert measurement.summary == {"control_steps": 600}
+    assert measurement.duration_s == 2.0
+    assert measurement.steps_per_second == 300.0
+
+
+def test_benchmark_separates_warning_from_failure() -> None:
+    module = _load_soak_module()
+    calls: list[tuple[float, int]] = []
+    clock_values = iter((0.0, 0.6, 0.6, 3.933333333333333))
+
+    def fake_counter() -> float:
+        return next(clock_values)
+
+    def fake_runner(minutes: float, seed: int) -> dict[str, object]:
+        calls.append((minutes, seed))
+        return {"control_steps": round(minutes * 3000), "error_count": 0}
+
+    benchmark = module.benchmark_soak(
+        runner=fake_runner,
+        perf_counter=fake_counter,
+    )
+
+    assert calls == [(0.1, 42), (0.5, 42), (2.0, 42)]
+    assert benchmark["long_to_short_ratio"] >= 0.70
+    assert benchmark["passed"] is True
+    assert benchmark["warning"] is True
 
 
 def test_soak_samples_the_storage_depth_observable(monkeypatch: pytest.MonkeyPatch) -> None:

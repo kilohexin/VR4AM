@@ -48,10 +48,35 @@ def _passing_soak(*, minutes: float, seed: int) -> dict[str, object]:
     }
 
 
+def _passing_soak_measurement(module):
+    return module.SoakMeasurement(
+        summary=_passing_soak(minutes=10, seed=42),
+        duration_s=2.0,
+        steps_per_second=15_000.0,
+    )
+
+
+def _passing_benchmark() -> dict[str, object]:
+    return {
+        "short_steps_per_second": 3_000.0,
+        "long_steps_per_second": 2_100.0,
+        "long_to_short_ratio": 0.70,
+        "warning": False,
+        "passed": True,
+    }
+
+
 def test_run_gate_emits_complete_hardware_separated_report(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "run_full_soak_process",
+        lambda repo_root, timeout_s=60.0: _passing_soak_measurement(module),
+    )
+    monkeypatch.setattr(module, "benchmark_soak", _passing_benchmark)
 
     def command_runner(name, argv, cwd):
         return module.CommandResult(
@@ -69,7 +94,6 @@ def test_run_gate_emits_complete_hardware_separated_report(
         ROOT,
         command_runner=command_runner,
         scenario_runner=_passing_scenarios,
-        soak_runner=_passing_soak,
     )
     payload = report.to_dict()
     output = tmp_path / "acceptance" / "report.json"
@@ -84,6 +108,7 @@ def test_run_gate_emits_complete_hardware_separated_report(
         "commands",
         "scenarios",
         "soak",
+        "soak_performance",
         "hardware_verified",
         "hardware_pending",
         "passed",
@@ -102,8 +127,14 @@ def test_run_gate_emits_complete_hardware_separated_report(
     assert not output.with_suffix(".json.tmp").exists()
 
 
-def test_command_failure_fails_gate_and_exit_code() -> None:
+def test_command_failure_fails_gate_and_exit_code(monkeypatch) -> None:
     module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "run_full_soak_process",
+        lambda repo_root, timeout_s=60.0: _passing_soak_measurement(module),
+    )
+    monkeypatch.setattr(module, "benchmark_soak", _passing_benchmark)
 
     def command_runner(name, argv, cwd):
         failed = name == "backend_tests"
@@ -122,15 +153,15 @@ def test_command_failure_fails_gate_and_exit_code() -> None:
         ROOT,
         command_runner=command_runner,
         scenario_runner=_passing_scenarios,
-        soak_runner=_passing_soak,
     )
 
     assert report.passed is False
     assert module.report_exit_code(report) == 1
 
 
-def test_scenario_or_soak_failure_fails_gate() -> None:
+def test_scenario_or_soak_failure_fails_gate(monkeypatch) -> None:
     module = _load_module()
+    monkeypatch.setattr(module, "benchmark_soak", _passing_benchmark)
 
     def command_runner(name, argv, cwd):
         return module.CommandResult(
@@ -154,28 +185,118 @@ def test_scenario_or_soak_failure_fails_gate() -> None:
             ),
         )
 
-    def failing_soak(*, minutes: float, seed: int):
-        return {
-            "simulated_minutes": minutes,
-            "seed": seed,
-            "error_count": 1,
-        }
-
+    monkeypatch.setattr(
+        module,
+        "run_full_soak_process",
+        lambda repo_root, timeout_s=60.0: _passing_soak_measurement(module),
+    )
     scenario_report = module.run_gate(
         ROOT,
         command_runner=command_runner,
         scenario_runner=failing_scenarios,
-        soak_runner=_passing_soak,
+    )
+    monkeypatch.setattr(
+        module,
+        "run_full_soak_process",
+        lambda repo_root, timeout_s=60.0: module.SoakMeasurement(
+            summary={"error_count": 1},
+            duration_s=1.0,
+            steps_per_second=1.0,
+        ),
     )
     soak_report = module.run_gate(
         ROOT,
         command_runner=command_runner,
         scenario_runner=_passing_scenarios,
-        soak_runner=failing_soak,
     )
 
     assert scenario_report.passed is False
     assert soak_report.passed is False
+
+
+def test_low_absolute_soak_throughput_warns_without_failing_gate(
+    monkeypatch,
+) -> None:
+    module = _load_module()
+
+    def command_runner(name, argv, cwd):
+        return module.CommandResult(
+            name=name,
+            argv=tuple(argv),
+            cwd=str(cwd),
+            returncode=0,
+            duration_s=0.1,
+            passed_count=1,
+            failed_count=0,
+            output_tail="1 passed",
+        )
+
+    monkeypatch.setattr(
+        module,
+        "run_full_soak_process",
+        lambda repo_root, timeout_s=60.0: module.SoakMeasurement(
+            summary=_passing_soak(minutes=10, seed=42),
+            duration_s=30.0,
+            steps_per_second=1000.0,
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "benchmark_soak",
+        lambda: {
+            "short_steps_per_second": 3000.0,
+            "long_steps_per_second": 2100.0,
+            "long_to_short_ratio": 0.70,
+            "warning": True,
+            "passed": True,
+        },
+    )
+
+    report = module.run_gate(
+        ROOT,
+        command_runner=command_runner,
+        scenario_runner=_passing_scenarios,
+    )
+    payload = report.to_dict()
+
+    assert payload["soak"]["steps_per_second"] == 1000.0
+    assert payload["soak_performance"]["warning"] is True
+    assert payload["soak_performance"]["passed"] is True
+    assert payload["passed"] is True
+
+
+def test_soak_process_failure_is_a_failed_gate_report(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module, "benchmark_soak", _passing_benchmark)
+    monkeypatch.setattr(
+        module,
+        "run_full_soak_process",
+        lambda repo_root, timeout_s=60.0: (_ for _ in ()).throw(
+            RuntimeError("soak_process_timeout")
+        ),
+    )
+
+    def command_runner(name, argv, cwd):
+        return module.CommandResult(
+            name=name,
+            argv=tuple(argv),
+            cwd=str(cwd),
+            returncode=0,
+            duration_s=0.1,
+            passed_count=1,
+            failed_count=0,
+            output_tail="1 passed",
+        )
+
+    report = module.run_gate(
+        ROOT,
+        command_runner=command_runner,
+        scenario_runner=_passing_scenarios,
+    )
+
+    assert report.passed is False
+    assert report.to_dict()["soak"]["error_count"] == 1
+    assert report.to_dict()["soak"]["failure"] == "soak_process_timeout"
 
 
 def test_parse_test_counts_supports_pytest_and_vitest() -> None:
