@@ -4,6 +4,7 @@ import {
   isDiagnosticsMessage,
   isFaultResetResultMessage,
   isHomeResultMessage,
+  isOfflineRehearsalClientMessage,
   isOfflineRehearsalFeedbackMessage,
   isRobotStateMessage,
   PROTOCOL_VERSION,
@@ -75,6 +76,7 @@ export class TeleopSocket {
   }
 
   sendRehearsal(message: OfflineRehearsalClientMessage): void {
+    if (!isOfflineRehearsalClientMessage(message)) return;
     this.send(message);
   }
 

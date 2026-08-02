@@ -73,6 +73,29 @@ const rehearsalBegin = (): OfflineRehearsalClientMessage => ({
   plan_version: 1,
 });
 
+const rehearsalPhase = (): OfflineRehearsalClientMessage => ({
+  v: 1,
+  type: 'offline_rehearsal_phase',
+  request_id: 'phase-1',
+  run_id: 'run-1',
+  phase: 'identity_preflight',
+  status: 'passed',
+  started_client_ms: 100,
+  completed_client_ms: 200,
+  target: {evidence: {source: 'fake'}},
+  measurements: {max_error_mm: 0.25},
+  failure: null,
+});
+
+const rehearsalFinish = (): OfflineRehearsalClientMessage => ({
+  v: 1,
+  type: 'offline_rehearsal_finish',
+  request_id: 'finish-1',
+  run_id: 'run-1',
+  outcome: 'passed',
+  failure: null,
+});
+
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => {
   vi.clearAllTimers();
@@ -231,6 +254,60 @@ describe('TeleopSocket', () => {
     sockets[0].readyState = WebSocket.CLOSING;
     client.sendRehearsal(rehearsalBegin());
     expect(sockets[0].sent).toHaveLength(2);
+  });
+
+  it('rejects non-JSON-safe rehearsal evidence before serializing and keeps the socket open', () => {
+    const {client, sockets} = setup();
+    client.connect();
+    sockets[0].open();
+
+    const invalidTarget = {
+      ...rehearsalPhase(),
+      target: {evidence: {latency_ms: Number.NaN}},
+    } as OfflineRehearsalClientMessage;
+    const invalidMeasurements = {
+      ...rehearsalPhase(),
+      measurements: {metrics: [0.1, Number.POSITIVE_INFINITY]},
+    } as OfflineRehearsalClientMessage;
+    const invalidTimestamp = {
+      ...rehearsalPhase(),
+      completed_client_ms: Number.NEGATIVE_INFINITY,
+    } as OfflineRehearsalClientMessage;
+    const invalidFinishEvidence = {
+      ...rehearsalFinish(),
+      failure: {evidence: {max_error_mm: Number.NEGATIVE_INFINITY}},
+    } as OfflineRehearsalClientMessage;
+    const invalidMotionField = {
+      ...rehearsalBegin(),
+      target_tcp: [0, 0, 0],
+    } as unknown as OfflineRehearsalClientMessage;
+    const invalidUndefinedEvidence = {
+      ...rehearsalFinish(),
+      failure: {evidence: undefined},
+    } as unknown as OfflineRehearsalClientMessage;
+
+    client.sendRehearsal(invalidTarget);
+    client.sendRehearsal(invalidMeasurements);
+    client.sendRehearsal(invalidTimestamp);
+    client.sendRehearsal(invalidFinishEvidence);
+    client.sendRehearsal(invalidMotionField);
+    client.sendRehearsal(invalidUndefinedEvidence);
+
+    expect(sockets[0].readyState).toBe(WebSocket.OPEN);
+    expect(sockets[0].sent.map((value) => JSON.parse(value).type)).toEqual(['hello']);
+
+    const validBegin = rehearsalBegin();
+    const validPhase = rehearsalPhase();
+    const validFinish = rehearsalFinish();
+    client.sendRehearsal(validBegin);
+    client.sendRehearsal(validPhase);
+    client.sendRehearsal(validFinish);
+    expect(sockets[0].sent.map((value) => JSON.parse(value))).toEqual([
+      {v: 1, type: 'hello', request_id: 'hello-1'},
+      validBegin,
+      validPhase,
+      validFinish,
+    ]);
   });
 
   it('delivers exact rehearsal feedback only through its final callback', () => {

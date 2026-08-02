@@ -205,6 +205,19 @@ export type OfflineRehearsalPhase =
 
 export type OfflineRehearsalOutcome = 'passed' | 'failed' | 'aborted';
 
+export const OFFLINE_REHEARSAL_HARDWARE_PENDING = [
+  'sdk_connection',
+  'tcp_home_joint_limits',
+  'translation_direction',
+  'rotation_direction',
+  'gripper_direction_force',
+  'pvat_tracking_latency',
+  'stop_distance_estop',
+  'lightweight_grasp_release',
+] as const;
+
+export type OfflineRehearsalHardwarePending = typeof OFFLINE_REHEARSAL_HARDWARE_PENDING;
+
 export interface OfflineRehearsalBeginMessage {
   v: typeof PROTOCOL_VERSION;
   type: 'offline_rehearsal_begin';
@@ -286,7 +299,7 @@ export type OfflineRehearsalFinishResultMessage =
       json_path: string;
       markdown_path: string;
       hardware_verified: false;
-      hardware_pending: [string, string, string, string, string, string, string, string];
+      hardware_pending: OfflineRehearsalHardwarePending;
     }
   | {
       v: typeof PROTOCOL_VERSION;
@@ -482,7 +495,10 @@ function isSdkLatencies(value: unknown): value is Record<string, number> {
   return isRecord(value) && Object.values(value).every(isNonNegativeNumber);
 }
 
-function isDiagnosticPayloadValue(value: unknown): value is DiagnosticPayloadValue {
+function isDiagnosticPayloadValue(
+  value: unknown,
+  ancestors: ReadonlySet<object> = new Set(),
+): value is DiagnosticPayloadValue {
   if (
     value === null ||
     typeof value === 'string' ||
@@ -491,8 +507,17 @@ function isDiagnosticPayloadValue(value: unknown): value is DiagnosticPayloadVal
   ) {
     return true;
   }
-  if (Array.isArray(value)) return value.every(isDiagnosticPayloadValue);
-  return isRecord(value) && Object.values(value).every(isDiagnosticPayloadValue);
+  if (typeof value !== 'object' || value === null || ancestors.has(value)) return false;
+  const nextAncestors = new Set(ancestors).add(value);
+  if (Array.isArray(value)) return value.every((item) => isDiagnosticPayloadValue(item, nextAncestors));
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+    return false;
+  }
+  return isRecord(value) && Object.values(value).every((item) => isDiagnosticPayloadValue(item, nextAncestors));
+}
+
+function isDiagnosticPayloadRecord(value: unknown): value is Record<string, DiagnosticPayloadValue> {
+  return isRecord(value) && isDiagnosticPayloadValue(value);
 }
 
 function isDiagnosticEvent(value: unknown): value is DiagnosticEvent {
@@ -507,7 +532,7 @@ function isDiagnosticEvent(value: unknown): value is DiagnosticEvent {
     codePointLength(value.kind) <= 64 &&
     typeof value.critical === 'boolean' &&
     isRecord(value.payload) &&
-    Object.values(value.payload).every(isDiagnosticPayloadValue)
+    Object.values(value.payload).every((item) => isDiagnosticPayloadValue(item))
   );
 }
 
@@ -715,6 +740,50 @@ export function isFaultResetResultMessage(value: unknown): value is FaultResetRe
   );
 }
 
+export function isOfflineRehearsalClientMessage(
+  value: unknown,
+): value is OfflineRehearsalClientMessage {
+  if (
+    !isRecord(value) ||
+    value.v !== PROTOCOL_VERSION ||
+    !isIdentifier(value.request_id)
+  ) {
+    return false;
+  }
+
+  if (value.type === 'offline_rehearsal_begin') {
+    return (
+      hasExactKeys(value, ['v', 'type', 'request_id', 'plan_version']) &&
+      value.plan_version === 1
+    );
+  }
+
+  if (value.type === 'offline_rehearsal_phase') {
+    return (
+      hasExactKeys(value, [
+        'v', 'type', 'request_id', 'run_id', 'phase', 'status', 'started_client_ms',
+        'completed_client_ms', 'target', 'measurements', 'failure',
+      ]) &&
+      isIdentifier(value.run_id) &&
+      isEnumValue(OFFLINE_REHEARSAL_PHASES, value.phase) &&
+      (value.status === 'passed' || value.status === 'failed') &&
+      isNonNegativeNumber(value.started_client_ms) &&
+      isNonNegativeNumber(value.completed_client_ms) &&
+      isDiagnosticPayloadRecord(value.target) &&
+      isDiagnosticPayloadRecord(value.measurements) &&
+      (value.failure === null || isDiagnosticPayloadRecord(value.failure))
+    );
+  }
+
+  return (
+    value.type === 'offline_rehearsal_finish' &&
+    hasExactKeys(value, ['v', 'type', 'request_id', 'run_id', 'outcome', 'failure']) &&
+    isIdentifier(value.run_id) &&
+    isEnumValue(OFFLINE_REHEARSAL_OUTCOMES, value.outcome) &&
+    (value.failure === null || isDiagnosticPayloadRecord(value.failure))
+  );
+}
+
 export function isHomeResultMessage(value: unknown): value is HomeResultMessage {
   if (
     !isRecord(value) ||
@@ -798,8 +867,10 @@ export function isOfflineRehearsalFeedbackMessage(
       isNonEmptyString(value.markdown_path) &&
       value.hardware_verified === false &&
       Array.isArray(value.hardware_pending) &&
-      value.hardware_pending.length === 8 &&
-      value.hardware_pending.every(isNonEmptyString)
+      value.hardware_pending.length === OFFLINE_REHEARSAL_HARDWARE_PENDING.length &&
+      value.hardware_pending.every(
+        (item, index) => item === OFFLINE_REHEARSAL_HARDWARE_PENDING[index],
+      )
     );
   }
   return (

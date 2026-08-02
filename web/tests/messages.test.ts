@@ -83,8 +83,43 @@ describe('protocol guards', () => {
       markdown_path: undefined,
     })).toBe(false);
     expect(isOfflineRehearsalFeedbackMessage({
-      ...phaseAccepted,
-      metrics: {latency_ms: Number.NaN},
+      ...validOfflineRehearsalFinish,
+      hardware_pending: [
+        'sdk_connection',
+        'tcp_home_joint_limits',
+        'translation_direction',
+        'rotation_direction',
+        'gripper_direction_force',
+        'pvat_tracking_latency',
+        'stop_distance_estop',
+        'unexpected_check',
+      ],
+    })).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({
+      ...validOfflineRehearsalFinish,
+      hardware_pending: [
+        'sdk_connection',
+        'sdk_connection',
+        'translation_direction',
+        'rotation_direction',
+        'gripper_direction_force',
+        'pvat_tracking_latency',
+        'stop_distance_estop',
+        'lightweight_grasp_release',
+      ],
+    })).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({
+      ...validOfflineRehearsalFinish,
+      hardware_pending: [
+        'tcp_home_joint_limits',
+        'sdk_connection',
+        'translation_direction',
+        'rotation_direction',
+        'gripper_direction_force',
+        'pvat_tracking_latency',
+        'stop_distance_estop',
+        'lightweight_grasp_release',
+      ],
     })).toBe(false);
     expect(isOfflineRehearsalFeedbackMessage({...finishRejected, run_id: ''})).toBe(false);
   });
