@@ -30,7 +30,8 @@ with warnings.catch_warnings():
     from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.main import create_app
+from app.main import REPOSITORY_ROOT, create_app
+from app.rehearsal.report import RehearsalReportStore
 from app.recording.noop import NoopRecorder
 from tests.config.test_real_robot_config import REAL_CONFIG_TEMPLATE
 from tests.robots.fake_lebai import FakeLebaiClient
@@ -137,6 +138,19 @@ def test_simulator_app_never_imports_lebai_sdk(
             "preflight_ready": True,
             "preflight_reason": None,
         }
+
+
+def test_rehearsal_store_uses_current_runtime_and_acceptance_root() -> None:
+    app = create_app(backend_label="LEBAI_FAKE")
+
+    with TestClient(app):
+        store = app.state.offline_rehearsal_store
+
+        assert isinstance(store, RehearsalReportStore)
+        assert store.runtime == "LEBAI_FAKE"
+        assert store.root == (
+            REPOSITORY_ROOT / "artifacts" / "acceptance" / "offline-rehearsal"
+        )
 
 
 def test_starlette_warning_filter_does_not_hide_extended_message() -> None:

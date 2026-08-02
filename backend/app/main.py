@@ -20,6 +20,7 @@ from app.diagnostics.store import DiagnosticsStore
 from app.recording.base import RecorderSink
 from app.recording.commissioning import CommissioningRecorder
 from app.recording.noop import NoopRecorder
+from app.rehearsal.report import RehearsalReportStore
 from app.robots.base import BackendPreflight, HomeOptions, RobotBackend
 from app.robots.lebai_adapter import ClientFactory, RealLebaiAdapter
 from app.robots.lebai_sdk_bridge import connect_real_client
@@ -183,6 +184,15 @@ def create_app(
         app.state.control = control
         app.state.recorder = recorder
         app.state.diagnostics = diagnostics
+        app.state.offline_rehearsal_store = RehearsalReportStore(
+            root=(
+                REPOSITORY_ROOT
+                / "artifacts"
+                / "acceptance"
+                / "offline-rehearsal"
+            ),
+            runtime=runtime_backend,
+        )
         app.state.runtime_backend = runtime_backend
         app.state.log_session_dir = recorder.log_session_dir
         app.state.teleop_sender_tasks = set()

@@ -29,6 +29,11 @@ with warnings.catch_warnings():
 
 from app.main import create_app
 from app.control.robot_control import FaultResetResult, HomeResult
+from app.rehearsal.report import (
+    HARDWARE_PENDING,
+    REHEARSAL_PHASES,
+    RehearsalReportStore,
+)
 from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -76,6 +81,191 @@ def _fault_robot_state() -> RobotStateMessage:
     return _disarmed_robot_state().model_copy(
         update={"mode": TeleopMode.FAULT, "fault": "workspace_violation"}
     )
+
+
+def _rehearsal_phase(run_id: str, phase: str) -> dict[str, object]:
+    return {
+        "v": 1,
+        "type": "offline_rehearsal_phase",
+        "request_id": f"phase-{phase}",
+        "run_id": run_id,
+        "phase": phase,
+        "status": "passed",
+        "started_client_ms": 10.0,
+        "completed_client_ms": 20.0,
+        "target": {},
+        "measurements": {},
+        "failure": None,
+    }
+
+
+def _install_rehearsal_store(app, root: Path, runtime: str) -> RehearsalReportStore:
+    store = RehearsalReportStore(
+        root=root,
+        runtime=runtime,
+        provenance=lambda: {
+            "git": {"commit": "a" * 40, "dirty": False, "dirty_paths": []},
+            "model": {},
+        },
+    )
+    app.state.offline_rehearsal_store = store
+    return store
+
+
+def test_rehearsal_begin_phase_finish_are_correlated_and_never_call_motion(
+    tmp_path: Path,
+) -> None:
+    app = create_app(backend_label="LEBAI_FAKE")
+    with TestClient(app) as client:
+        _install_rehearsal_store(app, tmp_path, "LEBAI_FAKE")
+        app.state.control.arm = AsyncMock(wraps=app.state.control.arm)
+        app.state.control.home = AsyncMock(wraps=app.state.control.home)
+        app.state.control.disarm = AsyncMock(wraps=app.state.control.disarm)
+        app.state.backend.command_tcp = AsyncMock(wraps=app.state.backend.command_tcp)
+        app.state.backend.set_gripper = AsyncMock(
+            wraps=app.state.backend.set_gripper
+        )
+
+        with client.websocket_connect("/ws/v1/teleop") as ws:
+            ws.send_json(
+                {
+                    "v": 1,
+                    "type": "offline_rehearsal_begin",
+                    "request_id": "begin-1",
+                    "plan_version": 1,
+                }
+            )
+            begun = ws.receive_json()
+            assert begun["type"] == "offline_rehearsal_begin_result"
+            assert begun["request_id"] == "begin-1"
+            assert begun["accepted"] is True
+            run_id = begun["run_id"]
+
+            for phase in REHEARSAL_PHASES:
+                ws.send_json(_rehearsal_phase(run_id, phase))
+                ack = ws.receive_json()
+                assert ack == {
+                    "v": 1,
+                    "type": "offline_rehearsal_phase_ack",
+                    "request_id": f"phase-{phase}",
+                    "accepted": True,
+                    "run_id": run_id,
+                    "phase": phase,
+                }
+
+            ws.send_json(
+                {
+                    "v": 1,
+                    "type": "offline_rehearsal_finish",
+                    "request_id": "finish-1",
+                    "run_id": run_id,
+                    "outcome": "passed",
+                    "failure": None,
+                }
+            )
+            finished = ws.receive_json()
+
+        assert finished == {
+            "v": 1,
+            "type": "offline_rehearsal_finish_result",
+            "request_id": "finish-1",
+            "accepted": True,
+            "run_id": run_id,
+            "outcome": "passed",
+            "json_path": str(tmp_path / f"{run_id}.json"),
+            "markdown_path": str(tmp_path / f"{run_id}.md"),
+            "hardware_verified": False,
+            "hardware_pending": list(HARDWARE_PENDING),
+        }
+        app.state.control.arm.assert_not_awaited()
+        app.state.control.home.assert_not_awaited()
+        app.state.control.disarm.assert_not_awaited()
+        app.state.backend.command_tcp.assert_not_awaited()
+        app.state.backend.set_gripper.assert_not_awaited()
+
+
+def test_rehearsal_begin_rejects_non_fake_without_closing_socket(tmp_path: Path) -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        _install_rehearsal_store(app, tmp_path, "SIMULATOR")
+        with client.websocket_connect("/ws/v1/teleop") as ws:
+            ws.send_json(
+                {
+                    "v": 1,
+                    "type": "offline_rehearsal_begin",
+                    "request_id": "begin-sim",
+                    "plan_version": 1,
+                }
+            )
+            assert ws.receive_json() == {
+                "v": 1,
+                "type": "offline_rehearsal_begin_result",
+                "request_id": "begin-sim",
+                "accepted": False,
+                "reason": "not_fake_runtime",
+            }
+            ws.send_json({"v": 1, "type": "ping", "request_id": "still-open"})
+            assert ws.receive_json() == {
+                "v": 1,
+                "type": "pong",
+                "request_id": "still-open",
+            }
+
+
+def test_rehearsal_wrong_run_and_owner_are_rejected_without_socket_close(
+    tmp_path: Path,
+) -> None:
+    app = create_app(backend_label="LEBAI_FAKE")
+    with TestClient(app) as client:
+        store = _install_rehearsal_store(app, tmp_path, "LEBAI_FAKE")
+        state = client.portal.call(app.state.control.state_message)
+        diagnostics = app.state.diagnostics.message(
+            runtime="LEBAI_FAKE",
+            hardware_verified=False,
+            server_mono_ns=app.state.control.clock.now_ns(),
+            control_generation=app.state.control.control_generation,
+            log_session_dir=app.state.log_session_dir,
+        )
+        other_run = client.portal.call(
+            store.begin, object(), 1, state, diagnostics
+        ).run_id
+
+        with client.websocket_connect("/ws/v1/teleop") as ws:
+            ws.send_json(_rehearsal_phase("missing-run", REHEARSAL_PHASES[0]))
+            missing = ws.receive_json()
+            assert missing["accepted"] is False
+            assert missing["reason"] == "run_not_active"
+
+            ws.send_json(_rehearsal_phase(other_run, REHEARSAL_PHASES[0]))
+            owner = ws.receive_json()
+            assert owner["accepted"] is False
+            assert owner["reason"] == "owner_mismatch"
+
+            ws.send_json({"v": 1, "type": "ping", "request_id": "still-open"})
+            assert ws.receive_json()["type"] == "pong"
+
+
+def test_rehearsal_disconnect_persists_aborted_report(tmp_path: Path) -> None:
+    app = create_app(backend_label="LEBAI_FAKE")
+    with TestClient(app) as client:
+        _install_rehearsal_store(app, tmp_path, "LEBAI_FAKE")
+        with client.websocket_connect("/ws/v1/teleop") as ws:
+            ws.send_json(
+                {
+                    "v": 1,
+                    "type": "offline_rehearsal_begin",
+                    "request_id": "begin-abort",
+                    "plan_version": 1,
+                }
+            )
+            run_id = ws.receive_json()["run_id"]
+
+        payload = json.loads(
+            (tmp_path / f"{run_id}.json").read_text(encoding="utf-8")
+        )
+        assert payload["outcome"] == "aborted"
+        assert payload["failure"] == {"reason": "connection_closed"}
+        assert payload["hardware_verified"] is False
 
 
 def _receive_reset_sequence(ws, limit: int = 8) -> list[dict[str, object]]:

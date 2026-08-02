@@ -26,6 +26,21 @@ ConstraintKind = Literal[
     "self_collision",
 ]
 RecoveryPhase = Literal["stopping", "homing", "stabilizing"]
+RehearsalPhaseName = Literal[
+    "identity_preflight",
+    "home",
+    "arm_and_anchor",
+    "translate",
+    "rotate",
+    "gripper",
+    "pick_place",
+    "soft_boundary",
+    "tracking_loss",
+    "recovery_and_home",
+    "final_stop",
+    "finalize",
+]
+RehearsalOutcome = Literal["passed", "failed", "aborted"]
 
 
 class StrictMessage(BaseModel):
@@ -201,3 +216,69 @@ class ClientControlMessage(StrictMessage):
     ]
     request_id: str = Field(min_length=1, max_length=64)
     client_mono_ms: float | None = Field(default=None, ge=0)
+
+
+class OfflineRehearsalBeginMessage(StrictMessage):
+    v: Literal[1]
+    type: Literal["offline_rehearsal_begin"]
+    request_id: str = Field(min_length=1, max_length=64)
+    plan_version: Literal[1]
+
+    @field_validator("plan_version", mode="before")
+    @classmethod
+    def validate_plan_version(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("plan_version must be the integer 1")
+        return value
+
+
+class OfflineRehearsalPhaseMessage(StrictMessage):
+    v: Literal[1]
+    type: Literal["offline_rehearsal_phase"]
+    request_id: str = Field(min_length=1, max_length=64)
+    run_id: str = Field(min_length=1, max_length=64)
+    phase: RehearsalPhaseName
+    status: Literal["passed", "failed"]
+    started_client_ms: float = Field(ge=0)
+    completed_client_ms: float = Field(ge=0)
+    target: dict[str, object]
+    measurements: dict[str, object]
+    failure: dict[str, object] | None
+
+    @field_validator("target", "measurements", "failure")
+    @classmethod
+    def validate_nested_payload(
+        cls,
+        value: dict[str, object] | None,
+    ) -> dict[str, object] | None:
+        if value is not None:
+            _validate_json_payload(value)
+        return value
+
+
+class OfflineRehearsalFinishMessage(StrictMessage):
+    v: Literal[1]
+    type: Literal["offline_rehearsal_finish"]
+    request_id: str = Field(min_length=1, max_length=64)
+    run_id: str = Field(min_length=1, max_length=64)
+    outcome: RehearsalOutcome
+    failure: dict[str, object] | None
+
+    @field_validator("failure")
+    @classmethod
+    def validate_failure_payload(
+        cls,
+        value: dict[str, object] | None,
+    ) -> dict[str, object] | None:
+        if value is not None:
+            _validate_json_payload(value)
+        return value
+
+
+ClientMessage = (
+    VRFrame
+    | ClientControlMessage
+    | OfflineRehearsalBeginMessage
+    | OfflineRehearsalPhaseMessage
+    | OfflineRehearsalFinishMessage
+)

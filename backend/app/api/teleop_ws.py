@@ -10,8 +10,13 @@ from pydantic import ValidationError
 
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.diagnostics.store import DiagnosticsStore
+from app.rehearsal.report import HARDWARE_PENDING, RehearsalReportStore
 from app.schemas.messages import (
+    ClientMessage,
     ClientControlMessage,
+    OfflineRehearsalBeginMessage,
+    OfflineRehearsalFinishMessage,
+    OfflineRehearsalPhaseMessage,
     RuntimeBackend,
     TeleopMode,
     VRFrame,
@@ -110,12 +115,169 @@ async def _protocol_error(websocket: WebSocket, send_lock: asyncio.Lock) -> None
         await websocket.close(code=1008, reason=message)
 
 
-def _parse_message(payload: Any) -> VRFrame | ClientControlMessage:
+def _parse_message(payload: Any) -> ClientMessage:
     if not isinstance(payload, dict):
         raise ValueError("message_must_be_object")
-    if payload.get("type") == "vr_frame":
+    message_type = payload.get("type")
+    if message_type == "vr_frame":
         return VRFrame.model_validate(payload)
+    if message_type == "offline_rehearsal_begin":
+        return OfflineRehearsalBeginMessage.model_validate(payload)
+    if message_type == "offline_rehearsal_phase":
+        return OfflineRehearsalPhaseMessage.model_validate(payload)
+    if message_type == "offline_rehearsal_finish":
+        return OfflineRehearsalFinishMessage.model_validate(payload)
     return ClientControlMessage.model_validate(payload)
+
+
+async def _rehearsal_snapshot(
+    websocket: WebSocket,
+    control: RobotControl,
+) -> tuple[object, object]:
+    app_state = websocket.app.state
+    diagnostics: DiagnosticsStore = app_state.diagnostics
+    state = await control.state_message()
+    diagnostic_message = diagnostics.message(
+        runtime=app_state.runtime_backend,
+        hardware_verified=False,
+        server_mono_ns=control.clock.now_ns(),
+        control_generation=control.control_generation,
+        log_session_dir=app_state.log_session_dir,
+    )
+    return state, diagnostic_message
+
+
+def _rehearsal_reject_reason(operation: str, error: Exception) -> str:
+    if isinstance(error, PermissionError):
+        return "owner_mismatch"
+    detail = str(error)
+    if "only for LEBAI_FAKE" in detail:
+        return "not_fake_runtime"
+    if "already has an active" in detail:
+        return "run_already_active"
+    if "run is not active" in detail:
+        return "run_not_active"
+    if "phase order" in detail:
+        return "phase_out_of_order"
+    if "all phases" in detail or "passed report requires" in detail:
+        return "run_incomplete"
+    if isinstance(error, OSError):
+        return "report_write_failed"
+    return f"{operation}_rejected"
+
+
+async def _handle_rehearsal_message(
+    websocket: WebSocket,
+    control: RobotControl,
+    owner_token: object,
+    message: (
+        OfflineRehearsalBeginMessage
+        | OfflineRehearsalPhaseMessage
+        | OfflineRehearsalFinishMessage
+    ),
+    send_lock: asyncio.Lock,
+    rehearsal_active: asyncio.Event | None = None,
+) -> None:
+    store: RehearsalReportStore = websocket.app.state.offline_rehearsal_store
+    state, diagnostics = await _rehearsal_snapshot(websocket, control)
+    if isinstance(message, OfflineRehearsalBeginMessage):
+        try:
+            result = await store.begin(
+                owner_token,
+                message.plan_version,
+                state,
+                diagnostics,
+            )
+        except Exception as error:
+            payload = {
+                "v": 1,
+                "type": "offline_rehearsal_begin_result",
+                "request_id": message.request_id,
+                "accepted": False,
+                "reason": _rehearsal_reject_reason("begin", error),
+            }
+        else:
+            if rehearsal_active is not None:
+                rehearsal_active.set()
+            payload = {
+                "v": 1,
+                "type": "offline_rehearsal_begin_result",
+                "request_id": message.request_id,
+                "accepted": True,
+                "run_id": result.run_id,
+            }
+        await _send_json(websocket, payload, send_lock)
+        return
+
+    if isinstance(message, OfflineRehearsalPhaseMessage):
+        phase_result = message.model_dump(
+            mode="json",
+            exclude={"v", "type", "request_id", "run_id"},
+        )
+        try:
+            await store.record_phase(
+                owner_token,
+                message.run_id,
+                phase_result,
+                state,
+                diagnostics,
+            )
+        except Exception as error:
+            payload = {
+                "v": 1,
+                "type": "offline_rehearsal_phase_ack",
+                "request_id": message.request_id,
+                "accepted": False,
+                "run_id": message.run_id,
+                "phase": message.phase,
+                "reason": _rehearsal_reject_reason("phase", error),
+            }
+        else:
+            payload = {
+                "v": 1,
+                "type": "offline_rehearsal_phase_ack",
+                "request_id": message.request_id,
+                "accepted": True,
+                "run_id": message.run_id,
+                "phase": message.phase,
+            }
+        await _send_json(websocket, payload, send_lock)
+        return
+
+    try:
+        result = await store.finish(
+            owner_token,
+            message.run_id,
+            message.outcome,
+            message.failure,
+            state,
+            diagnostics,
+        )
+    except Exception as error:
+        payload = {
+            "v": 1,
+            "type": "offline_rehearsal_finish_result",
+            "request_id": message.request_id,
+            "accepted": False,
+            "run_id": message.run_id,
+            "reason": _rehearsal_reject_reason("finish", error),
+        }
+    else:
+        if rehearsal_active is not None:
+            rehearsal_active.clear()
+        payload = {
+            "v": 1,
+            "type": "offline_rehearsal_finish_result",
+            "request_id": message.request_id,
+            "accepted": True,
+            "run_id": message.run_id,
+            "outcome": message.outcome,
+            "json_path": str(result.json_path),
+            "markdown_path": str(result.markdown_path),
+            "hardware_verified": False,
+            "hardware_pending": list(HARDWARE_PENDING),
+        }
+    await _send_json(websocket, payload, send_lock)
 
 
 async def _receive_messages(
@@ -123,6 +285,8 @@ async def _receive_messages(
     control: RobotControl,
     start_sender: asyncio.Event,
     send_lock: asyncio.Lock,
+    owner_token: object | None = None,
+    rehearsal_active: asyncio.Event | None = None,
 ) -> None:
     app = websocket.app
     while True:
@@ -138,6 +302,37 @@ async def _receive_messages(
         if isinstance(message, VRFrame):
             app.state.latest.publish(message, monotonic_ns())
             start_sender.set()
+            continue
+
+        if isinstance(
+            message,
+            (
+                OfflineRehearsalBeginMessage,
+                OfflineRehearsalPhaseMessage,
+                OfflineRehearsalFinishMessage,
+            ),
+        ):
+            if owner_token is None:
+                await _send_json(
+                    websocket,
+                    {
+                        "v": 1,
+                        "type": "offline_rehearsal_begin_result",
+                        "request_id": message.request_id,
+                        "accepted": False,
+                        "reason": "owner_mismatch",
+                    },
+                    send_lock,
+                )
+            else:
+                await _handle_rehearsal_message(
+                    websocket,
+                    control,
+                    owner_token,
+                    message,
+                    send_lock,
+                    rehearsal_active,
+                )
             continue
 
         if message.type == "hello":
@@ -264,11 +459,20 @@ async def _run_coupled_session(
     websocket: WebSocket,
     control: RobotControl,
     sender_tasks: set[asyncio.Task[None]],
+    owner_token: object | None = None,
+    rehearsal_active: asyncio.Event | None = None,
 ) -> None:
     start_sender = asyncio.Event()
     send_lock = asyncio.Lock()
     receiver = asyncio.create_task(
-        _receive_messages(websocket, control, start_sender, send_lock),
+        _receive_messages(
+            websocket,
+            control,
+            start_sender,
+            send_lock,
+            owner_token,
+            rehearsal_active,
+        ),
         name="teleop-receiver",
     )
     sender = asyncio.create_task(
@@ -353,11 +557,16 @@ async def teleop_websocket(websocket: WebSocket) -> None:
         return
     session_error: BaseException | None = None
     cleanup_error: BaseException | None = None
+    rehearsal_active = asyncio.Event()
     try:
         if control.mode == TeleopMode.DISCONNECTED:
             await control.connect()
         await _run_coupled_session(
-            websocket, control, app.state.teleop_sender_tasks
+            websocket,
+            control,
+            app.state.teleop_sender_tasks,
+            owner_token,
+            rehearsal_active,
         )
     except BaseException as error:
         session_error = error
@@ -367,13 +576,37 @@ async def teleop_websocket(websocket: WebSocket) -> None:
         if owns_connection:
             try:
                 try:
-                    await control.on_disconnect()
+                    store = getattr(
+                        app.state,
+                        "offline_rehearsal_store",
+                        None,
+                    )
+                    if (
+                        isinstance(store, RehearsalReportStore)
+                        and rehearsal_active.is_set()
+                    ):
+                        state, diagnostics = await _rehearsal_snapshot(
+                            websocket,
+                            control,
+                        )
+                        await store.abort_owner(
+                            owner_token,
+                            "connection_closed",
+                            state,
+                            diagnostics,
+                        )
                 except BaseException as error:
                     cleanup_error = error
                 finally:
-                    latest = LatestVRFrame()
-                    control.latest = latest
-                    app.state.latest = latest
+                    try:
+                        await control.on_disconnect()
+                    except BaseException as error:
+                        if cleanup_error is None:
+                            cleanup_error = error
+                    finally:
+                        latest = LatestVRFrame()
+                        control.latest = latest
+                        app.state.latest = latest
             finally:
                 async with app.state.teleop_owner_lock:
                     if app.state.teleop_owner is owner_token:

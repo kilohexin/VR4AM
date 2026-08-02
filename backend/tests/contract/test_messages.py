@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 from typing import Any, get_args
 
@@ -82,6 +83,133 @@ def test_diagnostics_fixture_round_trips_exactly() -> None:
     message = DiagnosticsMessage.model_validate(payload)
 
     assert message.model_dump(mode="json") == payload
+
+
+def test_rehearsal_messages_accept_only_the_exact_lifecycle_keys() -> None:
+    begin = {
+        "v": 1,
+        "type": "offline_rehearsal_begin",
+        "request_id": "begin-1",
+        "plan_version": 1,
+    }
+    finish = {
+        "v": 1,
+        "type": "offline_rehearsal_finish",
+        "request_id": "finish-1",
+        "run_id": "run-1",
+        "outcome": "failed",
+        "failure": {"reason": "offline_interlock"},
+    }
+
+    assert (
+        messages.OfflineRehearsalBeginMessage.model_validate(begin).plan_version
+        == 1
+    )
+    assert (
+        messages.OfflineRehearsalFinishMessage.model_validate(finish).outcome
+        == "failed"
+    )
+    with pytest.raises(ValidationError):
+        messages.OfflineRehearsalBeginMessage.model_validate(
+            {**begin, "client_mono_ms": 1.0}
+        )
+    with pytest.raises(ValidationError):
+        messages.OfflineRehearsalFinishMessage.model_validate(
+            {**finish, "target": {}}
+        )
+
+
+def test_rehearsal_phase_rejects_motion_fields_and_non_finite_metrics() -> None:
+    valid = {
+        "v": 1,
+        "type": "offline_rehearsal_phase",
+        "request_id": "phase-1",
+        "run_id": "run-1",
+        "phase": "home",
+        "status": "passed",
+        "started_client_ms": 10.0,
+        "completed_client_ms": 20.0,
+        "target": {},
+        "measurements": {"max_error": 0.0},
+        "failure": None,
+    }
+
+    messages.OfflineRehearsalPhaseMessage.model_validate(valid)
+    with pytest.raises(ValidationError):
+        messages.OfflineRehearsalPhaseMessage.model_validate(
+            {**valid, "target_q": [0] * 6}
+        )
+    with pytest.raises(ValidationError):
+        messages.OfflineRehearsalPhaseMessage.model_validate(
+            {**valid, "measurements": {"max_error": math.nan}}
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("request_id", ""),
+        ("request_id", "界" * 65),
+        ("run_id", ""),
+        ("run_id", "界" * 65),
+        ("phase", "unknown"),
+        ("status", "aborted"),
+    ],
+)
+def test_rehearsal_phase_enforces_ids_and_literals(field: str, value: str) -> None:
+    payload = {
+        "v": 1,
+        "type": "offline_rehearsal_phase",
+        "request_id": "界" * 64,
+        "run_id": "界" * 64,
+        "phase": "identity_preflight",
+        "status": "passed",
+        "started_client_ms": 0.0,
+        "completed_client_ms": 1.0,
+        "target": {},
+        "measurements": {},
+        "failure": None,
+    }
+
+    messages.OfflineRehearsalPhaseMessage.model_validate(payload)
+    with pytest.raises(ValidationError):
+        messages.OfflineRehearsalPhaseMessage.model_validate(
+            {**payload, field: value}
+        )
+
+
+@pytest.mark.parametrize("outcome", ["passed", "failed", "aborted"])
+def test_rehearsal_finish_accepts_only_declared_outcomes(outcome: str) -> None:
+    payload = {
+        "v": 1,
+        "type": "offline_rehearsal_finish",
+        "request_id": "finish-1",
+        "run_id": "run-1",
+        "outcome": outcome,
+        "failure": None,
+    }
+
+    assert (
+        messages.OfflineRehearsalFinishMessage.model_validate(payload).outcome
+        == outcome
+    )
+    with pytest.raises(ValidationError):
+        messages.OfflineRehearsalFinishMessage.model_validate(
+            {**payload, "outcome": "unknown"}
+        )
+
+
+@pytest.mark.parametrize("plan_version", [0, 2, True])
+def test_rehearsal_begin_requires_plan_version_one(plan_version: object) -> None:
+    with pytest.raises(ValidationError):
+        messages.OfflineRehearsalBeginMessage.model_validate(
+            {
+                "v": 1,
+                "type": "offline_rehearsal_begin",
+                "request_id": "begin-1",
+                "plan_version": plan_version,
+            }
+        )
 
 
 @pytest.mark.parametrize("bad_value", [-0.1, float("nan"), float("inf")])
