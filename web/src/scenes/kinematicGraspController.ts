@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type {GraspSceneSnapshot} from '../rehearsal/types';
 
 export interface GraspBlock {
   id: string;
@@ -103,6 +104,31 @@ export class KinematicGraspController {
     }
     this.carried = null;
     this.closeArmed = true;
+  }
+
+  snapshot(): GraspSceneSnapshot {
+    const blocks = this.options.blocks.map((block) => {
+      const position = block.object.position.toArray();
+      if (
+        !position.every(Number.isFinite)
+        || !Number.isFinite(block.sizeM)
+        || block.sizeM <= 0
+      ) {
+        throw new Error('invalid_grasp_snapshot');
+      }
+      return {
+        id: block.id,
+        position: [position[0], position[1], position[2]] as [number, number, number],
+        sizeM: block.sizeM,
+      };
+    });
+    return {
+      carriedBlockId: this.carried?.id ?? null,
+      blocks,
+      invalidOverlap: this.options.blocks.some((first, firstIndex) => (
+        this.options.blocks.slice(firstIndex + 1).some((second) => strictlyOverlaps(first, second))
+      )),
+    };
   }
 
   private validateOptions(): void {

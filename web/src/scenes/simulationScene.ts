@@ -22,8 +22,16 @@ import {
 } from './kinematicGraspController';
 import {WorkspacePlacementController} from './workspacePlacementController';
 import {type RobotRuntimeSummary, VrSafetyPanel} from './vrSafetyPanel';
+import {
+  copyOfflineControllerSample,
+  copyOfflineSceneSnapshot,
+  type OfflineControllerSample,
+  type OfflineSceneSnapshot,
+} from '../rehearsal/types';
 
 const FRAME_INTERVAL_MS = 1_000 / 60;
+const DESKTOP_CONTROLLER_POSITION: Vec3 = [0.56, 0.42, 0.18];
+const DESKTOP_CONTROLLER_QUATERNION: Quat = [0, 0, 0, 1];
 
 export interface VRFrameInput {
   sessionId: string;
@@ -215,8 +223,9 @@ export class SimulationScene {
   private lastFrameMs = Number.NEGATIVE_INFINITY;
   private readonly clockAnchor = new ServerClockAnchor();
   private readonly inputSafety: DesktopInputSafety;
-  private readonly controllerPosition = new THREE.Vector3(0.56, 0.42, 0.18);
-  private readonly controllerQuaternion = new THREE.Quaternion(0, 0, 0, 1);
+  private readonly controllerPosition = new THREE.Vector3(...DESKTOP_CONTROLLER_POSITION);
+  private readonly controllerQuaternion = new THREE.Quaternion(...DESKTOP_CONTROLLER_QUATERNION);
+  private offlineController: OfflineControllerSample | null = null;
   private readonly vrSafetyPanel: VrSafetyPanel;
   private readonly controllerHints: ControllerHints;
   private readonly workspacePlacement = new WorkspacePlacementController(window.localStorage);
@@ -297,6 +306,42 @@ export class SimulationScene {
     this.options.stateBuffer.reset();
     this.clockAnchor.reset();
     this.inputSafety.reset();
+  }
+
+  setOfflineController(sample: OfflineControllerSample | null): void {
+    if (sample === null) {
+      this.inputSafety.reset();
+      this.controllerPosition.fromArray(DESKTOP_CONTROLLER_POSITION);
+      this.controllerQuaternion.fromArray(DESKTOP_CONTROLLER_QUATERNION);
+      this.offlineController = null;
+      return;
+    }
+    this.inputSafety.reset();
+    this.offlineController = copyOfflineControllerSample(sample);
+    this.controllerPosition.fromArray(this.offlineController.position);
+    this.controllerQuaternion.fromArray(this.offlineController.quaternion);
+  }
+
+  getOfflineSceneSnapshot(): OfflineSceneSnapshot {
+    const grasp = this.graspController?.snapshot() ?? {
+      carriedBlockId: null,
+      blocks: this.graspBlocks.map((block) => ({
+        id: block.id,
+        position: block.object.position.toArray() as Vec3,
+        sizeM: block.sizeM,
+      })),
+      invalidOverlap: false,
+    };
+    return copyOfflineSceneSnapshot({
+      controller: this.offlineController === null
+        ? null
+        : copyOfflineControllerSample(this.offlineController),
+      ...grasp,
+    });
+  }
+
+  resetOfflineScene(): void {
+    this.graspController?.reset();
   }
 
   setArmSafetyState(snapshot: ArmSafetySnapshot): void {
@@ -428,16 +473,17 @@ export class SimulationScene {
   private sendDesktopFrame(nowMs: number): void {
     if (nowMs - this.lastFrameMs >= FRAME_INTERVAL_MS) {
       this.lastFrameMs = nowMs;
-      const input = this.inputSafety.snapshot();
+      const offline = this.offlineController;
+      const input = offline === null ? this.inputSafety.snapshot() : null;
       const frame = createVRFrame({
         sessionId: this.sessionId,
         sequence: this.sequence++,
         nowMs,
-        trackingValid: document.visibilityState === 'visible',
-        position: this.controllerPosition.toArray() as Vec3,
-        quaternion: this.controllerQuaternion.toArray() as Quat,
-        grip: input.grip,
-        trigger: input.trigger,
+        trackingValid: document.visibilityState === 'visible' && (offline?.trackingValid ?? true),
+        position: offline?.position ?? this.controllerPosition.toArray() as Vec3,
+        quaternion: offline?.quaternion ?? this.controllerQuaternion.toArray() as Quat,
+        grip: offline?.grip ?? input!.grip,
+        trigger: offline?.trigger ?? input!.trigger,
       });
       this.options.onController({
         tracking: frame.tracking_valid,
@@ -548,16 +594,22 @@ export class SimulationScene {
 
   private readonly resizeFromEvent = (): void => this.resize();
 
-  private readonly onPointerMove = (event: PointerEvent): void => {
+  private readonly onPointerMove = (event: PointerEvent): void => this.applyPointerMove(event);
+
+  private applyPointerMove(event: PointerEvent): void {
+    if (this.offlineController !== null) return;
     if (!this.inputSafety.isActivePointer(event.pointerId)) return;
     this.controllerPosition.x = clamp(this.controllerPosition.x + event.movementX * 0.0012, -0.2, 0.8);
     this.controllerPosition.y = clamp(this.controllerPosition.y - event.movementY * 0.0012, 0.05, 1.05);
-  };
+  }
 
-  private readonly onWheel = (event: WheelEvent): void => {
+  private readonly onWheel = (event: WheelEvent): void => this.applyWheel(event);
+
+  private applyWheel(event: WheelEvent): void {
+    if (this.offlineController !== null) return;
     event.preventDefault();
     this.controllerPosition.z = clamp(this.controllerPosition.z + event.deltaY * 0.0008, -0.62, 0.62);
-  };
+  }
 
   private readonly preventContextMenu = (event: MouseEvent): void => event.preventDefault();
 }

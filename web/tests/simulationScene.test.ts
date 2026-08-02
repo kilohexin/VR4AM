@@ -12,6 +12,7 @@ import {
 } from '../src/scenes/simulationScene';
 import type {ArmSafetySnapshot} from '../src/ui/armPanel';
 import type {XRPresentationSample} from '../src/xr/session';
+import type {OfflineControllerSample} from '../src/rehearsal/types';
 
 describe('grasp block resources', () => {
   it('creates five exact colored 60 mm blocks at deterministic positions', () => {
@@ -71,6 +72,127 @@ describe('desktop VR frame path', () => {
         grip: false,
         trigger: 0.25,
       },
+    });
+  });
+});
+
+describe('offline controller scene seam', () => {
+  it('publishes the exclusive synthetic sample instead of latched desktop input', () => {
+    Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'visible'});
+    const offline: OfflineControllerSample = {
+      position: [0.1, 0.2, 0.3], quaternion: [0, 0, 0, 1],
+      grip: false, trigger: 0.75, trackingValid: true,
+    };
+    const frame = vi.fn();
+    const controller = vi.fn();
+    const scene = {
+      lastFrameMs: Number.NEGATIVE_INFINITY,
+      inputSafety: {snapshot: vi.fn(() => ({activePointer: 5, grip: true, trigger: 1}))},
+      offlineController: offline,
+      sessionId: 'offline',
+      sequence: 0,
+      options: {onFrame: frame, onController: controller},
+    };
+
+    (SimulationScene.prototype as unknown as {sendDesktopFrame(this: typeof scene, nowMs: number): void})
+      .sendDesktopFrame.call(scene, 20);
+
+    expect(frame).toHaveBeenCalledWith(expect.objectContaining({
+      tracking_valid: true,
+      right: {p: [0.1, 0.2, 0.3], q: [0, 0, 0, 1], grip: false, trigger: 0.75},
+    }));
+    expect(scene.inputSafety.snapshot).not.toHaveBeenCalled();
+    expect(controller).toHaveBeenCalledWith({tracking: true, grip: false, trigger: 0.75});
+  });
+
+  it('marks an active synthetic sample invalid while the page is hidden', () => {
+    Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'hidden'});
+    const frame = vi.fn();
+    const scene = {
+      lastFrameMs: Number.NEGATIVE_INFINITY,
+      inputSafety: {snapshot: vi.fn()},
+      offlineController: {
+        position: [0.1, 0.2, 0.3], quaternion: [0, 0, 0, 1],
+        grip: false, trigger: 0, trackingValid: true,
+      },
+      sessionId: 'offline', sequence: 0,
+      options: {onFrame: frame, onController: vi.fn()},
+    };
+
+    (SimulationScene.prototype as unknown as {sendDesktopFrame(this: typeof scene, nowMs: number): void})
+      .sendDesktopFrame.call(scene, 20);
+
+    expect(frame.mock.calls[0][0].tracking_valid).toBe(false);
+  });
+
+  it('resets safety and controller pose before restoring desktop input', () => {
+    const reset = vi.fn();
+    const position = new THREE.Vector3(9, 8, 7);
+    const quaternion = new THREE.Quaternion(1, 0, 0, 0);
+    const scene = {
+      offlineController: {
+        position: [0.1, 0.2, 0.3], quaternion: [0, 0, 0, 1],
+        grip: true, trigger: 1, trackingValid: true,
+      },
+      inputSafety: {reset},
+      controllerPosition: position,
+      controllerQuaternion: quaternion,
+    };
+
+    SimulationScene.prototype.setOfflineController.call(scene as never, null);
+
+    expect(reset).toHaveBeenCalledOnce();
+    expect(scene.offlineController).toBeNull();
+    expect(position.toArray()).toEqual([0.56, 0.42, 0.18]);
+    expect(quaternion.toArray()).toEqual([0, 0, 0, 1]);
+  });
+
+  it('keeps pointer and wheel movement from changing a synthetic pose', () => {
+    const position = new THREE.Vector3(0.1, 0.2, 0.3);
+    const scene = {
+      offlineController: {
+        position: [0.1, 0.2, 0.3], quaternion: [0, 0, 0, 1],
+        grip: false, trigger: 0, trackingValid: true,
+      },
+      inputSafety: {isActivePointer: vi.fn(() => true)},
+      controllerPosition: position,
+    };
+
+    (SimulationScene.prototype as unknown as {applyPointerMove(this: typeof scene, event: PointerEvent): void})
+      .applyPointerMove.call(scene, pointerEvent('pointermove', 3) as PointerEvent);
+    (SimulationScene.prototype as unknown as {applyWheel(this: typeof scene, event: WheelEvent): void})
+      .applyWheel.call(scene, Object.assign(new Event('wheel'), {deltaY: 50, preventDefault: vi.fn()}) as unknown as WheelEvent);
+
+    expect(position.toArray()).toEqual([0.1, 0.2, 0.3]);
+  });
+
+  it('returns a copied immutable-shaped scene observation', () => {
+    const controller: OfflineControllerSample = {
+      position: [0.1, 0.2, 0.3], quaternion: [0, 0, 0, 1],
+      grip: true, trigger: 1, trackingValid: true,
+    };
+    const scene = {
+      offlineController: controller,
+      graspController: {
+        snapshot: vi.fn(() => ({
+          carriedBlockId: 'block-orange',
+          blocks: [{id: 'block-orange', position: [0.18, 0.025, -0.32], sizeM: 0.06}],
+          invalidOverlap: false,
+        })),
+      },
+    };
+
+    const snapshot = SimulationScene.prototype.getOfflineSceneSnapshot.call(scene as never);
+    snapshot.controller?.position.splice(0, 1, 9);
+    snapshot.blocks[0].position.splice(0, 1, 9);
+
+    expect(controller.position).toEqual([0.1, 0.2, 0.3]);
+    expect(scene.graspController.snapshot).toHaveBeenCalledOnce();
+    expect(SimulationScene.prototype.getOfflineSceneSnapshot.call(scene as never)).toEqual({
+      controller,
+      carriedBlockId: 'block-orange',
+      blocks: [{id: 'block-orange', position: [0.18, 0.025, -0.32], sizeM: 0.06}],
+      invalidOverlap: false,
     });
   });
 });

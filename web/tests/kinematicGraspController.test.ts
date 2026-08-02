@@ -214,4 +214,18 @@ describe('KinematicGraspController', () => {
     expect(blocks[1].object.parent).toBe(visualRoot);
     expect(blocks[1].object.position.toArray()).toEqual([0.3, 0.025, -0.1]);
   });
+
+  it('publishes copied finite grasp state without exposing Three.js block objects', () => {
+    const {blocks, controller} = createWorld([[0.1, 0.025, -0.2]]);
+
+    controller.update(pose([0.1, 0.025, -0.2]), 0.7);
+    const snapshot = controller.snapshot();
+    snapshot.blocks[0].position[0] = 99;
+
+    expect(snapshot.carriedBlockId).toBe('block-0');
+    expect(snapshot.invalidOverlap).toBe(false);
+    expect(snapshot.blocks).toEqual([{id: 'block-0', position: [99, 0.025, -0.2], sizeM: 0.06}]);
+    expect(blocks[0].object.position.toArray()).toEqual([0.1, 0.025, -0.2]);
+    expect(controller.snapshot().blocks[0].position).toEqual([0.1, 0.025, -0.2]);
+  });
 });
