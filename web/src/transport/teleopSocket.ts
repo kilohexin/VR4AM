@@ -4,6 +4,7 @@ import {
   isDiagnosticsMessage,
   isFaultResetResultMessage,
   isHomeResultMessage,
+  isOfflineRehearsalFeedbackMessage,
   isRobotStateMessage,
   PROTOCOL_VERSION,
   type ClientControlMessage,
@@ -11,6 +12,8 @@ import {
   type DiagnosticsMessage,
   type FaultResetResultMessage,
   type HomeResultMessage,
+  type OfflineRehearsalClientMessage,
+  type OfflineRehearsalFeedbackMessage,
   type RobotStateMessage,
   type VRFrame,
 } from '../protocol/messages';
@@ -49,6 +52,7 @@ export class TeleopSocket {
     private readonly onFaultResetResult: (message: FaultResetResultMessage) => void = () => {},
     private readonly onHomeResult: (message: HomeResultMessage) => void = () => {},
     private readonly onDiagnostics: (message: DiagnosticsMessage) => void = () => {},
+    private readonly onOfflineRehearsalFeedback: (message: OfflineRehearsalFeedbackMessage) => void = () => {},
   ) {}
 
   connect(): void {
@@ -67,6 +71,10 @@ export class TeleopSocket {
   }
 
   sendControl(message: ClientControlMessage): void {
+    this.send(message);
+  }
+
+  sendRehearsal(message: OfflineRehearsalClientMessage): void {
     this.send(message);
   }
 
@@ -126,6 +134,7 @@ export class TeleopSocket {
         else if (isFaultResetResultMessage(message)) this.onFaultResetResult(message);
         else if (isHomeResultMessage(message)) this.onHomeResult(message);
         else if (isDiagnosticsMessage(message)) this.onDiagnostics(message);
+        else if (isOfflineRehearsalFeedbackMessage(message)) this.onOfflineRehearsalFeedback(message);
       } catch {
         // Malformed or unsupported messages are ignored at the transport boundary.
       }
@@ -159,7 +168,7 @@ export class TeleopSocket {
     }, delay);
   }
 
-  private send(message: VRFrame | ClientControlMessage): void {
+  private send(message: VRFrame | ClientControlMessage | OfflineRehearsalClientMessage): void {
     if (this.socket?.readyState !== OPEN_READY_STATE) return;
     this.socket.send(JSON.stringify(message));
   }

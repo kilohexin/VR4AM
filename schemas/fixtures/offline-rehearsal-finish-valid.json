@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "type": "offline_rehearsal_finish_result",
+  "request_id": "finish-1",
+  "accepted": true,
+  "run_id": "run-1",
+  "outcome": "passed",
+  "json_path": "artifacts/acceptance/offline-rehearsal/run-1.json",
+  "markdown_path": "artifacts/acceptance/offline-rehearsal/run-1.md",
+  "hardware_verified": false,
+  "hardware_pending": [
+    "sdk_connection",
+    "tcp_home_joint_limits",
+    "translation_direction",
+    "rotation_direction",
+    "gripper_direction_force",
+    "pvat_tracking_latency",
+    "stop_distance_estop",
+    "lightweight_grasp_release"
+  ]
+}

@@ -189,6 +189,119 @@ export type HomeResultMessage =
       message: string;
     };
 
+export type OfflineRehearsalPhase =
+  | 'identity_preflight'
+  | 'home'
+  | 'arm_and_anchor'
+  | 'translate'
+  | 'rotate'
+  | 'gripper'
+  | 'pick_place'
+  | 'soft_boundary'
+  | 'tracking_loss'
+  | 'recovery_and_home'
+  | 'final_stop'
+  | 'finalize';
+
+export type OfflineRehearsalOutcome = 'passed' | 'failed' | 'aborted';
+
+export interface OfflineRehearsalBeginMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: 'offline_rehearsal_begin';
+  request_id: string;
+  plan_version: 1;
+}
+
+export interface OfflineRehearsalPhaseMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: 'offline_rehearsal_phase';
+  request_id: string;
+  run_id: string;
+  phase: OfflineRehearsalPhase;
+  status: 'passed' | 'failed';
+  started_client_ms: number;
+  completed_client_ms: number;
+  target: Record<string, DiagnosticPayloadValue>;
+  measurements: Record<string, DiagnosticPayloadValue>;
+  failure: Record<string, DiagnosticPayloadValue> | null;
+}
+
+export interface OfflineRehearsalFinishMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: 'offline_rehearsal_finish';
+  request_id: string;
+  run_id: string;
+  outcome: OfflineRehearsalOutcome;
+  failure: Record<string, DiagnosticPayloadValue> | null;
+}
+
+export type OfflineRehearsalClientMessage =
+  | OfflineRehearsalBeginMessage
+  | OfflineRehearsalPhaseMessage
+  | OfflineRehearsalFinishMessage;
+
+export type OfflineRehearsalBeginResultMessage =
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'offline_rehearsal_begin_result';
+      request_id: string;
+      accepted: true;
+      run_id: string;
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'offline_rehearsal_begin_result';
+      request_id: string;
+      accepted: false;
+      reason: string;
+    };
+
+export type OfflineRehearsalPhaseAckMessage =
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'offline_rehearsal_phase_ack';
+      request_id: string;
+      accepted: true;
+      run_id: string;
+      phase: OfflineRehearsalPhase;
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'offline_rehearsal_phase_ack';
+      request_id: string;
+      accepted: false;
+      run_id: string;
+      phase: OfflineRehearsalPhase;
+      reason: string;
+    };
+
+export type OfflineRehearsalFinishResultMessage =
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'offline_rehearsal_finish_result';
+      request_id: string;
+      accepted: true;
+      run_id: string;
+      outcome: OfflineRehearsalOutcome;
+      json_path: string;
+      markdown_path: string;
+      hardware_verified: false;
+      hardware_pending: [string, string, string, string, string, string, string, string];
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'offline_rehearsal_finish_result';
+      request_id: string;
+      accepted: false;
+      run_id: string;
+      reason: string;
+    };
+
+export type OfflineRehearsalFeedbackMessage =
+  | OfflineRehearsalBeginResultMessage
+  | OfflineRehearsalPhaseAckMessage
+  | OfflineRehearsalFinishResultMessage;
+
 type UnknownRecord = Record<string, unknown>;
 
 const TELEOP_MODES: readonly TeleopMode[] = [
@@ -242,6 +355,25 @@ const HOME_REJECT_REASONS: readonly HomeRejectReason[] = [
   'not_stopped',
   'control_loop_unavailable',
   'home_failed',
+];
+const OFFLINE_REHEARSAL_PHASES: readonly OfflineRehearsalPhase[] = [
+  'identity_preflight',
+  'home',
+  'arm_and_anchor',
+  'translate',
+  'rotate',
+  'gripper',
+  'pick_place',
+  'soft_boundary',
+  'tracking_loss',
+  'recovery_and_home',
+  'final_stop',
+  'finalize',
+];
+const OFFLINE_REHEARSAL_OUTCOMES: readonly OfflineRehearsalOutcome[] = [
+  'passed',
+  'failed',
+  'aborted',
 ];
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -328,6 +460,18 @@ function isNullableNonNegativeInteger(value: unknown): boolean {
 
 function isNullableNonNegativeNumber(value: unknown): boolean {
   return value === null || isNonNegativeNumber(value);
+}
+
+function isIdentifier(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    codePointLength(value) >= 1 &&
+    codePointLength(value) <= 64
+  );
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && codePointLength(value) >= 1;
 }
 
 function isNullableJointVector(value: unknown): boolean {
@@ -595,5 +739,72 @@ export function isHomeResultMessage(value: unknown): value is HomeResultMessage 
     hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'reason', 'message']) &&
     isEnumValue(HOME_REJECT_REASONS, value.reason) &&
     typeof value.message === 'string'
+  );
+}
+
+export function isOfflineRehearsalFeedbackMessage(
+  value: unknown,
+): value is OfflineRehearsalFeedbackMessage {
+  if (
+    !isRecord(value) ||
+    value.v !== PROTOCOL_VERSION ||
+    !isIdentifier(value.request_id)
+  ) {
+    return false;
+  }
+
+  if (value.type === 'offline_rehearsal_begin_result') {
+    if (value.accepted === true) {
+      return (
+        hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'run_id']) &&
+        isIdentifier(value.run_id)
+      );
+    }
+    return (
+      value.accepted === false &&
+      hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'reason']) &&
+      isNonEmptyString(value.reason)
+    );
+  }
+
+  if (value.type === 'offline_rehearsal_phase_ack') {
+    if (
+      !isIdentifier(value.run_id) ||
+      !isEnumValue(OFFLINE_REHEARSAL_PHASES, value.phase)
+    ) {
+      return false;
+    }
+    if (value.accepted === true) {
+      return hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'run_id', 'phase']);
+    }
+    return (
+      value.accepted === false &&
+      hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'run_id', 'phase', 'reason']) &&
+      isNonEmptyString(value.reason)
+    );
+  }
+
+  if (value.type !== 'offline_rehearsal_finish_result' || !isIdentifier(value.run_id)) {
+    return false;
+  }
+  if (value.accepted === true) {
+    return (
+      hasExactKeys(value, [
+        'v', 'type', 'request_id', 'accepted', 'run_id', 'outcome', 'json_path', 'markdown_path',
+        'hardware_verified', 'hardware_pending',
+      ]) &&
+      isEnumValue(OFFLINE_REHEARSAL_OUTCOMES, value.outcome) &&
+      isNonEmptyString(value.json_path) &&
+      isNonEmptyString(value.markdown_path) &&
+      value.hardware_verified === false &&
+      Array.isArray(value.hardware_pending) &&
+      value.hardware_pending.length === 8 &&
+      value.hardware_pending.every(isNonEmptyString)
+    );
+  }
+  return (
+    value.accepted === false &&
+    hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'run_id', 'reason']) &&
+    isNonEmptyString(value.reason)
   );
 }

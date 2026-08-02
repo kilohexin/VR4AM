@@ -1,5 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import validDiagnostics from '../../schemas/fixtures/diagnostics-valid.json';
+import validOfflineRehearsalFinish from '../../schemas/fixtures/offline-rehearsal-finish-valid.json';
 import robotFixture from '../../schemas/fixtures/robot-state-valid.json';
 import vrFixture from '../../schemas/fixtures/vr-frame-valid.json';
 import type {
@@ -7,6 +8,8 @@ import type {
   DiagnosticsMessage,
   FaultResetResultMessage,
   HomeResultMessage,
+  OfflineRehearsalClientMessage,
+  OfflineRehearsalFeedbackMessage,
   RobotStateMessage,
   VRFrame,
 } from '../src/protocol/messages';
@@ -61,6 +64,13 @@ const control = (type: ClientControlMessage['type']): ClientControlMessage => ({
   v: 1,
   type,
   request_id: `request-${type}`,
+});
+
+const rehearsalBegin = (): OfflineRehearsalClientMessage => ({
+  v: 1,
+  type: 'offline_rehearsal_begin',
+  request_id: 'begin-1',
+  plan_version: 1,
 });
 
 beforeEach(() => vi.useFakeTimers());
@@ -202,6 +212,57 @@ describe('TeleopSocket', () => {
     sockets[0].message(JSON.stringify(robotFixture));
 
     expect(states).toEqual([robotFixture]);
+  });
+
+  it('drops rehearsal reports before open and serializes them only while open', () => {
+    const {client, sockets} = setup();
+    client.connect();
+
+    client.sendRehearsal(rehearsalBegin());
+    expect(sockets[0].sent).toEqual([]);
+
+    sockets[0].open();
+    client.sendRehearsal(rehearsalBegin());
+    expect(sockets[0].sent.map((value) => JSON.parse(value).type)).toEqual([
+      'hello',
+      'offline_rehearsal_begin',
+    ]);
+
+    sockets[0].readyState = WebSocket.CLOSING;
+    client.sendRehearsal(rehearsalBegin());
+    expect(sockets[0].sent).toHaveLength(2);
+  });
+
+  it('delivers exact rehearsal feedback only through its final callback', () => {
+    const feedback: OfflineRehearsalFeedbackMessage[] = [];
+    const armFeedback: unknown[] = [];
+    const homeResults: HomeResultMessage[] = [];
+    const sockets: FakeSocket[] = [];
+    const client = new TeleopSocket(
+      'wss://test',
+      () => {},
+      () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      () => {},
+      (message) => armFeedback.push(message),
+      () => {},
+      (message) => homeResults.push(message),
+      () => {},
+      (message) => feedback.push(message),
+    );
+    client.connect();
+    sockets[0].open();
+
+    sockets[0].message(JSON.stringify({...validOfflineRehearsalFinish, hardware_verified: true}));
+    sockets[0].message(JSON.stringify({...validOfflineRehearsalFinish, extra: true}));
+    sockets[0].message(JSON.stringify(validOfflineRehearsalFinish));
+
+    expect(feedback).toEqual([validOfflineRehearsalFinish]);
+    expect(armFeedback).toEqual([]);
+    expect(homeResults).toEqual([]);
   });
 
   it('delivers diagnostics only through the final owner-socket callback', () => {

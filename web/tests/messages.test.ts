@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import validDiagnostics from '../../schemas/fixtures/diagnostics-valid.json';
+import validOfflineRehearsalFinish from '../../schemas/fixtures/offline-rehearsal-finish-valid.json';
 import robotFixture from '../../schemas/fixtures/robot-state-valid.json';
 import vrFixture from '../../schemas/fixtures/vr-frame-valid.json';
 import {
@@ -8,11 +9,86 @@ import {
   isDiagnosticsMessage,
   isFaultResetResultMessage,
   isHomeResultMessage,
+  isOfflineRehearsalFeedbackMessage,
   isRobotStateMessage,
   isVRFrame,
 } from '../src/protocol/messages';
 
 describe('protocol guards', () => {
+  it('accepts only exact correlated offline rehearsal feedback variants', () => {
+    const beginAccepted = {
+      v: 1,
+      type: 'offline_rehearsal_begin_result',
+      request_id: 'begin-1',
+      accepted: true,
+      run_id: 'run-1',
+    };
+    const beginRejected = {
+      v: 1,
+      type: 'offline_rehearsal_begin_result',
+      request_id: 'begin-2',
+      accepted: false,
+      reason: 'not_fake_runtime',
+    };
+    const phaseAccepted = {
+      v: 1,
+      type: 'offline_rehearsal_phase_ack',
+      request_id: 'phase-1',
+      accepted: true,
+      run_id: 'run-1',
+      phase: 'identity_preflight',
+    };
+    const phaseRejected = {
+      v: 1,
+      type: 'offline_rehearsal_phase_ack',
+      request_id: 'phase-2',
+      accepted: false,
+      run_id: 'run-1',
+      phase: 'identity_preflight',
+      reason: 'phase_out_of_order',
+    };
+    const finishRejected = {
+      v: 1,
+      type: 'offline_rehearsal_finish_result',
+      request_id: 'finish-2',
+      accepted: false,
+      run_id: 'run-1',
+      reason: 'run_incomplete',
+    };
+
+    expect(isOfflineRehearsalFeedbackMessage(beginAccepted)).toBe(true);
+    expect(isOfflineRehearsalFeedbackMessage(beginRejected)).toBe(true);
+    expect(isOfflineRehearsalFeedbackMessage(phaseAccepted)).toBe(true);
+    expect(isOfflineRehearsalFeedbackMessage(phaseRejected)).toBe(true);
+    expect(isOfflineRehearsalFeedbackMessage(validOfflineRehearsalFinish)).toBe(true);
+    expect(isOfflineRehearsalFeedbackMessage(finishRejected)).toBe(true);
+
+    expect(isOfflineRehearsalFeedbackMessage({...beginAccepted, extra: true})).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({...beginRejected, request_id: ''})).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({...phaseAccepted, phase: 'move'})).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({...phaseRejected, extra: true})).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({...validOfflineRehearsalFinish, hardware_verified: true})).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({...validOfflineRehearsalFinish, extra: true})).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({...validOfflineRehearsalFinish, hardware_pending: []})).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({
+      ...validOfflineRehearsalFinish,
+      hardware_pending: [...validOfflineRehearsalFinish.hardware_pending.slice(0, 7), ''],
+    })).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({
+      ...validOfflineRehearsalFinish,
+      json_path: '',
+    })).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({
+      ...validOfflineRehearsalFinish,
+      markdown_path: undefined,
+    })).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({
+      ...phaseAccepted,
+      metrics: {latency_ms: Number.NaN},
+    })).toBe(false);
+    expect(isOfflineRehearsalFeedbackMessage({...finishRejected, run_id: ''})).toBe(false);
+  });
+
   it('accepts only strict diagnostics messages with unverified hardware', () => {
     expect(isDiagnosticsMessage(validDiagnostics)).toBe(true);
     expect(isDiagnosticsMessage({...validDiagnostics, hardware_verified: true})).toBe(false);
