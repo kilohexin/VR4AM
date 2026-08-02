@@ -26,3 +26,23 @@ with the outstanding hardware checks.
 These are offline, Fake-runtime reports only. They are not evidence of SDK,
 robot, safety-stop, gripper, or physical-motion verification; the eight
 hardware-pending checks remain explicit in every report.
+
+## Review-fix evidence
+
+The independent review found two P1 false-green/partial-publication cases.
+Both were addressed with new focused regression tests.
+
+1. `cd backend; python -m pytest tests/rehearsal/test_report.py -q`
+   - Red phase: exit 1, `3 failed, 9 passed`. The exact contradictory case
+     (`status: failed` plus a phase failure for all twelve phases followed by
+     `outcome: passed`) did not raise; the two transaction tests also failed
+     because the staging/publish boundary did not yet exist.
+2. `cd backend; python -m pytest tests/rehearsal/test_report.py -q`
+   - Green phase: exit 0, `12 passed in 0.10s`. A passed outcome now requires
+     each phase to be passed with no recorded failure. Markdown-first/JSON-last
+     staged publication removes temporary and final artifacts on either a
+     Markdown staging failure or JSON final-marker publication failure, while
+     preserving the active run for a successful retry.
+3. `cd backend; python -m pytest -q`
+   - Full backend regression: exit 0. Pytest completed all progress groups;
+     this environment again omitted the usual final summary line.

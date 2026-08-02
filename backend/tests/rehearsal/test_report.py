@@ -263,3 +263,100 @@ def test_provenance_uses_one_consistent_git_status_snapshot(
         "dirty_paths": ["reports/offline rehearsal.md"],
     }
     assert calls.count(("status", "--porcelain=v1", "-z")) == 1
+
+
+@pytest.mark.asyncio
+async def test_passing_finish_rejects_failed_phases_with_recorded_failures(
+    tmp_path: Path,
+) -> None:
+    report_store = store(tmp_path)
+    owner = object()
+    begun = await report_store.begin(owner, 1, READY_STATE, DIAGNOSTICS)
+    for phase in REHEARSAL_PHASES:
+        failed_phase = phase_result(phase, status="failed")
+        failed_phase["failure"] = {"reason": "offline_interlock"}
+        await report_store.record_phase(
+            owner,
+            begun.run_id,
+            failed_phase,
+            READY_STATE,
+            DIAGNOSTICS,
+        )
+
+    with pytest.raises(ValueError, match="passed report requires"):
+        await report_store.finish(
+            owner, begun.run_id, "passed", None, READY_STATE, DIAGNOSTICS
+        )
+
+    assert not (tmp_path / f"{begun.run_id}.json").exists()
+    assert not (tmp_path / f"{begun.run_id}.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_markdown_staging_failure_leaves_no_final_pair_and_run_can_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_store = store(tmp_path)
+    owner = object()
+    begun = await report_store.begin(owner, 1, READY_STATE, DIAGNOSTICS)
+    await record_all_phases(report_store, owner, begun.run_id)
+    original_stage = report_store._stage_file
+
+    def fail_markdown_stage(path: Path, content: str) -> Path:
+        if path.suffix == ".md":
+            raise OSError("markdown staging exploded")
+        return original_stage(path, content)
+
+    monkeypatch.setattr(report_store, "_stage_file", fail_markdown_stage)
+    with pytest.raises(OSError, match="markdown staging exploded"):
+        await report_store.finish(
+            owner, begun.run_id, "passed", None, READY_STATE, DIAGNOSTICS
+        )
+
+    assert not (tmp_path / f"{begun.run_id}.json").exists()
+    assert not (tmp_path / f"{begun.run_id}.md").exists()
+    assert not (tmp_path / f"{begun.run_id}.json.tmp").exists()
+    assert not (tmp_path / f"{begun.run_id}.md.tmp").exists()
+
+    monkeypatch.setattr(report_store, "_stage_file", original_stage)
+    finished = await report_store.finish(
+        owner, begun.run_id, "passed", None, READY_STATE, DIAGNOSTICS
+    )
+    assert finished.json_path.exists()
+    assert finished.markdown_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_json_publish_failure_rolls_back_markdown_and_keeps_run_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_store = store(tmp_path)
+    owner = object()
+    begun = await report_store.begin(owner, 1, READY_STATE, DIAGNOSTICS)
+    await record_all_phases(report_store, owner, begun.run_id)
+    original_replace = report_store._replace_staged_file
+
+    def fail_json_publish(temporary: Path, final: Path) -> None:
+        if final.suffix == ".json":
+            raise OSError("json publish exploded")
+        original_replace(temporary, final)
+
+    monkeypatch.setattr(report_store, "_replace_staged_file", fail_json_publish)
+    with pytest.raises(OSError, match="json publish exploded"):
+        await report_store.finish(
+            owner, begun.run_id, "passed", None, READY_STATE, DIAGNOSTICS
+        )
+
+    assert not (tmp_path / f"{begun.run_id}.json").exists()
+    assert not (tmp_path / f"{begun.run_id}.md").exists()
+    assert not (tmp_path / f"{begun.run_id}.json.tmp").exists()
+    assert not (tmp_path / f"{begun.run_id}.md.tmp").exists()
+
+    monkeypatch.setattr(report_store, "_replace_staged_file", original_replace)
+    finished = await report_store.finish(
+        owner, begun.run_id, "passed", None, READY_STATE, DIAGNOSTICS
+    )
+    assert finished.json_path.exists()
+    assert finished.markdown_path.exists()

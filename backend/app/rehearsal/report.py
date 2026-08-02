@@ -131,6 +131,7 @@ class RehearsalReportStore:
             ) else None
             if result_snapshot.get("phase") != expected:
                 raise ValueError("phase order does not match the rehearsal plan")
+            _validate_phase_result(result_snapshot)
             state_snapshot, diagnostics_snapshot = self._snapshot_context(
                 state, diagnostics
             )
@@ -188,6 +189,13 @@ class RehearsalReportStore:
             raise ValueError("outcome must be passed, failed, or aborted")
         if outcome == "passed" and len(run.phases) != len(REHEARSAL_PHASES):
             raise ValueError("all phases must be recorded before a passing finish")
+        if outcome == "passed" and any(
+            phase["status"] != "passed" or phase["failure"] is not None
+            for phase in run.phases
+        ):
+            raise ValueError(
+                "passed report requires every phase to pass without a failure"
+            )
         state_snapshot, diagnostics_snapshot = self._snapshot_context(state, diagnostics)
         failure_snapshot = None if failure is None else _json_snapshot(failure, "failure")
         if outcome == "passed" and failure_snapshot is not None:
@@ -212,8 +220,20 @@ class RehearsalReportStore:
         }
         json_path = self.root / f"{run.run_id}.json"
         markdown_path = self.root / f"{run.run_id}.md"
-        self._write_json(json_path, payload)
-        self._write_markdown(markdown_path, payload)
+        json_content = json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        ) + "\n"
+        markdown_content = _render_markdown(payload)
+        self._publish_pair(
+            json_path,
+            json_content,
+            markdown_path,
+            markdown_content,
+        )
         self._active_runs.remove(run)
         return FinishResult(json_path=json_path, markdown_path=markdown_path)
 
@@ -248,25 +268,40 @@ class RehearsalReportStore:
         if self.runtime != _FAKE_RUNTIME:
             raise ValueError("rehearsal reports are available only for LEBAI_FAKE")
 
-    def _write_json(self, path: Path, payload: Mapping[str, object]) -> None:
-        serialized = json.dumps(
-            payload,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-            allow_nan=False,
-        ) + "\n"
-        self._atomic_write(path, serialized)
-
-    def _write_markdown(self, path: Path, payload: Mapping[str, object]) -> None:
-        self._atomic_write(path, _render_markdown(payload))
+    def _publish_pair(
+        self,
+        json_path: Path,
+        json_content: str,
+        markdown_path: Path,
+        markdown_content: str,
+    ) -> None:
+        json_temporary = json_path.with_name(f"{json_path.name}.tmp")
+        markdown_temporary = markdown_path.with_name(f"{markdown_path.name}.tmp")
+        try:
+            self._stage_file(json_path, json_content)
+            self._stage_file(markdown_path, markdown_content)
+            self._replace_staged_file(markdown_temporary, markdown_path)
+            self._replace_staged_file(json_temporary, json_path)
+        except Exception:
+            for path in (
+                json_temporary,
+                markdown_temporary,
+                json_path,
+                markdown_path,
+            ):
+                path.unlink(missing_ok=True)
+            raise
 
     @staticmethod
-    def _atomic_write(path: Path, content: str) -> None:
+    def _stage_file(path: Path, content: str) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f"{path.name}.tmp")
         temporary.write_text(content, encoding="utf-8")
-        temporary.replace(path)
+        return temporary
+
+    @staticmethod
+    def _replace_staged_file(temporary: Path, final: Path) -> None:
+        temporary.replace(final)
 
 
 def _json_snapshot(value: object, label: str) -> object:
@@ -295,6 +330,17 @@ def _mapping_snapshot(value: object, label: str) -> dict[str, object]:
     if not isinstance(snapshot, dict):
         raise ValueError(f"{label} must be an object")
     return snapshot
+
+
+def _validate_phase_result(result: Mapping[str, object]) -> None:
+    status = result.get("status")
+    failure = result.get("failure")
+    if status not in {"passed", "failed"}:
+        raise ValueError("phase status must be passed or failed")
+    if status == "passed" and failure is not None:
+        raise ValueError("a passed phase cannot contain a failure")
+    if status == "failed" and failure is None:
+        raise ValueError("a failed phase must contain a failure")
 
 
 def _utc_timestamp(value: datetime) -> str:
