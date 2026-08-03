@@ -35,7 +35,7 @@ button {
 
 .operator-console {
   display: grid;
-  grid-template-rows: 80px minmax(0, 1fr) 80px;
+  grid-template-rows: 80px 44px minmax(0, 1fr) 80px;
   width: 100%;
   height: 100dvh;
   min-width: 960px;
@@ -214,6 +214,22 @@ button {
   background: var(--rail);
 }
 
+.offline-rehearsal-banner {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  color: #04131b;
+  border-bottom: 1px solid #59e3ff;
+  background: var(--cyan);
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
 .diagnostics-rail {
   min-width: 0;
   padding-top: 20px;
@@ -234,24 +250,12 @@ button {
   background: rgba(5, 17, 26, 0.82);
 }
 
-.offline-rehearsal-identity {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  display: grid;
-  gap: 4px;
-  margin: -14px -14px 0;
-  padding: 14px;
+.offline-rehearsal-panel h2 {
+  margin: 0;
   color: var(--cyan);
-  border-bottom: 1px solid var(--line-soft);
-  background: #071720;
+  font-size: 15px;
 }
 
-.offline-rehearsal-identity strong {
-  font-size: 14px;
-}
-
-.offline-rehearsal-identity span,
 .offline-rehearsal-status dt {
   color: var(--muted);
   font-size: 12px;
@@ -715,7 +719,7 @@ button {
   }
 
   .operator-console {
-    grid-template-rows: auto auto auto;
+    grid-template-rows: auto auto auto auto;
     min-width: 0;
     min-height: 100dvh;
     height: auto;
@@ -742,9 +746,6 @@ button {
     border-left: 0;
   }
 
-  .offline-rehearsal-identity {
-    position: static;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

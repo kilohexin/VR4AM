@@ -26,6 +26,7 @@ export interface RobotHudState {
 export class Hud {
   readonly sceneContainer: HTMLElement;
   readonly actionContainer: HTMLElement;
+  readonly rehearsalBanner: HTMLElement;
   readonly rehearsalContainer: HTMLElement;
   readonly diagnosticsContainer: HTMLElement;
 
@@ -57,6 +58,7 @@ export class Hud {
         </div>
         <div class="command-actions-host"></div>
       </header>
+      <div class="offline-rehearsal-banner" role="note" style="position: sticky; top: 0;">DIGITAL TWIN / 数字孪生，不是真机</div>
       <main class="console-main">
         <section class="simulation-viewport" aria-label="LM3 三维仿真场景">
           <div class="scene-canvas"></div>
@@ -110,6 +112,7 @@ export class Hud {
 
     this.sceneContainer = requireElement(root, '.scene-canvas');
     this.actionContainer = requireElement(root, '.command-actions-host');
+    this.rehearsalBanner = requireElement(root, '.offline-rehearsal-banner');
     this.rehearsalContainer = requireElement(root, '.offline-rehearsal-rail');
     this.diagnosticsContainer = requireElement(root, '.diagnostics-rail');
     this.modeValue = requireElement(root, '[data-field="mode"]');

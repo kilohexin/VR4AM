@@ -48,6 +48,7 @@ let rehearsalActive = false;
 let connectionState: OfflineRehearsalEligibility['connected'] = false;
 let latestRobotState: RobotStateMessage | null = null;
 let latestDiagnostics: DiagnosticsMessage | null = null;
+let xrState: XRSessionStatus['state'] = 'idle';
 let vrControlSequence = 0;
 
 const socket = new TeleopSocket(
@@ -121,7 +122,7 @@ xrController = new XRSessionController({
 
 rehearsalPanel = new OfflineRehearsalPanel(
   hud.rehearsalContainer,
-  () => { void rehearsal.start(); },
+  startRehearsal,
   () => rehearsal.requestStop('operator_stop'),
 );
 rehearsal = new OfflineRehearsalController({
@@ -159,6 +160,7 @@ function sendVRDisarm(): void {
 }
 
 function updateXRStatus(status: XRSessionStatus): void {
+  xrState = status.state;
   armPanel.setVRStatus(status);
   if (status.state === 'starting') {
     pendingFrames.clear();
@@ -169,6 +171,7 @@ function updateXRStatus(status: XRSessionStatus): void {
   } else if (status.state === 'active') {
     hud.clearSceneError();
   }
+  refreshRehearsalPanel();
 }
 
 function sendFrame(frame: VRFrame): void {
@@ -230,7 +233,16 @@ function rehearsalEligibility(): OfflineRehearsalEligibility {
     fault: latestRobotState?.fault ?? null,
     constraint: latestRobotState?.constraint ?? null,
     actualTcp: latestRobotState?.actual_tcp ?? null,
+    xrState,
   };
+}
+
+function startRehearsal(): void {
+  if (rehearsalEligibility().xrState !== 'idle') {
+    refreshRehearsalPanel();
+    return;
+  }
+  void rehearsal.start();
 }
 
 function disposeForPageExit(): void {

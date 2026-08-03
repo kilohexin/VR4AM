@@ -11,6 +11,21 @@ async function flushSafetyChange(): Promise<void> {
 }
 
 describe('ArmPanel simulator safety', () => {
+  it('keeps the active VR exit action available before automation owns control', () => {
+    const toggleVR = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, vi.fn(), toggleVR);
+
+    panel.setVRStatus({state: 'starting'});
+    expect(panel.vrButton.disabled).toBe(true);
+    panel.vrButton.click();
+    expect(toggleVR).not.toHaveBeenCalled();
+
+    panel.setVRStatus({state: 'active'});
+    expect(panel.vrButton.disabled).toBe(false);
+    panel.vrButton.click();
+    expect(toggleVR).toHaveBeenCalledOnce();
+  });
+
   it('locks every manual action without clearing the latest authoritative eligibility', () => {
     const send = vi.fn();
     const enterVR = vi.fn();

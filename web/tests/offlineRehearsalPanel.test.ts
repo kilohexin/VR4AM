@@ -6,6 +6,7 @@ import {
   OfflineRehearsalPanel,
   type OfflineRehearsalEligibility,
 } from '../src/ui/offlineRehearsalPanel';
+import type {XRSessionStatus} from '../src/xr/session';
 
 const idleSnapshot: OfflineRehearsalSnapshot = {
   phase: 'idle', currentPhase: null, step: null, active: false, failure: null, runId: null,
@@ -24,6 +25,7 @@ const eligible: OfflineRehearsalEligibility = {
   fault: null,
   constraint: null,
   actualTcp: {p: [0, 0, 0], q: [0, 0, 0, 1]},
+  xrState: 'idle',
 };
 
 beforeEach(() => {
@@ -31,6 +33,32 @@ beforeEach(() => {
 });
 
 describe('OfflineRehearsalPanel', () => {
+  it('tracks XR ownership transitions and never starts while XR is starting or active', () => {
+    const start = vi.fn();
+    const panel = new OfflineRehearsalPanel(document.querySelector('#panel')!, start, vi.fn());
+    const eligibilityAt = (state: XRSessionStatus['state']): OfflineRehearsalEligibility => ({
+      ...eligible,
+      xrState: state,
+    } as OfflineRehearsalEligibility);
+
+    panel.update(idleSnapshot, eligibilityAt('starting'));
+    expect(panel.startButton.disabled).toBe(true);
+    panel.startButton.click();
+    expect(start).not.toHaveBeenCalled();
+
+    panel.update(idleSnapshot, eligibilityAt('idle'));
+    expect(panel.startButton.disabled).toBe(false);
+
+    panel.update(idleSnapshot, eligibilityAt('active'));
+    expect(panel.startButton.disabled).toBe(true);
+    panel.startButton.click();
+    expect(start).not.toHaveBeenCalled();
+
+    panel.update(idleSnapshot, eligibilityAt('idle'));
+    panel.startButton.click();
+    expect(start).toHaveBeenCalledOnce();
+  });
+
   it('allows start only for the connected idle Fake digital twin and keeps stop for an active run', () => {
     const start = vi.fn();
     const stop = vi.fn();
@@ -75,7 +103,6 @@ describe('OfflineRehearsalPanel', () => {
     }, eligible);
 
     const text = document.body.textContent ?? '';
-    expect(text).toContain('DIGITAL TWIN / 数字孪生，不是真机');
     expect(text).toContain('translate');
     expect(text).toContain('+x');
     expect(text).toContain('2 / 12');
@@ -88,7 +115,5 @@ describe('OfflineRehearsalPanel', () => {
     for (const check of OFFLINE_REHEARSAL_HARDWARE_PENDING) expect(text).toContain(check);
     expect(document.querySelectorAll('[data-hardware-check]')).toHaveLength(8);
 
-    panel.update(idleSnapshot, {...eligible, runtime: 'LEBAI'});
-    expect(document.body.textContent).toContain('DIGITAL TWIN / 数字孪生，不是真机');
   });
 });

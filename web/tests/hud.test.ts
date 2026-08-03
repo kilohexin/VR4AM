@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {beforeEach, describe, expect, it} from 'vitest';
+import '../src/styles.css';
 import {Hud} from '../src/ui/hud';
 
 beforeEach(() => {
@@ -11,6 +12,13 @@ describe('Chinese simulator HUD', () => {
     const hud = new Hud(document.querySelector('#app')!);
 
     expect(hud.sceneContainer).toBeInstanceOf(HTMLElement);
+    expect(hud.rehearsalBanner).toBeInstanceOf(HTMLElement);
+    expect(hud.rehearsalBanner.textContent).toBe('DIGITAL TWIN / 数字孪生，不是真机');
+    expect(hud.rehearsalBanner.parentElement).toBe(document.querySelector('.operator-console'));
+    expect(hud.rehearsalBanner.closest('.status-rail')).toBeNull();
+    expect(hud.rehearsalBanner.nextElementSibling).toBe(document.querySelector('.console-main'));
+    expect(getComputedStyle(hud.rehearsalBanner).position).toBe('sticky');
+    expect(getComputedStyle(hud.rehearsalBanner).top).toBe('0px');
     expect(hud.rehearsalContainer).toBeInstanceOf(HTMLElement);
     expect(hud.rehearsalContainer.nextElementSibling).toBe(hud.diagnosticsContainer);
     expect(document.body.textContent).toContain('LM3 遥操作仿真');

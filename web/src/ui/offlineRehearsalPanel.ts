@@ -8,6 +8,7 @@ import type {
 import type {OfflineRehearsalSnapshot} from '../rehearsal/offlineRehearsalController';
 import {REHEARSAL_PHASES} from '../rehearsal/types';
 import {quaternionAngularError} from '../rehearsal/trajectory';
+import type {XRSessionStatus} from '../xr/session';
 
 export interface OfflineRehearsalEligibility {
   connected: boolean;
@@ -19,6 +20,7 @@ export interface OfflineRehearsalEligibility {
   fault: string | null;
   constraint: ConstraintKind | null;
   actualTcp: Pose | null;
+  xrState: XRSessionStatus['state'];
 }
 
 export class OfflineRehearsalPanel {
@@ -43,10 +45,7 @@ export class OfflineRehearsalPanel {
     container.classList.add('offline-rehearsal-host');
     container.innerHTML = `
       <section class="offline-rehearsal-panel" aria-labelledby="offline-rehearsal-heading">
-        <div class="offline-rehearsal-identity">
-          <strong id="offline-rehearsal-heading">DIGITAL TWIN / 数字孪生，不是真机</strong>
-          <span>离线自动演练</span>
-        </div>
+        <h2 id="offline-rehearsal-heading">离线自动演练</h2>
         <div class="offline-rehearsal-actions">
           <button type="button" data-action="start">开始演练</button>
           <button type="button" data-action="stop" disabled>停止演练</button>
@@ -111,6 +110,7 @@ export class OfflineRehearsalPanel {
 
 function canStart(eligibility: Readonly<OfflineRehearsalEligibility>): boolean {
   return eligibility.connected
+    && eligibility.xrState === 'idle'
     && eligibility.runtime === 'LEBAI_FAKE'
     && eligibility.robotRuntime === 'LEBAI_FAKE'
     && eligibility.hardwareVerified === false
