@@ -11,6 +11,34 @@ async function flushSafetyChange(): Promise<void> {
 }
 
 describe('ArmPanel simulator safety', () => {
+  it('locks every manual action without clearing the latest authoritative eligibility', () => {
+    const send = vi.fn();
+    const enterVR = vi.fn();
+    const panel = new ArmPanel(document.querySelector('#panel')!, send, enterVR);
+    panel.setConnectionStatus({state: 'connected'});
+    panel.setMode('READY');
+    panel.observeGrip(false);
+
+    panel.setAutomationActive(true);
+
+    expect(panel.armButton.disabled).toBe(true);
+    expect(panel.stopButton.disabled).toBe(true);
+    expect(panel.vrButton.disabled).toBe(true);
+    expect(panel.armButton.textContent).toContain('离线演练运行中');
+    expect(panel.requestArm('desktop')).toBe(false);
+    panel.requestDisarm('xr');
+    panel.requestStopOrReset('desktop');
+    panel.vrButton.click();
+    panel.setVRStatus({state: 'idle'});
+    expect(send).not.toHaveBeenCalled();
+    expect(enterVR).not.toHaveBeenCalled();
+    expect(panel.vrButton.disabled).toBe(true);
+
+    panel.setAutomationActive(false);
+    expect(panel.armButton.disabled).toBe(false);
+    expect(panel.requestArm('desktop')).toBe(true);
+  });
+
   it('is simulator-only and starts locked', () => {
     const send = vi.fn();
     const panel = new ArmPanel(document.querySelector('#panel')!, send);

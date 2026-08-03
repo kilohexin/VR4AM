@@ -11,6 +11,8 @@ describe('Chinese simulator HUD', () => {
     const hud = new Hud(document.querySelector('#app')!);
 
     expect(hud.sceneContainer).toBeInstanceOf(HTMLElement);
+    expect(hud.rehearsalContainer).toBeInstanceOf(HTMLElement);
+    expect(hud.rehearsalContainer.nextElementSibling).toBe(hud.diagnosticsContainer);
     expect(document.body.textContent).toContain('LM3 遥操作仿真');
     expect(document.body.textContent).toContain('仅仿真 · SIMULATOR');
     expect(document.body.textContent).toContain('右 Grip 建立末端零位');

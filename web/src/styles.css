@@ -219,6 +219,114 @@ button {
   padding-top: 20px;
 }
 
+.offline-rehearsal-rail {
+  min-width: 0;
+  padding-top: 20px;
+}
+
+.offline-rehearsal-panel {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--cyan);
+  background: rgba(5, 17, 26, 0.82);
+}
+
+.offline-rehearsal-identity {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  gap: 4px;
+  margin: -14px -14px 0;
+  padding: 14px;
+  color: var(--cyan);
+  border-bottom: 1px solid var(--line-soft);
+  background: #071720;
+}
+
+.offline-rehearsal-identity strong {
+  font-size: 14px;
+}
+
+.offline-rehearsal-identity span,
+.offline-rehearsal-status dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.offline-rehearsal-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.offline-rehearsal-actions button {
+  min-height: 44px;
+  color: #04131b;
+  border: 1px solid #59e3ff;
+  border-radius: 4px;
+  background: var(--cyan);
+  cursor: pointer;
+}
+
+.offline-rehearsal-actions button[data-action="stop"] {
+  color: var(--white);
+  border-color: #ff3546;
+  background: #ed1f31;
+}
+
+.offline-rehearsal-actions button:disabled {
+  color: var(--muted);
+  border-color: var(--line);
+  background: #132934;
+  cursor: not-allowed;
+}
+
+.offline-rehearsal-status {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.offline-rehearsal-status > div {
+  display: grid;
+  grid-template-columns: 124px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.offline-rehearsal-status dt,
+.offline-rehearsal-status dd {
+  margin: 0;
+}
+
+.offline-rehearsal-status dd {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, "Cascadia Mono", monospace;
+  font-size: 12px;
+  text-align: right;
+}
+
+.offline-rehearsal-status [data-field="rehearsal-failure"][data-active="true"] {
+  color: var(--red);
+}
+
+.offline-rehearsal-hardware {
+  color: var(--amber);
+  font-size: 12px;
+}
+
+.offline-rehearsal-hardware ul {
+  display: grid;
+  gap: 3px;
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-family: ui-monospace, "Cascadia Mono", monospace;
+}
+
 .diagnostics-panel {
   display: grid;
   gap: 12px;
@@ -595,6 +703,47 @@ button {
 
   .status-row {
     grid-template-columns: 42px 116px minmax(0, 1fr) auto;
+  }
+}
+
+@media (max-width: 900px) {
+  html,
+  body,
+  #app {
+    height: auto;
+    overflow: auto;
+  }
+
+  .operator-console {
+    grid-template-rows: auto auto auto;
+    min-width: 0;
+    min-height: 100dvh;
+    height: auto;
+  }
+
+  .top-bar,
+  .brand-lockup,
+  .command-actions {
+    flex-wrap: wrap;
+    height: auto;
+  }
+
+  .console-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .simulation-viewport {
+    min-height: 60dvh;
+  }
+
+  .status-rail {
+    overflow: visible;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .offline-rehearsal-identity {
+    position: static;
   }
 }
 

@@ -6,6 +6,10 @@ import {
   type RobotStateMessage,
   type VRFrame,
 } from './protocol/messages';
+import {
+  OfflineRehearsalController,
+  type OfflineRehearsalSnapshot,
+} from './rehearsal/offlineRehearsalController';
 import {RobotStateBuffer} from './robot/robotState';
 import {SimulationScene} from './scenes/simulationScene';
 import type {RobotRuntimeSummary} from './scenes/vrSafetyPanel';
@@ -15,6 +19,10 @@ import {ArmPanel} from './ui/armPanel';
 import {Hud} from './ui/hud';
 import {LatencyTracker} from './ui/latency';
 import {DiagnosticsPanel, DiagnosticsUpdateCoordinator} from './ui/diagnosticsPanel';
+import {
+  OfflineRehearsalPanel,
+  type OfflineRehearsalEligibility,
+} from './ui/offlineRehearsalPanel';
 import {XRSessionController, type XRSessionStatus} from './xr/session';
 
 const app = document.querySelector<HTMLElement>('#app');
@@ -34,6 +42,12 @@ const diagnosticsUpdates = new DiagnosticsUpdateCoordinator(
 let scene: SimulationScene;
 let armPanel: ArmPanel;
 let xrController: XRSessionController;
+let rehearsal: OfflineRehearsalController;
+let rehearsalPanel: OfflineRehearsalPanel;
+let rehearsalActive = false;
+let connectionState: OfflineRehearsalEligibility['connected'] = false;
+let latestRobotState: RobotStateMessage | null = null;
+let latestDiagnostics: DiagnosticsMessage | null = null;
 let vrControlSequence = 0;
 
 const socket = new TeleopSocket(
@@ -41,6 +55,8 @@ const socket = new TeleopSocket(
   (state) => onRobotState(state),
   undefined,
   (status) => {
+    connectionState = status.state === 'connected';
+    rehearsal?.onConnection(status);
     scene?.resetConnection();
     pendingFrames.clear();
     latency.reset();
@@ -49,16 +65,29 @@ const socket = new TeleopSocket(
     armPanel?.setConnectionStatus(status);
     xrController?.setConstraint(null);
     if (status.state !== 'connected') {
+      latestRobotState = null;
+      latestDiagnostics = null;
       hud.setRuntimeIdentity(null, null);
       armPanel?.setRuntimeIdentity(null);
       diagnosticsUpdates.clear();
       scene?.setRuntimeSummary(emptyRuntimeSummary());
     }
+    refreshRehearsalPanel();
   },
-  (message) => armPanel?.handleArmFeedback(message),
-  (message) => armPanel?.handleFaultResetResult(message),
-  (message) => armPanel?.handleHomeResult(message),
+  (message) => {
+    armPanel?.handleArmFeedback(message);
+    rehearsal?.onFeedback(message);
+  },
+  (message) => {
+    armPanel?.handleFaultResetResult(message);
+    rehearsal?.onFeedback(message);
+  },
+  (message) => {
+    armPanel?.handleHomeResult(message);
+    rehearsal?.onFeedback(message);
+  },
   (message) => onDiagnostics(message),
+  (message) => rehearsal?.onFeedback(message),
 );
 
 armPanel = new ArmPanel(
@@ -90,12 +119,28 @@ xrController = new XRSessionController({
   onStatus: updateXRStatus,
 });
 
+rehearsalPanel = new OfflineRehearsalPanel(
+  hud.rehearsalContainer,
+  () => { void rehearsal.start(); },
+  () => rehearsal.requestStop('operator_stop'),
+);
+rehearsal = new OfflineRehearsalController({
+  nowMs: () => performance.now(),
+  sendControl: (message) => socket.sendControl(message),
+  sendRehearsal: (message) => socket.sendRehearsal(message),
+  closeConnection: () => socket.close(),
+  setOfflineController: (sample) => scene.setOfflineController(sample),
+  readScene: () => scene.getOfflineSceneSnapshot(),
+  resetScene: () => scene.resetOfflineScene(),
+  onSnapshot: renderRehearsalSnapshot,
+});
+refreshRehearsalPanel();
+
 scene.start();
 socket.connect();
 
-window.addEventListener('beforeunload', () => {
-  disposeAppForUnload(xrController, scene, socket);
-});
+window.addEventListener('pagehide', disposeForPageExit);
+window.addEventListener('beforeunload', disposeForPageExit);
 
 function updateController(controller: {tracking: boolean; grip: boolean; trigger: number}): void {
   hud.setController(controller);
@@ -103,6 +148,7 @@ function updateController(controller: {tracking: boolean; grip: boolean; trigger
 }
 
 function sendVRDisarm(): void {
+  if (rehearsalActive) return;
   vrControlSequence += 1;
   socket.sendControl({
     v: PROTOCOL_VERSION,
@@ -126,12 +172,15 @@ function updateXRStatus(status: XRSessionStatus): void {
 }
 
 function sendFrame(frame: VRFrame): void {
+  if (rehearsalActive) return;
   pendingFrames.set(frame.seq, frame.client_mono_ms);
   while (pendingFrames.size > 512) pendingFrames.delete(pendingFrames.keys().next().value!);
   socket.sendFrame(frame);
 }
 
 function onRobotState(state: RobotStateMessage): void {
+  latestRobotState = structuredClone(state);
+  rehearsal.onRobotState(state);
   const constraint = state.constraint ?? null;
   const recoveryPhase = state.recovery_phase ?? null;
   scene.applyRobotState(state);
@@ -149,10 +198,45 @@ function onRobotState(state: RobotStateMessage): void {
     recoveryPhase,
   });
   diagnosticsUpdates.onRobotState(state, recordAcknowledgement);
+  refreshRehearsalPanel();
 }
 
 function onDiagnostics(diagnostics: DiagnosticsMessage): void {
+  latestDiagnostics = structuredClone(diagnostics);
+  rehearsal.onDiagnostics(diagnostics);
   diagnosticsUpdates.onDiagnostics(diagnostics);
+  refreshRehearsalPanel();
+}
+
+function renderRehearsalSnapshot(snapshot: OfflineRehearsalSnapshot): void {
+  rehearsalActive = snapshot.active;
+  armPanel.setAutomationActive(snapshot.active);
+  rehearsalPanel.update(snapshot, rehearsalEligibility());
+}
+
+function refreshRehearsalPanel(): void {
+  if (!rehearsal || !rehearsalPanel) return;
+  renderRehearsalSnapshot(rehearsal.snapshot);
+}
+
+function rehearsalEligibility(): OfflineRehearsalEligibility {
+  return {
+    connected: connectionState,
+    runtime: latestDiagnostics?.runtime ?? null,
+    robotRuntime: latestRobotState?.backend ?? null,
+    hardwareVerified: latestDiagnostics?.hardware_verified ?? null,
+    mode: latestRobotState?.mode ?? null,
+    backendState: latestRobotState?.robot_state ?? null,
+    fault: latestRobotState?.fault ?? null,
+    constraint: latestRobotState?.constraint ?? null,
+    actualTcp: latestRobotState?.actual_tcp ?? null,
+  };
+}
+
+function disposeForPageExit(): void {
+  window.removeEventListener('pagehide', disposeForPageExit);
+  window.removeEventListener('beforeunload', disposeForPageExit);
+  disposeAppForUnload(rehearsal, xrController, scene, socket);
 }
 
 function recordAcknowledgement(sequence: number | null): void {

@@ -26,6 +26,7 @@ export interface RobotHudState {
 export class Hud {
   readonly sceneContainer: HTMLElement;
   readonly actionContainer: HTMLElement;
+  readonly rehearsalContainer: HTMLElement;
   readonly diagnosticsContainer: HTMLElement;
 
   private readonly modeValue: HTMLElement;
@@ -97,6 +98,7 @@ export class Hud {
             <span class="status-label">边界/恢复</span>
             <span class="status-value" data-field="constraint">无</span>
           </div>
+          <div class="offline-rehearsal-rail" aria-label="离线演练控制台"></div>
           <div class="diagnostics-rail" aria-label="LM3 diagnostics"></div>
         </aside>
       </main>
@@ -108,6 +110,7 @@ export class Hud {
 
     this.sceneContainer = requireElement(root, '.scene-canvas');
     this.actionContainer = requireElement(root, '.command-actions-host');
+    this.rehearsalContainer = requireElement(root, '.offline-rehearsal-rail');
     this.diagnosticsContainer = requireElement(root, '.diagnostics-rail');
     this.modeValue = requireElement(root, '[data-field="mode"]');
     this.runtimeIdentityValue = requireElement(root, '.simulator-label');

@@ -90,6 +90,8 @@ export class ArmPanel {
   private mode: TeleopMode = 'READY';
   private stopRequested = false;
   private safetyPublishQueued = false;
+  private automationActive = false;
+  private vrStarting = false;
   private readonly armLabel: HTMLElement;
   private readonly stopLabel: HTMLElement;
   private runtimeArmLabel = '解锁仿真';
@@ -121,7 +123,9 @@ export class ArmPanel {
 
     this.armButton.addEventListener('click', () => this.requestArm('desktop'));
     this.stopButton.addEventListener('click', () => this.requestStopOrReset('desktop'));
-    this.vrButton.addEventListener('click', onEnterVR);
+    this.vrButton.addEventListener('click', () => {
+      if (!this.automationActive) onEnterVR();
+    });
   }
 
   get isArmed(): boolean {
@@ -142,7 +146,9 @@ export class ArmPanel {
       phase,
       connected: this.connected && this.mode !== 'DISCONNECTED',
       connectionState: this.connectionState,
-      eligible: phase === 'disconnected' || phase === 'fault' ? false : this.eligible,
+      eligible: this.automationActive || phase === 'disconnected' || phase === 'fault'
+        ? false
+        : this.eligible,
       armed: (phase === 'armed' || phase === 'active') && this.armed,
       pending: this.isArmPending,
       mode: this.mode,
@@ -156,6 +162,7 @@ export class ArmPanel {
   }
 
   observeGrip(grip: boolean): void {
+    if (this.automationActive) return;
     this.gripPressed = grip;
     if (
       !grip &&
@@ -189,6 +196,12 @@ export class ArmPanel {
       : backend === 'LEBAI_FAKE'
         ? '解锁数字孪生'
         : '解锁仿真';
+    this.syncButtonState();
+  }
+
+  setAutomationActive(active: boolean): void {
+    if (this.automationActive === active) return;
+    this.automationActive = active;
     this.syncButtonState();
   }
 
@@ -289,7 +302,8 @@ export class ArmPanel {
 
   setVRStatus(status: XRSessionStatus): void {
     const label = requireElement(this.vrButton, 'span');
-    this.vrButton.disabled = status.state === 'starting';
+    this.vrStarting = status.state === 'starting';
+    this.vrButton.disabled = this.automationActive || this.vrStarting;
     this.vrButton.dataset.state = status.state;
     this.vrButton.title = status.state === 'error' ? status.message : '';
     label.textContent = status.state === 'starting'
@@ -301,6 +315,7 @@ export class ArmPanel {
 
   requestArm(source: ControlSource = 'desktop'): boolean {
     if (
+      this.automationActive ||
       !this.connected ||
       !this.eligible ||
       this.fault ||
@@ -323,6 +338,7 @@ export class ArmPanel {
   }
 
   requestDisarm(source: ControlSource = 'desktop'): void {
+    if (this.automationActive) return;
     this.armed = false;
     this.eligible = false;
     this.pendingArmRequestId = null;
@@ -334,6 +350,7 @@ export class ArmPanel {
   }
 
   requestStopOrReset(source: ControlSource = 'desktop'): void {
+    if (this.automationActive) return;
     if (this.fault) {
       if (!this.isFaultRecoverable) return;
       if (!this.connected || this.gripPressed || this.pendingFaultResetId !== null) return;
@@ -436,6 +453,19 @@ export class ArmPanel {
   }
 
   private syncButtonState(): void {
+    if (this.automationActive) {
+      this.armButton.disabled = true;
+      this.armButton.dataset.state = 'automation';
+      this.armLabel.textContent = '离线演练运行中';
+      this.armButton.title = '自动演练拥有控制权';
+      this.armButton.setAttribute('aria-label', '离线演练运行中，手动控制已锁定');
+      this.stopLabel.textContent = '离线演练运行中';
+      this.stopButton.disabled = true;
+      this.stopButton.title = '请使用离线演练面板停止';
+      this.vrButton.disabled = true;
+      this.publishSafetyChange();
+      return;
+    }
     this.armButton.disabled =
       !this.connected ||
       !this.eligible ||
@@ -497,6 +527,7 @@ export class ArmPanel {
       this.stopButton.disabled = false;
     }
     this.stopButton.title = this.resetFeedback ?? this.homeFeedback ?? '';
+    this.vrButton.disabled = this.vrStarting;
     this.publishSafetyChange();
   }
 
