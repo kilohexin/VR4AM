@@ -5,6 +5,7 @@ import {
   type ClientControlMessage,
   type DiagnosticPayloadValue,
   type DiagnosticsMessage,
+  type FaultResetResultMessage,
   type HomeResultMessage,
   type OfflineRehearsalClientMessage,
   type OfflineRehearsalFeedbackMessage,
@@ -68,6 +69,7 @@ export interface OfflineRehearsalPorts {
 
 type ControllerFeedback =
   | ArmFeedbackMessage
+  | FaultResetResultMessage
   | HomeResultMessage
   | OfflineRehearsalFeedbackMessage;
 
@@ -78,6 +80,7 @@ type PendingReport = Readonly<{
 }> | Readonly<{
   kind: 'finish';
   requestId: string;
+  outcome: 'passed' | 'failed' | 'aborted';
 }>;
 
 type MotionTarget = Readonly<{
@@ -92,6 +95,8 @@ const PICK_LIFT_M = 0.10;
 const CARRIED_OFFSET_TOLERANCE_M = 0.005;
 const RELEASE_SUPPORT_TOLERANCE_M = 0.015;
 const BOUNDARY_PROBE_DISTANCE_M = 0.30;
+const AUTHORITATIVE_FRESHNESS_MS = 1_000;
+const AUTHORITATIVE_CORRELATION_NS = AUTHORITATIVE_FRESHNESS_MS * 1_000_000;
 
 export class OfflineRehearsalController {
   private displayPhase: OfflineRehearsalDisplayPhase = 'idle';
@@ -104,6 +109,10 @@ export class OfflineRehearsalController {
   private stopVerified = false;
   private latestState: RobotStateMessage | null = null;
   private latestDiagnostics: DiagnosticsMessage | null = null;
+  private stateReceivedMs: number | null = null;
+  private diagnosticsReceivedMs: number | null = null;
+  private lastRobotServerMonoNs = -1;
+  private lastDiagnosticsServerMonoNs = -1;
   private connection: TeleopConnectionStatus['state'] = 'disconnected';
   private disposed = false;
   private cleanupActive = false;
@@ -115,7 +124,7 @@ export class OfflineRehearsalController {
   private requestSequence = 0;
   private beginRequestId: string | null = null;
   private controlRequestId: string | null = null;
-  private controlRequestType: 'home_request' | 'arm_request' | null = null;
+  private controlRequestType: 'home_request' | 'arm_request' | 'reset_fault' | null = null;
   private pendingReport: PendingReport | null = null;
   private homeAccepted = false;
   private armAccepted = false;
@@ -130,6 +139,8 @@ export class OfflineRehearsalController {
   private motionIndex = 0;
   private gripperIndex = 0;
   private carriedOffset: Vec3 | null = null;
+  private trackingLossAckSeq: number | null = null;
+  private recoverySafeAfterResetRequest = false;
 
   constructor(private readonly ports: OfflineRehearsalPorts) {}
 
@@ -154,12 +165,18 @@ export class OfflineRehearsalController {
     this.ports.setOfflineController(null);
     this.ports.resetScene?.();
     this.beginRequestId = this.nextRequestId('begin');
-    this.ports.sendRehearsal({
+    const begin = {
       v: PROTOCOL_VERSION,
-      type: 'offline_rehearsal_begin',
+      type: 'offline_rehearsal_begin' as const,
       request_id: this.beginRequestId,
       plan_version: REHEARSAL_CONFIG.planVersion,
-    });
+    };
+    if (!this.trySendRehearsal(begin)) {
+      this.beginRequestId = null;
+      this.beginCleanup('send_failed');
+      this.finishLocalCleanup();
+      return false;
+    }
     this.notify();
     return true;
   }
@@ -174,14 +191,30 @@ export class OfflineRehearsalController {
       if (this.isActive()) this.beginCleanup('non_finite_state');
       return;
     }
+    if (state.server_mono_ns <= this.lastRobotServerMonoNs) return;
+    this.lastRobotServerMonoNs = state.server_mono_ns;
+    this.stateReceivedMs = this.ports.nowMs();
     this.latestState = structuredClone(state);
     if (!this.isActive()) return;
     this.checkDeadline();
+    if (!this.isActive()) return;
     if (this.cleanupActive) {
       this.confirmCleanupStop(state);
       return;
     }
-    if (state.mode === 'FAULT' || state.robot_state === 'FAULT' || state.fault !== null) {
+    if (!hasFakeControlIdentity(state)) {
+      this.beginCleanup('identity_lost');
+      return;
+    }
+    const authoritativeFailure = this.authoritativeFreshnessFailure();
+    if (authoritativeFailure !== null) {
+      this.beginCleanup(authoritativeFailure);
+      return;
+    }
+    if (
+      this.currentPhase !== 'recovery_and_home'
+      && (state.mode === 'FAULT' || state.robot_state === 'FAULT' || state.fault !== null)
+    ) {
       this.beginCleanup('robot_fault');
       return;
     }
@@ -233,6 +266,9 @@ export class OfflineRehearsalController {
       if (this.isActive()) this.beginCleanup('non_finite_diagnostics');
       return;
     }
+    if (message.server_mono_ns <= this.lastDiagnosticsServerMonoNs) return;
+    this.lastDiagnosticsServerMonoNs = message.server_mono_ns;
+    this.diagnosticsReceivedMs = this.ports.nowMs();
     this.latestDiagnostics = structuredClone(message);
     if (
       this.isActive()
@@ -240,11 +276,15 @@ export class OfflineRehearsalController {
       && (message.runtime !== 'LEBAI_FAKE' || message.hardware_verified !== false)
     ) {
       this.beginCleanup('identity_lost');
+      return;
+    }
+    if (this.isActive() && !this.cleanupActive) {
+      const authoritativeFailure = this.authoritativeFreshnessFailure();
+      if (authoritativeFailure !== null) this.beginCleanup(authoritativeFailure);
     }
   }
 
   onFeedback(message: ControllerFeedback): void {
-    if (this.disposed && this.runId === null) return;
     this.checkDeadline();
     if (message.type === 'offline_rehearsal_begin_result') {
       this.processBeginFeedback(message);
@@ -262,13 +302,27 @@ export class OfflineRehearsalController {
       this.processArmFeedback(message);
       return;
     }
+    if (message.type === 'fault_reset_result') {
+      this.processFaultResetFeedback(message);
+      return;
+    }
     this.processHomeFeedback(message);
   }
 
   onConnection(status: TeleopConnectionStatus): void {
+    const previous = this.connection;
     this.connection = status.state;
-    if (!this.isActive() || this.cleanupActive || status.state === 'connected') return;
+    if (status.state === 'connected') {
+      if (previous !== 'connected' && !this.isActive()) this.clearAuthoritativeSnapshots();
+      return;
+    }
+    if (!this.isActive()) return;
+    if (this.cleanupActive) {
+      this.finishLocalCleanup();
+      return;
+    }
     this.beginCleanup(status.state === 'occupied' ? 'controller_occupied' : 'connection_lost');
+    this.finishLocalCleanup();
   }
 
   dispose(): void {
@@ -281,18 +335,25 @@ export class OfflineRehearsalController {
     message: Extract<OfflineRehearsalFeedbackMessage, {type: 'offline_rehearsal_begin_result'}>,
   ): void {
     if (
-      this.cleanupActive
-      || this.beginRequestId === null
+      this.beginRequestId === null
       || message.request_id !== this.beginRequestId
     ) return;
     this.beginRequestId = null;
     if (!message.accepted) {
+      if (this.cleanupActive) {
+        if (this.stopVerified) this.finishLocalCleanup();
+        return;
+      }
       this.beginCleanup(message.reason === 'controller_occupied'
         ? 'controller_occupied'
         : 'begin_rejected');
       return;
     }
     this.runId = message.run_id;
+    if (this.cleanupActive) {
+      if (this.cleanupReadyToReport) this.sendNextCleanupReport();
+      return;
+    }
     this.step = 'identity_confirmed';
     this.reportCurrentPhase('passed', {
       runtime: 'LEBAI_FAKE',
@@ -314,7 +375,8 @@ export class OfflineRehearsalController {
     this.pendingReport = null;
     if (!message.accepted) {
       if (this.cleanupActive) {
-        this.sendCleanupFinish();
+        this.failure = 'report_rejected';
+        this.finishLocalCleanup();
       } else {
         this.beginCleanup('report_rejected');
       }
@@ -344,7 +406,17 @@ export class OfflineRehearsalController {
     ) return;
     this.pendingReport = null;
     if (!message.accepted) {
-      if (!this.cleanupActive) this.beginCleanup('finish_rejected');
+      if (this.cleanupActive) {
+        this.failure = 'finish_rejected';
+        this.finishLocalCleanup();
+      } else {
+        this.beginCleanup('finish_rejected');
+      }
+      return;
+    }
+    if (message.outcome !== pending.outcome) {
+      this.runId = null;
+      this.beginCleanup('finish_outcome_mismatch');
       return;
     }
     if (message.hardware_verified !== false) {
@@ -384,7 +456,31 @@ export class OfflineRehearsalController {
     this.armAccepted = true;
     this.step = 'active_confirmation';
     this.confirmations = 0;
+    if (this.sample !== null) {
+      this.sample = {...copyOfflineControllerSample(this.sample), grip: true};
+      this.publishSample();
+    }
     this.notify();
+  }
+
+  private processFaultResetFeedback(message: FaultResetResultMessage): void {
+    if (
+      this.cleanupActive
+      || this.currentPhase !== 'recovery_and_home'
+      || this.controlRequestType !== 'reset_fault'
+      || message.request_id !== this.controlRequestId
+    ) return;
+    this.controlRequestId = null;
+    this.controlRequestType = null;
+    if (!message.accepted) {
+      this.beginCleanup('fault_reset_rejected');
+      return;
+    }
+    if (!this.recoverySafeAfterResetRequest) {
+      this.step = 'recovery_post_reset_confirmation';
+      return;
+    }
+    this.sendRecoveryHome();
   }
 
   private processHomeFeedback(message: HomeResultMessage): void {
@@ -417,7 +513,7 @@ export class OfflineRehearsalController {
     if (!this.armAccepted || this.pendingReport !== null) return;
     if (!this.confirm(state.mode === 'ACTIVE')) return;
     this.anchor = copyPose(state.actual_tcp);
-    this.sample = sampleFromPose(state.actual_tcp, 0, true);
+    this.sample = sampleFromPose(state.actual_tcp, 0, true, true);
     this.publishSample();
     this.reportCurrentPhase('passed', {anchor_confirmations: SAFE_CONFIRMATIONS});
   }
@@ -593,6 +689,9 @@ export class OfflineRehearsalController {
   }
 
   private processTrackingLossState(state: RobotStateMessage): void {
+    if (state.ack_seq != null) {
+      this.trackingLossAckSeq = Math.max(this.trackingLossAckSeq ?? -1, state.ack_seq);
+    }
     if (this.confirm(state.mode === 'STALE' && isStoppedBackendState(state))) {
       this.reportCurrentPhase('passed', {
         tracking_valid: false,
@@ -602,10 +701,30 @@ export class OfflineRehearsalController {
   }
 
   private processRecoveryState(state: RobotStateMessage): void {
-    if (!this.homeAccepted) return;
-    if (this.confirm(isSafeStoppedState(state))) {
+    if (this.homeAccepted) {
+      if (!this.confirm(isSafeStoppedState(state))) return;
       this.reportCurrentPhase('passed', {home_after_tracking_loss: true});
+      return;
     }
+    const validFrameAcknowledged = state.ack_seq != null
+      && this.trackingLossAckSeq != null
+      && state.ack_seq > this.trackingLossAckSeq;
+    const stoppedMode = state.mode === 'READY' || state.mode === 'DISARMED';
+    if (this.controlRequestType === 'reset_fault') {
+      if (validFrameAcknowledged && stoppedMode && isStoppedBackendState(state) && state.fault === null) {
+        this.recoverySafeAfterResetRequest = true;
+      }
+      return;
+    }
+    if (this.controlRequestType === 'home_request' || !validFrameAcknowledged) return;
+    if (!stoppedMode || !isStoppedBackendState(state)) return;
+    if (state.fault !== null || state.robot_state === 'FAULT') {
+      this.step = 'recovery_reset_fault';
+      this.recoverySafeAfterResetRequest = false;
+      this.sendControl('reset_fault');
+      return;
+    }
+    this.sendRecoveryHome();
   }
 
   private processFinalStopState(state: RobotStateMessage): void {
@@ -667,6 +786,7 @@ export class OfflineRehearsalController {
         break;
       case 'tracking_loss':
         this.step = 'tracking_invalid';
+        this.trackingLossAckSeq = this.latestState?.ack_seq ?? null;
         if (this.sample === null && this.anchor !== null) this.sample = sampleFromPose(this.anchor, 0, false);
         if (this.sample !== null) {
           this.sample = {...copyOfflineControllerSample(this.sample), trackingValid: false};
@@ -674,12 +794,12 @@ export class OfflineRehearsalController {
         }
         break;
       case 'recovery_and_home':
-        this.step = 'recovery_home_request';
+        this.step = 'recovery_valid_tracking';
+        this.recoverySafeAfterResetRequest = false;
         if (this.sample !== null) {
           this.sample = {...copyOfflineControllerSample(this.sample), trackingValid: true, grip: false, trigger: 0};
           this.publishSample();
         }
-        this.sendControl('home_request');
         break;
       case 'final_stop':
         this.step = 'final_disarm';
@@ -801,7 +921,7 @@ export class OfflineRehearsalController {
     this.displayPhase = this.cleanupActive ? 'failed' : 'reporting';
     this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
     this.targetTcp = null;
-    this.ports.sendRehearsal({
+    const message: OfflineRehearsalClientMessage = {
       v: PROTOCOL_VERSION,
       type: 'offline_rehearsal_phase',
       request_id: requestId,
@@ -816,22 +936,41 @@ export class OfflineRehearsalController {
       },
       measurements,
       failure: status === 'failed' ? {reason: this.failure ?? 'failed'} : null,
-    });
+    };
+    if (!this.trySendRehearsal(message)) {
+      this.pendingReport = null;
+      if (this.cleanupActive) {
+        this.failure = 'send_failed';
+        this.finishLocalCleanup();
+      } else {
+        this.beginCleanup('send_failed');
+      }
+      return;
+    }
     this.notify();
   }
 
   private sendFinish(outcome: 'passed' | 'failed' | 'aborted'): void {
     if (this.runId === null || this.pendingReport !== null) return;
     const requestId = this.nextRequestId('finish');
-    this.pendingReport = {kind: 'finish', requestId};
-    this.ports.sendRehearsal({
+    this.pendingReport = {kind: 'finish', requestId, outcome};
+    const message: OfflineRehearsalClientMessage = {
       v: PROTOCOL_VERSION,
       type: 'offline_rehearsal_finish',
       request_id: requestId,
       run_id: this.runId,
       outcome,
       failure: outcome === 'passed' ? null : {reason: this.failure ?? outcome},
-    });
+    };
+    if (!this.trySendRehearsal(message)) {
+      this.pendingReport = null;
+      if (!this.cleanupActive) this.beginCleanup('send_failed');
+      else {
+        this.failure = 'send_failed';
+        this.finishLocalCleanup();
+      }
+      return;
+    }
     this.notify();
   }
 
@@ -849,15 +988,16 @@ export class OfflineRehearsalController {
     this.targetTcp = null;
     this.targetTrigger = null;
     this.ports.setOfflineController(null);
-    this.ports.sendControl({
+    const disarmSent = this.trySendControl({
       v: PROTOCOL_VERSION,
       type: 'disarm',
       request_id: this.nextRequestId('cleanup-disarm'),
       client_mono_ms: this.ports.nowMs(),
     });
-    if (this.runId === null) {
-      this.pendingReport = null;
-      this.beginRequestId = null;
+    if (!disarmSent) {
+      this.failure = 'send_failed';
+      this.finishLocalCleanup();
+      return;
     }
     this.notify();
   }
@@ -877,7 +1017,10 @@ export class OfflineRehearsalController {
     if (this.cleanupStopConfirmations < SAFE_CONFIRMATIONS) return;
     this.stopVerified = true;
     this.cleanupReadyToReport = true;
-    this.deadlineMs = null;
+    if (this.runId === null) {
+      if (this.beginRequestId === null) this.finishLocalCleanup();
+      return;
+    }
     this.sendNextCleanupReport();
   }
 
@@ -902,30 +1045,83 @@ export class OfflineRehearsalController {
     this.sendFinish(this.cleanupOutcome);
   }
 
+  private finishLocalCleanup(): void {
+    this.cleanupActive = false;
+    this.cleanupReadyToReport = false;
+    this.currentPhase = null;
+    this.step = null;
+    this.deadlineMs = null;
+    this.beginRequestId = null;
+    this.controlRequestId = null;
+    this.controlRequestType = null;
+    this.pendingReport = null;
+    this.sample = null;
+    this.targetTcp = null;
+    this.targetTrigger = null;
+    this.ports.setOfflineController(null);
+    this.notify();
+  }
+
   private checkDeadline(): void {
-    if (!this.isActive() || this.deadlineMs === null || this.ports.nowMs() <= this.deadlineMs) return;
+    if (!this.isActive()) return;
+    if (!this.cleanupActive) {
+      const authoritativeFailure = this.authoritativeFreshnessFailure();
+      if (authoritativeFailure !== null) {
+        this.beginCleanup(authoritativeFailure);
+        return;
+      }
+    }
+    if (this.deadlineMs === null || this.ports.nowMs() <= this.deadlineMs) return;
     if (this.cleanupActive) {
-      this.failure = 'stop_unverified';
-      this.cleanupReadyToReport = true;
-      this.deadlineMs = null;
-      this.sendNextCleanupReport();
+      if (!this.stopVerified) this.failure = 'stop_unverified';
+      this.finishLocalCleanup();
       return;
     }
     this.beginCleanup('phase_timeout');
   }
 
-  private sendControl(type: 'home_request' | 'arm_request' | 'disarm'): void {
+  private sendControl(type: 'home_request' | 'arm_request' | 'reset_fault' | 'disarm'): void {
     const requestId = this.nextRequestId(type);
     if (type !== 'disarm') {
       this.controlRequestId = requestId;
       this.controlRequestType = type;
     }
-    this.ports.sendControl({
+    const sent = this.trySendControl({
       v: PROTOCOL_VERSION,
       type,
       request_id: requestId,
       client_mono_ms: this.ports.nowMs(),
     });
+    if (!sent) {
+      this.controlRequestId = null;
+      this.controlRequestType = null;
+      this.beginCleanup('send_failed');
+    }
+  }
+
+  private sendRecoveryHome(): void {
+    if (this.controlRequestType !== null) return;
+    this.step = 'recovery_home_request';
+    this.sendControl('home_request');
+    this.notify();
+  }
+
+  private trySendControl(message: ClientControlMessage): boolean {
+    try {
+      this.ports.sendControl(message);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private trySendRehearsal(message: OfflineRehearsalClientMessage): boolean {
+    try {
+      this.ports.sendRehearsal(message);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private setSampleTrigger(trigger: 0 | 1): void {
@@ -936,7 +1132,7 @@ export class OfflineRehearsalController {
     }
     this.sample = {
       ...copyOfflineControllerSample(this.sample),
-      grip: false,
+      grip: true,
       trigger,
       trackingValid: true,
     };
@@ -987,7 +1183,34 @@ export class OfflineRehearsalController {
       && state.mode === 'READY'
       && state.robot_state === 'IDLE'
       && state.fault === null
-      && state.constraint === null;
+      && state.constraint === null
+      && this.authoritativeFreshnessFailure() === null;
+  }
+
+  private authoritativeFreshnessFailure(): string | null {
+    if (this.latestState === null || this.stateReceivedMs === null) return 'state_timeout';
+    if (this.latestDiagnostics === null || this.diagnosticsReceivedMs === null) {
+      return 'diagnostics_timeout';
+    }
+    const nowMs = this.ports.nowMs();
+    if (nowMs - this.stateReceivedMs > AUTHORITATIVE_FRESHNESS_MS) return 'state_timeout';
+    if (nowMs - this.diagnosticsReceivedMs > AUTHORITATIVE_FRESHNESS_MS) {
+      return 'diagnostics_timeout';
+    }
+    if (
+      Math.abs(this.latestState.server_mono_ns - this.latestDiagnostics.server_mono_ns)
+      > AUTHORITATIVE_CORRELATION_NS
+    ) return 'identity_uncorrelated';
+    return null;
+  }
+
+  private clearAuthoritativeSnapshots(): void {
+    this.latestState = null;
+    this.latestDiagnostics = null;
+    this.stateReceivedMs = null;
+    this.diagnosticsReceivedMs = null;
+    this.lastRobotServerMonoNs = -1;
+    this.lastDiagnosticsServerMonoNs = -1;
   }
 
   private isActive(): boolean {
@@ -1025,6 +1248,8 @@ export class OfflineRehearsalController {
     this.motionIndex = 0;
     this.gripperIndex = 0;
     this.carriedOffset = null;
+    this.trackingLossAckSeq = null;
+    this.recoverySafeAfterResetRequest = false;
   }
 
   private nextRequestId(kind: string): string {
@@ -1059,11 +1284,16 @@ export class OfflineRehearsalController {
   }
 }
 
-function sampleFromPose(pose: TcpPose, trigger: 0 | 1, trackingValid: boolean): OfflineControllerSample {
+function sampleFromPose(
+  pose: TcpPose,
+  trigger: 0 | 1,
+  trackingValid: boolean,
+  grip = false,
+): OfflineControllerSample {
   return {
     position: [...pose.p],
     quaternion: [...pose.q],
-    grip: false,
+    grip,
     trigger,
     trackingValid,
   };
@@ -1091,6 +1321,12 @@ function isSafeStoppedState(state: RobotStateMessage): boolean {
     && isStoppedBackendState(state)
     && state.fault === null
     && state.recovery_phase == null;
+}
+
+function hasFakeControlIdentity(state: RobotStateMessage): boolean {
+  return state.backend === 'LEBAI_FAKE'
+    && state.real_robot_mode === 'control'
+    && state.preflight_ready === true;
 }
 
 function isStoppedBackendState(state: RobotStateMessage): boolean {
