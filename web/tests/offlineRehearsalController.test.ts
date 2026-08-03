@@ -37,8 +37,10 @@ function robotState(overrides: Partial<RobotStateMessage> = {}): RobotStateMessa
     constraint: null,
     recovery_phase: null,
     backend: 'LEBAI_FAKE',
-    real_robot_mode: 'control',
-    preflight_ready: true,
+    // RealLebaiAdapter.get_state(), as used by create_digital_twin_app(),
+    // leaves the health-only fields null on the WebSocket state contract.
+    real_robot_mode: null,
+    preflight_ready: null,
     preflight_reason: null,
     ...overrides,
   };
@@ -81,6 +83,8 @@ function harness(options: {throwOnBegin?: boolean} = {}) {
     invalidOverlap: false,
   };
   let resets = 0;
+  let connectionAborts = 0;
+  const serverRun = {active: false};
   const ports: OfflineRehearsalPorts = {
     nowMs: () => nowMs,
     sendControl: (message) => controls.push(structuredClone(message)),
@@ -97,6 +101,10 @@ function harness(options: {throwOnBegin?: boolean} = {}) {
     },
     readScene: () => structuredClone(scene),
     resetScene: () => { resets += 1; },
+    closeConnection: () => {
+      connectionAborts += 1;
+      serverRun.active = false;
+    },
   };
   const controller = new OfflineRehearsalController(ports);
   return {
@@ -124,6 +132,8 @@ function harness(options: {throwOnBegin?: boolean} = {}) {
     samples,
     scene,
     resets: () => resets,
+    connectionAborts: () => connectionAborts,
+    serverRun,
   };
 }
 
@@ -153,6 +163,7 @@ function acceptBegin(test: Harness): void {
     accepted: true,
     run_id: 'run-1',
   });
+  test.serverRun.active = true;
 }
 
 function acknowledgePhase(test: Harness): void {
@@ -188,6 +199,7 @@ function acknowledgeFinish(
       'stop_distance_estop', 'lightweight_grasp_release',
     ],
   });
+  test.serverRun.active = false;
 }
 
 function acceptLatestControl(test: Harness): void {
@@ -430,6 +442,29 @@ function driveFromAnchorToFinish(test: Harness, recoverFault = false): void {
 }
 
 describe('OfflineRehearsalController happy path', () => {
+  it('accepts the real create_digital_twin_app WebSocket identity shape', () => {
+    const actualDigitalTwin = harness();
+    connectReady(actualDigitalTwin);
+
+    expect(actualDigitalTwin.controller.start()).toBe(true);
+    expect(latestReport(actualDigitalTwin, 'offline_rehearsal_begin')).toBeDefined();
+
+    for (const backend of [null, 'SIMULATOR', 'LEBAI'] as const) {
+      const unsafe = harness();
+      unsafe.controller.onConnection({state: 'connected'});
+      unsafe.emitDiagnostics();
+      unsafe.emitState({backend});
+      expect(unsafe.controller.start()).toBe(false);
+      expect(unsafe.controller.snapshot.failure).toBe('identity_preflight_failed');
+    }
+
+    const wrongDiagnostics = harness();
+    wrongDiagnostics.controller.onConnection({state: 'connected'});
+    wrongDiagnostics.emitDiagnostics({runtime: 'SIMULATOR'});
+    wrongDiagnostics.emitState();
+    expect(wrongDiagnostics.controller.start()).toBe(false);
+  });
+
   it('runs the exact state-confirmed phase sequence and keeps lifecycle reports report-only', () => {
     const test = harness();
     beginThroughAnchor(test);
@@ -467,6 +502,26 @@ describe('OfflineRehearsalController happy path', () => {
     acknowledgeFinish(test, 'failed');
 
     expectFailed(test, 'finish_outcome_mismatch');
+  });
+
+  it('keeps safety cleanup active when a stale normal finish is accepted', () => {
+    const test = harness();
+    beginThroughAnchor(test);
+    driveFromAnchorToFinish(test);
+
+    test.advance(1_001);
+    acknowledgeFinish(test);
+
+    expect(test.controls.at(-1)?.type).toBe('disarm');
+    expect(test.serverRun.active).toBe(false);
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'failed', failure: 'state_timeout', active: true, stopVerified: false,
+    });
+
+    confirmState(test, {mode: 'DISARMED', robot_state: 'IDLE'});
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'failed', failure: 'state_timeout', active: false, stopVerified: true,
+    });
   });
 
   it('orders valid tracking, conditional fault reset, authoritative stop, then Home', () => {
@@ -620,6 +675,8 @@ describe('OfflineRehearsalController fail-closed cleanup', () => {
     const begin = latestReport(test, 'offline_rehearsal_begin');
     test.controller.dispose();
     expectFailed(test, 'disposed');
+    expect(test.connectionAborts()).toBe(1);
+    expect(test.controller.snapshot.active).toBe(false);
     test.controller.onFeedback({
       v: 1, type: 'offline_rehearsal_begin_result', request_id: begin.request_id,
       accepted: true, run_id: 'late-run',
@@ -627,13 +684,13 @@ describe('OfflineRehearsalController fail-closed cleanup', () => {
     expect(test.reports).toHaveLength(1);
     test.advance(8_001);
     expect(test.controller.snapshot).toMatchObject({
-      phase: 'failed', failure: 'stop_unverified', active: false, stopVerified: false,
+      phase: 'failed', failure: 'disposed', active: false, stopVerified: false,
     });
     expect(test.controller.start()).toBe(false);
-    expectFailed(test, 'stop_unverified');
+    expectFailed(test, 'disposed');
   });
 
-  it('bounds pending-begin stop, begin rejection, disconnect, and report timeout cleanup', () => {
+  it('bounds pending-begin stop, begin rejection, and disconnect cleanup', () => {
     const pending = harness();
     connectReady(pending);
     pending.controller.start();
@@ -674,16 +731,6 @@ describe('OfflineRehearsalController fail-closed cleanup', () => {
       phase: 'failed', failure: 'operator_stop', active: false,
     });
 
-    const reportTimeout = harness();
-    connectReady(reportTimeout);
-    reportTimeout.controller.start();
-    acceptBegin(reportTimeout);
-    rejectLatestPhase(reportTimeout);
-    confirmState(reportTimeout, {mode: 'DISARMED'});
-    reportTimeout.advance(8_001);
-    expect(reportTimeout.controller.snapshot).toMatchObject({
-      phase: 'failed', active: false,
-    });
   });
 
   it('contains begin send failures in a terminal fail-closed state', () => {
@@ -708,6 +755,65 @@ describe('OfflineRehearsalController fail-closed cleanup', () => {
     test.emitState({mode: 'FAULT', robot_state: 'FAULT', fault: 'latched'});
     expectFailed(test, 'stop_unverified');
     expect(test.controller.snapshot.stopVerified).toBe(false);
+  });
+
+  it('drains a known backend run after the stop-confirmation deadline', () => {
+    const test = harness();
+    connectReady(test);
+    test.controller.start();
+    acceptBegin(test);
+    acknowledgePhase(test);
+    test.controller.requestStop('page_hidden');
+
+    test.advance(8_001);
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'failed', failure: 'stop_unverified', active: true, stopVerified: false,
+    });
+    expect(test.serverRun.active).toBe(true);
+
+    for (const expectedPhase of REHEARSAL_PHASES.slice(1)) {
+      const phase = latestReport(test, 'offline_rehearsal_phase');
+      expect(phase).toMatchObject({phase: expectedPhase, status: 'failed'});
+      expect(phase.measurements).toMatchObject({stop_verified: false});
+      acknowledgePhase(test);
+    }
+    expect(latestReport(test, 'offline_rehearsal_finish').outcome).toBe('aborted');
+    expect(test.serverRun.active).toBe(true);
+
+    acknowledgeFinish(test);
+    expect(test.serverRun.active).toBe(false);
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'failed', failure: 'stop_unverified', active: false, stopVerified: false,
+    });
+  });
+
+  it('retries an exact cleanup report then closes the owning socket at the bound', () => {
+    const test = harness();
+    connectReady(test);
+    test.controller.start();
+    acceptBegin(test);
+    acknowledgePhase(test);
+    test.controller.requestStop('operator_stop');
+    confirmState(test, {mode: 'DISARMED', robot_state: 'IDLE'});
+
+    const first = latestReport(test, 'offline_rehearsal_phase');
+    expect(first).toMatchObject({phase: 'home', status: 'failed'});
+    for (let expectedAttempts = 2; expectedAttempts <= 3; expectedAttempts += 1) {
+      test.advance(8_001);
+      expect(test.controller.snapshot.active).toBe(true);
+      const attempts = test.reports.filter((message) => (
+        message.type === 'offline_rehearsal_phase' && message.phase === 'home'
+      ));
+      expect(attempts).toHaveLength(expectedAttempts);
+      expect(attempts.at(-1)).toEqual(first);
+      expect(test.connectionAborts()).toBe(0);
+      expect(test.serverRun.active).toBe(true);
+    }
+
+    test.advance(8_001);
+    expect(test.controller.snapshot.active).toBe(false);
+    expect(test.connectionAborts()).toBe(1);
+    expect(test.serverRun.active).toBe(false);
   });
 
   it('submits every remaining failed phase before an aborted finish becomes terminal', () => {
@@ -737,7 +843,7 @@ describe('OfflineRehearsalController fail-closed cleanup', () => {
     expect(test.controller.snapshot.stopVerified).toBe(true);
   });
 
-  it('requires fresh correlated Fake/control diagnostics and identity throughout the run', () => {
+  it('requires fresh correlated Fake diagnostics and state identity throughout the run', () => {
     const stale = harness();
     connectReady(stale);
     stale.advance(1_001);
@@ -762,7 +868,7 @@ describe('OfflineRehearsalController fail-closed cleanup', () => {
     connectReady(drift);
     drift.controller.start();
     acceptBegin(drift);
-    drift.emitState({backend: 'LEBAI', real_robot_mode: 'readonly', preflight_ready: false});
+    drift.emitState({backend: 'LEBAI'});
     expectFailed(drift, 'identity_lost');
   });
 });

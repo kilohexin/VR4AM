@@ -61,6 +61,7 @@ export interface OfflineRehearsalPorts {
   nowMs(): number;
   sendControl(message: ClientControlMessage): void;
   sendRehearsal(message: OfflineRehearsalClientMessage): void;
+  closeConnection(): void;
   setOfflineController(sample: OfflineControllerSample | null): void;
   readScene(): OfflineSceneSnapshot;
   resetScene?(): void;
@@ -73,14 +74,30 @@ type ControllerFeedback =
   | HomeResultMessage
   | OfflineRehearsalFeedbackMessage;
 
+type PhaseReportMessage = Extract<
+  OfflineRehearsalClientMessage,
+  {type: 'offline_rehearsal_phase'}
+>;
+
+type FinishReportMessage = Extract<
+  OfflineRehearsalClientMessage,
+  {type: 'offline_rehearsal_finish'}
+>;
+
 type PendingReport = Readonly<{
   kind: 'phase';
   requestId: string;
   phase: RehearsalPhase;
+  cleanupGeneration: number | null;
+  attempts: number;
+  message: PhaseReportMessage;
 }> | Readonly<{
   kind: 'finish';
   requestId: string;
   outcome: 'passed' | 'failed' | 'aborted';
+  cleanupGeneration: number | null;
+  attempts: number;
+  message: FinishReportMessage;
 }>;
 
 type MotionTarget = Readonly<{
@@ -97,6 +114,7 @@ const RELEASE_SUPPORT_TOLERANCE_M = 0.015;
 const BOUNDARY_PROBE_DISTANCE_M = 0.30;
 const AUTHORITATIVE_FRESHNESS_MS = 1_000;
 const AUTHORITATIVE_CORRELATION_NS = AUTHORITATIVE_FRESHNESS_MS * 1_000_000;
+const MAX_CLEANUP_REPORT_ATTEMPTS = 3;
 
 export class OfflineRehearsalController {
   private displayPhase: OfflineRehearsalDisplayPhase = 'idle';
@@ -119,6 +137,8 @@ export class OfflineRehearsalController {
   private cleanupReadyToReport = false;
   private cleanupOutcome: 'failed' | 'aborted' = 'failed';
   private cleanupStopConfirmations = 0;
+  private cleanupGeneration = 0;
+  private cleanupClosingConnection = false;
   private phaseStartedMs = 0;
   private deadlineMs: number | null = null;
   private requestSequence = 0;
@@ -327,13 +347,17 @@ export class OfflineRehearsalController {
 
   dispose(): void {
     if (this.disposed) return;
-    if (this.isActive()) this.beginCleanup('disposed');
+    if (this.isActive()) {
+      this.beginCleanup('disposed');
+      this.abortBackendRunByClosingConnection();
+    }
     this.disposed = true;
   }
 
   private processBeginFeedback(
     message: Extract<OfflineRehearsalFeedbackMessage, {type: 'offline_rehearsal_begin_result'}>,
   ): void {
+    if (this.cleanupClosingConnection) return;
     if (
       this.beginRequestId === null
       || message.request_id !== this.beginRequestId
@@ -341,7 +365,7 @@ export class OfflineRehearsalController {
     this.beginRequestId = null;
     if (!message.accepted) {
       if (this.cleanupActive) {
-        if (this.stopVerified) this.finishLocalCleanup();
+        if (this.stopVerified || this.cleanupReadyToReport) this.finishLocalCleanup();
         return;
       }
       this.beginCleanup(message.reason === 'controller_occupied'
@@ -365,6 +389,7 @@ export class OfflineRehearsalController {
   private processPhaseFeedback(
     message: Extract<OfflineRehearsalFeedbackMessage, {type: 'offline_rehearsal_phase_ack'}>,
   ): void {
+    if (this.cleanupClosingConnection) return;
     const pending = this.pendingReport;
     if (
       pending?.kind !== 'phase'
@@ -376,7 +401,7 @@ export class OfflineRehearsalController {
     if (!message.accepted) {
       if (this.cleanupActive) {
         this.failure = 'report_rejected';
-        this.finishLocalCleanup();
+        this.abortBackendRunByClosingConnection();
       } else {
         this.beginCleanup('report_rejected');
       }
@@ -398,6 +423,7 @@ export class OfflineRehearsalController {
   private processFinishFeedback(
     message: Extract<OfflineRehearsalFeedbackMessage, {type: 'offline_rehearsal_finish_result'}>,
   ): void {
+    if (this.cleanupClosingConnection) return;
     const pending = this.pendingReport;
     if (
       pending?.kind !== 'finish'
@@ -405,10 +431,12 @@ export class OfflineRehearsalController {
       || message.run_id !== this.runId
     ) return;
     this.pendingReport = null;
+    const belongsToCurrentCleanup = pending.cleanupGeneration !== null
+      && pending.cleanupGeneration === this.cleanupGeneration;
     if (!message.accepted) {
       if (this.cleanupActive) {
         this.failure = 'finish_rejected';
-        this.finishLocalCleanup();
+        this.abortBackendRunByClosingConnection();
       } else {
         this.beginCleanup('finish_rejected');
       }
@@ -416,20 +444,28 @@ export class OfflineRehearsalController {
     }
     if (message.outcome !== pending.outcome) {
       this.runId = null;
-      this.beginCleanup('finish_outcome_mismatch');
+      if (this.cleanupActive) {
+        this.failure = 'finish_outcome_mismatch';
+        this.finishAcceptedDuringCleanup(belongsToCurrentCleanup);
+      } else {
+        this.beginCleanup('finish_outcome_mismatch');
+      }
       return;
     }
     if (message.hardware_verified !== false) {
-      this.beginCleanup('invalid_finish_identity');
+      this.runId = null;
+      if (this.cleanupActive) {
+        this.failure = 'invalid_finish_identity';
+        this.finishAcceptedDuringCleanup(belongsToCurrentCleanup);
+      } else {
+        this.beginCleanup('invalid_finish_identity');
+      }
       return;
     }
     this.reportPaths = {json: message.json_path, markdown: message.markdown_path};
+    this.runId = null;
     if (this.cleanupActive) {
-      this.cleanupActive = false;
-      this.currentPhase = null;
-      this.step = null;
-      this.deadlineMs = null;
-      this.notify();
+      this.finishAcceptedDuringCleanup(belongsToCurrentCleanup);
       return;
     }
     this.displayPhase = 'passed';
@@ -437,6 +473,15 @@ export class OfflineRehearsalController {
     this.step = null;
     this.deadlineMs = null;
     this.ports.setOfflineController(null);
+    this.notify();
+  }
+
+  private finishAcceptedDuringCleanup(belongsToCurrentCleanup: boolean): void {
+    if (belongsToCurrentCleanup || this.stopVerified) {
+      this.finishLocalCleanup();
+      return;
+    }
+    this.step = 'cleanup_stop';
     this.notify();
   }
 
@@ -917,11 +962,10 @@ export class OfflineRehearsalController {
     if (this.runId === null || this.currentPhase === null || this.pendingReport !== null) return;
     const requestId = this.nextRequestId('phase');
     const phase = this.currentPhase;
-    this.pendingReport = {kind: 'phase', requestId, phase};
     this.displayPhase = this.cleanupActive ? 'failed' : 'reporting';
     this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
     this.targetTcp = null;
-    const message: OfflineRehearsalClientMessage = {
+    const message: PhaseReportMessage = {
       v: PROTOCOL_VERSION,
       type: 'offline_rehearsal_phase',
       request_id: requestId,
@@ -937,11 +981,19 @@ export class OfflineRehearsalController {
       measurements,
       failure: status === 'failed' ? {reason: this.failure ?? 'failed'} : null,
     };
+    this.pendingReport = {
+      kind: 'phase',
+      requestId,
+      phase,
+      cleanupGeneration: this.cleanupActive ? this.cleanupGeneration : null,
+      attempts: 1,
+      message,
+    };
     if (!this.trySendRehearsal(message)) {
       this.pendingReport = null;
       if (this.cleanupActive) {
         this.failure = 'send_failed';
-        this.finishLocalCleanup();
+        this.abortBackendRunByClosingConnection();
       } else {
         this.beginCleanup('send_failed');
       }
@@ -953,8 +1005,7 @@ export class OfflineRehearsalController {
   private sendFinish(outcome: 'passed' | 'failed' | 'aborted'): void {
     if (this.runId === null || this.pendingReport !== null) return;
     const requestId = this.nextRequestId('finish');
-    this.pendingReport = {kind: 'finish', requestId, outcome};
-    const message: OfflineRehearsalClientMessage = {
+    const message: FinishReportMessage = {
       v: PROTOCOL_VERSION,
       type: 'offline_rehearsal_finish',
       request_id: requestId,
@@ -962,12 +1013,21 @@ export class OfflineRehearsalController {
       outcome,
       failure: outcome === 'passed' ? null : {reason: this.failure ?? outcome},
     };
+    this.pendingReport = {
+      kind: 'finish',
+      requestId,
+      outcome,
+      cleanupGeneration: this.cleanupActive ? this.cleanupGeneration : null,
+      attempts: 1,
+      message,
+    };
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
     if (!this.trySendRehearsal(message)) {
       this.pendingReport = null;
       if (!this.cleanupActive) this.beginCleanup('send_failed');
       else {
         this.failure = 'send_failed';
-        this.finishLocalCleanup();
+        this.abortBackendRunByClosingConnection();
       }
       return;
     }
@@ -977,9 +1037,12 @@ export class OfflineRehearsalController {
   private beginCleanup(reason: string): void {
     if (this.cleanupActive) return;
     this.cleanupActive = true;
+    this.cleanupGeneration += 1;
+    this.cleanupClosingConnection = false;
     this.cleanupOutcome = isAbortReason(reason) ? 'aborted' : 'failed';
     this.failure = reason;
     this.displayPhase = 'failed';
+    this.stopVerified = false;
     this.step = 'cleanup_stop';
     this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
     this.cleanupStopConfirmations = 0;
@@ -996,27 +1059,25 @@ export class OfflineRehearsalController {
     });
     if (!disarmSent) {
       this.failure = 'send_failed';
-      this.finishLocalCleanup();
+      if (this.runId !== null || this.beginRequestId !== null) {
+        this.abortBackendRunByClosingConnection();
+      } else {
+        this.finishLocalCleanup();
+      }
       return;
     }
     this.notify();
   }
 
   private confirmCleanupStop(state: RobotStateMessage): void {
-    if (this.deadlineMs !== null && this.ports.nowMs() > this.deadlineMs) {
-      this.failure = 'stop_unverified';
-      this.cleanupReadyToReport = true;
-      this.deadlineMs = null;
-      this.sendNextCleanupReport();
-      this.notify();
-      return;
-    }
     this.cleanupStopConfirmations = isSafeStoppedState(state)
       ? this.cleanupStopConfirmations + 1
       : 0;
     if (this.cleanupStopConfirmations < SAFE_CONFIRMATIONS) return;
+    if (this.stopVerified) return;
     this.stopVerified = true;
     this.cleanupReadyToReport = true;
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
     if (this.runId === null) {
       if (this.beginRequestId === null) this.finishLocalCleanup();
       return;
@@ -1048,6 +1109,7 @@ export class OfflineRehearsalController {
   private finishLocalCleanup(): void {
     this.cleanupActive = false;
     this.cleanupReadyToReport = false;
+    this.cleanupClosingConnection = false;
     this.currentPhase = null;
     this.step = null;
     this.deadlineMs = null;
@@ -1073,11 +1135,60 @@ export class OfflineRehearsalController {
     }
     if (this.deadlineMs === null || this.ports.nowMs() <= this.deadlineMs) return;
     if (this.cleanupActive) {
-      if (!this.stopVerified) this.failure = 'stop_unverified';
-      this.finishLocalCleanup();
+      if (this.cleanupClosingConnection) {
+        this.abortBackendRunByClosingConnection();
+        return;
+      }
+      if (!this.cleanupReadyToReport) {
+        if (!this.stopVerified) this.failure = 'stop_unverified';
+        this.cleanupReadyToReport = true;
+        if (this.runId === null) {
+          this.finishLocalCleanup();
+          return;
+        }
+      }
+      if (this.runId === null) {
+        this.finishLocalCleanup();
+        return;
+      }
+      if (this.pendingReport !== null) {
+        this.retryPendingCleanupReport();
+      } else {
+        this.sendNextCleanupReport();
+      }
       return;
     }
     this.beginCleanup('phase_timeout');
+  }
+
+  private retryPendingCleanupReport(): void {
+    const pending = this.pendingReport;
+    if (pending === null) return;
+    if (pending.attempts >= MAX_CLEANUP_REPORT_ATTEMPTS) {
+      this.abortBackendRunByClosingConnection();
+      return;
+    }
+    this.pendingReport = {...pending, attempts: pending.attempts + 1};
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
+    if (!this.trySendRehearsal(pending.message)) {
+      this.failure = 'send_failed';
+      this.abortBackendRunByClosingConnection();
+      return;
+    }
+    this.notify();
+  }
+
+  private abortBackendRunByClosingConnection(): void {
+    this.cleanupClosingConnection = true;
+    this.pendingReport = null;
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
+    try {
+      this.ports.closeConnection();
+      this.finishLocalCleanup();
+    } catch {
+      // Keep cleanup active and retry socket closure at the next deadline.
+      this.notify();
+    }
   }
 
   private sendControl(type: 'home_request' | 'arm_request' | 'reset_fault' | 'disarm'): void {
@@ -1178,8 +1289,6 @@ export class OfflineRehearsalController {
       && diagnostics?.runtime === 'LEBAI_FAKE'
       && diagnostics.hardware_verified === false
       && state?.backend === 'LEBAI_FAKE'
-      && state.real_robot_mode === 'control'
-      && state.preflight_ready === true
       && state.mode === 'READY'
       && state.robot_state === 'IDLE'
       && state.fault === null
@@ -1231,6 +1340,8 @@ export class OfflineRehearsalController {
     this.cleanupActive = false;
     this.cleanupReadyToReport = false;
     this.cleanupStopConfirmations = 0;
+    this.cleanupGeneration = 0;
+    this.cleanupClosingConnection = false;
     this.beginRequestId = null;
     this.controlRequestId = null;
     this.controlRequestType = null;
@@ -1324,9 +1435,7 @@ function isSafeStoppedState(state: RobotStateMessage): boolean {
 }
 
 function hasFakeControlIdentity(state: RobotStateMessage): boolean {
-  return state.backend === 'LEBAI_FAKE'
-    && state.real_robot_mode === 'control'
-    && state.preflight_ready === true;
+  return state.backend === 'LEBAI_FAKE';
 }
 
 function isStoppedBackendState(state: RobotStateMessage): boolean {
