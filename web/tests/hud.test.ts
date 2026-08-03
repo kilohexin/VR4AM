@@ -1,13 +1,30 @@
 // @vitest-environment jsdom
 import {beforeEach, describe, expect, it} from 'vitest';
-import '../src/styles.css';
+// @ts-expect-error Vitest executes this CSS-contract test in Node without project Node typings.
+import {readFileSync} from 'node:fs';
+// @ts-expect-error Vitest executes this CSS-contract test in Node without project Node typings.
+import {resolve} from 'node:path';
 import {Hud} from '../src/ui/hud';
+
+declare const process: {cwd(): string};
+
+const styles = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
 
 beforeEach(() => {
   document.body.innerHTML = '<div id="app"></div>';
 });
 
 describe('Chinese simulator HUD', () => {
+  it('constrains narrow intrinsic widths and keeps rehearsal actions within one viewport column', () => {
+    const narrowRules = styles.slice(styles.indexOf('@media (max-width: 900px)'));
+
+    expect(narrowRules).toMatch(/\.operator-console\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/s);
+    expect(narrowRules).toMatch(/\.help-strip\s*\{[^}]*white-space:\s*normal/s);
+    expect(narrowRules).toMatch(/\.mode-heading strong\s*\{[^}]*white-space:\s*normal/s);
+    expect(narrowRules).toMatch(/\.offline-rehearsal-actions\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/s);
+    expect(narrowRules).toMatch(/\.offline-rehearsal-actions button\s*\{[^}]*width:\s*100%/s);
+  });
+
   it('renders only the approved simulator console regions and Chinese safety copy', () => {
     const hud = new Hud(document.querySelector('#app')!);
 
