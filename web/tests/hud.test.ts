@@ -17,8 +17,11 @@ describe('Chinese simulator HUD', () => {
     expect(hud.rehearsalBanner.parentElement).toBe(document.querySelector('.operator-console'));
     expect(hud.rehearsalBanner.closest('.status-rail')).toBeNull();
     expect(hud.rehearsalBanner.nextElementSibling).toBe(document.querySelector('.console-main'));
-    expect(getComputedStyle(hud.rehearsalBanner).position).toBe('sticky');
+    expect(getComputedStyle(hud.rehearsalBanner).position).toBe('fixed');
     expect(getComputedStyle(hud.rehearsalBanner).top).toBe('0px');
+    expect(getComputedStyle(hud.rehearsalBanner).left).toBe('0px');
+    expect(getComputedStyle(hud.rehearsalBanner).right).toBe('0px');
+    expect(getComputedStyle(document.querySelector('.operator-console')!).paddingTop).toBe('44px');
     expect(hud.rehearsalContainer).toBeInstanceOf(HTMLElement);
     expect(hud.rehearsalContainer.nextElementSibling).toBe(hud.diagnosticsContainer);
     expect(document.body.textContent).toContain('LM3 遥操作仿真');

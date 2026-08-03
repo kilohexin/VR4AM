@@ -50,6 +50,7 @@ export class Hud {
 
   constructor(root: Element) {
     root.classList.add('operator-console');
+    if (root instanceof HTMLElement) root.style.paddingTop = '44px';
     root.innerHTML = `
       <header class="top-bar">
         <div class="brand-lockup">
@@ -58,7 +59,7 @@ export class Hud {
         </div>
         <div class="command-actions-host"></div>
       </header>
-      <div class="offline-rehearsal-banner" role="note" style="position: sticky; top: 0;">DIGITAL TWIN / 数字孪生，不是真机</div>
+      <div class="offline-rehearsal-banner" role="note" style="position: fixed; top: 0; left: 0; right: 0; z-index: 20;">DIGITAL TWIN / 数字孪生，不是真机</div>
       <main class="console-main">
         <section class="simulation-viewport" aria-label="LM3 三维仿真场景">
           <div class="scene-canvas"></div>

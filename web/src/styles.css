@@ -35,11 +35,12 @@ button {
 
 .operator-console {
   display: grid;
-  grid-template-rows: 80px 44px minmax(0, 1fr) 80px;
+  grid-template-rows: 80px minmax(0, 1fr) 80px;
   width: 100%;
   height: 100dvh;
   min-width: 960px;
   min-height: 640px;
+  padding-top: 44px;
   color: var(--white);
   border: 1px solid var(--line);
   background: var(--bg);
@@ -215,8 +216,10 @@ button {
 }
 
 .offline-rehearsal-banner {
-  position: sticky;
+  position: fixed;
   top: 0;
+  right: 0;
+  left: 0;
   z-index: 20;
   display: flex;
   align-items: center;
@@ -719,7 +722,7 @@ button {
   }
 
   .operator-console {
-    grid-template-rows: auto auto auto auto;
+    grid-template-rows: auto auto auto;
     min-width: 0;
     min-height: 100dvh;
     height: auto;
