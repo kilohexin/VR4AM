@@ -2157,6 +2157,37 @@ async def test_stop_records_request_before_backend_and_confirmation_after() -> N
 
 
 @pytest.mark.asyncio
+async def test_disarm_ignores_a_queued_grip_held_frame_after_revoking_motion() -> None:
+    control, latest, backend, clock = make_control()
+    await activate(control, latest, clock)
+    targets_before = list(backend.targets)
+    stop_started = asyncio.Event()
+    allow_stop = asyncio.Event()
+
+    async def slow_stop(reason: StopReason) -> None:
+        backend.stops.append(reason)
+        stop_started.set()
+        await allow_stop.wait()
+
+    backend.stop = slow_stop  # type: ignore[method-assign]
+    latest.publish(frame(3, True, p=(0.01, 1.2, -0.3)), clock.now_ns())
+    disarm = asyncio.create_task(control.disarm())
+    await stop_started.wait()
+    try:
+        await control.tick()
+    finally:
+        allow_stop.set()
+        await disarm
+
+    assert backend.targets == targets_before
+    assert control.mode is TeleopMode.DISARMED
+    assert control._fault is None
+    assert control._loop_failed is False
+    assert control.mapper._hand_anchor is None
+    assert control.last_target is None
+
+
+@pytest.mark.asyncio
 async def test_critical_recorder_failure_never_prevents_physical_stop() -> None:
     recorder = RecordingRecorder()
     control, latest, backend, clock = make_control(recorder=recorder)

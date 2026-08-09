@@ -159,6 +159,7 @@ class RobotControl:
         self._shutdown_stopped = False
         self._control_generation = 0
         self._disconnect_stop_pending_frame = False
+        self._disarm_in_progress = False
 
     @property
     def mode(self) -> TeleopMode:
@@ -249,28 +250,33 @@ class RobotControl:
     async def disarm(self) -> None:
         if self.machine.mode in {TeleopMode.STALE, TeleopMode.FAULT}:
             return
-        if self.machine.mode == TeleopMode.ACTIVE:
-            self.mapper.clear()
+        self._disarm_in_progress = True
+        self.last_target = None
         try:
-            stopped_with_recording = await self._stop_backend(
-                StopReason.GRIP_RELEASED
+            if self.machine.mode == TeleopMode.ACTIVE:
+                self.mapper.clear()
+            try:
+                stopped_with_recording = await self._stop_backend(
+                    StopReason.GRIP_RELEASED
+                )
+            finally:
+                self.mapper.clear()
+                self.last_target = None
+                self._clear_constraint()
+                if self._stop_unverified:
+                    self.machine.fault()
+            if not stopped_with_recording:
+                return
+            recorded = await self._record_critical(
+                "state_transition",
+                {"from": self.machine.mode.value, "to": TeleopMode.DISARMED.value},
             )
+            if not recorded:
+                self._latch_recording_fault()
+                return
+            self.machine.disarm()
         finally:
-            self.mapper.clear()
-            self.last_target = None
-            self._clear_constraint()
-            if self._stop_unverified:
-                self.machine.fault()
-        if not stopped_with_recording:
-            return
-        recorded = await self._record_critical(
-            "state_transition",
-            {"from": self.machine.mode.value, "to": TeleopMode.DISARMED.value},
-        )
-        if not recorded:
-            self._latch_recording_fault()
-            return
-        self.machine.disarm()
+            self._disarm_in_progress = False
 
     async def home(self) -> HomeResult:
         async with self._recovery_lock:
@@ -559,7 +565,7 @@ class RobotControl:
             raise
 
     async def tick(self) -> None:
-        if self._recovery_lock.locked():
+        if self._recovery_lock.locked() or self._disarm_in_progress:
             return
         received = self.latest.snapshot()
         if received is None:
