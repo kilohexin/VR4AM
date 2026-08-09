@@ -1,5 +1,6 @@
 import './styles.css';
 import {disposeAppForUnload} from './appDisposal';
+import {forwardTeleopFrame, type TeleopFrameSource} from './appFrameForwarding';
 import {
   PROTOCOL_VERSION,
   type DiagnosticsMessage,
@@ -110,7 +111,7 @@ scene.setArmSafetyState(armPanel.safetyState);
 xrController = new XRSessionController({
   xr: navigator.xr,
   host: scene,
-  onFrame: sendFrame,
+  onFrame: (frame) => sendFrame(frame, 'xr'),
   onController: updateController,
   onArmRequest: () => { armPanel.requestArm('xr'); },
   onStopOrResetRequest: () => { armPanel.requestStopOrReset('xr'); },
@@ -174,8 +175,11 @@ function updateXRStatus(status: XRSessionStatus): void {
   refreshRehearsalPanel();
 }
 
-function sendFrame(frame: VRFrame): void {
-  if (rehearsalActive) return;
+function sendFrame(frame: VRFrame, source: TeleopFrameSource): void {
+  forwardTeleopFrame(frame, source, rehearsalActive, sendFrameToSocket);
+}
+
+function sendFrameToSocket(frame: VRFrame): void {
   pendingFrames.set(frame.seq, frame.client_mono_ms);
   while (pendingFrames.size > 512) pendingFrames.delete(pendingFrames.keys().next().value!);
   socket.sendFrame(frame);
@@ -213,6 +217,7 @@ function onDiagnostics(diagnostics: DiagnosticsMessage): void {
 
 function renderRehearsalSnapshot(snapshot: OfflineRehearsalSnapshot): void {
   rehearsalActive = snapshot.active;
+  scene.setAutomationActive(snapshot.active);
   armPanel.setAutomationActive(snapshot.active);
   rehearsalPanel.update(snapshot, rehearsalEligibility());
 }

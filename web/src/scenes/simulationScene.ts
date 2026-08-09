@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type {TeleopFrameSource} from '../appFrameForwarding';
 import {
   PROTOCOL_VERSION,
   type Quat,
@@ -201,7 +202,7 @@ export interface DesktopControllerState {
 
 export interface SimulationSceneOptions {
   stateBuffer: RobotStateBuffer;
-  onFrame(frame: VRFrame): void;
+  onFrame(frame: VRFrame, source: TeleopFrameSource): void;
   onController(state: DesktopControllerState): void;
   onError(message: string): void;
 }
@@ -253,6 +254,7 @@ export class SimulationScene {
     hardwareVerified: false,
   };
   private started = false;
+  private automationActive = false;
 
   constructor(
     private readonly container: HTMLElement,
@@ -320,6 +322,12 @@ export class SimulationScene {
     this.offlineController = copyOfflineControllerSample(sample);
     this.controllerPosition.fromArray(this.offlineController.position);
     this.controllerQuaternion.fromArray(this.offlineController.quaternion);
+  }
+
+  setAutomationActive(active: boolean): void {
+    if (this.automationActive === active) return;
+    this.automationActive = active;
+    this.inputSafety.reset();
   }
 
   getOfflineSceneSnapshot(): OfflineSceneSnapshot {
@@ -474,7 +482,7 @@ export class SimulationScene {
     if (nowMs - this.lastFrameMs >= FRAME_INTERVAL_MS) {
       this.lastFrameMs = nowMs;
       const offline = this.offlineController;
-      const input = offline === null ? this.inputSafety.snapshot() : null;
+      const input = offline === null && !this.automationActive ? this.inputSafety.snapshot() : null;
       const frame = createVRFrame({
         sessionId: this.sessionId,
         sequence: this.sequence++,
@@ -482,15 +490,15 @@ export class SimulationScene {
         trackingValid: document.visibilityState === 'visible' && (offline?.trackingValid ?? true),
         position: offline?.position ?? this.controllerPosition.toArray() as Vec3,
         quaternion: offline?.quaternion ?? this.controllerQuaternion.toArray() as Quat,
-        grip: offline?.grip ?? input!.grip,
-        trigger: offline?.trigger ?? input!.trigger,
+        grip: offline?.grip ?? input?.grip ?? false,
+        trigger: offline?.trigger ?? input?.trigger ?? 0,
       });
       this.options.onController({
         tracking: frame.tracking_valid,
         grip: frame.right.grip,
         trigger: frame.right.trigger,
       });
-      this.options.onFrame(frame);
+      this.options.onFrame(frame, this.automationActive ? 'offline_rehearsal' : 'manual');
     }
   }
 

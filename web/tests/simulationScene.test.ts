@@ -77,6 +77,31 @@ describe('desktop VR frame path', () => {
 });
 
 describe('offline controller scene seam', () => {
+  it('publishes a safe rehearsal heartbeat before a synthetic sample exists', () => {
+    Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'visible'});
+    const frame = vi.fn();
+    const scene = {
+      lastFrameMs: Number.NEGATIVE_INFINITY,
+      inputSafety: {snapshot: vi.fn(() => ({activePointer: 5, grip: true, trigger: 1}))},
+      offlineController: null,
+      automationActive: true,
+      controllerPosition: new THREE.Vector3(0.56, 0.42, 0.18),
+      controllerQuaternion: new THREE.Quaternion(0, 0, 0, 1),
+      sessionId: 'offline',
+      sequence: 0,
+      options: {onFrame: frame, onController: vi.fn()},
+    };
+
+    (SimulationScene.prototype as unknown as {sendDesktopFrame(this: typeof scene, nowMs: number): void})
+      .sendDesktopFrame.call(scene, 20);
+
+    expect(scene.inputSafety.snapshot).not.toHaveBeenCalled();
+    expect(frame).toHaveBeenCalledWith(expect.objectContaining({
+      tracking_valid: true,
+      right: expect.objectContaining({grip: false, trigger: 0}),
+    }), 'offline_rehearsal');
+  });
+
   it('publishes the exclusive synthetic sample instead of latched desktop input', () => {
     Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'visible'});
     const offline: OfflineControllerSample = {
@@ -89,6 +114,7 @@ describe('offline controller scene seam', () => {
       lastFrameMs: Number.NEGATIVE_INFINITY,
       inputSafety: {snapshot: vi.fn(() => ({activePointer: 5, grip: true, trigger: 1}))},
       offlineController: offline,
+      automationActive: true,
       sessionId: 'offline',
       sequence: 0,
       options: {onFrame: frame, onController: controller},
@@ -100,7 +126,7 @@ describe('offline controller scene seam', () => {
     expect(frame).toHaveBeenCalledWith(expect.objectContaining({
       tracking_valid: true,
       right: {p: [0.1, 0.2, 0.3], q: [0, 0, 0, 1], grip: false, trigger: 0.75},
-    }));
+    }), 'offline_rehearsal');
     expect(scene.inputSafety.snapshot).not.toHaveBeenCalled();
     expect(controller).toHaveBeenCalledWith({tracking: true, grip: false, trigger: 0.75});
   });
@@ -115,6 +141,7 @@ describe('offline controller scene seam', () => {
         position: [0.1, 0.2, 0.3], quaternion: [0, 0, 0, 1],
         grip: false, trigger: 0, trackingValid: true,
       },
+      automationActive: true,
       sessionId: 'offline', sequence: 0,
       options: {onFrame: frame, onController: vi.fn()},
     };
