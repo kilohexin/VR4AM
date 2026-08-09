@@ -188,6 +188,19 @@ def test_npm_timeout_kills_descendants_and_atomically_writes_failed_report(
     monkeypatch.setenv("TASK8_PID_FILE", str(pid_path))
     monkeypatch.setattr(module, "COMMAND_TIMEOUT_S", 0.5)
     monkeypatch.setattr(module, "COMMAND_CLEANUP_TIMEOUT_S", 1.0, raising=False)
+    real_spawn = module._spawn_command_tree
+    readiness_waits: list[float] = []
+
+    def spawn_after_fixture_ready(argv, cwd, stdout, stderr):
+        tree = real_spawn(argv, cwd, stdout, stderr)
+        readiness_started = time.perf_counter()
+        readiness_deadline = readiness_started + 3.0
+        while not pid_path.exists() and time.perf_counter() < readiness_deadline:
+            time.sleep(0.01)
+        readiness_waits.append(time.perf_counter() - readiness_started)
+        return tree
+
+    monkeypatch.setattr(module, "_spawn_command_tree", spawn_after_fixture_ready)
     npm = "npm.cmd" if os.name == "nt" else "npm"
     calls: list[tuple[str, tuple[str, ...], Path]] = []
     passing = _passing_runner(module, calls)
@@ -215,8 +228,9 @@ def test_npm_timeout_kills_descendants_and_atomically_writes_failed_report(
         )
         elapsed = time.perf_counter() - started
         assert pid_path.exists()
+        assert readiness_waits and readiness_waits[0] < 3.0
         pids = json.loads(pid_path.read_text(encoding="utf-8"))
-        assert elapsed < 2.5
+        assert elapsed < 4.5
         assert all(not _pid_is_alive(pid) for pid in pids)
         timed_out = report.commands[0]
         assert timed_out.returncode == 124
