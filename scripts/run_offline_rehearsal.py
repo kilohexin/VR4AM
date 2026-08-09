@@ -110,6 +110,7 @@ class ProcessTree:
         self._process = process
         self._os_name = os_name
         self._tracked_pids = {process.pid}
+        self._pid_parents: dict[int, int] = {}
 
     def _refresh_windows_tree(self) -> None:
         parents = _windows_process_parents()
@@ -119,11 +120,26 @@ class ProcessTree:
             for pid, parent in parents.items():
                 if parent in self._tracked_pids and pid not in self._tracked_pids:
                     self._tracked_pids.add(pid)
+                    self._pid_parents[pid] = parent
                     changed = True
 
     def _windows_alive_pids(self) -> list[int]:
         self._refresh_windows_tree()
         return sorted(pid for pid in self._tracked_pids if _windows_pid_alive(pid))
+
+    def _windows_alive_pids_deepest_first(self) -> list[int]:
+        alive = self._windows_alive_pids()
+
+        def depth(pid: int) -> int:
+            value = 0
+            seen: set[int] = set()
+            while pid in self._pid_parents and pid not in seen:
+                seen.add(pid)
+                pid = self._pid_parents[pid]
+                value += 1
+            return value
+
+        return sorted(alive, key=lambda pid: (depth(pid), pid), reverse=True)
 
     def _posix_group_alive(self) -> bool:
         try:
@@ -163,7 +179,7 @@ class ProcessTree:
 
     def kill(self) -> None:
         if self._os_name == "nt":
-            for pid in self._windows_alive_pids():
+            for pid in self._windows_alive_pids_deepest_first():
                 try:
                     os.kill(pid, signal.SIGTERM)
                 except (OSError, ProcessLookupError):

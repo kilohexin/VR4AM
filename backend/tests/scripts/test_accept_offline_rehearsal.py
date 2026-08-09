@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -136,6 +137,115 @@ def test_run_command_times_out_as_a_truthful_failed_result(
     assert result.passed_count == 0
     assert result.failed_count == 1
     assert "command_timeout:0.05s" in result.output_tail
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_npm_timeout_kills_descendants_and_atomically_writes_failed_report(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A stubborn npm/Node tree must not retain capture or stale success."""
+    module = _load_module()
+    _write_input_reports(tmp_path)
+    npm_root = tmp_path / "npm-hang"
+    npm_root.mkdir()
+    pid_path = npm_root / "pids.json"
+    package = {
+        "name": "task8-timeout-probe",
+        "private": True,
+        "scripts": {"hang": "node hang.cjs"},
+    }
+    npm_root.joinpath("package.json").write_text(
+        json.dumps(package),
+        encoding="utf-8",
+    )
+    stubborn_child = (
+        "process.on('SIGTERM',()=>{});"
+        "process.on('SIGBREAK',()=>{});"
+        "setTimeout(()=>process.exit(0),4000)"
+    )
+    npm_root.joinpath("hang.cjs").write_text(
+        "const fs=require('fs');"
+        "const {spawn}=require('child_process');"
+        f"const child=spawn(process.execPath,['-e',{stubborn_child!r}],"
+        "{stdio:'inherit'});"
+        "fs.writeFileSync(process.env.TASK8_PID_FILE,"
+        "JSON.stringify([process.ppid,process.pid,child.pid]));"
+        "console.log('stubborn-start');"
+        "console.error('stubborn-err');"
+        "process.on('SIGTERM',()=>{});"
+        "process.on('SIGBREAK',()=>{});"
+        "setTimeout(()=>process.exit(0),4000);",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TASK8_PID_FILE", str(pid_path))
+    monkeypatch.setattr(module, "COMMAND_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(module, "COMMAND_CLEANUP_TIMEOUT_S", 1.0, raising=False)
+    npm = "npm.cmd" if os.name == "nt" else "npm"
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+    passing = _passing_runner(module, calls)
+
+    def runner(name, argv, cwd):
+        if name == "backend_rehearsal":
+            return module.run_command(name, (npm, "run", "hang"), npm_root)
+        return passing(name, argv, cwd)
+
+    pids: list[int] = []
+    started = time.perf_counter()
+    try:
+        report = module.run_gate(
+            tmp_path,
+            runner,
+            provenance_provider=lambda _root: {
+                "git": {"commit": "d" * 40, "dirty": False, "dirty_paths": []},
+                "model": {
+                    "kinematics_sha256": "a" * 64,
+                    "fake_config_sha256": "c" * 64,
+                    "glb_sha256": "b" * 64,
+                },
+            },
+            browser_report_provider=lambda _root: None,
+        )
+        elapsed = time.perf_counter() - started
+        assert pid_path.exists()
+        pids = json.loads(pid_path.read_text(encoding="utf-8"))
+        assert elapsed < 2.5
+        assert all(not _pid_is_alive(pid) for pid in pids)
+        timed_out = report.commands[0]
+        assert timed_out.returncode == 124
+        assert timed_out.passed_count == 0
+        assert timed_out.failed_count == 1
+        assert "stubborn-start" in timed_out.output_tail
+        assert "stubborn-err" in timed_out.output_tail
+        assert "command_timeout:0.5s" in timed_out.output_tail
+        assert report.passed is False
+        assert report.to_dict()["hardware_verified"] is False
+
+        output = tmp_path / "offline-rehearsal-latest.json"
+        output.write_text(json.dumps({"passed": True}), encoding="utf-8")
+        module.write_report(report, output)
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        assert payload["passed"] is False
+        assert payload["hardware_verified"] is False
+        assert payload["gates"][2]["passed"] is False
+        assert "backend_rehearsal" in payload["gates"][2]["errors"]
+        assert not output.with_name(f"{output.name}.tmp").exists()
+    finally:
+        if pid_path.exists() and not pids:
+            pids = json.loads(pid_path.read_text(encoding="utf-8"))
+        for pid in reversed(pids):
+            if _pid_is_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
 
 
 def test_gate_composes_virtual_fake_and_offline_checks_without_claiming_browser(

@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -15,8 +16,17 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from run_offline_rehearsal import ProcessTree  # noqa: E402
+
+
 COMMAND_TIMEOUT_S = 300.0
+COMMAND_CLEANUP_TIMEOUT_S = 2.0
 GIT_TIMEOUT_S = 10.0
+CAPTURE_TAIL_BYTES = 1_000_000
 HARDWARE_PENDING = (
     "sdk_connection",
     "tcp_home_joint_limits",
@@ -146,28 +156,61 @@ def parse_test_counts(output: str) -> tuple[int | None, int | None]:
     return passed[-1] if passed else 0, failed[-1] if failed else 0
 
 
+def _read_capture_tail(stream) -> str:
+    stream.flush()
+    size = stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, size - CAPTURE_TAIL_BYTES))
+    return stream.read().decode("utf-8", errors="replace")
+
+
+def _spawn_command_tree(
+    argv: Sequence[str],
+    cwd: Path,
+    stdout,
+    stderr,
+) -> ProcessTree:
+    process = subprocess.Popen(
+        list(argv),
+        cwd=cwd,
+        stdout=stdout,
+        stderr=stderr,
+        start_new_session=os.name != "nt",
+        creationflags=(
+            subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        ),
+    )
+    return ProcessTree(process, os.name)
+
+
 def run_command(name: str, argv: Sequence[str], cwd: Path) -> CommandResult:
     started = time.perf_counter()
-    try:
-        completed = subprocess.run(
-            list(argv),
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=COMMAND_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired as error:
-        duration_s = time.perf_counter() - started
-        parts: list[str] = []
-        for value in (error.stdout, error.stderr):
-            if isinstance(value, bytes):
-                parts.append(value.decode("utf-8", errors="replace"))
-            elif isinstance(value, str):
-                parts.append(value)
-        parts.append(f"command_timeout:{COMMAND_TIMEOUT_S:g}s")
+    timed_out = False
+    cleanup_timed_out = False
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        tree = _spawn_command_tree(argv, cwd, stdout, stderr)
+        try:
+            returncode = tree.wait(timeout=COMMAND_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            returncode = 124
+            tree.kill()
+            try:
+                tree.wait(timeout=COMMAND_CLEANUP_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                cleanup_timed_out = True
+        output = "\n".join(
+            part
+            for part in (_read_capture_tail(stdout), _read_capture_tail(stderr))
+            if part
+        ).strip()
+    duration_s = time.perf_counter() - started
+    if timed_out:
+        markers = [f"command_timeout:{COMMAND_TIMEOUT_S:g}s"]
+        if cleanup_timed_out:
+            markers.append(
+                f"process_tree_cleanup_timeout:{COMMAND_CLEANUP_TIMEOUT_S:g}s"
+            )
+        output = "\n".join(part for part in (output, *markers) if part)
         return CommandResult(
             name=name,
             argv=tuple(str(value) for value in argv),
@@ -176,18 +219,14 @@ def run_command(name: str, argv: Sequence[str], cwd: Path) -> CommandResult:
             duration_s=duration_s,
             passed_count=0,
             failed_count=1,
-            output_tail="\n".join(parts).strip()[-4000:],
+            output_tail=output[-4000:],
         )
-    duration_s = time.perf_counter() - started
-    output = "\n".join(
-        part for part in (completed.stdout, completed.stderr) if part
-    ).strip()
     passed_count, failed_count = parse_test_counts(output)
     return CommandResult(
         name=name,
         argv=tuple(str(value) for value in argv),
         cwd=str(cwd),
-        returncode=completed.returncode,
+        returncode=returncode,
         duration_s=duration_s,
         passed_count=passed_count,
         failed_count=failed_count,
