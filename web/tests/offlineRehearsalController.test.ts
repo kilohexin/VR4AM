@@ -579,9 +579,59 @@ describe('OfflineRehearsalController happy path', () => {
     confirmState(test, {mode: 'DISARMED'}, 2);
     expect(latestReport(test, 'offline_rehearsal_phase').phase).toBe('home');
   });
+
+  it('renews the 8 second deadline only after each motion target has three advancing confirmations', () => {
+    const test = harness();
+    beginThroughAnchor(test);
+    acknowledgePhase(test);
+    expect(test.controller.snapshot).toMatchObject({phase: 'translate', step: '+x'});
+
+    const target = test.controller.snapshot.targetTcp;
+    if (target === null) throw new Error('missing first translation target');
+    test.advance(500);
+    test.emitDiagnostics();
+    const first = test.emitState({mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: target});
+    expect(test.controller.snapshot.remainingTimeoutMs).toBe(7_500);
+    expect(test.samples.at(-1)?.grip).toBe(true);
+
+    test.advance(500);
+    test.emitDiagnostics();
+    test.emitState({mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: target});
+    test.controller.onRobotState(first);
+    expect(test.controller.snapshot).toMatchObject({step: '+x', remainingTimeoutMs: 7_000});
+
+    test.advance(500);
+    test.emitDiagnostics();
+    test.emitState({mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: target});
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'translate', step: '+x_return', remainingTimeoutMs: 8_000,
+    });
+    expect(test.samples.at(-1)?.grip).toBe(true);
+  });
 });
 
 describe('OfflineRehearsalController fail-closed cleanup', () => {
+  it('hard-stops a full rehearsal after 300 seconds through the verified cleanup path', () => {
+    const test = harness();
+    connectReady(test);
+    test.controller.start();
+    acceptBegin(test);
+    acknowledgePhase(test);
+
+    test.advance(300_001);
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'failed', failure: 'full_rehearsal_timeout', active: true, stopVerified: false,
+    });
+    expect(test.samples.at(-1)).toBeNull();
+    expect(test.controls.at(-1)?.type).toBe('disarm');
+
+    confirmState(test, {mode: 'DISARMED', robot_state: 'IDLE'});
+    expect(test.controller.snapshot.stopVerified).toBe(true);
+    expect(latestReport(test, 'offline_rehearsal_phase')).toMatchObject({
+      phase: 'home', status: 'failed', failure: {reason: 'full_rehearsal_timeout'},
+    });
+  });
+
   it.each([
     ['connection_lost', (test: Harness) => test.controller.onConnection({state: 'disconnected'})],
     ['page_hidden', (test: Harness) => test.controller.requestStop('page_hidden')],

@@ -83,16 +83,16 @@ export function nextControllerSample(input: NextControllerSampleInput): OfflineC
   const distance = Math.hypot(...difference);
   const positionScale = distance === 0 ? 0 : Math.min(1, input.maxPositionStepM / distance);
   const position: Vec3 = [
-    sample.position[0] + difference[0] * positionScale,
-    sample.position[1] + difference[1] * positionScale,
-    sample.position[2] + difference[2] * positionScale,
+    actual.p[0] + difference[0] * positionScale,
+    actual.p[1] + difference[1] * positionScale,
+    actual.p[2] + difference[2] * positionScale,
   ];
   const error = shortestRotation(multiplyQuaternion(target.q, invertQuaternion(actual.q)));
   const errorAngle = 2 * Math.acos(clamp(error[3], -1, 1));
   const rotationStep = Math.min(errorAngle, input.maxRotationStepRad);
   const quaternion = rotationStep === 0
-    ? sample.quaternion
-    : multiplyQuaternion(rotationStepQuaternion(error, errorAngle, rotationStep), sample.quaternion);
+    ? actual.q
+    : multiplyQuaternion(rotationStepQuaternion(error, errorAngle, rotationStep), actual.q);
   return {
     position,
     quaternion,

@@ -16,7 +16,7 @@
 - Preserve the existing one-WebSocket-owner policy; do not add an observer connection or a second control channel.
 - Report lifecycle messages contain metadata only. Arm, Home, stop, reset, Grip, TCP mapping, IK, and PVAT must continue through existing production paths.
 - Every generated rehearsal and acceptance report must contain `hardware_verified: false` and the fixed eight-item hardware-pending list.
-- Translation targets are `±0.020 m`, rotation targets are `±8°`, translation tolerance is `0.003 m`, rotation tolerance is `2°`, and each motion phase times out after `8 s`.
+- Translation targets are `±0.020 m`, rotation targets are `±8°`, translation tolerance is `0.003 m`, and rotation tolerance is `2°`. Per the 2026-08-09 user ruling, each individual translate/return and rotate/return target has an `8 s` deadline; that deadline is renewed only after three strictly advancing authoritative confirmations advance to the next target. Other phases retain an `8 s` deadline, and the complete rehearsal has a `300 s` hard deadline.
 - The complete soak still executes 30,000 cycles and all seven scheduled safety events.
 - Do not make the soak gate green by deleting coverage or merely replacing `<15 s` with a larger ordinary threshold.
 - A full soak has a `60 s` hard timeout; throughput below `2000 steps/s` is a warning; the `2.0` minute throughput must remain at least `70%` of the `0.5` minute throughput after a `0.1` minute warm-up.
@@ -706,7 +706,7 @@ Expected: FAIL because `OfflineRehearsalController` does not exist.
 
 - [ ] **Step 6: Implement state-driven Home, Arm, anchor, and axis motion**
 
-Use current actual TCP as the anchor after ACTIVE confirmation. For each target, `nextControllerSample()` incrementally updates the synthetic hand pose based on authoritative TCP error. A target completes only after three consecutive robot states inside tolerance. Return to the anchor between axes. Never sleep to assume completion; `nowMs()` is used only for deadlines.
+Use current actual TCP as the anchor after ACTIVE confirmation. For each target, `nextControllerSample()` commands a bounded actual-toward-target step; it must not integrate the same target-minus-actual error into an ever-growing previous command or exceed the anchor-relative `±0.020 m` / `±8°` target. A target completes only after three consecutive, strictly advancing robot states inside tolerance. Each individual target and return starts an `8 s` deadline, renewed only when those confirmations advance the target index. Return to the anchor between axes. Other phase deadlines remain `8 s`; a `300 s` full-rehearsal hard deadline uses the same fail-closed verified stop/report path. Never sleep to assume completion; `nowMs()` is used only for deadlines.
 
 - [ ] **Step 7: Implement gripper, pick/place, boundary, tracking loss, and recovery**
 

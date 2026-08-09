@@ -141,6 +141,7 @@ export class OfflineRehearsalController {
   private cleanupClosingConnection = false;
   private phaseStartedMs = 0;
   private deadlineMs: number | null = null;
+  private fullRehearsalDeadlineMs: number | null = null;
   private requestSequence = 0;
   private beginRequestId: string | null = null;
   private controlRequestId: string | null = null;
@@ -181,7 +182,8 @@ export class OfflineRehearsalController {
     this.currentPhase = 'identity_preflight';
     this.step = 'begin';
     this.phaseStartedMs = this.ports.nowMs();
-    this.deadlineMs = this.phaseStartedMs + REHEARSAL_CONFIG.motionTimeoutMs;
+    this.deadlineMs = this.phaseStartedMs + REHEARSAL_CONFIG.phaseTimeoutMs;
+    this.fullRehearsalDeadlineMs = this.phaseStartedMs + REHEARSAL_CONFIG.fullRehearsalTimeoutMs;
     this.ports.setOfflineController(null);
     this.ports.resetScene?.();
     this.beginRequestId = this.nextRequestId('begin');
@@ -584,6 +586,7 @@ export class OfflineRehearsalController {
       });
       return;
     }
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionStepTimeoutMs;
     this.applyMotionTarget();
   }
 
@@ -788,7 +791,11 @@ export class OfflineRehearsalController {
     this.displayPhase = phase;
     this.step = null;
     this.phaseStartedMs = this.ports.nowMs();
-    this.deadlineMs = this.phaseStartedMs + REHEARSAL_CONFIG.motionTimeoutMs;
+    this.deadlineMs = this.phaseStartedMs + (
+      phase === 'translate' || phase === 'rotate'
+        ? REHEARSAL_CONFIG.motionStepTimeoutMs
+        : REHEARSAL_CONFIG.phaseTimeoutMs
+    );
     this.confirmations = 0;
     this.invalidConfirmations = 0;
     this.homeAccepted = false;
@@ -963,7 +970,7 @@ export class OfflineRehearsalController {
     const requestId = this.nextRequestId('phase');
     const phase = this.currentPhase;
     this.displayPhase = this.cleanupActive ? 'failed' : 'reporting';
-    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.phaseTimeoutMs;
     this.targetTcp = null;
     const message: PhaseReportMessage = {
       v: PROTOCOL_VERSION,
@@ -1021,7 +1028,7 @@ export class OfflineRehearsalController {
       attempts: 1,
       message,
     };
-    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.phaseTimeoutMs;
     if (!this.trySendRehearsal(message)) {
       this.pendingReport = null;
       if (!this.cleanupActive) this.beginCleanup('send_failed');
@@ -1044,7 +1051,7 @@ export class OfflineRehearsalController {
     this.displayPhase = 'failed';
     this.stopVerified = false;
     this.step = 'cleanup_stop';
-    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.phaseTimeoutMs;
     this.cleanupStopConfirmations = 0;
     this.cleanupReadyToReport = false;
     this.sample = null;
@@ -1077,7 +1084,7 @@ export class OfflineRehearsalController {
     if (this.stopVerified) return;
     this.stopVerified = true;
     this.cleanupReadyToReport = true;
-    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.phaseTimeoutMs;
     if (this.runId === null) {
       if (this.beginRequestId === null) this.finishLocalCleanup();
       return;
@@ -1113,6 +1120,7 @@ export class OfflineRehearsalController {
     this.currentPhase = null;
     this.step = null;
     this.deadlineMs = null;
+    this.fullRehearsalDeadlineMs = null;
     this.beginRequestId = null;
     this.controlRequestId = null;
     this.controlRequestType = null;
@@ -1127,6 +1135,13 @@ export class OfflineRehearsalController {
   private checkDeadline(): void {
     if (!this.isActive()) return;
     if (!this.cleanupActive) {
+      if (
+        this.fullRehearsalDeadlineMs !== null
+        && this.ports.nowMs() > this.fullRehearsalDeadlineMs
+      ) {
+        this.beginCleanup('full_rehearsal_timeout');
+        return;
+      }
       const authoritativeFailure = this.authoritativeFreshnessFailure();
       if (authoritativeFailure !== null) {
         this.beginCleanup(authoritativeFailure);
@@ -1169,7 +1184,7 @@ export class OfflineRehearsalController {
       return;
     }
     this.pendingReport = {...pending, attempts: pending.attempts + 1};
-    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.phaseTimeoutMs;
     if (!this.trySendRehearsal(pending.message)) {
       this.failure = 'send_failed';
       this.abortBackendRunByClosingConnection();
@@ -1181,7 +1196,7 @@ export class OfflineRehearsalController {
   private abortBackendRunByClosingConnection(): void {
     this.cleanupClosingConnection = true;
     this.pendingReport = null;
-    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionTimeoutMs;
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.phaseTimeoutMs;
     try {
       this.ports.closeConnection();
       this.finishLocalCleanup();
@@ -1342,6 +1357,7 @@ export class OfflineRehearsalController {
     this.cleanupStopConfirmations = 0;
     this.cleanupGeneration = 0;
     this.cleanupClosingConnection = false;
+    this.fullRehearsalDeadlineMs = null;
     this.beginRequestId = null;
     this.controlRequestId = null;
     this.controlRequestType = null;
