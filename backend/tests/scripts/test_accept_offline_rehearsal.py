@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -113,6 +114,28 @@ def _passing_runner(module, calls: list[tuple[str, tuple[str, ...], Path]]):
         )
 
     return run
+
+
+def test_run_command_times_out_as_a_truthful_failed_result(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A hung aggregate subprocess must fail quickly and remain reportable."""
+    module = _load_module()
+    monkeypatch.setattr(module, "COMMAND_TIMEOUT_S", 0.05, raising=False)
+    started = time.perf_counter()
+
+    result = module.run_command(
+        "hung_command",
+        (sys.executable, "-c", "import time; time.sleep(0.4)"),
+        tmp_path,
+    )
+
+    assert time.perf_counter() - started < 0.3
+    assert result.returncode == 124
+    assert result.passed_count == 0
+    assert result.failed_count == 1
+    assert "command_timeout:0.05s" in result.output_tail
 
 
 def test_gate_composes_virtual_fake_and_offline_checks_without_claiming_browser(

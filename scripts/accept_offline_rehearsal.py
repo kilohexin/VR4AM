@@ -15,6 +15,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+COMMAND_TIMEOUT_S = 300.0
+GIT_TIMEOUT_S = 10.0
 HARDWARE_PENDING = (
     "sdk_connection",
     "tcp_home_joint_limits",
@@ -146,15 +148,36 @@ def parse_test_counts(output: str) -> tuple[int | None, int | None]:
 
 def run_command(name: str, argv: Sequence[str], cwd: Path) -> CommandResult:
     started = time.perf_counter()
-    completed = subprocess.run(
-        list(argv),
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            list(argv),
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=COMMAND_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as error:
+        duration_s = time.perf_counter() - started
+        parts: list[str] = []
+        for value in (error.stdout, error.stderr):
+            if isinstance(value, bytes):
+                parts.append(value.decode("utf-8", errors="replace"))
+            elif isinstance(value, str):
+                parts.append(value)
+        parts.append(f"command_timeout:{COMMAND_TIMEOUT_S:g}s")
+        return CommandResult(
+            name=name,
+            argv=tuple(str(value) for value in argv),
+            cwd=str(cwd),
+            returncode=124,
+            duration_s=duration_s,
+            passed_count=0,
+            failed_count=1,
+            output_tail="\n".join(parts).strip()[-4000:],
+        )
     duration_s = time.perf_counter() - started
     output = "\n".join(
         part for part in (completed.stdout, completed.stderr) if part
@@ -202,6 +225,7 @@ def _git_output(repo_root: Path, *args: str) -> str:
         encoding="utf-8",
         errors="replace",
         check=False,
+        timeout=GIT_TIMEOUT_S,
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
