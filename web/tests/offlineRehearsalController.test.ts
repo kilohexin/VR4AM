@@ -608,6 +608,27 @@ describe('OfflineRehearsalController happy path', () => {
     });
     expect(test.samples.at(-1)?.grip).toBe(true);
   });
+
+  it('converges the hand command to the inverse Fake mapping while actual TCP lags', () => {
+    const test = harness();
+    beginThroughAnchor(test);
+    acknowledgePhase(test);
+    const target = test.controller.snapshot.targetTcp;
+    if (target === null) throw new Error('missing first translation target');
+
+    for (let index = 0; index < 25; index += 1) {
+      test.emitState({mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: ANCHOR});
+    }
+
+    expect(test.controller.snapshot).toMatchObject({phase: 'translate', step: '+x'});
+    expect(test.samples.at(-1)?.position[0]).toBeCloseTo(ANCHOR.p[0] + 0.040);
+    expect(test.samples.at(-1)).toMatchObject({
+      position: [expect.any(Number), ANCHOR.p[1], ANCHOR.p[2]],
+      grip: true,
+    });
+    confirmState(test, {mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: target});
+    expect(test.controller.snapshot.step).toBe('+x_return');
+  });
 });
 
 describe('OfflineRehearsalController fail-closed cleanup', () => {

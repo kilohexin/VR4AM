@@ -10,8 +10,10 @@ export type SignedDirection = -1 | 1;
 
 export interface NextControllerSampleInput {
   sample: OfflineControllerSample;
-  actualTcp: TcpPose;
+  controllerAnchor: OfflineControllerSample;
+  tcpAnchor: TcpPose;
   targetTcp: TcpPose;
+  translationScale: number;
   maxPositionStepM: number;
   maxRotationStepRad: number;
 }
@@ -69,30 +71,42 @@ export function quaternionAngularError(
 
 export function nextControllerSample(input: NextControllerSampleInput): OfflineControllerSample {
   const sample = copyOfflineControllerSample(input.sample);
-  const actual = copyPose(input.actualTcp);
+  const controllerAnchor = copyOfflineControllerSample(input.controllerAnchor);
+  const tcpAnchor = copyPose(input.tcpAnchor);
   const target = copyPose(input.targetTcp);
-  if (!isPositiveFinite(input.maxPositionStepM) || !isPositiveFinite(input.maxRotationStepRad)) {
+  if (
+    !isPositiveFinite(input.translationScale)
+    || !isPositiveFinite(input.maxPositionStepM)
+    || !isPositiveFinite(input.maxRotationStepRad)
+  ) {
     throw new Error('invalid_controller_step');
   }
 
+  const mappedPosition: Vec3 = [
+    controllerAnchor.position[0] + (target.p[0] - tcpAnchor.p[0]) / input.translationScale,
+    controllerAnchor.position[1] + (target.p[1] - tcpAnchor.p[1]) / input.translationScale,
+    controllerAnchor.position[2] + (target.p[2] - tcpAnchor.p[2]) / input.translationScale,
+  ];
   const difference: Vec3 = [
-    target.p[0] - actual.p[0],
-    target.p[1] - actual.p[1],
-    target.p[2] - actual.p[2],
+    mappedPosition[0] - sample.position[0],
+    mappedPosition[1] - sample.position[1],
+    mappedPosition[2] - sample.position[2],
   ];
   const distance = Math.hypot(...difference);
   const positionScale = distance === 0 ? 0 : Math.min(1, input.maxPositionStepM / distance);
   const position: Vec3 = [
-    actual.p[0] + difference[0] * positionScale,
-    actual.p[1] + difference[1] * positionScale,
-    actual.p[2] + difference[2] * positionScale,
+    sample.position[0] + difference[0] * positionScale,
+    sample.position[1] + difference[1] * positionScale,
+    sample.position[2] + difference[2] * positionScale,
   ];
-  const error = shortestRotation(multiplyQuaternion(target.q, invertQuaternion(actual.q)));
+  const targetDelta = multiplyQuaternion(target.q, invertQuaternion(tcpAnchor.q));
+  const mappedQuaternion = multiplyQuaternion(targetDelta, controllerAnchor.quaternion);
+  const error = shortestRotation(multiplyQuaternion(mappedQuaternion, invertQuaternion(sample.quaternion)));
   const errorAngle = 2 * Math.acos(clamp(error[3], -1, 1));
   const rotationStep = Math.min(errorAngle, input.maxRotationStepRad);
   const quaternion = rotationStep === 0
-    ? actual.q
-    : multiplyQuaternion(rotationStepQuaternion(error, errorAngle, rotationStep), actual.q);
+    ? sample.quaternion
+    : multiplyQuaternion(rotationStepQuaternion(error, errorAngle, rotationStep), sample.quaternion);
   return {
     position,
     quaternion,

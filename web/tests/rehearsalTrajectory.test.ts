@@ -51,13 +51,15 @@ describe('offline rehearsal trajectory', () => {
     const target = translationTarget(anchor, 'x', 1, 0.020);
     const update = nextControllerSample({
       sample: neutralSample,
-      actualTcp: anchor,
+      controllerAnchor: neutralSample,
+      tcpAnchor: anchor,
       targetTcp: target,
+      translationScale: 0.5,
       maxPositionStepM: 0.002,
       maxRotationStepRad: Math.PI / 180,
     });
 
-    expect(update.position).toEqual([anchor.p[0] + 0.002, anchor.p[1], anchor.p[2]]);
+    expect(update.position).toEqual([0.562, 0.42, 0.18]);
     expect(update.quaternion).toEqual([0, 0, 0, 1]);
     expect(update).not.toBe(neutralSample);
     expect(update.position).not.toBe(neutralSample.position);
@@ -67,8 +69,10 @@ describe('offline rehearsal trajectory', () => {
   it('takes a bounded shortest rotation step without changing the source sample', () => {
     const update = nextControllerSample({
       sample: neutralSample,
-      actualTcp: anchor,
+      controllerAnchor: neutralSample,
+      tcpAnchor: anchor,
       targetTcp: rotationTarget(anchor, 'z', -1, 8 * Math.PI / 180),
+      translationScale: 0.5,
       maxPositionStepM: 0.002,
       maxRotationStepRad: Math.PI / 180,
     });
@@ -78,7 +82,7 @@ describe('offline rehearsal trajectory', () => {
     expect(neutralSample.quaternion).toEqual([0, 0, 0, 1]);
   });
 
-  it('does not accumulate translation error into an overshooting command when actual TCP lags', () => {
+  it('steps toward the exact inverse-mapped translation target without overshoot', () => {
     const target = translationTarget(anchor, 'x', 1, 0.020);
     let sample: OfflineControllerSample = {
       ...neutralSample,
@@ -88,18 +92,21 @@ describe('offline rehearsal trajectory', () => {
     for (let index = 0; index < 20; index += 1) {
       sample = nextControllerSample({
         sample,
-        actualTcp: anchor,
+        controllerAnchor: {...neutralSample, position: [...anchor.p]},
+        tcpAnchor: anchor,
         targetTcp: target,
+        translationScale: 0.5,
         maxPositionStepM: 0.002,
         maxRotationStepRad: Math.PI / 180,
       });
-      expect(sample.position[0]).toBeLessThanOrEqual(anchor.p[0] + 0.020);
+      expect(sample.position[0]).toBeLessThanOrEqual(anchor.p[0] + 0.040 + 1e-12);
     }
 
-    expect(sample.position).toEqual([anchor.p[0] + 0.002, anchor.p[1], anchor.p[2]]);
+    expect(sample.position[0]).toBeCloseTo(anchor.p[0] + 0.040);
+    expect(sample.position.slice(1)).toEqual([anchor.p[1], anchor.p[2]]);
   });
 
-  it('does not accumulate rotation error into an overshooting command when actual TCP lags', () => {
+  it('steps toward the identity-mapped rotation target without overshoot', () => {
     const target = rotationTarget(anchor, 'z', 1, 8 * Math.PI / 180);
     let sample: OfflineControllerSample = {
       ...neutralSample,
@@ -110,8 +117,10 @@ describe('offline rehearsal trajectory', () => {
     for (let index = 0; index < 20; index += 1) {
       sample = nextControllerSample({
         sample,
-        actualTcp: anchor,
+        controllerAnchor: {...neutralSample, position: [...anchor.p], quaternion: [...anchor.q]},
+        tcpAnchor: anchor,
         targetTcp: target,
+        translationScale: 0.5,
         maxPositionStepM: 0.002,
         maxRotationStepRad: Math.PI / 180,
       });
@@ -119,10 +128,10 @@ describe('offline rehearsal trajectory', () => {
         .toBeLessThanOrEqual(8 * Math.PI / 180 + 1e-12);
     }
 
-    expect(quaternionAngularError(anchor.q, sample.quaternion)).toBeCloseTo(Math.PI / 180);
+    expect(quaternionAngularError(anchor.q, sample.quaternion)).toBeCloseTo(8 * Math.PI / 180);
   });
 
-  it('keeps commands bounded and converges as lagging authoritative translation catches up', () => {
+  it('keeps the mapped robot command bounded and convergent while authoritative TCP lags', () => {
     const target = translationTarget(anchor, 'x', 1, 0.020);
     let actual = {p: [...anchor.p], q: [...anchor.q]} as typeof target;
     let sample: OfflineControllerSample = {
@@ -133,20 +142,24 @@ describe('offline rehearsal trajectory', () => {
     for (let index = 0; index < 20; index += 1) {
       sample = nextControllerSample({
         sample,
-        actualTcp: actual,
+        controllerAnchor: {...neutralSample, position: [...anchor.p]},
+        tcpAnchor: anchor,
         targetTcp: target,
+        translationScale: 0.5,
         maxPositionStepM: 0.002,
         maxRotationStepRad: Math.PI / 180,
       });
-      expect(sample.position[0]).toBeGreaterThanOrEqual(actual.p[0]);
-      expect(sample.position[0]).toBeLessThanOrEqual(target.p[0]);
+      const mappedRobotX = anchor.p[0] + 0.5 * (sample.position[0] - anchor.p[0]);
+      expect(mappedRobotX).toBeGreaterThanOrEqual(actual.p[0]);
+      expect(mappedRobotX).toBeLessThanOrEqual(target.p[0] + 1e-12);
       actual = {
         p: [Math.min(target.p[0], actual.p[0] + 0.001), actual.p[1], actual.p[2]],
         q: [...actual.q],
       };
     }
 
-    expect(sample.position).toEqual([...target.p]);
+    expect(sample.position[0]).toBeCloseTo(anchor.p[0] + 0.040);
+    expect(sample.position.slice(1)).toEqual([anchor.p[1], anchor.p[2]]);
   });
 
   it('rejects non-finite poses, non-unit quaternions, and invalid bounded steps', () => {
@@ -157,8 +170,10 @@ describe('offline rehearsal trajectory', () => {
       .toThrow('invalid_quaternion');
     expect(() => nextControllerSample({
       sample: {...neutralSample, quaternion: [0, 0, 0, 0]},
-      actualTcp: anchor,
+      controllerAnchor: neutralSample,
+      tcpAnchor: anchor,
       targetTcp: anchor,
+      translationScale: 0.5,
       maxPositionStepM: 0.002,
       maxRotationStepRad: Math.PI / 180,
     })).toThrow('invalid_controller_sample');

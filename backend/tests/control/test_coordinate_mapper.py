@@ -32,3 +32,20 @@ def test_mapper_applies_fixed_one_to_one_world_pose_delta_without_a_jump() -> No
         (delta * tcp_rotation).as_matrix(),
         atol=1e-8,
     )
+
+
+def test_fake_half_scale_inverse_hand_target_maps_to_twenty_millimetres() -> None:
+    mapper = CoordinateMapper(
+        translation_scale=0.5,
+        rotation_scale=1.0,
+        rotation_dead_zone_deg=0.0,
+    )
+    anchor = Pose(p=(0.30, 0.20, -0.20), q=(0.0, 0.0, 0.0, 1.0))
+    mapper.capture(anchor, anchor)
+
+    target = mapper.target(
+        Pose(p=(0.34, 0.20, -0.20), q=(0.0, 0.0, np.sin(np.deg2rad(4)), np.cos(np.deg2rad(4))))
+    )
+
+    assert target.p == pytest.approx((0.32, 0.20, -0.20))
+    assert Rotation.from_quat(target.q).magnitude() == pytest.approx(np.deg2rad(8))

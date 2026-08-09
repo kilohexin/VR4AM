@@ -152,6 +152,7 @@ export class OfflineRehearsalController {
   private confirmations = 0;
   private invalidConfirmations = 0;
   private sample: OfflineControllerSample | null = null;
+  private controllerAnchor: OfflineControllerSample | null = null;
   private anchor: Pose | null = null;
   private targetTcp: Pose | null = null;
   private targetTrigger: 0 | 1 | null = null;
@@ -561,16 +562,25 @@ export class OfflineRehearsalController {
     if (!this.confirm(state.mode === 'ACTIVE')) return;
     this.anchor = copyPose(state.actual_tcp);
     this.sample = sampleFromPose(state.actual_tcp, 0, true, true);
+    this.controllerAnchor = copyOfflineControllerSample(this.sample);
     this.publishSample();
     this.reportCurrentPhase('passed', {anchor_confirmations: SAFE_CONFIRMATIONS});
   }
 
   private processMotionState(state: RobotStateMessage): void {
-    if (this.targetTcp === null || this.sample === null || this.pendingReport !== null) return;
+    if (
+      this.targetTcp === null
+      || this.sample === null
+      || this.controllerAnchor === null
+      || this.anchor === null
+      || this.pendingReport !== null
+    ) return;
     this.sample = nextControllerSample({
       sample: this.sample,
-      actualTcp: state.actual_tcp,
+      controllerAnchor: this.controllerAnchor,
+      tcpAnchor: this.anchor,
       targetTcp: this.targetTcp,
+      translationScale: REHEARSAL_CONFIG.fakeTranslationScale,
       maxPositionStepM: REHEARSAL_CONFIG.maxPositionStepM,
       maxRotationStepRad: REHEARSAL_CONFIG.maxRotationStepRad,
     });
@@ -618,13 +628,21 @@ export class OfflineRehearsalController {
   }
 
   private processPickPlaceState(state: RobotStateMessage): void {
-    if (this.targetTcp === null || this.targetTrigger === null || this.sample === null) return;
+    if (
+      this.targetTcp === null
+      || this.targetTrigger === null
+      || this.sample === null
+      || this.controllerAnchor === null
+      || this.anchor === null
+    ) return;
     const scene = this.readValidScene();
     if (scene === null) return;
     this.sample = nextControllerSample({
       sample: this.sample,
-      actualTcp: state.actual_tcp,
+      controllerAnchor: this.controllerAnchor,
+      tcpAnchor: this.anchor,
       targetTcp: this.targetTcp,
+      translationScale: REHEARSAL_CONFIG.fakeTranslationScale,
       maxPositionStepM: REHEARSAL_CONFIG.maxPositionStepM,
       maxRotationStepRad: REHEARSAL_CONFIG.maxRotationStepRad,
     });
@@ -706,11 +724,18 @@ export class OfflineRehearsalController {
   }
 
   private processBoundaryState(state: RobotStateMessage): void {
-    if (this.targetTcp === null || this.sample === null) return;
+    if (
+      this.targetTcp === null
+      || this.sample === null
+      || this.controllerAnchor === null
+      || this.anchor === null
+    ) return;
     this.sample = nextControllerSample({
       sample: this.sample,
-      actualTcp: state.actual_tcp,
+      controllerAnchor: this.controllerAnchor,
+      tcpAnchor: this.anchor,
       targetTcp: this.targetTcp,
+      translationScale: REHEARSAL_CONFIG.fakeTranslationScale,
       maxPositionStepM: REHEARSAL_CONFIG.maxPositionStepM,
       maxRotationStepRad: REHEARSAL_CONFIG.maxRotationStepRad,
     });
@@ -1367,6 +1392,7 @@ export class OfflineRehearsalController {
     this.confirmations = 0;
     this.invalidConfirmations = 0;
     this.sample = null;
+    this.controllerAnchor = null;
     this.anchor = null;
     this.targetTcp = null;
     this.targetTrigger = null;
