@@ -573,6 +573,7 @@ export class OfflineRehearsalController {
       this.targetTcp = copyPose(FAKE_REHEARSAL_PREP.tcp);
       this.step = 'fake_prep';
       this.confirmations = 0;
+      this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.fakePrepTimeoutMs;
       this.notify();
       return;
     }

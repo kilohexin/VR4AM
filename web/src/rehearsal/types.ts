@@ -25,6 +25,7 @@ export const REHEARSAL_CONFIG = {
   translationToleranceM: 0.003,
   rotationToleranceRad: 2 * Math.PI / 180,
   phaseTimeoutMs: 8_000,
+  fakePrepTimeoutMs: 15_000,
   motionStepTimeoutMs: 8_000,
   fullRehearsalTimeoutMs: 300_000,
   fakeTranslationScale: 0.5,

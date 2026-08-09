@@ -17,6 +17,7 @@ import {
 } from '../src/rehearsal/offlineRehearsalController';
 import {
   FAKE_REHEARSAL_PREP,
+  REHEARSAL_CONFIG,
   REHEARSAL_PHASES,
   type OfflineControllerSample,
   type OfflineSceneSnapshot,
@@ -668,7 +669,7 @@ describe('OfflineRehearsalController fail-closed cleanup', () => {
     });
   });
 
-  it('fails closed when the Fake prep pose is not authoritatively reached within 8 seconds', () => {
+  it('gives only Fake prep 15 seconds and then fails closed', () => {
     const test = harness();
     connectReady(test);
     test.controller.start();
@@ -681,7 +682,11 @@ describe('OfflineRehearsalController fail-closed cleanup', () => {
     confirmState(test, {mode: 'ACTIVE', robot_state: 'MOVING'});
     expect(test.controller.snapshot).toMatchObject({
       phase: 'arm_and_anchor', step: 'fake_prep', targetTcp: FAKE_REHEARSAL_PREP_TCP,
+      remainingTimeoutMs: 15_000,
     });
+    expect(REHEARSAL_CONFIG.phaseTimeoutMs).toBe(8_000);
+    expect(REHEARSAL_CONFIG.motionStepTimeoutMs).toBe(8_000);
+    expect(REHEARSAL_CONFIG.fullRehearsalTimeoutMs).toBe(300_000);
 
     for (let index = 0; index < 8; index += 1) {
       test.advance(999);
@@ -692,6 +697,18 @@ describe('OfflineRehearsalController fail-closed cleanup', () => {
     test.emitState({mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: ANCHOR});
     test.emitDiagnostics();
     test.advance(2);
+    test.emitDiagnostics();
+
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'arm_and_anchor', step: 'fake_prep', active: true,
+      remainingTimeoutMs: 6_999,
+    });
+    for (let index = 0; index < 7; index += 1) {
+      test.advance(999);
+      test.emitState({mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: ANCHOR});
+      test.emitDiagnostics();
+    }
+    test.advance(7);
     test.emitDiagnostics();
 
     expect(test.controller.snapshot).toMatchObject({
