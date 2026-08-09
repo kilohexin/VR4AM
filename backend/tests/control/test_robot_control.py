@@ -1869,6 +1869,7 @@ async def test_two_consecutive_absolute_deadline_lateness_over_40ms_fault_and_st
         nonlocal tick_count
         tick_count += 1
         clock.advance_ms(70)
+        latest.publish(frame(tick_count, False), clock.now_ns())
         await control_tick()
         if tick_count == 3:
             control._running = False
@@ -1880,6 +1881,42 @@ async def test_two_consecutive_absolute_deadline_lateness_over_40ms_fault_and_st
     fault_state = await control.state_message()
     assert fault_state.mode == TeleopMode.FAULT
     assert control.mode == TeleopMode.DISARMED
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        StopReason.GRIP_RELEASED,
+        StopReason.STALE,
+        StopReason.FAULT,
+        StopReason.HOME,
+    ],
+)
+@pytest.mark.asyncio
+async def test_completed_slow_safety_stop_rebases_the_next_control_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: StopReason,
+) -> None:
+    control, _latest, backend, clock = make_control()
+    tick_count = 0
+
+    async def slow_stop(stop_reason: StopReason) -> None:
+        backend.stops.append(stop_reason)
+        clock.advance_ms(300)
+
+    async def tick_with_one_slow_stop() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        if tick_count == 1:
+            await control._stop_backend(reason)
+        if tick_count == 3:
+            control._running = False
+
+    backend.stop = slow_stop  # type: ignore[method-assign]
+    await run_with_fake_sleep(monkeypatch, control, clock, tick_with_one_slow_stop)
+
+    assert backend.stops == [reason]
+    assert control._consecutive_overruns == 0
 
 
 @pytest.mark.asyncio

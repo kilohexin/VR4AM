@@ -142,6 +142,7 @@ class RobotControl:
         self._last_gripper_sent: float | None = None
         self._last_gripper_sent_ns: int | None = None
         self._consecutive_overruns = 0
+        self._deadline_rebase_requested = False
         self._pending_stop_completion = False
         self._hard_stop_completion = False
         self._stop_unverified = False
@@ -517,6 +518,10 @@ class RobotControl:
         try:
             while self._running:
                 now_ns = self.clock.now_ns()
+                if self._deadline_rebase_requested:
+                    next_deadline_ns = now_ns
+                    self._consecutive_overruns = 0
+                    self._deadline_rebase_requested = False
                 lateness_ns = now_ns - next_deadline_ns
                 if lateness_ns > OVERRUN_NS:
                     self._consecutive_overruns += 1
@@ -525,6 +530,10 @@ class RobotControl:
                 if self._consecutive_overruns >= 2:
                     await self._enter_fault("control_overrun")
                 await self.tick()
+                if self._deadline_rebase_requested:
+                    next_deadline_ns = self.clock.now_ns()
+                    self._consecutive_overruns = 0
+                    self._deadline_rebase_requested = False
                 next_deadline_ns += CONTROL_PERIOD_NS
                 delay_seconds = max(
                     0.0,
@@ -814,6 +823,7 @@ class RobotControl:
             "stop_confirmed",
             {"reason": reason.value},
         )
+        self._deadline_rebase_requested = True
         if not recorded or not confirmed:
             self._latch_recording_fault()
             return False
