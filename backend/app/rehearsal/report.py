@@ -104,7 +104,10 @@ class RehearsalReportStore:
                 raise ValueError("plan_version must be positive")
             if self._find_active_by_owner(owner) is not None:
                 raise ValueError("owner already has an active rehearsal run")
-            provenance = _mapping_snapshot(self._provenance(), "provenance")
+            provenance = _mapping_snapshot(
+                await _run_blocking(self._provenance),
+                "provenance",
+            )
             run = _ActiveRun(
                 owner=owner,
                 run_id=uuid.uuid4().hex,
@@ -150,7 +153,7 @@ class RehearsalReportStore:
     ) -> FinishResult:
         async with self._lock:
             run = self._owned_run(owner, run_id)
-            return self._finish_locked(
+            return await self._finish_locked(
                 run,
                 outcome,
                 failure,
@@ -169,7 +172,7 @@ class RehearsalReportStore:
             run = self._find_active_by_owner(owner)
             if run is None:
                 return None
-            return self._finish_locked(
+            return await self._finish_locked(
                 run,
                 "aborted",
                 {"reason": reason},
@@ -177,7 +180,7 @@ class RehearsalReportStore:
                 diagnostics,
             )
 
-    def _finish_locked(
+    async def _finish_locked(
         self,
         run: _ActiveRun,
         outcome: str,
@@ -228,7 +231,8 @@ class RehearsalReportStore:
             allow_nan=False,
         ) + "\n"
         markdown_content = _render_markdown(payload)
-        self._publish_pair(
+        await _run_blocking(
+            self._publish_pair,
             json_path,
             json_content,
             markdown_path,
@@ -323,6 +327,15 @@ def _json_snapshot(value: object, label: str) -> object:
     if value is None or isinstance(value, (str, bool, int)):
         return value
     raise ValueError(f"{label} values must be JSON safe")
+
+
+async def _run_blocking(function: Callable[..., object], *args: object) -> object:
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
 
 
 def _mapping_snapshot(value: object, label: str) -> dict[str, object]:

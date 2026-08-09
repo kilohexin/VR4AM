@@ -280,6 +280,33 @@ async def _handle_rehearsal_message(
     await _send_json(websocket, payload, send_lock)
 
 
+async def _rehearsal_worker(
+    websocket: WebSocket,
+    control: RobotControl,
+    owner_token: object,
+    messages: asyncio.Queue[
+        OfflineRehearsalBeginMessage
+        | OfflineRehearsalPhaseMessage
+        | OfflineRehearsalFinishMessage
+    ],
+    send_lock: asyncio.Lock,
+    rehearsal_active: asyncio.Event | None,
+) -> None:
+    while True:
+        message = await messages.get()
+        try:
+            await _handle_rehearsal_message(
+                websocket,
+                control,
+                owner_token,
+                message,
+                send_lock,
+                rehearsal_active,
+            )
+        finally:
+            messages.task_done()
+
+
 async def _receive_messages(
     websocket: WebSocket,
     control: RobotControl,
@@ -287,6 +314,11 @@ async def _receive_messages(
     send_lock: asyncio.Lock,
     owner_token: object | None = None,
     rehearsal_active: asyncio.Event | None = None,
+    rehearsal_messages: asyncio.Queue[
+        OfflineRehearsalBeginMessage
+        | OfflineRehearsalPhaseMessage
+        | OfflineRehearsalFinishMessage
+    ] | None = None,
 ) -> None:
     app = websocket.app
     while True:
@@ -325,14 +357,9 @@ async def _receive_messages(
                     send_lock,
                 )
             else:
-                await _handle_rehearsal_message(
-                    websocket,
-                    control,
-                    owner_token,
-                    message,
-                    send_lock,
-                    rehearsal_active,
-                )
+                if rehearsal_messages is None:
+                    raise RuntimeError("rehearsal message worker is unavailable")
+                rehearsal_messages.put_nowait(message)
             continue
 
         if message.type == "hello":
@@ -464,6 +491,11 @@ async def _run_coupled_session(
 ) -> None:
     start_sender = asyncio.Event()
     send_lock = asyncio.Lock()
+    rehearsal_messages: asyncio.Queue[
+        OfflineRehearsalBeginMessage
+        | OfflineRehearsalPhaseMessage
+        | OfflineRehearsalFinishMessage
+    ] = asyncio.Queue()
     receiver = asyncio.create_task(
         _receive_messages(
             websocket,
@@ -472,6 +504,7 @@ async def _run_coupled_session(
             send_lock,
             owner_token,
             rehearsal_active,
+            rehearsal_messages,
         ),
         name="teleop-receiver",
     )
@@ -480,6 +513,19 @@ async def _run_coupled_session(
         name="teleop-state-50hz",
     )
     tasks: list[asyncio.Task[None]] = [receiver, sender]
+    if owner_token is not None:
+        rehearsal_worker = asyncio.create_task(
+            _rehearsal_worker(
+                websocket,
+                control,
+                owner_token,
+                rehearsal_messages,
+                send_lock,
+                rehearsal_active,
+            ),
+            name="teleop-rehearsal-worker",
+        )
+        tasks.append(rehearsal_worker)
     sender_tasks.add(sender)
     app_state = getattr(getattr(websocket, "app", None), "state", None)
     diagnostics = getattr(app_state, "diagnostics", None)
@@ -585,16 +631,17 @@ async def teleop_websocket(websocket: WebSocket) -> None:
                         isinstance(store, RehearsalReportStore)
                         and rehearsal_active.is_set()
                     ):
-                        state, diagnostics = await _rehearsal_snapshot(
-                            websocket,
-                            control,
-                        )
-                        await store.abort_owner(
-                            owner_token,
-                            "connection_closed",
-                            state,
-                            diagnostics,
-                        )
+                        with anyio.CancelScope(shield=True):
+                            state, diagnostics = await _rehearsal_snapshot(
+                                websocket,
+                                control,
+                            )
+                            await store.abort_owner(
+                                owner_token,
+                                "connection_closed",
+                                state,
+                                diagnostics,
+                            )
                 except BaseException as error:
                     cleanup_error = error
                 finally:

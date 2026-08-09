@@ -1,6 +1,8 @@
 import asyncio
 import gc
 import json
+import threading
+import time
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +30,8 @@ with warnings.catch_warnings():
     from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.control.robot_control import FaultResetResult, HomeResult
+from app.control.robot_control import FaultResetResult, HomeResult, LatestVRFrame
+from app.diagnostics.store import DiagnosticsStore
 from app.rehearsal.report import (
     HARDWARE_PENDING,
     REHEARSAL_PHASES,
@@ -182,6 +185,113 @@ def test_rehearsal_begin_phase_finish_are_correlated_and_never_call_motion(
         app.state.control.disarm.assert_not_awaited()
         app.state.backend.command_tcp.assert_not_awaited()
         app.state.backend.set_gripper.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_slow_rehearsal_provenance_does_not_block_frames_or_control_ticks(
+    tmp_path: Path,
+) -> None:
+    from app.api import teleop_ws
+
+    slow_started = threading.Event()
+
+    def slow_provenance() -> dict[str, object]:
+        slow_started.set()
+        time.sleep(0.15)
+        return {
+            "git": {"commit": "a" * 40, "dirty": False, "dirty_paths": []},
+            "model": {},
+        }
+
+    store = RehearsalReportStore(
+        root=tmp_path,
+        runtime="LEBAI_FAKE",
+        provenance=slow_provenance,
+    )
+    latest = LatestVRFrame()
+    diagnostics = DiagnosticsStore()
+    incoming: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    sent: list[dict[str, object]] = []
+    ticks: list[float] = []
+
+    class Control:
+        mode = TeleopMode.READY
+        control_generation = 0
+        clock = SimpleNamespace(now_ns=lambda: 456)
+
+        async def state_message(self) -> RobotStateMessage:
+            ticks.append(asyncio.get_running_loop().time())
+            return _disarmed_robot_state()
+
+    class Socket:
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                latest=latest,
+                offline_rehearsal_store=store,
+                diagnostics=diagnostics,
+                runtime_backend="LEBAI_FAKE",
+                log_session_dir=None,
+                settings=SimpleNamespace(state_hz=50, backend="simulator"),
+            )
+        )
+
+        async def receive_json(self) -> dict[str, object]:
+            return await incoming.get()
+
+        async def send_json(self, payload: dict[str, object]) -> None:
+            sent.append(payload)
+
+    await incoming.put({"v": 1, "type": "hello", "request_id": "hello"})
+    await incoming.put(_valid_frame(seq=1))
+    await incoming.put({
+        "v": 1,
+        "type": "offline_rehearsal_begin",
+        "request_id": "slow-begin",
+        "plan_version": 1,
+    })
+    await incoming.put(_valid_frame(seq=2))
+    await incoming.put(_valid_frame(seq=3))
+
+    session = asyncio.create_task(
+        teleop_ws._run_coupled_session(Socket(), Control(), set(), object(), asyncio.Event())
+    )
+    started = asyncio.get_running_loop().time()
+    try:
+        while (
+            (latest.snapshot() is None or latest.snapshot().frame.seq != 3)
+            and asyncio.get_running_loop().time() - started < 0.08
+        ):
+            await asyncio.sleep(0.002)
+
+        assert slow_started.is_set()
+        snapshot = latest.snapshot()
+        assert snapshot is not None and snapshot.frame.seq == 3
+        assert asyncio.get_running_loop().time() - started < 0.08
+        assert len(ticks) >= 2
+
+        while not any(message.get("type") == "offline_rehearsal_begin_result" for message in sent):
+            await asyncio.sleep(0.002)
+        begun = next(
+            message for message in sent
+            if message.get("type") == "offline_rehearsal_begin_result"
+        )
+        assert begun["request_id"] == "slow-begin"
+        assert begun["accepted"] is True
+        run_id = str(begun["run_id"])
+        await incoming.put(_rehearsal_phase(run_id, REHEARSAL_PHASES[0]))
+        while not any(message.get("type") == "offline_rehearsal_phase_ack" for message in sent):
+            await asyncio.sleep(0.002)
+        ack = next(
+            message for message in sent
+            if message.get("type") == "offline_rehearsal_phase_ack"
+        )
+        assert ack["request_id"] == f"phase-{REHEARSAL_PHASES[0]}"
+        assert ack["run_id"] == run_id
+        assert ack["phase"] == REHEARSAL_PHASES[0]
+    finally:
+        session.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await session
 
 
 def test_rehearsal_begin_rejects_non_fake_without_closing_socket(tmp_path: Path) -> None:
