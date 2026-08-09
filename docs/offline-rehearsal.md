@@ -66,6 +66,7 @@ Runtime: LEBAI_FAKE / DIGITAL_TWIN / hardware_verified=false
 - 应用内 Browser 首先按计划使用，但导航被 `net::ERR_CERT_AUTHORITY_INVALID` 阻止；安全边界禁止绕过该证书错误，因此没有把应用内 Browser 记为完成。
 - 经明确允许后使用了本机渲染 Edge fallback。桌面首屏的页面身份、永久 Fake 警告、有效 DOM、离线演练面板、Start/Stop 初始资格、无框架错误覆盖层以及应用控制台健康检查通过；这只证明首屏，不是完整流程通过。
 - Edge 实际运行中，`identity_preflight` 用时约 `0.080 s`、`home` 用时约 `0.837 s`，Fake-only 准备位姿在 `arm_and_anchor` 中用时约 `11.488 s`，满足独立 `15 s` 准备超时。
+- 后端数字孪生测试只以有界迭代检查准备位姿和 12 个目标/返回的几何可达性与安全性；共享 FakeClock 的迭代次数不是模拟秒数或墙钟时间证据。`15 s / 8 s / 300 s` 的选择、逐目标重置和失败收尾语义由确定性的控制器测试覆盖；本轮真实渲染证据只证明上述 `11.488 s` 准备阶段，不证明尚未完成的平移/旋转阶段耗时。
 - 完整流程没有完成：`translate` 期间从已接收 `seq=504` 到清理帧 `seq=510` 出现 `399.063 ms` 的浏览器/后端帧接收空洞；后端在超过固定 `100 ms` stale 阈值后正确进入 `STALE`、执行停止并生成失败报告，首个失败为 `unexpected_stale`。证据对已从正式候选目录移至本次任务的外部证据目录 `C:\Users\Kilo\.codex\visualizations\2026\07\12\019f5689-0b13-76c3-8ce0-b2c05b7976ff\task9-offline-rehearsal-diagnostics\2c37fc5bb0524c3fa313d2cd6d917692.json` 和同名 `.md`，内容 SHA-256 保持不变。
 - 随后的诊断运行在首个 VRFrame 到达后端前过早点击 Start，因 Home 的 Grip/最新帧前提不满足而得到 `home_rejected`；该运行无效，不计入浏览器验收，也不能用来覆盖前述失败。
 

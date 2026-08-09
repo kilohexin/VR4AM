@@ -54,31 +54,45 @@ def _advance_hand(current: Pose, target: Pose) -> Pose:
     return Pose(p=tuple(position), q=tuple(rotation.as_quat()))
 
 
-def _assert_safe_state(state: RobotStateMessage, model: LM3Model) -> None:
+def _assert_safe_state(
+    state: RobotStateMessage,
+    harness: fake_acceptance.Harness,
+) -> None:
+    settings = harness.settings.lebai
+    assert settings is not None
+    actual_q = np.asarray(state.actual_q)
     assert state.mode is TeleopMode.ACTIVE
     assert state.fault is None
     assert state.constraint is None
-    assert not is_self_colliding(state.actual_q, model)
+    assert np.all(actual_q >= np.asarray(settings.soft_joint_min_rad))
+    assert np.all(actual_q <= np.asarray(settings.soft_joint_max_rad))
+    assert not is_self_colliding(state.actual_q, harness.client.model)
 
 
-async def _drive_until_confirmed(
+async def _drive_until_geometrically_confirmed(
     harness: fake_acceptance.Harness,
     *,
     frame_factory,
     target: Pose,
     sequence: int,
-    timeout_s: float,
-) -> tuple[int, float]:
+    max_cycles: int,
+) -> int:
+    """Characterize eventual pose reachability, not simulated or wall time."""
+
     period_s = 1 / harness.settings.lebai.control.loop_hz  # type: ignore[union-attr]
     confirmations = 0
-    for cycle in range(math.ceil(timeout_s / period_s)):
+    # The shared FakeClock can advance in both this driver and the PVAT pump.
+    # This bound only prevents a hung test; cycles are not physical-time evidence.
+    position_error = math.inf
+    rotation_error = math.inf
+    for _ in range(max_cycles):
         harness.latest.publish(frame_factory(sequence), harness.clock.now_ns())
         sequence += 1
         await harness.control.tick()
         await harness.clock.sleep(period_s)
         await asyncio.sleep(0)
         state = await fake_acceptance._publish_state(harness)
-        _assert_safe_state(state, harness.client.model)
+        _assert_safe_state(state, harness)
         position_error, rotation_error = _pose_error(state.actual_tcp, target)
         confirmations = (
             confirmations + 1
@@ -86,11 +100,15 @@ async def _drive_until_confirmed(
             else 0
         )
         if confirmations == 3:
-            return sequence, (cycle + 1) * period_s
-    raise AssertionError("authoritative_confirmation_timeout")
+            return sequence
+    raise AssertionError(
+        "geometric_confirmation_iteration_guard:"
+        f"cycles={max_cycles}:position_error_m={position_error}:"
+        f"rotation_error_rad={rotation_error}"
+    )
 
 
-def test_frozen_fake_prep_preserves_home_and_has_robust_margin() -> None:
+def test_frozen_fake_prep_geometry_preserves_home_and_is_safe() -> None:
     settings = fake_acceptance.load_digital_twin_settings(FAKE_CONFIG)
     assert settings.lebai is not None
     config = _config()
@@ -113,7 +131,11 @@ def test_frozen_fake_prep_preserves_home_and_has_robust_margin() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fake_prep_and_full_local_envelope_confirm_with_timeout_margin(monkeypatch) -> None:
+async def test_fake_prep_and_full_local_envelope_are_geometrically_reachable_and_safe(
+    monkeypatch,
+) -> None:
+    """Exercise full-pose reachability and safety without making timing claims."""
+
     config = _config()
     prep_q = tuple(float(value) for value in config["prep_q"])
     prep_payload = config["prep_tcp"]
@@ -142,17 +164,16 @@ async def test_fake_prep_and_full_local_envelope_confirm_with_timeout_margin(mon
                 sequence, grip=True, position=hand.p, rotation=hand.q
             )
 
-        _, prep_elapsed = await _drive_until_confirmed(
+        await _drive_until_geometrically_confirmed(
             harness,
             frame_factory=prep_frame,
             target=prep,
             sequence=3,
-            timeout_s=8.0,
+            max_cycles=512,
         )
-        assert prep_elapsed <= 8.0
 
     monkeypatch.setattr(fake_acceptance, "ACCEPTANCE_START_Q", prep_q)
-    results: dict[str, float] = {}
+    confirmed_targets: list[str] = []
     actions = [
         TranslationAction(axis, sign * 0.020)
         for axis in ("x", "y", "z")
@@ -182,24 +203,23 @@ async def test_fake_prep_and_full_local_envelope_confirm_with_timeout_margin(mon
                         ).as_quat()
                     ),
                 )
-            sequence, elapsed = await _drive_until_confirmed(
+            sequence = await _drive_until_geometrically_confirmed(
                 harness,
                 frame_factory=lambda seq, action=action: fake_acceptance._motion_frame(
                     action, harness.settings, seq
                 ),
                 target=target,
                 sequence=3,
-                timeout_s=6.5,
+                max_cycles=512,
             )
-            results[label] = elapsed
-            _, return_elapsed = await _drive_until_confirmed(
+            confirmed_targets.append(label)
+            await _drive_until_geometrically_confirmed(
                 harness,
                 frame_factory=lambda seq: fake_acceptance._frame(seq, grip=True),
                 target=before.actual_tcp,
                 sequence=sequence,
-                timeout_s=6.5,
+                max_cycles=512,
             )
-            results[f"{label}_return"] = return_elapsed
+            confirmed_targets.append(f"{label}_return")
 
-    assert len(results) == 24
-    assert max(results.values()) <= 6.5
+    assert len(confirmed_targets) == 24
