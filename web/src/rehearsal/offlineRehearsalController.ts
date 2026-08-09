@@ -23,6 +23,7 @@ import {
   type CartesianAxis,
 } from './trajectory';
 import {
+  FAKE_REHEARSAL_PREP,
   REHEARSAL_CONFIG,
   REHEARSAL_PHASES,
   copyOfflineControllerSample,
@@ -154,6 +155,8 @@ export class OfflineRehearsalController {
   private sample: OfflineControllerSample | null = null;
   private controllerAnchor: OfflineControllerSample | null = null;
   private anchor: Pose | null = null;
+  private prepControllerAnchor: OfflineControllerSample | null = null;
+  private prepTcpAnchor: Pose | null = null;
   private targetTcp: Pose | null = null;
   private targetTrigger: 0 | 1 | null = null;
   private placementTarget: Vec3 | null = null;
@@ -559,12 +562,50 @@ export class OfflineRehearsalController {
 
   private processArmState(state: RobotStateMessage): void {
     if (!this.armAccepted || this.pendingReport !== null) return;
-    if (!this.confirm(state.mode === 'ACTIVE')) return;
-    this.anchor = copyPose(state.actual_tcp);
-    this.sample = sampleFromPose(state.actual_tcp, 0, true, true);
-    this.controllerAnchor = copyOfflineControllerSample(this.sample);
+    if (this.step === 'active_confirmation') {
+      if (!this.confirm(state.mode === 'ACTIVE')) return;
+      if (this.sample === null) {
+        this.beginCleanup('missing_controller_sample');
+        return;
+      }
+      this.prepTcpAnchor = copyPose(state.actual_tcp);
+      this.prepControllerAnchor = copyOfflineControllerSample(this.sample);
+      this.targetTcp = copyPose(FAKE_REHEARSAL_PREP.tcp);
+      this.step = 'fake_prep';
+      this.confirmations = 0;
+      this.notify();
+      return;
+    }
+    if (
+      this.step !== 'fake_prep'
+      || this.targetTcp === null
+      || this.sample === null
+      || this.prepControllerAnchor === null
+      || this.prepTcpAnchor === null
+    ) return;
+    this.sample = nextControllerSample({
+      sample: this.sample,
+      controllerAnchor: this.prepControllerAnchor,
+      tcpAnchor: this.prepTcpAnchor,
+      targetTcp: this.targetTcp,
+      translationScale: REHEARSAL_CONFIG.fakeTranslationScale,
+      maxPositionStepM: REHEARSAL_CONFIG.maxPositionStepM,
+      maxRotationStepRad: REHEARSAL_CONFIG.maxRotationStepRad,
+    });
     this.publishSample();
-    this.reportCurrentPhase('passed', {anchor_confirmations: SAFE_CONFIRMATIONS});
+    if (!this.confirm(
+      state.mode === 'ACTIVE' && isPoseWithinTolerance(state.actual_tcp, this.targetTcp),
+    )) return;
+    this.anchor = copyPose(state.actual_tcp);
+    this.controllerAnchor = copyOfflineControllerSample(this.sample);
+    this.targetTcp = null;
+    this.reportCurrentPhase('passed', {
+      anchor_confirmations: SAFE_CONFIRMATIONS,
+      fake_prep_joint_q: [...FAKE_REHEARSAL_PREP.joints],
+      fake_prep_tcp_p: [...FAKE_REHEARSAL_PREP.tcp.p],
+      fake_prep_tcp_q: [...FAKE_REHEARSAL_PREP.tcp.q],
+      minimum_jacobian_singular_value: FAKE_REHEARSAL_PREP.minimumJacobianSingularValue,
+    });
   }
 
   private processMotionState(state: RobotStateMessage): void {
@@ -1394,6 +1435,8 @@ export class OfflineRehearsalController {
     this.sample = null;
     this.controllerAnchor = null;
     this.anchor = null;
+    this.prepControllerAnchor = null;
+    this.prepTcpAnchor = null;
     this.targetTcp = null;
     this.targetTrigger = null;
     this.placementTarget = null;

@@ -1,4 +1,5 @@
 import type {Quat, Vec3} from '../protocol/messages';
+import fakeRehearsalConfig from '../../../config/fake-offline-rehearsal.json';
 
 export const REHEARSAL_PHASES = [
   'identity_preflight',
@@ -30,6 +31,18 @@ export const REHEARSAL_CONFIG = {
   maxPositionStepM: 0.002,
   maxRotationStepRad: Math.PI / 180,
   completionSamples: 3,
+} as const;
+
+// Deterministic LEBAI_FAKE-only rehearsal preparation pose. The joint vector is
+// retained as auditable digital-twin evidence; the controller commands only the
+// TCP pose through ordinary VR frames.
+export const FAKE_REHEARSAL_PREP = {
+  joints: [...fakeRehearsalConfig.prep_q] as [number, number, number, number, number, number],
+  tcp: {
+    p: [...fakeRehearsalConfig.prep_tcp.p] as Vec3,
+    q: [...fakeRehearsalConfig.prep_tcp.q] as Quat,
+  },
+  minimumJacobianSingularValue: fakeRehearsalConfig.minimum_jacobian_singular_value,
 } as const;
 
 export interface OfflineControllerSample {

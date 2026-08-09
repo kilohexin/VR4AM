@@ -16,12 +16,14 @@ import {
   type OfflineRehearsalPorts,
 } from '../src/rehearsal/offlineRehearsalController';
 import {
+  FAKE_REHEARSAL_PREP,
   REHEARSAL_PHASES,
   type OfflineControllerSample,
   type OfflineSceneSnapshot,
 } from '../src/rehearsal/types';
 
 const ANCHOR: Pose = {p: [0.30, 0.20, -0.20], q: [0, 0, 0, 1]};
+const FAKE_REHEARSAL_PREP_TCP: Pose = structuredClone(FAKE_REHEARSAL_PREP.tcp);
 
 function robotState(overrides: Partial<RobotStateMessage> = {}): RobotStateMessage {
   return {
@@ -255,6 +257,13 @@ function beginThroughAnchor(test: Harness): void {
   confirmState(test, {mode: 'ARMED', robot_state: 'IDLE'});
   expect(latestReport(test, 'offline_rehearsal_phase').phase).toBe('home');
   confirmState(test, {mode: 'ACTIVE', robot_state: 'MOVING'});
+  expect(test.controller.snapshot).toMatchObject({
+    phase: 'arm_and_anchor', step: 'fake_prep', targetTcp: FAKE_REHEARSAL_PREP_TCP,
+  });
+  expect(test.samples.at(-1)).toMatchObject({grip: true, trigger: 0, trackingValid: true});
+  confirmState(test, {
+    mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: FAKE_REHEARSAL_PREP_TCP,
+  });
   expect(latestReport(test, 'offline_rehearsal_phase').phase).toBe('arm_and_anchor');
 }
 
@@ -615,15 +624,21 @@ describe('OfflineRehearsalController happy path', () => {
     acknowledgePhase(test);
     const target = test.controller.snapshot.targetTcp;
     if (target === null) throw new Error('missing first translation target');
+    const controllerAnchor = structuredClone(test.samples.at(-1));
+    if (controllerAnchor === null || controllerAnchor === undefined) {
+      throw new Error('missing prepared controller anchor');
+    }
 
     for (let index = 0; index < 25; index += 1) {
-      test.emitState({mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: ANCHOR});
+      test.emitState({
+        mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: FAKE_REHEARSAL_PREP_TCP,
+      });
     }
 
     expect(test.controller.snapshot).toMatchObject({phase: 'translate', step: '+x'});
-    expect(test.samples.at(-1)?.position[0]).toBeCloseTo(ANCHOR.p[0] + 0.040);
+    expect(test.samples.at(-1)?.position[0]).toBeCloseTo(controllerAnchor.position[0] + 0.040);
     expect(test.samples.at(-1)).toMatchObject({
-      position: [expect.any(Number), ANCHOR.p[1], ANCHOR.p[2]],
+      position: [expect.any(Number), controllerAnchor.position[1], controllerAnchor.position[2]],
       grip: true,
     });
     confirmState(test, {mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: target});
@@ -651,6 +666,38 @@ describe('OfflineRehearsalController fail-closed cleanup', () => {
     expect(latestReport(test, 'offline_rehearsal_phase')).toMatchObject({
       phase: 'home', status: 'failed', failure: {reason: 'full_rehearsal_timeout'},
     });
+  });
+
+  it('fails closed when the Fake prep pose is not authoritatively reached within 8 seconds', () => {
+    const test = harness();
+    connectReady(test);
+    test.controller.start();
+    acceptBegin(test);
+    acknowledgePhase(test);
+    acceptLatestControl(test);
+    confirmState(test, {mode: 'DISARMED'});
+    acknowledgePhase(test);
+    acceptLatestControl(test);
+    confirmState(test, {mode: 'ACTIVE', robot_state: 'MOVING'});
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'arm_and_anchor', step: 'fake_prep', targetTcp: FAKE_REHEARSAL_PREP_TCP,
+    });
+
+    for (let index = 0; index < 8; index += 1) {
+      test.advance(999);
+      test.emitState({mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: ANCHOR});
+      test.emitDiagnostics();
+    }
+    test.advance(7);
+    test.emitState({mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: ANCHOR});
+    test.emitDiagnostics();
+    test.advance(2);
+    test.emitDiagnostics();
+
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'failed', failure: 'phase_timeout', active: true, stopVerified: false,
+    });
+    expect(test.controls.at(-1)?.type).toBe('disarm');
   });
 
   it.each([
