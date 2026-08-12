@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type {TeleopFrameSource} from '../appFrameForwarding';
 import {
   PROTOCOL_VERSION,
+  type Pose,
   type Quat,
   type RobotStateMessage,
   type VisibilityState,
@@ -26,6 +27,7 @@ import {type RobotRuntimeSummary, VrSafetyPanel} from './vrSafetyPanel';
 import {
   copyOfflineControllerSample,
   copyOfflineSceneSnapshot,
+  FAKE_REHEARSAL_WORKSPACE,
   type OfflineControllerSample,
   type OfflineSceneSnapshot,
 } from '../rehearsal/types';
@@ -78,6 +80,7 @@ export class DesktopInputSafety {
   private grip = false;
   private trigger = 0;
   private attached = false;
+  private enabled = true;
   private readonly ownerWindow: Window;
   private readonly ownerDocument: Document;
 
@@ -118,7 +121,13 @@ export class DesktopInputSafety {
   }
 
   isActivePointer(pointerId: number): boolean {
-    return this.activePointer === pointerId;
+    return this.enabled && this.activePointer === pointerId;
+  }
+
+  setEnabled(enabled: boolean): void {
+    if (this.enabled === enabled) return;
+    this.enabled = enabled;
+    this.reset();
   }
 
   reset(): void {
@@ -135,7 +144,7 @@ export class DesktopInputSafety {
   }
 
   private readonly onPointerDown = (event: PointerEvent): void => {
-    if (event.button !== 0) return;
+    if (!this.enabled || event.button !== 0) return;
     this.activePointer = event.pointerId;
     this.grip = true;
     try {
@@ -167,7 +176,7 @@ export class DesktopInputSafety {
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (event.code !== 'Space') return;
+    if (!this.enabled || event.code !== 'Space') return;
     event.preventDefault();
     this.trigger = 1;
   };
@@ -216,6 +225,8 @@ export class SimulationScene {
   private readonly grid = new THREE.GridHelper(4, 40, 0x1f839f, 0x183245);
   private readonly targetMarker = new THREE.Group();
   private readonly graspBlocks = createGraspBlocks();
+  private readonly rehearsalSupport = createRehearsalSupport();
+  private readonly rehearsalPlacementMarker = createRehearsalPlacementMarker();
   private sessionId = createSessionId();
   private robotModel: RobotModel | null = null;
   private graspController: KinematicGraspController | null = null;
@@ -255,6 +266,7 @@ export class SimulationScene {
   };
   private started = false;
   private automationActive = false;
+  private offlineWorkspace: OfflineSceneSnapshot['workspace'] = null;
 
   constructor(
     private readonly container: HTMLElement,
@@ -282,6 +294,15 @@ export class SimulationScene {
     this.robotVisualRoot.add(
       ...this.graspBlocks.map(({object}) => object),
     );
+    this.robotVisualRoot.add(this.rehearsalSupport);
+    this.robotVisualRoot.add(this.rehearsalPlacementMarker);
+    this.graspController = new KinematicGraspController({
+      visualRoot: this.robotVisualRoot,
+      blocks: this.graspBlocks,
+      tableTopY: -0.005,
+      tableHalfWidth: 0.61,
+      tableHalfDepth: 0.43,
+    });
     this.createTargetMarker();
     this.controllerHints = new ControllerHints(this.scene);
     this.controllerHints.setVisible(false);
@@ -327,7 +348,7 @@ export class SimulationScene {
   setAutomationActive(active: boolean): void {
     if (this.automationActive === active) return;
     this.automationActive = active;
-    this.inputSafety.reset();
+    this.inputSafety.setEnabled(!active);
   }
 
   getOfflineSceneSnapshot(): OfflineSceneSnapshot {
@@ -345,11 +366,41 @@ export class SimulationScene {
         ? null
         : copyOfflineControllerSample(this.offlineController),
       ...grasp,
+      workspace: this.offlineWorkspace,
     });
+  }
+
+  configureFakeRehearsalWorkspace(limiterAnchor: Pose, taskAnchor: Pose): void {
+    const layout = fakeRehearsalWorkspaceLayout(limiterAnchor, taskAnchor);
+    const orange = this.graspBlocks.find(({id}) => id === 'block-orange');
+    if (!orange || !this.graspController) throw new Error('offline_workspace_unavailable');
+    orange.object.position.fromArray(layout.pickBlockCenter);
+    orange.object.quaternion.identity();
+    orange.object.updateMatrix();
+    orange.object.updateMatrixWorld(true);
+    this.rehearsalSupport.visible = true;
+    this.rehearsalSupport.position.fromArray(layout.supportCenter);
+    this.rehearsalSupport.scale.set(layout.supportWidthM, 0.02, 0.10);
+    this.rehearsalPlacementMarker.visible = true;
+    this.rehearsalPlacementMarker.position.set(
+      layout.placementTarget[0],
+      layout.supportTopY + 0.001,
+      layout.placementTarget[2],
+    );
+    this.graspController.setTableTopY(layout.supportTopY);
+    this.offlineWorkspace = {
+      limiterAnchor: [...limiterAnchor.p],
+      taskAnchor: [...taskAnchor.p],
+      placementTarget: [...layout.placementTarget],
+      liftM: FAKE_REHEARSAL_WORKSPACE.liftM,
+    };
   }
 
   resetOfflineScene(): void {
     this.graspController?.reset();
+    this.rehearsalSupport.visible = false;
+    this.rehearsalPlacementMarker.visible = false;
+    this.offlineWorkspace = null;
   }
 
   setArmSafetyState(snapshot: ArmSafetySnapshot): void {
@@ -514,13 +565,6 @@ export class SimulationScene {
       model.group.scale.setScalar(1);
       model.group.position.set(0, 0, 0);
       this.robotVisualRoot.add(model.group);
-      this.graspController = new KinematicGraspController({
-        visualRoot: this.robotVisualRoot,
-        blocks: this.graspBlocks,
-        tableTopY: -0.005,
-        tableHalfWidth: 0.61,
-        tableHalfDepth: 0.43,
-      });
     } catch (error) {
       if (this.started) this.options.onError(modelLoadErrorMessage(error));
     }
@@ -605,7 +649,7 @@ export class SimulationScene {
   private readonly onPointerMove = (event: PointerEvent): void => this.applyPointerMove(event);
 
   private applyPointerMove(event: PointerEvent): void {
-    if (this.offlineController !== null) return;
+    if (this.automationActive || this.offlineController !== null) return;
     if (!this.inputSafety.isActivePointer(event.pointerId)) return;
     this.controllerPosition.x = clamp(this.controllerPosition.x + event.movementX * 0.0012, -0.2, 0.8);
     this.controllerPosition.y = clamp(this.controllerPosition.y - event.movementY * 0.0012, 0.05, 1.05);
@@ -614,7 +658,7 @@ export class SimulationScene {
   private readonly onWheel = (event: WheelEvent): void => this.applyWheel(event);
 
   private applyWheel(event: WheelEvent): void {
-    if (this.offlineController !== null) return;
+    if (this.automationActive || this.offlineController !== null) return;
     event.preventDefault();
     this.controllerPosition.z = clamp(this.controllerPosition.z + event.deltaY * 0.0008, -0.62, 0.62);
   }
@@ -650,6 +694,62 @@ export function createGraspBlocks(): GraspBlock[] {
     object.receiveShadow = true;
     return {id, object, sizeM: 0.06};
   });
+}
+
+export function fakeRehearsalWorkspaceLayout(
+  limiterAnchor: Pose,
+  taskAnchor: Pose,
+): {
+  pickBlockCenter: Vec3;
+  placementTarget: Vec3;
+  supportCenter: Vec3;
+  supportTopY: number;
+  supportWidthM: number;
+} {
+  const add = (offset: Vec3): Vec3 => [
+    limiterAnchor.p[0] + offset[0],
+    limiterAnchor.p[1] + offset[1],
+    limiterAnchor.p[2] + offset[2],
+  ];
+  const pickBlockCenter = add(FAKE_REHEARSAL_WORKSPACE.pickBlockCenterFromHomeM);
+  const placementTarget = add(FAKE_REHEARSAL_WORKSPACE.placeBlockCenterFromHomeM);
+  if (![...limiterAnchor.p, ...taskAnchor.p].every(Number.isFinite)) {
+    throw new Error('invalid_offline_workspace_anchor');
+  }
+  const supportTopY = pickBlockCenter[1] - FAKE_REHEARSAL_WORKSPACE.blockSizeM / 2;
+  return {
+    pickBlockCenter,
+    placementTarget,
+    supportCenter: [
+      (pickBlockCenter[0] + placementTarget[0]) / 2,
+      supportTopY - 0.01,
+      (pickBlockCenter[2] + placementTarget[2]) / 2,
+    ],
+    supportTopY,
+    supportWidthM: Math.abs(pickBlockCenter[0] - placementTarget[0]) + 0.10,
+  };
+}
+
+function createRehearsalSupport(): THREE.Mesh {
+  const support = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshStandardMaterial({color: 0x203746, metalness: 0.25, roughness: 0.65}),
+  );
+  support.name = 'offline-rehearsal-support';
+  support.visible = false;
+  support.receiveShadow = true;
+  return support;
+}
+
+function createRehearsalPlacementMarker(): THREE.Mesh {
+  const marker = new THREE.Mesh(
+    new THREE.RingGeometry(0.038, 0.044, 32),
+    new THREE.MeshBasicMaterial({color: 0x58d68d, side: THREE.DoubleSide}),
+  );
+  marker.name = 'offline-rehearsal-placement-target';
+  marker.rotation.x = -Math.PI / 2;
+  marker.visible = false;
+  return marker;
 }
 
 export function modelLoadErrorMessage(_error: unknown): string {

@@ -57,6 +57,10 @@ Runtime: LEBAI_FAKE / DIGITAL_TWIN / hardware_verified=false
 
 `arm_and_anchor` 不会改写现有 Home。Fake 后端在 Home 和解锁确认后，继续通过同一个控制 WebSocket 的普通 Grip/VRFrame 路径移动到 `config/fake-offline-rehearsal.json` 固定的演练准备位姿；连续 3 个递增的权威状态都达到 `3 mm / 2°` 后，才在准备位姿重新设定演练锚点并进入平移。准备动作单独拥有 `15 s` 超时；每一个平移/返回、旋转/返回子目标分别拥有 `8 s`，其他非运动阶段仍为 `8 s`，完整演练还有 `300 s` 硬超时。任一超时都走同一条已验证停止和报告路径。该准备位姿严格属于 `LEBAI_FAKE / hardware_verified=false`，不改变真机 Home 或真机控制行为。
 
+后端 SafetyLimiter 的原始锚点仍是第一次 Grip 在未改写 Home 捕获的 TCP；浏览器准备位姿只是后续任务锚点，两者不会混用。准备确认后，页面按共享 Fake 配置重排橙色方块、抬高支撑台和绿色放置标记。抓取接近、抬升、转移和下降相对原始 Home 的最大分量偏移均小于 `0.10 m`，并继续经过真实 `SafetyLimiter -> FakeLebaiClient` 路径；控制器只消费页面返回的方块/放置观测并发送普通 VRFrame，不注入权威机器人状态或报告专用运动目标。
+
+从点击 Start 到清理完成，桌面指针、滚轮、Grip 和 Trigger 的手动处理均保持禁用，包括尚无合成样本的 begin、Home 与 cleanup 窗口；VR 退出安全行为不变。若文档变为 hidden，页面立即调用现有 `requestStop('page_hidden')`，先进入安全停止/报告路径，而不是等待 stale 看门狗兜底。visible 事件不停止演练，页面销毁时会移除该监听器。
+
 完整浏览器 smoke 至少要实际观察平移、旋转、夹爪、方块抓放、跟踪丢失后的停止与恢复，以及最终停止。成功时进度到达 `12 / 12`，阶段变为 `passed`，Start 重新可用、Stop 禁用，并显示 JSON 和 Markdown 报告路径。页面隐藏、刷新、关闭、WebSocket 断开、所有权丢失、状态/诊断过期、FAULT/STALE/急停、阶段超时、非有限数值或后端拒绝都会进入相同的安全停止收尾。
 
 ### 当前 Task 9 浏览器验收状态

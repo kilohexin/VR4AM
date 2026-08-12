@@ -9,8 +9,10 @@ import {
   modelLoadErrorMessage,
   ServerClockAnchor,
   SimulationScene,
+  fakeRehearsalWorkspaceLayout,
 } from '../src/scenes/simulationScene';
 import type {ArmSafetySnapshot} from '../src/ui/armPanel';
+import type {Pose} from '../src/protocol/messages';
 import type {XRPresentationSample} from '../src/xr/session';
 import type {OfflineControllerSample} from '../src/rehearsal/types';
 
@@ -193,6 +195,25 @@ describe('offline controller scene seam', () => {
     expect(position.toArray()).toEqual([0.1, 0.2, 0.3]);
   });
 
+  it('keeps pointer and wheel movement disabled for the full automation run without a sample', () => {
+    const position = new THREE.Vector3(0.1, 0.2, 0.3);
+    const preventDefault = vi.fn();
+    const scene = {
+      offlineController: null,
+      automationActive: true,
+      inputSafety: {isActivePointer: vi.fn(() => true)},
+      controllerPosition: position,
+    };
+
+    (SimulationScene.prototype as unknown as {applyPointerMove(this: typeof scene, event: PointerEvent): void})
+      .applyPointerMove.call(scene, pointerEvent('pointermove', 3) as PointerEvent);
+    (SimulationScene.prototype as unknown as {applyWheel(this: typeof scene, event: WheelEvent): void})
+      .applyWheel.call(scene, Object.assign(new Event('wheel'), {deltaY: 50, preventDefault}) as unknown as WheelEvent);
+
+    expect(position.toArray()).toEqual([0.1, 0.2, 0.3]);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+
   it('returns a copied immutable-shaped scene observation', () => {
     const controller: OfflineControllerSample = {
       position: [0.1, 0.2, 0.3], quaternion: [0, 0, 0, 1],
@@ -200,6 +221,12 @@ describe('offline controller scene seam', () => {
     };
     const scene = {
       offlineController: controller,
+      offlineWorkspace: {
+        limiterAnchor: [0.3, 0.2, -0.2],
+        taskAnchor: [0.31, 0.22, -0.19],
+        placementTarget: [0.27, 0.165, -0.215],
+        liftM: 0.03,
+      },
       graspController: {
         snapshot: vi.fn(() => ({
           carriedBlockId: 'block-orange',
@@ -220,11 +247,50 @@ describe('offline controller scene seam', () => {
       carriedBlockId: 'block-orange',
       blocks: [{id: 'block-orange', position: [0.18, 0.025, -0.32], sizeM: 0.06}],
       invalidOverlap: false,
+      workspace: scene.offlineWorkspace,
     });
+  });
+
+  it('lays out the Fake block and observed placement target from distinct Home and prep anchors', () => {
+    const home: Pose = {p: [-0.14378786228061097, 0.6959976154948492, -0.12063003385763715], q: [0, 0, 0, 1]};
+    const prep: Pose = {p: [-0.06972270013518106, 0.7320848696673521, -0.13552758188831457], q: [0, 0, 0, 1]};
+
+    const layout = fakeRehearsalWorkspaceLayout(home, prep);
+
+    expect(layout.pickBlockCenter).toEqual(expect.arrayContaining([
+      expect.closeTo(-0.07378786228061097, 12),
+      expect.closeTo(0.6609976154948491, 12),
+      expect.closeTo(-0.13563003385763714, 12),
+    ]));
+    expect(layout.placementTarget).toEqual(expect.arrayContaining([
+      expect.closeTo(-0.11378786228061097, 12),
+      expect.closeTo(0.6609976154948491, 12),
+      expect.closeTo(-0.13563003385763714, 12),
+    ]));
+    expect(layout.supportTopY).toBeCloseTo(0.6309976154948491);
   });
 });
 
 describe('desktop input release safety', () => {
+  it('does not latch pointer Grip or keyboard Trigger while automation disables manual input', () => {
+    const canvas = document.createElement('canvas');
+    canvas.setPointerCapture = vi.fn();
+    canvas.hasPointerCapture = vi.fn(() => false);
+    const input = new DesktopInputSafety(canvas);
+    input.attach();
+    input.setEnabled(false);
+
+    canvas.dispatchEvent(pointerEvent('pointerdown', 7, 0));
+    window.dispatchEvent(new KeyboardEvent('keydown', {code: 'Space'}));
+    expect(input.snapshot()).toEqual({activePointer: null, grip: false, trigger: 0});
+
+    input.setEnabled(true);
+    canvas.dispatchEvent(pointerEvent('pointerdown', 7, 0));
+    window.dispatchEvent(new KeyboardEvent('keydown', {code: 'Space'}));
+    expect(input.snapshot()).toEqual({activePointer: 7, grip: true, trigger: 1});
+    input.dispose();
+  });
+
   it.each([
     ['window blur', (canvas: HTMLCanvasElement) => window.dispatchEvent(new Event('blur'))],
     ['document visibility loss', (_canvas: HTMLCanvasElement) => {

@@ -46,6 +46,13 @@ export const FAKE_REHEARSAL_PREP = {
   minimumJacobianSingularValue: fakeRehearsalConfig.minimum_jacobian_singular_value,
 } as const;
 
+export const FAKE_REHEARSAL_WORKSPACE = {
+  pickBlockCenterFromHomeM: [...fakeRehearsalConfig.workspace.pick_block_center_from_home_m] as Vec3,
+  placeBlockCenterFromHomeM: [...fakeRehearsalConfig.workspace.place_block_center_from_home_m] as Vec3,
+  blockSizeM: fakeRehearsalConfig.workspace.block_size_m,
+  liftM: fakeRehearsalConfig.workspace.lift_m,
+} as const;
+
 export interface OfflineControllerSample {
   position: Vec3;
   quaternion: Quat;
@@ -68,6 +75,12 @@ export interface GraspSceneSnapshot {
 
 export interface OfflineSceneSnapshot extends GraspSceneSnapshot {
   controller: OfflineControllerSample | null;
+  workspace: {
+    limiterAnchor: Vec3;
+    taskAnchor: Vec3;
+    placementTarget: Vec3;
+    liftM: number;
+  } | null;
 }
 
 export function copyOfflineControllerSample(
@@ -101,6 +114,13 @@ export function copyOfflineSceneSnapshot(
     || typeof snapshot.carriedBlockId !== 'string' && snapshot.carriedBlockId !== null
     || typeof snapshot.invalidOverlap !== 'boolean'
     || !Array.isArray(snapshot.blocks)
+    || (snapshot.workspace !== null && (
+      !isFiniteVector(snapshot.workspace.limiterAnchor, 3)
+      || !isFiniteVector(snapshot.workspace.taskAnchor, 3)
+      || !isFiniteVector(snapshot.workspace.placementTarget, 3)
+      || !Number.isFinite(snapshot.workspace.liftM)
+      || snapshot.workspace.liftM <= 0
+    ))
   ) {
     throw new Error('invalid_offline_scene_snapshot');
   }
@@ -109,6 +129,12 @@ export function copyOfflineSceneSnapshot(
     carriedBlockId: snapshot.carriedBlockId,
     blocks: snapshot.blocks.map((block) => copyBlock(block)),
     invalidOverlap: snapshot.invalidOverlap,
+    workspace: snapshot.workspace === null ? null : {
+      limiterAnchor: [...snapshot.workspace.limiterAnchor] as Vec3,
+      taskAnchor: [...snapshot.workspace.taskAnchor] as Vec3,
+      placementTarget: [...snapshot.workspace.placementTarget] as Vec3,
+      liftM: snapshot.workspace.liftM,
+    },
   };
 }
 

@@ -5,5 +5,11 @@
     "p": [-0.06972270013518106, 0.7320848696673521, -0.13552758188831457],
     "q": [0.06855558566951264, -0.02287994282799873, 0.7761667901356353, -0.6263718973423398]
   },
-  "minimum_jacobian_singular_value": 0.085224906
+  "minimum_jacobian_singular_value": 0.085224906,
+  "workspace": {
+    "pick_block_center_from_home_m": [0.070, -0.035, -0.015],
+    "place_block_center_from_home_m": [0.030, -0.035, -0.015],
+    "block_size_m": 0.060,
+    "lift_m": 0.030
+  }
 }

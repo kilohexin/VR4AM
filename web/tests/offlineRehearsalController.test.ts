@@ -17,6 +17,7 @@ import {
 } from '../src/rehearsal/offlineRehearsalController';
 import {
   FAKE_REHEARSAL_PREP,
+  FAKE_REHEARSAL_WORKSPACE,
   REHEARSAL_CONFIG,
   REHEARSAL_PHASES,
   type OfflineControllerSample,
@@ -84,7 +85,9 @@ function harness(options: {throwOnBegin?: boolean} = {}) {
     carriedBlockId: null,
     blocks: [{id: 'block-orange', position: [0.18, 0.030, -0.32], sizeM: 0.06}],
     invalidOverlap: false,
+    workspace: null,
   };
+  const configuredWorkspaces: Array<{limiterAnchor: Pose; taskAnchor: Pose}> = [];
   let resets = 0;
   let connectionAborts = 0;
   const serverRun = {active: false};
@@ -103,6 +106,23 @@ function harness(options: {throwOnBegin?: boolean} = {}) {
       scene.controller = copy;
     },
     readScene: () => structuredClone(scene),
+    configureFakeWorkspace: (limiterAnchor, taskAnchor) => {
+      configuredWorkspaces.push({
+        limiterAnchor: structuredClone(limiterAnchor),
+        taskAnchor: structuredClone(taskAnchor),
+      });
+      scene.workspace = {
+        limiterAnchor: structuredClone(limiterAnchor.p),
+        taskAnchor: structuredClone(taskAnchor.p),
+        placementTarget: limiterAnchor.p.map((value, index) => (
+          value + FAKE_REHEARSAL_WORKSPACE.placeBlockCenterFromHomeM[index]
+        )) as [number, number, number],
+        liftM: FAKE_REHEARSAL_WORKSPACE.liftM,
+      };
+      scene.blocks[0].position = limiterAnchor.p.map((value, index) => (
+        value + FAKE_REHEARSAL_WORKSPACE.pickBlockCenterFromHomeM[index]
+      )) as [number, number, number];
+    },
     resetScene: () => { resets += 1; },
     closeConnection: () => {
       connectionAborts += 1;
@@ -134,6 +154,7 @@ function harness(options: {throwOnBegin?: boolean} = {}) {
     reports,
     samples,
     scene,
+    configuredWorkspaces,
     resets: () => resets,
     connectionAborts: () => connectionAborts,
     serverRun,
@@ -266,6 +287,10 @@ function beginThroughAnchor(test: Harness): void {
     mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: FAKE_REHEARSAL_PREP_TCP,
   });
   expect(latestReport(test, 'offline_rehearsal_phase').phase).toBe('arm_and_anchor');
+  expect(test.configuredWorkspaces).toEqual([{
+    limiterAnchor: ANCHOR,
+    taskAnchor: FAKE_REHEARSAL_PREP_TCP,
+  }]);
 }
 
 function driveCurrentMotionTarget(test: Harness): void {
@@ -398,6 +423,11 @@ function driveFromAnchorToFinish(test: Harness, recoverFault = false): void {
   acknowledgePhase(test);
   driveGripper(test);
   acknowledgePhase(test);
+  expect(test.controller.snapshot).toMatchObject({
+    phase: 'pick_place',
+    step: 'pick_approach',
+    placementTarget: test.scene.workspace?.placementTarget,
+  });
   drivePickPlace(test);
   acknowledgePhase(test);
 

@@ -1,5 +1,5 @@
 import './styles.css';
-import {disposeAppForUnload} from './appDisposal';
+import {disposeAppForUnload, installRehearsalVisibilityStop} from './appDisposal';
 import {forwardTeleopFrame, type TeleopFrameSource} from './appFrameForwarding';
 import {
   PROTOCOL_VERSION,
@@ -133,9 +133,13 @@ rehearsal = new OfflineRehearsalController({
   closeConnection: () => socket.close(),
   setOfflineController: (sample) => scene.setOfflineController(sample),
   readScene: () => scene.getOfflineSceneSnapshot(),
+  configureFakeWorkspace: (limiterAnchor, taskAnchor) => (
+    scene.configureFakeRehearsalWorkspace(limiterAnchor, taskAnchor)
+  ),
   resetScene: () => scene.resetOfflineScene(),
   onSnapshot: renderRehearsalSnapshot,
 });
+const removeRehearsalVisibilityStop = installRehearsalVisibilityStop(document, rehearsal);
 refreshRehearsalPanel();
 
 scene.start();
@@ -253,6 +257,7 @@ function startRehearsal(): void {
 function disposeForPageExit(): void {
   window.removeEventListener('pagehide', disposeForPageExit);
   window.removeEventListener('beforeunload', disposeForPageExit);
+  removeRehearsalVisibilityStop();
   disposeAppForUnload(rehearsal, xrController, scene, socket);
 }
 

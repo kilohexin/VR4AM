@@ -46,8 +46,10 @@ export class KinematicGraspController {
   private readonly initialTransforms: readonly InitialTransform[];
   private carried: GraspBlock | null = null;
   private closeArmed = true;
+  private tableTopY: number;
 
   constructor(private readonly options: KinematicGraspOptions) {
+    this.tableTopY = options.tableTopY;
     this.captureHalfExtents = (
       options.captureHalfExtents ?? DEFAULT_CAPTURE_HALF_EXTENTS
     ).clone();
@@ -104,6 +106,12 @@ export class KinematicGraspController {
     }
     this.carried = null;
     this.closeArmed = true;
+    this.tableTopY = this.options.tableTopY;
+  }
+
+  setTableTopY(tableTopY: number): void {
+    if (!Number.isFinite(tableTopY)) throw new Error('invalid_grasp_options');
+    this.tableTopY = tableTopY;
   }
 
   snapshot(): GraspSceneSnapshot {
@@ -227,7 +235,7 @@ export class KinematicGraspController {
       this.options.tableHalfDepth - half,
     );
     const support = this.highestSupport(released, x, z);
-    let supportTop = this.options.tableTopY;
+    let supportTop = this.tableTopY;
     if (support) {
       x = support.object.position.x;
       z = support.object.position.z;

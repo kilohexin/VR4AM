@@ -137,6 +137,21 @@ describe('KinematicGraspController', () => {
     expect(blocks[0].object.position.toArray()).toEqual([0.2, 0.025, -0.2]);
   });
 
+  it('releases onto a configured Fake rehearsal support plane and reset restores the table', () => {
+    const {blocks, controller} = createWorld([[0, 0.66, 0]]);
+    controller.setTableTopY(0.63);
+    controller.update(pose([0, 0.66, 0]), 0.7);
+    controller.update(pose([0.1, 0.69, 0]), 0.7);
+    controller.update(pose([0.1, 0.69, 0]), 0.2);
+    expect(blocks[0].object.position.toArray()).toEqual([0.1, 0.66, 0]);
+
+    controller.reset();
+    controller.update(pose([0, 0.66, 0]), 0.7);
+    controller.update(pose([0.1, 0.69, 0]), 0.7);
+    controller.update(pose([0.1, 0.69, 0]), 0.2);
+    expect(blocks[0].object.position.toArray()).toEqual([0.1, 0.025, 0]);
+  });
+
   it('releases a block on one support block at center Y 0.085', () => {
     const {blocks, controller} = createWorld([
       [0.2, 0.15, 0],

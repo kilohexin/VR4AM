@@ -1,5 +1,7 @@
+// @vitest-environment jsdom
+
 import {expect, it, vi} from 'vitest';
-import {disposeAppForUnload} from '../src/appDisposal';
+import {disposeAppForUnload, installRehearsalVisibilityStop} from '../src/appDisposal';
 
 it('stops and disposes rehearsal before XR, scene, and socket disposal on unload', () => {
   const events: string[] = [];
@@ -26,4 +28,22 @@ it('stops and disposes rehearsal before XR, scene, and socket disposal on unload
     'socket-close',
   ]);
   expect(rehearsal.requestStop).toHaveBeenCalledWith('page_unload');
+});
+
+it('requests immediate fail-closed rehearsal cleanup only when the document becomes hidden', () => {
+  Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'visible'});
+  const requestStop = vi.fn();
+  const dispose = installRehearsalVisibilityStop(document, {requestStop});
+
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(requestStop).not.toHaveBeenCalled();
+
+  Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'hidden'});
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(requestStop).toHaveBeenCalledOnce();
+  expect(requestStop).toHaveBeenCalledWith('page_hidden');
+
+  dispose();
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(requestStop).toHaveBeenCalledOnce();
 });

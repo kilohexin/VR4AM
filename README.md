@@ -96,6 +96,8 @@ python scripts/run_offline_rehearsal.py
 
 Fake 演练保持现有 Home 不变；Home 后通过同一控制 WebSocket 的普通 Grip/VRFrame 路径到达固定的 Fake-only 准备位姿，再以权威状态确认后开始轴向检查。该准备动作不是新的控制通道，也不会改变真机 Home 或真机控制流程。
 
+准备确认后，页面会按 `config/fake-offline-rehearsal.json` 把橙色方块、支撑台和放置标记布置到原始 Home 安全锚点的 `±0.10 m` 分量包络内；控制器从页面观测读取抓取与放置目标，仍只发送普通 VRFrame。演练活动期间桌面指针、滚轮、Grip/Trigger 输入均被禁用；页面转为隐藏时立即以 `page_hidden` 进入现有安全停止与报告路径。
+
 Fake 准备位姿单独限时 `15 s`；每一个平移/返回和旋转/返回子目标仍分别限时 `8 s`，其他非运动阶段为 `8 s`，完整演练硬上限为 `300 s`。所有超时都必须进入同一条停止并写报告的收尾路径。
 
 完整的前提、两个按钮、12 阶段顺序、报告字段与位置、三条非硬件门禁、浏览器 smoke 语义、性能警告和八项现场待验证检查见 [无真机离线实验演练](docs/offline-rehearsal.md)。即使全部离线门禁通过，现场仍必须按 [LM3 真机部署与首次实验流程](docs/real-robot-deployment.md) 从 `readonly` 零写入预检开始；真机状态仍为 **PENDING / `hardware_verified=false`**。

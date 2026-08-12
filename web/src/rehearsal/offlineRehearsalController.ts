@@ -65,6 +65,7 @@ export interface OfflineRehearsalPorts {
   closeConnection(): void;
   setOfflineController(sample: OfflineControllerSample | null): void;
   readScene(): OfflineSceneSnapshot;
+  configureFakeWorkspace(limiterAnchor: Pose, taskAnchor: Pose): void;
   resetScene?(): void;
   onSnapshot?(snapshot: OfflineRehearsalSnapshot): void;
 }
@@ -109,7 +110,6 @@ type MotionTarget = Readonly<{
 const SAFE_CONFIRMATIONS = REHEARSAL_CONFIG.completionSamples;
 const GRIPPER_CLOSE_THRESHOLD = 0.65;
 const GRIPPER_OPEN_THRESHOLD = 0.35;
-const PICK_LIFT_M = 0.10;
 const CARRIED_OFFSET_TOLERANCE_M = 0.005;
 const RELEASE_SUPPORT_TOLERANCE_M = 0.015;
 const BOUNDARY_PROBE_DISTANCE_M = 0.30;
@@ -160,6 +160,7 @@ export class OfflineRehearsalController {
   private targetTcp: Pose | null = null;
   private targetTrigger: 0 | 1 | null = null;
   private placementTarget: Vec3 | null = null;
+  private pickLiftM = 0;
   private motionTargets: MotionTarget[] = [];
   private motionIndex = 0;
   private gripperIndex = 0;
@@ -599,6 +600,10 @@ export class OfflineRehearsalController {
     )) return;
     this.anchor = copyPose(state.actual_tcp);
     this.controllerAnchor = copyOfflineControllerSample(this.sample);
+    this.ports.configureFakeWorkspace(
+      copyPose(this.prepTcpAnchor),
+      copyPose(this.anchor),
+    );
     this.targetTcp = null;
     this.reportCurrentPhase('passed', {
       anchor_confirmations: SAFE_CONFIRMATIONS,
@@ -871,6 +876,7 @@ export class OfflineRehearsalController {
     this.targetTcp = null;
     this.targetTrigger = null;
     this.placementTarget = null;
+    this.pickLiftM = 0;
 
     switch (phase) {
       case 'home':
@@ -979,11 +985,12 @@ export class OfflineRehearsalController {
     }
     const scene = this.readValidScene();
     const block = scene?.blocks.find((candidate) => candidate.id === 'block-orange');
-    if (!scene || !block || scene.carriedBlockId !== null || scene.invalidOverlap) {
+    if (!scene || !block || scene.workspace === null || scene.carriedBlockId !== null || scene.invalidOverlap) {
       this.beginCleanup('invalid_block_placement');
       return;
     }
-    this.placementTarget = [-block.position[0], block.position[1], block.position[2]];
+    this.placementTarget = [...scene.workspace.placementTarget];
+    this.pickLiftM = scene.workspace.liftM;
     this.targetTcp = {
       p: [block.position[0], block.position[1] + block.sizeM / 2, block.position[2]],
       q: [...this.anchor.q],
@@ -1001,7 +1008,7 @@ export class OfflineRehearsalController {
     }
     const current = this.targetTcp;
     if (step === 'pick_lift') {
-      this.targetTcp = {p: [current.p[0], current.p[1] + PICK_LIFT_M, current.p[2]], q: [...current.q]};
+      this.targetTcp = {p: [current.p[0], current.p[1] + this.pickLiftM, current.p[2]], q: [...current.q]};
     } else if (step === 'pick_transfer') {
       this.targetTcp = {
         p: [this.placementTarget[0], current.p[1], this.placementTarget[2]],

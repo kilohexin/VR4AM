@@ -10,6 +10,7 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 import app.acceptance.fake_lebai as fake_acceptance
+from app.control.safety import SafetyLimiter
 from app.commissioning.actions import RotationAction, TranslationAction
 from app.schemas.messages import Pose, RobotStateMessage, TeleopMode
 from app.sim.kinematics import forward_pose, geometric_jacobian
@@ -130,6 +131,39 @@ def test_frozen_fake_prep_geometry_preserves_home_and_is_safe() -> None:
     assert actual.q == pytest.approx(prep_tcp["q"], abs=1e-12)
 
 
+def test_fake_pick_place_workspace_projects_unconstrained_from_real_home_anchor() -> None:
+    settings = fake_acceptance.load_digital_twin_settings(FAKE_CONFIG)
+    assert settings.lebai is not None
+    config = _config()
+    workspace = config["workspace"]
+    assert isinstance(workspace, dict)
+    home = forward_pose(settings.lebai.home_q, LM3Model())
+    prep_payload = config["prep_tcp"]
+    assert isinstance(prep_payload, dict)
+    prep = Pose(p=tuple(prep_payload["p"]), q=tuple(prep_payload["q"]))
+    limiter = SafetyLimiter(
+        anchor=home.p,
+        workspace_half_extent_m=settings.lebai.control.max_relative_translation_m,
+    )
+    pick_center = np.asarray(home.p) + np.asarray(workspace["pick_block_center_from_home_m"])
+    place_center = np.asarray(home.p) + np.asarray(workspace["place_block_center_from_home_m"])
+    half = float(workspace["block_size_m"]) / 2
+    lift = float(workspace["lift_m"])
+    commanded = [
+        (pick_center[0], pick_center[1] + half, pick_center[2]),
+        (pick_center[0], pick_center[1] + half + lift, pick_center[2]),
+        (place_center[0], pick_center[1] + half + lift, place_center[2]),
+        (place_center[0], place_center[1] + half, place_center[2]),
+    ]
+
+    assert np.linalg.norm(np.asarray(commanded[0]) - np.asarray(prep.p)) < 0.10
+    for target in commanded:
+        projection = limiter.project_workspace(Pose(p=target, q=prep.q))
+        assert projection.constrained is False
+        assert projection.hold is False
+        assert projection.pose.p == pytest.approx(target)
+
+
 @pytest.mark.asyncio
 async def test_fake_prep_and_full_local_envelope_are_geometrically_reachable_and_safe(
     monkeypatch,
@@ -164,13 +198,56 @@ async def test_fake_prep_and_full_local_envelope_are_geometrically_reachable_and
                 sequence, grip=True, position=hand.p, rotation=hand.q
             )
 
-        await _drive_until_geometrically_confirmed(
+        sequence = await _drive_until_geometrically_confirmed(
             harness,
             frame_factory=prep_frame,
             target=prep,
             sequence=3,
             max_cycles=512,
         )
+        workspace = config["workspace"]
+        assert isinstance(workspace, dict)
+        pick_center = np.asarray(home.actual_tcp.p) + np.asarray(
+            workspace["pick_block_center_from_home_m"]
+        )
+        place_center = np.asarray(home.actual_tcp.p) + np.asarray(
+            workspace["place_block_center_from_home_m"]
+        )
+        half = float(workspace["block_size_m"]) / 2
+        lift = float(workspace["lift_m"])
+        pick_place_targets = [
+            (pick_center[0], pick_center[1] + half, pick_center[2]),
+            (pick_center[0], pick_center[1] + half + lift, pick_center[2]),
+            (place_center[0], pick_center[1] + half + lift, place_center[2]),
+            (place_center[0], place_center[1] + half, place_center[2]),
+        ]
+        home_rotation = Rotation.from_quat(home.actual_tcp.q)
+        hand_rotation = tuple(
+            (Rotation.from_quat(prep.q) * home_rotation.inv()).as_quat()
+        )
+        for position in pick_place_targets:
+            hand_target = Pose(
+                p=tuple(
+                    (np.asarray(position) - np.asarray(home.actual_tcp.p))
+                    / translation_scale
+                ),
+                q=hand_rotation,
+            )
+
+            def pick_place_frame(seq: int):
+                nonlocal hand
+                hand = _advance_hand(hand, hand_target)
+                return fake_acceptance._frame(
+                    seq, grip=True, position=hand.p, rotation=hand.q
+                )
+
+            sequence = await _drive_until_geometrically_confirmed(
+                harness,
+                frame_factory=pick_place_frame,
+                target=Pose(p=position, q=prep.q),
+                sequence=sequence,
+                max_cycles=512,
+            )
 
     monkeypatch.setattr(fake_acceptance, "ACCEPTANCE_START_Q", prep_q)
     confirmed_targets: list[str] = []
