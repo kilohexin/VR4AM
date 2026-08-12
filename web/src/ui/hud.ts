@@ -262,6 +262,7 @@ export function readableFault(fault: string | null): string {
     joint_safety_window: '目标超出仿真关节安全范围',
     ik_joint_jump: '逆解关节变化过大',
     ik_failure_persistent: '逆解连续失败',
+    stop_unverified: '停止状态未确认',
     invalid_joint_count: '机器人关节数据无效',
     ik_unreachable: '目标不可达',
     ik_singular: '目标接近奇异位形',

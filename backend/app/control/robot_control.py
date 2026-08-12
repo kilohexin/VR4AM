@@ -146,6 +146,7 @@ class RobotControl:
         self._pending_stop_completion = False
         self._hard_stop_completion = False
         self._stop_unverified = False
+        self._stop_unverified_from_cancelled_stop = False
         self._fault: str | None = None
         self._constraint: ConstraintKind | None = None
         self._constraint_valid_since_ns: int | None = None
@@ -488,6 +489,8 @@ class RobotControl:
             stopped_with_recording = await self._stop_backend(
                 StopReason.DISCONNECT
             )
+            if stopped_with_recording:
+                self._resolve_cancelled_stop_with_verified_disconnect()
         finally:
             self.mapper.clear()
             self.filter.clear()
@@ -826,7 +829,10 @@ class RobotControl:
                 and str(error) == "stop_incomplete"
                 else "stop_unverified"
             )
-            self._latch_stop_unverified(fault)
+            self._latch_stop_unverified(
+                fault,
+                from_cancelled_stop=isinstance(error, asyncio.CancelledError),
+            )
             if not recorded:
                 self._latch_recording_fault()
             raise
@@ -864,9 +870,15 @@ class RobotControl:
         if changed:
             self._advance_control_generation()
 
-    def _latch_stop_unverified(self, fault: str = "stop_unverified") -> None:
+    def _latch_stop_unverified(
+        self,
+        fault: str = "stop_unverified",
+        *,
+        from_cancelled_stop: bool = False,
+    ) -> None:
         changed = not self._stop_unverified or self._fault != fault
         self._stop_unverified = True
+        self._stop_unverified_from_cancelled_stop = from_cancelled_stop
         self._fault = fault
         self.mapper.clear()
         self.filter.clear()
@@ -883,6 +895,18 @@ class RobotControl:
         self._hard_stop_completion = False
         if changed:
             self._advance_control_generation()
+
+    def _resolve_cancelled_stop_with_verified_disconnect(self) -> None:
+        if not self._stop_unverified_from_cancelled_stop:
+            return
+        if self._fault != "stop_unverified":
+            return
+        self._stop_unverified = False
+        self._stop_unverified_from_cancelled_stop = False
+        self._fault = None
+        self._pending_stop_completion = False
+        self._hard_stop_completion = False
+        self._advance_control_generation()
 
     def _latch_backend_fault(self, fault: str) -> None:
         changed = self._fault != fault or self.machine.mode is not TeleopMode.FAULT
@@ -951,6 +975,7 @@ class RobotControl:
         if clear_fault:
             self._fault = None
             self._stop_unverified = False
+            self._stop_unverified_from_cancelled_stop = False
         if changed:
             self._advance_control_generation()
 

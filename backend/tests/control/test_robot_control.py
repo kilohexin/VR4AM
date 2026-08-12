@@ -1253,6 +1253,62 @@ async def test_failed_disconnect_stop_revokes_authority_and_latches_unrecoverabl
 
 
 @pytest.mark.asyncio
+async def test_verified_disconnect_recovers_only_a_cancelled_overlapping_disarm_stop() -> None:
+    control, _latest, backend, _clock = make_control()
+    await control.connect()
+    grip_stop_started = asyncio.Event()
+
+    async def cancellable_then_verified_stop(reason: StopReason) -> None:
+        backend.stops.append(reason)
+        if reason is StopReason.GRIP_RELEASED:
+            grip_stop_started.set()
+            await asyncio.Future()
+
+    backend.stop = cancellable_then_verified_stop  # type: ignore[method-assign]
+    disarm = asyncio.create_task(control.disarm())
+    await grip_stop_started.wait()
+    disarm.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await disarm
+
+    assert control.mode is TeleopMode.FAULT
+    assert control._fault == "stop_unverified"
+
+    await control.on_disconnect()
+    await control.connect()
+    state = await control.state_message()
+
+    assert backend.stops == [StopReason.GRIP_RELEASED, StopReason.DISCONNECT]
+    assert state.mode is TeleopMode.READY
+    assert state.fault is None
+    assert control._pending_stop_completion is False
+
+
+@pytest.mark.asyncio
+async def test_verified_disconnect_does_not_clear_a_real_disarm_stop_failure() -> None:
+    control, _latest, backend, _clock = make_control()
+    await control.connect()
+
+    async def fail_only_grip_stop(reason: StopReason) -> None:
+        backend.stops.append(reason)
+        if reason is StopReason.GRIP_RELEASED:
+            raise BackendCommandError("sdk_call_failed:stop_move")
+
+    backend.stop = fail_only_grip_stop  # type: ignore[method-assign]
+    with pytest.raises(BackendCommandError, match="^sdk_call_failed:stop_move$"):
+        await control.disarm()
+
+    await control.on_disconnect()
+    await control.connect()
+    state = await control.state_message()
+
+    assert backend.stops == [StopReason.GRIP_RELEASED, StopReason.DISCONNECT]
+    assert state.mode is TeleopMode.FAULT
+    assert state.fault == "stop_unverified"
+    assert control._pending_stop_completion is True
+
+
+@pytest.mark.asyncio
 async def test_grip_release_holds_and_stops_motion() -> None:
     control, latest, backend, clock = make_control()
     await connect_release_arm(control, latest, clock)
