@@ -206,11 +206,13 @@ describe('VR safety presentation', () => {
   });
 
   it.each([
-    ['workspace_boundary', '向反方向退回'],
-    ['ik_boundary', '保持 Grip，退回上一个位置'],
+    ['workspace_boundary', '已到达操作边界，保持 Grip 向反方向退回'],
+    ['ik_boundary', '当前姿态暂不可达，保持 Grip 退回上一个位置'],
+    ['joint_boundary', '已到达关节操作边界，保持 Grip 反向退回'],
   ] as const)('uses the specific safe recovery instruction for %s', (constraint, instruction) => {
-    expect(describeVrSafety({...state('active'), constraint}, true)).toMatchObject({
-      instruction,
+    const presentation = describeVrSafety({...state('active'), constraint}, true);
+    expect(`${presentation.title} ${presentation.instruction}`).toContain(instruction);
+    expect(presentation).toMatchObject({
       tone: 'amber',
     });
   });

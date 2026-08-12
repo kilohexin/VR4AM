@@ -39,6 +39,42 @@ def test_runtime_selects_axis_clamp_only_for_fake_backend() -> None:
     assert real.workspace_boundary_mode == "hold"
 
 
+def test_fake_profile_uses_responsive_but_bounded_motion_values() -> None:
+    settings = Settings.load(DIGITAL_TWIN_CONFIG)
+    assert settings.lebai is not None
+    control = settings.lebai.control
+
+    assert (
+        control.max_tcp_speed_mps,
+        control.max_tcp_rotation_radps,
+        control.max_tcp_acceleration_mps2,
+        control.max_tcp_angular_acceleration_radps2,
+        control.max_joint_speed_radps,
+        control.max_joint_acceleration_radps2,
+        control.max_joint_step_rad,
+        control.max_tcp_step_m,
+        control.max_tcp_rotation_step_deg,
+        control.max_relative_translation_m,
+        control.max_relative_rotation_deg,
+        control.translation_scale,
+    ) == pytest.approx(
+        (
+            0.06,
+            0.50,
+            0.20,
+            1.00,
+            0.30,
+            1.00,
+            0.015,
+            0.003,
+            1.5,
+            0.16,
+            45.0,
+            0.70,
+        )
+    )
+
+
 def test_digital_twin_app_reports_exact_fake_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

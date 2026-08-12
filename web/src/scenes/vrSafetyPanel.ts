@@ -124,8 +124,9 @@ function presentation(
 }
 
 function constraintInstruction(constraint: NonNullable<ArmSafetySnapshot['constraint']>): string {
-  if (constraint === 'workspace_boundary') return '向反方向退回';
-  if (constraint === 'ik_boundary') return '保持 Grip，退回上一个位置';
+  if (constraint === 'workspace_boundary') return '保持 Grip 向反方向退回';
+  if (constraint === 'ik_boundary') return '保持 Grip 退回上一个位置';
+  if (constraint === 'joint_boundary') return '保持 Grip 反向退回';
   return '将手柄移回可达区域，无需复位';
 }
 

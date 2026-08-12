@@ -158,6 +158,14 @@ class SafetyLimiter:
             velocity_delta *= max_velocity_delta / velocity_delta_norm
         self.linear_velocity += velocity_delta
         position = start + self.linear_velocity * dt
+        requested_step = target - start
+        actual_step = position - start
+        if (
+            np.dot(actual_step, requested_step) > 0
+            and np.linalg.norm(actual_step) >= np.linalg.norm(requested_step)
+        ):
+            position = target
+            self.linear_velocity[:] = 0
         if self.max_linear_step_m is not None:
             step = position - start
             step_norm = float(np.linalg.norm(step))
@@ -179,6 +187,14 @@ class SafetyLimiter:
             angular_velocity_delta *= max_angular_velocity_delta / angular_velocity_delta_norm
         self.angular_velocity += angular_velocity_delta
         limited_rotation = Rotation.from_rotvec(self.angular_velocity * dt) * start_rotation
+        angular_step = self.angular_velocity * dt
+        requested_rotvec = relative_rotation.as_rotvec()
+        if (
+            np.dot(angular_step, requested_rotvec) > 0
+            and np.linalg.norm(angular_step) >= np.linalg.norm(requested_rotvec)
+        ):
+            limited_rotation = requested_rotation
+            self.angular_velocity[:] = 0
         if self.max_angular_step_rad is not None:
             limited_delta = limited_rotation * start_rotation.inv()
             limited_angle = limited_delta.magnitude()
