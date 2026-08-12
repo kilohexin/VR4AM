@@ -62,6 +62,11 @@ export class DiagnosticsPanel {
     diagnostics: DiagnosticsMessage | null,
     latency: LatencyView,
   ): void {
+    const rail = this.root.closest<HTMLElement>('.status-rail');
+    const railScrollTop = rail?.scrollTop ?? null;
+    const eventScrollTop = this.root.querySelector<HTMLElement>(
+      '.diagnostics-event-stream',
+    )?.scrollTop ?? null;
     this.root.replaceChildren(
       this.renderIdentity(state, diagnostics),
       this.renderTcp(state.actual_tcp, diagnostics?.target_tcp ?? null),
@@ -70,6 +75,13 @@ export class DiagnosticsPanel {
       this.renderSafety(state),
       this.renderEvents(diagnostics),
     );
+    if (rail !== null && railScrollTop !== null) rail.scrollTop = railScrollTop;
+    const refreshedEventStream = this.root.querySelector<HTMLElement>(
+      '.diagnostics-event-stream',
+    );
+    if (refreshedEventStream !== null && eventScrollTop !== null) {
+      refreshedEventStream.scrollTop = eventScrollTop;
+    }
   }
 
   clear(): void {

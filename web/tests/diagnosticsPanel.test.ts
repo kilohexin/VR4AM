@@ -74,6 +74,29 @@ describe('DiagnosticsPanel', () => {
     expect(root.querySelector('img')).toBeNull();
   });
 
+  it('preserves operator scroll positions while live diagnostics refresh', () => {
+    document.body.innerHTML = `
+      <aside class="status-rail">
+        <div id="diagnostics"></div>
+      </aside>
+    `;
+    const rail = document.querySelector<HTMLElement>('.status-rail')!;
+    const root = document.querySelector<HTMLElement>('#diagnostics')!;
+    const panel = new DiagnosticsPanel(root);
+    const diagnostics = validDiagnostics as unknown as DiagnosticsMessage;
+    panel.update(robotFixture as RobotStateMessage, diagnostics, {currentMs: 18, p95Ms: 27});
+    const originalStream = root.querySelector<HTMLElement>('.diagnostics-event-stream')!;
+    rail.scrollTop = 320;
+    originalStream.scrollTop = 90;
+
+    panel.update(robotFixture as RobotStateMessage, diagnostics, {currentMs: 19, p95Ms: 28});
+
+    const refreshedStream = root.querySelector<HTMLElement>('.diagnostics-event-stream')!;
+    expect(refreshedStream).not.toBe(originalStream);
+    expect(rail.scrollTop).toBe(320);
+    expect(refreshedStream.scrollTop).toBe(90);
+  });
+
   it('clears stale diagnostics when the owner connection is no longer usable', () => {
     const root = document.querySelector<HTMLElement>('#diagnostics')!;
     const panel = new DiagnosticsPanel(root);
