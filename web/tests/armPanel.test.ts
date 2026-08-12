@@ -561,7 +561,7 @@ describe('ArmPanel simulator safety', () => {
     const before = panel.safetyState;
 
     panel.setRuntimeIdentity('LEBAI_FAKE');
-    expect(panel.armButton.textContent).toContain('解锁数字孪生');
+    expect(panel.armButton.textContent).toContain('解锁仿真');
     expect(panel.safetyState).toMatchObject({
       eligible: before.eligible,
       armed: before.armed,

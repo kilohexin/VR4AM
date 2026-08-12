@@ -138,7 +138,7 @@ function formatRuntimeSummary(summary: RobotRuntimeSummary): string {
     const mode = summary.realRobotMode === 'control' ? 'CONTROL' : 'READONLY';
     return `真机已连接 · ${mode} · TCP ${tcp} · ${latency}`;
   }
-  if (summary.backend === 'LEBAI_FAKE') return `数字孪生已连接 · TCP ${tcp} · ${latency}`;
+  if (summary.backend === 'LEBAI_FAKE') return `仿真已连接 · TCP ${tcp} · ${latency}`;
   return `SIMULATOR · TCP ${tcp} · ${latency}`;
 }
 

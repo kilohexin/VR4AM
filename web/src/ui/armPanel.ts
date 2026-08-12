@@ -194,7 +194,7 @@ export class ArmPanel {
     this.runtimeArmLabel = backend === 'LEBAI'
       ? '解锁真机'
       : backend === 'LEBAI_FAKE'
-        ? '解锁数字孪生'
+        ? '解锁仿真'
         : '解锁仿真';
     this.syncButtonState();
   }

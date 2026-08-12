@@ -83,6 +83,6 @@ def test_fake_runtime_recorder_durably_identifies_digital_twin(
 
     assert first_entry["kind"] == "session_started"
     assert first_entry["metadata"]["backend"] == "LEBAI_FAKE"
-    assert first_entry["metadata"]["runtime"] == "DIGITAL_TWIN"
+    assert first_entry["metadata"]["runtime"] == "SIMULATION"
     assert first_entry["metadata"]["hardware_verified"] is False
     assert first_entry["metadata"]["real_robot_mode"] == "control"

@@ -375,7 +375,7 @@ def _render_markdown(payload: Mapping[str, object]) -> str:
         "# Offline Fake-only rehearsal report",
         "",
         f"- Run ID: `{payload['run_id']}`",
-        f"- Runtime: `{payload['runtime']}` (digital twin; no hardware verification)",
+        f"- Runtime: `{payload['runtime']}` (simulation only; no hardware verification)",
         f"- Outcome: {payload['outcome']}",
         "- Hardware verified: false",
         f"- Log directory: {log_directory if log_directory is not None else 'not recorded'}",

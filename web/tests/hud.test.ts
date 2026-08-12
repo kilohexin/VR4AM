@@ -30,7 +30,7 @@ describe('Chinese simulator HUD', () => {
 
     expect(hud.sceneContainer).toBeInstanceOf(HTMLElement);
     expect(hud.rehearsalBanner).toBeInstanceOf(HTMLElement);
-    expect(hud.rehearsalBanner.textContent).toBe('DIGITAL TWIN / 数字孪生，不是真机');
+    expect(hud.rehearsalBanner.textContent).toBe('仿真模式，不是真机');
     expect(hud.rehearsalBanner.parentElement).toBe(document.querySelector('.operator-console'));
     expect(hud.rehearsalBanner.closest('.status-rail')).toBeNull();
     expect(hud.rehearsalBanner.nextElementSibling).toBe(document.querySelector('.console-main'));
@@ -121,7 +121,7 @@ describe('Chinese simulator HUD', () => {
     hud.setRuntimeIdentity('SIMULATOR', null);
     expect(document.querySelector('.simulator-label')?.textContent).toBe('仅仿真 · SIMULATOR');
     hud.setRuntimeIdentity('LEBAI_FAKE', null);
-    expect(document.querySelector('.simulator-label')?.textContent).toBe('数字孪生 · LEBAI_FAKE');
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('仿真 · LEBAI_FAKE');
     expect(document.querySelector('.simulator-label')?.getAttribute('data-backend')).toBe('LEBAI_FAKE');
     hud.setRuntimeIdentity('LEBAI', 'readonly');
     expect(document.querySelector('.simulator-label')?.textContent).toBe('真机只读 · LEBAI');

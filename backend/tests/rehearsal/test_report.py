@@ -93,6 +93,8 @@ async def test_finish_writes_authoritative_false_hardware_report(tmp_path: Path)
     assert not finished.json_path.with_suffix(".json.tmp").exists()
     markdown = finished.markdown_path.read_text(encoding="utf-8")
     assert "Offline Fake-only rehearsal" in markdown
+    assert "simulation only; no hardware verification" in markdown
+    assert "digital twin" not in markdown.lower()
     assert "Outcome: passed" in markdown
     assert "logs/commissioning/session-1" in markdown
     assert all(item in markdown for item in HARDWARE_PENDING)

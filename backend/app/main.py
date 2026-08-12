@@ -49,7 +49,7 @@ def build_recorder(
     if runtime == "LEBAI_FAKE":
         metadata.update(
             {
-                "runtime": "DIGITAL_TWIN",
+                "runtime": "SIMULATION",
                 "hardware_verified": False,
             }
         )

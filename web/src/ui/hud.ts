@@ -59,7 +59,7 @@ export class Hud {
         </div>
         <div class="command-actions-host"></div>
       </header>
-      <div class="offline-rehearsal-banner" role="note" style="position: fixed; top: 0; left: 0; right: 0; z-index: 20;">DIGITAL TWIN / 数字孪生，不是真机</div>
+      <div class="offline-rehearsal-banner" role="note" style="position: fixed; top: 0; left: 0; right: 0; z-index: 20;">仿真模式，不是真机</div>
       <main class="console-main">
         <section class="simulation-viewport" aria-label="LM3 三维仿真场景">
           <div class="scene-canvas"></div>
@@ -275,7 +275,7 @@ export function readableFault(fault: string | null): string {
 }
 
 function runtimeIdentityLabel(backend: RuntimeBackend | null, realMode: RealRobotMode | null): string {
-  if (backend === 'LEBAI_FAKE') return '数字孪生 · LEBAI_FAKE';
+  if (backend === 'LEBAI_FAKE') return '仿真 · LEBAI_FAKE';
   if (backend === 'LEBAI') {
     return realMode === 'control' ? '真机控制 · LEBAI' : '真机只读 · LEBAI';
   }

@@ -327,7 +327,7 @@ def test_ctrl_c_cleans_up_frontend_then_backend_and_prints_exact_ready_block(
     output = capsys.readouterr().out
     assert output.splitlines() == [
         "Offline rehearsal ready: https://127.0.0.1:5173/",
-        "Runtime: LEBAI_FAKE / DIGITAL_TWIN / hardware_verified=false",
+        "Runtime: LEBAI_FAKE / SIMULATION / hardware_verified=false",
         "Press Ctrl+C to stop.",
     ]
 

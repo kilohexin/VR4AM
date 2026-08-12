@@ -1,6 +1,6 @@
 # Fake Lebai offline acceptance
 
-This procedure validates the LM3 software path against the digital twin. It
+This procedure validates the LM3 software path in simulation. It
 does not connect to a robot, import or call the real Lebai SDK, request a
 real-robot confirmation, or verify a physical safety property. The generated
 report always identifies the runtime as `LEBAI_FAKE`, sets `digital_twin` to

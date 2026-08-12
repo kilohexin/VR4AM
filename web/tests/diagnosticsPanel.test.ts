@@ -21,7 +21,7 @@ describe('DiagnosticsPanel', () => {
     );
 
     expect(root.textContent).toContain('LEBAI_FAKE');
-    expect(root.textContent).toContain('DIGITAL TWIN');
+    expect(root.textContent).toContain('SIMULATION');
     expect(root.textContent).toContain('TCP');
     expect(root.textContent).toContain('q1');
     expect(root.textContent).toContain('PVAT 25.0 Hz');

@@ -86,13 +86,13 @@ wss://<PC-LAN-IP>:5173/ws/v1/teleop
 
 ## 无真机离线实验演练
 
-当前仓库除纯模拟器外，还包含 LM3 真机适配器形状相同的 Fake Lebai 数字孪生路径、真实适配器的受保护软件路径和现场 commissioning 工具；这些代码存在不代表真实机器人已经验证。当 LM3 或 Quest 不可用时，推荐先从仓库根目录运行：
+当前仓库包含仿真路径、真实适配器的受保护软件路径和现场 commissioning 工具；这些代码存在不代表真实机器人已经验证。当 LM3 或 Quest 不可用时，推荐先从仓库根目录运行：
 
 ```powershell
 python scripts/run_offline_rehearsal.py
 ```
 
-该单一入口固定启动 Task 8 的 Fake 后端与 PC HTTPS 前端，打印 `https://127.0.0.1:5173/`，并保持 `LEBAI_FAKE / DIGITAL_TWIN / hardware_verified=false`。演练只允许一个 PC 页面持有唯一控制 WebSocket，没有第二控制端或 observer 角色；不要同时打开 Quest 或其他控制标签页。它会覆盖 Home、平移、旋转、夹爪、方块抓放、软边界、跟踪丢失恢复和最终停止，并生成 JSON/Markdown 证据，但不连接真实 SDK、不证明真实方向/延迟/停止距离，也不授权真机运动。
+该单一入口固定启动 Task 8 的仿真后端与 PC HTTPS 前端，打印 `https://127.0.0.1:5173/`，并保持 `LEBAI_FAKE / SIMULATION / hardware_verified=false`。演练只允许一个 PC 页面持有唯一控制 WebSocket，没有第二控制端或 observer 角色；不要同时打开 Quest 或其他控制标签页。它会覆盖 Home、平移、旋转、夹爪、方块抓放、软边界、跟踪丢失恢复和最终停止，并生成 JSON/Markdown 证据，但不连接真实 SDK、不证明真实方向/延迟/停止距离，也不授权真机运动。
 
 Fake 演练保持现有 Home 不变；Home 后通过同一控制 WebSocket 的普通 Grip/VRFrame 路径到达固定的 Fake-only 准备位姿，再以权威状态确认后开始轴向检查。该准备动作不是新的控制通道，也不会改变真机 Home 或真机控制流程。
 

@@ -381,7 +381,7 @@ def run_launcher(
         )
         print(f"Offline rehearsal ready: {spec.frontend_url}", file=stdout)
         print(
-            "Runtime: LEBAI_FAKE / DIGITAL_TWIN / hardware_verified=false",
+            "Runtime: LEBAI_FAKE / SIMULATION / hardware_verified=false",
             file=stdout,
         )
         print("Press Ctrl+C to stop.", file=stdout)

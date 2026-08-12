@@ -4,7 +4,7 @@
 
 首次实验不要求眼在手外相机，也不要求相机标定。相机与时间同步接口继续保留，完成安全、稳定的遥操作后再接入 Gemini 330。
 
-当 LM3 或 Quest 暂不可用时，推荐先完成 [无真机离线实验演练](offline-rehearsal.md)，用 `LEBAI_FAKE / DIGITAL_TWIN` 复核当前软件路径。离线报告始终是 `hardware_verified=false`，不替代本流程中的真实 SDK、方向、延迟、停止距离、急停和夹爪负载检查，也不授权直接进入 `control`。到达现场后仍从第 2 节的 `mode: readonly` 和第 4 节的零写入只读预检开始。
+当 LM3 或 Quest 暂不可用时，推荐先完成 [无真机离线实验演练](offline-rehearsal.md)，用 `LEBAI_FAKE / SIMULATION` 复核当前软件路径。离线报告始终是 `hardware_verified=false`，不替代本流程中的真实 SDK、方向、延迟、停止距离、急停和夹爪负载检查，也不授权直接进入 `control`。到达现场后仍从第 2 节的 `mode: readonly` 和第 4 节的零写入只读预检开始。
 
 当前 Task 9 冻结点的完整 PC 浏览器演练仍为 **pending/failed**：Fake 准备位姿已在 `11.488 s` 内通过，但平移阶段的一次 `399.063 ms` 帧空洞触发了预期的 stale 停止，后续阶段未完成。该状态不改变现场流程；即使未来离线浏览器演练通过，也仍必须从 `readonly` 开始并完成全部八项真机检查。
 
