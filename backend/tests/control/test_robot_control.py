@@ -2048,6 +2048,34 @@ async def test_self_collision_command_error_is_a_soft_constraint() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "expected_constraint"),
+    [
+        ("ik_joint_jump", "joint_boundary"),
+        ("ik_joint_limit", "joint_boundary"),
+        ("joint_speed_limit", "joint_boundary"),
+    ],
+)
+async def test_pvat_continuity_rejection_is_a_soft_constraint(
+    reason: str,
+    expected_constraint: str,
+) -> None:
+    control, latest, backend, clock = make_control()
+    backend.command_tcp = AsyncMock(side_effect=BackendCommandError(reason))
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    latest.publish(frame(3, True, p=(0.0, 1.2, -0.31)), clock.now_ns())
+
+    await control.tick()
+
+    state = await control.state_message()
+    assert control.mode is TeleopMode.ACTIVE
+    assert control._fault is None
+    assert state.constraint == expected_constraint
+
+
+@pytest.mark.asyncio
 async def test_stop_is_idempotent_and_uses_shutdown_reason() -> None:
     control, _latest, backend, _clock = make_control()
 

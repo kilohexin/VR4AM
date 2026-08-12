@@ -678,7 +678,12 @@ class RobotControl:
                     code = str(error)
                     if code in {"ik_unreachable", "ik_singular"}:
                         self._set_constraint("ik_boundary")
-                    elif code == "joint_safety_window":
+                    elif code in {
+                        "joint_safety_window",
+                        "ik_joint_jump",
+                        "ik_joint_limit",
+                        "joint_speed_limit",
+                    }:
                         self._set_constraint("joint_boundary")
                     elif code == "self_collision":
                         self._set_constraint("self_collision")
