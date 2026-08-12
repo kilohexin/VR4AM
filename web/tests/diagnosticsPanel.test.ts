@@ -92,9 +92,66 @@ describe('DiagnosticsPanel', () => {
     panel.update(robotFixture as RobotStateMessage, diagnostics, {currentMs: 19, p95Ms: 28});
 
     const refreshedStream = root.querySelector<HTMLElement>('.diagnostics-event-stream')!;
-    expect(refreshedStream).not.toBe(originalStream);
+    expect(refreshedStream).toBe(originalStream);
     expect(rail.scrollTop).toBe(320);
     expect(refreshedStream.scrollTop).toBe(90);
+  });
+
+  it('does not rebuild diagnostics while the operator is reading below the top', () => {
+    document.body.innerHTML = `
+      <aside class="status-rail">
+        <div id="diagnostics"></div>
+      </aside>
+    `;
+    const rail = document.querySelector<HTMLElement>('.status-rail')!;
+    const root = document.querySelector<HTMLElement>('#diagnostics')!;
+    const panel = new DiagnosticsPanel(root);
+    const diagnostics = validDiagnostics as unknown as DiagnosticsMessage;
+    panel.update(robotFixture as RobotStateMessage, diagnostics, {currentMs: 18, p95Ms: 27});
+    const originalCard = root.firstElementChild;
+    const originalText = root.textContent;
+    rail.scrollTop = 320;
+
+    panel.update(
+      {...robotFixture, mode: 'ACTIVE'} as RobotStateMessage,
+      diagnostics,
+      {currentMs: 99, p95Ms: 120},
+    );
+
+    expect(root.firstElementChild).toBe(originalCard);
+    expect(root.textContent).toBe(originalText);
+    expect(rail.scrollTop).toBe(320);
+
+    rail.scrollTop = 0;
+    panel.update(
+      {...robotFixture, mode: 'ACTIVE'} as RobotStateMessage,
+      diagnostics,
+      {currentMs: 99, p95Ms: 120},
+    );
+    expect(root.firstElementChild).not.toBe(originalCard);
+    expect(root.textContent).toContain('ACTIVE');
+    expect(root.textContent).toContain('99 ms');
+  });
+
+  it('does not rebuild diagnostics while the operator is scrolling recent events', () => {
+    document.body.innerHTML = `
+      <aside class="status-rail">
+        <div id="diagnostics"></div>
+      </aside>
+    `;
+    const rail = document.querySelector<HTMLElement>('.status-rail')!;
+    const root = document.querySelector<HTMLElement>('#diagnostics')!;
+    const panel = new DiagnosticsPanel(root);
+    const diagnostics = validDiagnostics as unknown as DiagnosticsMessage;
+    panel.update(robotFixture as RobotStateMessage, diagnostics, {currentMs: 18, p95Ms: 27});
+    const originalStream = root.querySelector<HTMLElement>('.diagnostics-event-stream')!;
+    rail.scrollTop = 0;
+    originalStream.scrollTop = 90;
+
+    panel.update(robotFixture as RobotStateMessage, diagnostics, {currentMs: 19, p95Ms: 28});
+
+    expect(root.querySelector<HTMLElement>('.diagnostics-event-stream')).toBe(originalStream);
+    expect(originalStream.scrollTop).toBe(90);
   });
 
   it('clears stale diagnostics when the owner connection is no longer usable', () => {
