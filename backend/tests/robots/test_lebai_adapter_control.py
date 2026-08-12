@@ -360,6 +360,55 @@ async def test_stop_move_cancellation_escalates_and_latches_unverified_stop() ->
 
 
 @pytest.mark.asyncio
+async def test_verified_disconnect_clears_only_a_cancelled_stop_fault() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    original_stop_move = client.stop_move
+    stop_started = asyncio.Event()
+
+    async def blocked_stop_move() -> None:
+        client.write_calls.append(("stop_move",))
+        stop_started.set()
+        await asyncio.Event().wait()
+
+    client.stop_move = blocked_stop_move  # type: ignore[method-assign]
+    stop_task = asyncio.create_task(adapter.stop(StopReason.GRIP_RELEASED))
+    await stop_started.wait()
+    stop_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
+
+    client.stop_move = original_stop_move  # type: ignore[method-assign]
+    await adapter.stop(StopReason.DISCONNECT)
+    state = await adapter.get_state()
+
+    assert state.robot_state.value == "IDLE"
+    assert state.fault is None
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_verified_disconnect_keeps_a_real_stop_failure_latched() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    original_stop_move = client.stop_move
+
+    async def failed_stop_move() -> None:
+        client.write_calls.append(("stop_move",))
+        raise RuntimeError("simulated_stop_move_failure")
+
+    client.stop_move = failed_stop_move  # type: ignore[method-assign]
+    with pytest.raises(BackendCommandError, match="^sdk_call_failed:stop_move$"):
+        await adapter.stop(StopReason.GRIP_RELEASED)
+
+    client.stop_move = original_stop_move  # type: ignore[method-assign]
+    await adapter.stop(StopReason.DISCONNECT)
+    state = await adapter.get_state()
+
+    assert state.robot_state.value == "FAULT"
+    assert state.fault == "stop_unverified"
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stop_sys_error", [RuntimeError("failed"), TimeoutError()])
 async def test_stop_move_failure_retains_primary_error_when_escalation_fails(
     stop_sys_error: Exception,

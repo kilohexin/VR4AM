@@ -115,6 +115,7 @@ class RealLebaiAdapter:
         self._constraint_error: str | None = None
         self._consecutive_ik_failures = 0
         self._latched_fault: str | None = None
+        self._latched_fault_from_cancelled_stop = False
         self._preflight_ready = False
 
     @property
@@ -238,7 +239,12 @@ class RealLebaiAdapter:
             async with self._sdk_lock:
                 await asyncio.wait_for(client.stop_move(), timeout=0.20)
         except asyncio.CancelledError:
-            await asyncio.shield(self._fail_unverified_stop(client))
+            await asyncio.shield(
+                self._fail_unverified_stop(
+                    client,
+                    from_cancelled_stop=True,
+                )
+            )
             raise
         except TimeoutError:
             await self._fail_unverified_stop(client)
@@ -260,6 +266,8 @@ class RealLebaiAdapter:
                         stable_since_ns = now_ns
                     elif now_ns - stable_since_ns >= 300_000_000:
                         self._motion_accepted = False
+                        if reason is StopReason.DISCONNECT:
+                            self._resolve_cancelled_stop_with_verified_disconnect()
                         return
                 else:
                     stable_since_ns = None
@@ -272,7 +280,12 @@ class RealLebaiAdapter:
                     raise BackendCommandError("stop_incomplete")
                 await self._sleep(0.02)
         except asyncio.CancelledError:
-            await asyncio.shield(self._fail_unverified_stop(client))
+            await asyncio.shield(
+                self._fail_unverified_stop(
+                    client,
+                    from_cancelled_stop=True,
+                )
+            )
             raise
         except BackendCommandError as error:
             if str(error) == "stop_incomplete":
@@ -287,8 +300,13 @@ class RealLebaiAdapter:
             await self._fail_unverified_stop(client)
             raise BackendCommandError("stop_unverified") from None
 
-    def _latch_unverified_stop(self) -> None:
+    def _latch_unverified_stop(
+        self,
+        *,
+        from_cancelled_stop: bool = False,
+    ) -> None:
         self._latched_fault = "stop_unverified"
+        self._latched_fault_from_cancelled_stop = from_cancelled_stop
         self._motion_accepted = False
         self._preflight_ready = False
         self._pump.invalidate()
@@ -299,15 +317,26 @@ class RealLebaiAdapter:
         client: LebaiClientProtocol,
         *,
         preserve_fault: bool = False,
+        from_cancelled_stop: bool = False,
     ) -> None:
         if not preserve_fault:
-            self._latch_unverified_stop()
+            self._latch_unverified_stop(
+                from_cancelled_stop=from_cancelled_stop,
+            )
         else:
             self._motion_accepted = False
             self._preflight_ready = False
             self._pump.invalidate()
             self._previous_sent_qd = None
         await self._safety_escalate_stop_sys(client)
+
+    def _resolve_cancelled_stop_with_verified_disconnect(self) -> None:
+        if not self._latched_fault_from_cancelled_stop:
+            return
+        if self._latched_fault != "stop_unverified":
+            return
+        self._latched_fault = None
+        self._latched_fault_from_cancelled_stop = False
 
     async def _safety_escalate_stop_sys(
         self,
