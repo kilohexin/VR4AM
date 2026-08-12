@@ -45,6 +45,19 @@ def _receive_ack(ws: Any, seq: int, *, limit: int = 40) -> dict[str, Any]:
     raise AssertionError(f"did not receive ack {seq}")
 
 
+def _receive_ack_or_fault(
+    ws: Any,
+    seq: int,
+    *,
+    limit: int = 40,
+) -> dict[str, Any]:
+    for _ in range(limit):
+        state = _receive_type(ws, "robot_state")
+        if state["ack_seq"] == seq or state["fault"] is not None:
+            return state
+    raise AssertionError(f"did not receive ack {seq} or fault")
+
+
 def _receive_arm_result(ws: Any, *, limit: int = 40) -> dict[str, Any]:
     for _ in range(limit):
         message = ws.receive_json()
@@ -169,8 +182,28 @@ def test_single_socket_remains_responsive_through_soft_constraints_and_recovery(
 
             seq += 1
             ws.send_json(_frame(seq, x=0.0, grip=False))
-            stopped = _receive_type(ws, "robot_state")
-            assert stopped["mode"] in {TeleopMode.HOLD, TeleopMode.DISARMED}
+            stopped = _receive_ack(ws, seq)
+            assert stopped["mode"] == TeleopMode.HOLD
+            assert stopped["fault"] is None
+
+            seq += 1
+            ws.send_json(_frame(seq, x=0.0, grip=True))
+            regripped = _receive_ack_or_fault(ws, seq)
+            assert regripped["mode"] == TeleopMode.ACTIVE
+            assert regripped["fault"] is None
+
+            seq += 1
+            ws.send_json(_frame(seq, x=0.02, grip=True))
+            resumed = _receive_ack_or_fault(ws, seq)
+            assert resumed["mode"] == TeleopMode.ACTIVE
+            assert resumed["fault"] is None
+            assert resumed["ack_seq"] == seq
+
+            seq += 1
+            ws.send_json(_frame(seq, x=0.0, grip=False))
+            stopped_again = _receive_ack(ws, seq)
+            assert stopped_again["mode"] == TeleopMode.HOLD
+            assert stopped_again["fault"] is None
             ws.send_json({"v": 1, "type": "disarm", "request_id": "disarm"})
             assert _receive_type(ws, "disarm_ack")["request_id"] == "disarm"
 

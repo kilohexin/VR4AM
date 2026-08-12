@@ -625,6 +625,29 @@ class RobotControl:
                 and not self._shutdown_started
             ):
                 mode_before_grip = self.machine.mode
+                if (
+                    mode_before_grip == TeleopMode.HOLD
+                    and received.frame.right.grip
+                ):
+                    preflight = await self.backend.preflight()
+                    recorded = await self._record_critical(
+                        "preflight_result",
+                        {
+                            "ready": preflight.ready,
+                            "reason": preflight.reason,
+                            "robot_state": preflight.robot_state.value,
+                            "tcp_matches": preflight.tcp_matches,
+                            "capabilities": list(preflight.capabilities),
+                        },
+                    )
+                    if not recorded:
+                        await self._handle_recording_unavailable()
+                        return
+                    if not preflight.ready:
+                        reason = preflight.reason or "unknown"
+                        raise BackendCommandError(
+                            f"preflight_not_ready:{reason}"
+                        )
                 self.machine.observe_grip(received.frame.right.grip)
                 if self.machine.mode != mode_before_grip:
                     recorded = await self._record_critical(
