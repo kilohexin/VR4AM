@@ -130,7 +130,7 @@ async def fake_real_harness() -> AsyncIterator[Harness]:
         clock=clock,
         recorder=recorder,
         mapper=_build_mapper(settings),
-        limiter=_build_limiter(settings),
+            limiter=_build_limiter(settings, "LEBAI_FAKE"),
         constraint_clear_ms=settings.constraint_clear_ms,
     )
     harness = Harness(
@@ -673,7 +673,7 @@ async def _run_ik_failure_case() -> tuple[int, int]:
             1_000_000_000 / harness.settings.lebai.control.pvat_send_hz
         )
         verified_failures = 0
-        for failure_index, seq in enumerate(range(3, 7), start=1):
+        for failure_index, seq in enumerate(range(3, 9), start=1):
             started_ns = harness.clock.now_ns()
             await _publish_motion(harness, seq, 0.001 * (seq - 2))
             await _yield_until(
@@ -687,14 +687,19 @@ async def _run_ik_failure_case() -> tuple[int, int]:
                 soft = await _publish_state(harness)
                 assert soft.constraint == "ik_boundary"
                 assert soft.fault is None
+        assert harness.backend.pump_fault is None
+        assert harness.backend._pump.running is True
+        assert harness.control.mode is TeleopMode.ACTIVE
 
-        await _publish_motion(harness, 7, 0.005)
-        await _yield_until(lambda: harness.backend.pump_fault is not None)
-        verified_failures += 1
-        assert str(harness.backend.pump_fault) == "ik_failure_persistent"
-        await _publish_motion(harness, 8, 0.004)
-        assert harness.control.mode is TeleopMode.FAULT
-        assert "stop_move" in _methods(harness)
+        harness.client.set_faults(DigitalTwinFaults())
+        pvat_before = _methods(harness).count("move_pvat")
+        await _publish_motion(harness, 9, 0.004)
+        await _yield_until(
+            lambda: _methods(harness).count("move_pvat") > pvat_before
+        )
+        recovered = await _publish_state(harness)
+        assert recovered.fault is None
+        assert harness.backend.pump_fault is None
         return verified_failures, len(harness.published_states)
 
 
@@ -796,7 +801,7 @@ async def run_fault_scenario() -> FakeLebaiScenarioResult:
             "cases": cases,
             "injected": len(case_operations),
             "verified": len(outcomes),
-            "ik_failures_before_hard_fault": ik_failures,
+            "recoverable_ik_failures": ik_failures,
             "stop_sys_calls": stop_sys_calls,
             "published_states": (
                 ik_states

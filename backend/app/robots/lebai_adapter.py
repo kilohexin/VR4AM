@@ -31,7 +31,8 @@ from app.robots.lebai_sdk_bridge import (
     detect_capabilities,
 )
 from app.robots.lebai_pump import PvatPump, PvatRequest
-from app.robots.lebai_pvat import PvatLimits, build_pvat_point
+from app.robots.lebai_pvat import PvatLimits, PvatPoint, build_pvat_point
+from app.robots.lebai_recovery import recovery_candidates
 from app.schemas.messages import (
     BackendState,
     JointVector,
@@ -42,6 +43,13 @@ from app.schemas.messages import (
 
 ClientFactory = Callable[[str], Awaitable[LebaiClientProtocol]]
 EventCallback = Callable[[dict[str, object], int], Awaitable[None]]
+RECOVERABLE_IK_ERRORS = {
+    "ik_unreachable",
+    "ik_invalid",
+    "ik_joint_limit",
+    "ik_joint_jump",
+    "joint_speed_limit",
+}
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,7 @@ class RealLebaiAdapter:
             sleep=pump_sleep,
         )
         self._previous_sent_qd: JointVector | None = None
+        self._last_sent_tcp: Pose | None = None
         self._constraint: str | None = None
         self._constraint_error: str | None = None
         self._consecutive_ik_failures = 0
@@ -160,6 +169,7 @@ class RealLebaiAdapter:
         ):
             await self.stop(StopReason.SHUTDOWN)
         await self._pump.stop()
+        self._reset_pvat_history()
         self._snapshot = None
         self._client = None
         self._motion_accepted = False
@@ -229,7 +239,7 @@ class RealLebaiAdapter:
         if self.settings.mode == "readonly":
             return
         self._pump.invalidate()
-        self._previous_sent_qd = None
+        self._reset_pvat_history()
         self._preflight_ready = False
         client = self._client
         if client is None:
@@ -310,7 +320,7 @@ class RealLebaiAdapter:
         self._motion_accepted = False
         self._preflight_ready = False
         self._pump.invalidate()
-        self._previous_sent_qd = None
+        self._reset_pvat_history()
 
     async def _fail_unverified_stop(
         self,
@@ -327,7 +337,7 @@ class RealLebaiAdapter:
             self._motion_accepted = False
             self._preflight_ready = False
             self._pump.invalidate()
-            self._previous_sent_qd = None
+            self._reset_pvat_history()
         await self._safety_escalate_stop_sys(client)
 
     def _resolve_cancelled_stop_with_verified_disconnect(self) -> None:
@@ -375,7 +385,7 @@ class RealLebaiAdapter:
         if self._pump.has_pending:
             raise BackendCommandError("home_command_pending")
         self._pump.invalidate()
-        self._previous_sent_qd = None
+        self._reset_pvat_history()
         on_phase("homing")
         async with self._sdk_lock:
             try:
@@ -535,7 +545,7 @@ class RealLebaiAdapter:
             self._preflight_ready = False
             self._motion_accepted = False
             self._pump.invalidate()
-            self._previous_sent_qd = None
+            self._reset_pvat_history()
             try:
                 await self.stop(StopReason.FAULT)
             except asyncio.CancelledError:
@@ -546,31 +556,27 @@ class RealLebaiAdapter:
             if self._latched_fault == runtime_fault:
                 raise BackendCommandError(runtime_fault)
             raise BackendCommandError(self._latched_fault or "stop_unverified")
-        try:
-            async with self._sdk_lock:
+        accepted: tuple[float, Pose, PvatPoint, float] | None = None
+        last_recoverable_error: str | None = None
+        async with self._sdk_lock:
+            for fraction, candidate in recovery_candidates(
+                self._last_sent_tcp,
+                request.target,
+                fake=self._backend_label == "LEBAI_FAKE",
+            ):
                 try:
-                    solution = await asyncio.wait_for(
-                        client.kinematics_inverse(
-                            pose_to_lebai(request.target),
-                            list(snapshot.actual_q),
-                        ),
-                        timeout=0.20,
+                    point = await self._solve_candidate(
+                        client,
+                        snapshot,
+                        candidate,
                     )
-                except TimeoutError:
-                    raise BackendCommandError("sdk_timeout:ik") from None
-                except Exception:
-                    raise BackendCommandError("sdk_call_failed:ik") from None
+                except BackendCommandError as error:
+                    if str(error) not in RECOVERABLE_IK_ERRORS:
+                        raise
+                    last_recoverable_error = str(error)
+                    continue
                 if not self._pump.is_current(request.generation):
                     return
-                if solution is None:
-                    raise BackendCommandError("ik_unreachable")
-                point = build_pvat_point(
-                    solution_q=solution,
-                    actual_q=snapshot.actual_q,
-                    actual_qd=snapshot.actual_qd,
-                    previous_qd=self._previous_sent_qd,
-                    limits=self._pvat_limits,
-                )
                 pvat_started = self._clock()
                 try:
                     await asyncio.wait_for(
@@ -592,28 +598,35 @@ class RealLebaiAdapter:
                     0.0,
                     (self._clock() - pvat_started) / 1_000_000,
                 )
-        except BackendCommandError as error:
-            if str(error) in {
-                "ik_unreachable",
-                "ik_invalid",
-                "ik_joint_limit",
-                "ik_joint_jump",
-                "joint_speed_limit",
-            }:
-                self._note_soft_constraint(str(error))
-                return
-            raise
-        self._constraint = None
-        self._constraint_error = None
-        self._consecutive_ik_failures = 0
+                accepted = (fraction, candidate, point, pvat_latency_ms)
+                break
+        if accepted is None:
+            self._note_soft_constraint(
+                last_recoverable_error or "ik_unreachable",
+                persistent=self._backend_label != "LEBAI_FAKE",
+            )
+            return
+        fraction, candidate, point, pvat_latency_ms = accepted
+        if fraction == 1.0:
+            self._constraint = None
+            self._constraint_error = None
+            self._consecutive_ik_failures = 0
+        else:
+            self._note_soft_constraint(
+                last_recoverable_error or "ik_unreachable",
+                persistent=False,
+            )
         self._previous_sent_qd = point.qd
+        self._last_sent_tcp = candidate.model_copy(deep=True)
         self._command_id = request.command_id
         self._motion_accepted = True
         await self._emit_event(
             {
                 "kind": "pvat_sent",
                 "command_id": request.command_id,
-                "target_tcp": request.target.model_dump(),
+                "requested_tcp": request.target.model_dump(),
+                "target_tcp": candidate.model_dump(),
+                "recovery_fraction": fraction,
                 "p": list(point.q),
                 "v": list(point.qd),
                 "a": list(point.qdd),
@@ -622,7 +635,40 @@ class RealLebaiAdapter:
             }
         )
 
-    def _note_soft_constraint(self, reason: str) -> None:
+    async def _solve_candidate(
+        self,
+        client: LebaiClientProtocol,
+        snapshot: LebaiSnapshot,
+        target: Pose,
+    ) -> PvatPoint:
+        try:
+            solution = await asyncio.wait_for(
+                client.kinematics_inverse(
+                    pose_to_lebai(target),
+                    list(snapshot.actual_q),
+                ),
+                timeout=0.20,
+            )
+        except TimeoutError:
+            raise BackendCommandError("sdk_timeout:ik") from None
+        except Exception:
+            raise BackendCommandError("sdk_call_failed:ik") from None
+        if solution is None:
+            raise BackendCommandError("ik_unreachable")
+        return build_pvat_point(
+            solution_q=solution,
+            actual_q=snapshot.actual_q,
+            actual_qd=snapshot.actual_qd,
+            previous_qd=self._previous_sent_qd,
+            limits=self._pvat_limits,
+        )
+
+    def _note_soft_constraint(
+        self,
+        reason: str,
+        *,
+        persistent: bool = True,
+    ) -> None:
         self._consecutive_ik_failures += 1
         self._constraint_error = (
             "ik_unreachable" if reason in {"ik_unreachable", "ik_invalid"}
@@ -633,8 +679,12 @@ class RealLebaiAdapter:
             if self._constraint_error == "ik_unreachable"
             else "joint_boundary"
         )
-        if self._consecutive_ik_failures >= 5:
+        if persistent and self._consecutive_ik_failures >= 5:
             raise BackendCommandError("ik_failure_persistent")
+
+    def _reset_pvat_history(self) -> None:
+        self._previous_sent_qd = None
+        self._last_sent_tcp = None
 
     async def _emit_event(self, event: dict[str, object]) -> None:
         if self._event_callback is None:

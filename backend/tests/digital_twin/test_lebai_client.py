@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from unittest.mock import patch
 
 from app.digital_twin.lebai_client import DigitalTwinFaults, DigitalTwinLebaiClient
+from app.sim.cartesian_servo import CartesianServoResult
 from app.robots.lebai_sdk_bridge import detect_capabilities
 from tests.robots.fake_lebai import ACTUAL_TCP, IDLE_Q
 from tests.robots.real_settings import control_settings
@@ -58,6 +60,29 @@ async def test_ik_failure_returns_none_without_mutating_state() -> None:
     )
     before = await client.get_kin_data()
     assert await client.kinematics_inverse(ACTUAL_TCP, list(IDLE_Q)) is None
+    assert await client.get_kin_data() == before
+
+
+@pytest.mark.asyncio
+async def test_self_collision_limited_ik_returns_none_without_mutating_state() -> None:
+    client = DigitalTwinLebaiClient.idle(control_settings())
+    before = await client.get_kin_data()
+    result = CartesianServoResult(
+        q=tuple(IDLE_Q),
+        joint_velocity=(0.0,) * 6,
+        position_error_m=0.01,
+        orientation_error_rad=0.0,
+        joint_limited=False,
+        self_collision_limited=True,
+    )
+
+    with patch(
+        "app.digital_twin.lebai_client.cartesian_servo_step",
+        return_value=result,
+    ):
+        solution = await client.kinematics_inverse(ACTUAL_TCP, list(IDLE_Q))
+
+    assert solution is None
     assert await client.get_kin_data() == before
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from typing import Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -83,6 +84,7 @@ async def _connected_control_adapter(
     *,
     block_ik: bool = False,
     clock: FakeClock | None = None,
+    backend_label: Literal["LEBAI", "LEBAI_FAKE"] = "LEBAI",
 ) -> tuple[RealLebaiAdapter, FakeLebaiClient, FakeClock]:
     fake = FakeLebaiClient.idle()
     fake.block_ik = block_ik
@@ -92,6 +94,7 @@ async def _connected_control_adapter(
         client_factory=AsyncMock(return_value=fake),
         clock=test_clock.now_ns,
         sleep=test_clock.sleep,
+        backend_label=backend_label,
     )
     await adapter.connect()
     return adapter, fake, test_clock
@@ -278,6 +281,117 @@ async def test_one_ik_miss_recovers_but_five_consecutive_misses_fault() -> None:
     await _wait_until(lambda: adapter.pump_fault is not None)
 
     assert str(adapter.pump_fault) == "ik_failure_persistent"
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_fake_repeated_ik_misses_remain_soft_and_keep_pump_running() -> None:
+    adapter, client, _ = await _connected_control_adapter(
+        backend_label="LEBAI_FAKE",
+    )
+    client.ik_results = deque([None] * 10)
+
+    for command_id in range(1, 11):
+        await _send_and_wait_for_ik(adapter, client, command_id)
+
+    assert adapter.constraint == "ik_boundary"
+    assert adapter.pump_fault is None
+    assert adapter._pump.running is True
+    await adapter.get_state()
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_fake_ik_fallback_sends_nearest_feasible_candidate() -> None:
+    events: list[dict[str, object]] = []
+
+    async def recorder(event: dict[str, object], _timestamp: int) -> None:
+        events.append(event)
+
+    client = FakeLebaiClient.idle()
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=recorder,
+        backend_label="LEBAI_FAKE",
+    )
+    await adapter.connect()
+    initial = _target(0.30)
+    requested = _target(0.34)
+    initial_solution = [0.0032, -1.0, 1.0, 0.0, 1.57, 0.0]
+    fallback_solution = [0.0040, -1.0, 1.0, 0.0, 1.57, 0.0]
+    client.ik_results = deque(
+        [
+            initial_solution,
+            None,
+            fallback_solution,
+        ]
+    )
+
+    await adapter.command_tcp(initial, command_id=1)
+    await client.wait_for_write("move_pvat")
+    await adapter.command_tcp(requested, command_id=2)
+    await _wait_until(lambda: len(client.ik_calls) == 3)
+    await _wait_until(
+        lambda: [call[0] for call in client.write_calls].count("move_pvat")
+        == 2
+    )
+
+    assert client.ik_calls[-2][0] == pytest.approx(pose_to_lebai(requested))
+    assert client.ik_calls[-1][0] == pytest.approx(
+        pose_to_lebai(_target(0.33))
+    )
+    pvat_events = [event for event in events if event["kind"] == "pvat_sent"]
+    assert pvat_events[-1]["recovery_fraction"] == pytest.approx(0.75)
+    assert pvat_events[-1]["requested_tcp"] == requested.model_dump()
+    assert pvat_events[-1]["target_tcp"] == _target(0.33).model_dump()
+    assert adapter.pump_fault is None
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_stop_clears_fake_fallback_pose_history() -> None:
+    adapter, client, _ = await _connected_control_adapter(
+        backend_label="LEBAI_FAKE",
+    )
+    client.ik_results = deque(
+        [[0.0032, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+    await adapter.command_tcp(_target(0.30), command_id=1)
+    await client.wait_for_write("move_pvat")
+
+    await adapter.stop(StopReason.GRIP_RELEASED)
+    assert adapter._last_sent_tcp is None
+
+    client.ik_results = deque([None])
+    previous_calls = len(client.ik_calls)
+    await adapter.preflight()
+    await adapter.command_tcp(_target(0.34), command_id=2)
+    await _wait_until(lambda: len(client.ik_calls) > previous_calls)
+
+    assert len(client.ik_calls) == previous_calls + 1
+    assert adapter.pump_fault is None
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_fake_unknown_ik_exception_still_faults_pump() -> None:
+    adapter, client, _ = await _connected_control_adapter(
+        backend_label="LEBAI_FAKE",
+    )
+    client.kinematics_inverse = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("unexpected_ik_failure")
+    )
+
+    await adapter.command_tcp(_target(0.31), command_id=1)
+    await _wait_until(lambda: adapter.pump_fault is not None)
+
+    assert str(adapter.pump_fault) == "sdk_call_failed:ik"
+    with pytest.raises(BackendCommandError, match="^sdk_call_failed:ik$"):
+        await adapter.get_state()
     await adapter.disconnect()
 
 

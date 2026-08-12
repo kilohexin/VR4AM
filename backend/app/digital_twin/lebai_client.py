@@ -175,6 +175,8 @@ class DigitalTwinLebaiClient:
             # manufacture a joint jump for an otherwise valid TCP command.
             dt=0.5 / self.settings.control.loop_hz,
         )
+        if result.self_collision_limited:
+            return None
         return list(result.q)
 
     async def move_pvat(
