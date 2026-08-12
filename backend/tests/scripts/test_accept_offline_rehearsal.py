@@ -147,6 +147,60 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
+def _wait_for_stubborn_fixture_ready(
+    *,
+    tree,
+    pid_path: Path,
+    stdout,
+    stderr,
+    capture_tail,
+    timeout_s: float,
+) -> float:
+    started = time.perf_counter()
+    deadline = started + timeout_s
+    last_pid_error = "pid_file_absent"
+    while time.perf_counter() < deadline:
+        if pid_path.exists():
+            try:
+                pids = json.loads(pid_path.read_text(encoding="utf-8"))
+                valid = (
+                    isinstance(pids, list)
+                    and len(pids) == 3
+                    and all(isinstance(pid, int) and pid > 0 for pid in pids)
+                )
+                if valid and all(_pid_is_alive(pid) for pid in pids):
+                    return time.perf_counter() - started
+                last_pid_error = f"invalid_or_dead_pids:{pids!r}"
+            except (OSError, json.JSONDecodeError) as error:
+                last_pid_error = f"pid_read_error:{error!r}"
+        parent_returncode = tree._process.poll()
+        if parent_returncode is not None:
+            break
+        time.sleep(0.01)
+
+    elapsed = time.perf_counter() - started
+    parent_pid = tree._process.pid
+    parent_returncode = tree._process.poll()
+    tree_returncode = tree.poll()
+    stdout_tail = capture_tail(stdout)
+    stderr_tail = capture_tail(stderr)
+    stdout_capture = getattr(stdout, "name", None)
+    stderr_capture = getattr(stderr, "name", None)
+    tree.kill()
+    try:
+        tree.wait(timeout=1.0)
+    except Exception:
+        pass
+    raise AssertionError(
+        "stubborn_fixture_not_ready:"
+        f"elapsed_s={elapsed:.3f}:timeout_s={timeout_s:g}:"
+        f"parent_pid={parent_pid}:parent_returncode={parent_returncode}:"
+        f"tree_returncode={tree_returncode}:pid_status={last_pid_error}:"
+        f"stdout_capture={stdout_capture!r}:stderr_capture={stderr_capture!r}:"
+        f"stdout={stdout_tail!r}:stderr={stderr_tail!r}"
+    )
+
+
 def test_npm_timeout_kills_descendants_and_atomically_writes_failed_report(
     monkeypatch,
     tmp_path: Path,
@@ -190,14 +244,21 @@ def test_npm_timeout_kills_descendants_and_atomically_writes_failed_report(
     monkeypatch.setattr(module, "COMMAND_CLEANUP_TIMEOUT_S", 1.0, raising=False)
     real_spawn = module._spawn_command_tree
     readiness_waits: list[float] = []
+    timeout_started_at: list[float] = []
+    timeout_elapsed: list[float] = []
 
     def spawn_after_fixture_ready(argv, cwd, stdout, stderr):
         tree = real_spawn(argv, cwd, stdout, stderr)
-        readiness_started = time.perf_counter()
-        readiness_deadline = readiness_started + 3.0
-        while not pid_path.exists() and time.perf_counter() < readiness_deadline:
-            time.sleep(0.01)
-        readiness_waits.append(time.perf_counter() - readiness_started)
+        readiness_elapsed = _wait_for_stubborn_fixture_ready(
+            tree=tree,
+            pid_path=pid_path,
+            stdout=stdout,
+            stderr=stderr,
+            capture_tail=module._read_capture_tail,
+            timeout_s=10.0,
+        )
+        readiness_waits.append(readiness_elapsed)
+        timeout_started_at.append(time.perf_counter())
         return tree
 
     monkeypatch.setattr(module, "_spawn_command_tree", spawn_after_fixture_ready)
@@ -207,7 +268,10 @@ def test_npm_timeout_kills_descendants_and_atomically_writes_failed_report(
 
     def runner(name, argv, cwd):
         if name == "backend_rehearsal":
-            return module.run_command(name, (npm, "run", "hang"), npm_root)
+            result = module.run_command(name, (npm, "run", "hang"), npm_root)
+            if timeout_started_at:
+                timeout_elapsed.append(time.perf_counter() - timeout_started_at[0])
+            return result
         return passing(name, argv, cwd)
 
     pids: list[int] = []
@@ -227,10 +291,11 @@ def test_npm_timeout_kills_descendants_and_atomically_writes_failed_report(
             browser_report_provider=lambda _root: None,
         )
         elapsed = time.perf_counter() - started
-        assert pid_path.exists()
-        assert readiness_waits and readiness_waits[0] < 3.0
+        assert pid_path.exists(), report.commands[0].output_tail
+        assert readiness_waits and readiness_waits[0] < 10.0
         pids = json.loads(pid_path.read_text(encoding="utf-8"))
-        assert elapsed < 4.5
+        assert timeout_elapsed and timeout_elapsed[0] < 4.5
+        assert elapsed < readiness_waits[0] + 4.5
         assert all(not _pid_is_alive(pid) for pid in pids)
         timed_out = report.commands[0]
         assert timed_out.returncode == 124
