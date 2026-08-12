@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from app.digital_twin.lebai_client import DigitalTwinFaults, DigitalTwinLebaiClient
 from app.digital_twin.runtime import create_digital_twin_app
@@ -72,99 +73,116 @@ def _send_until_state(
 
 def test_single_socket_remains_responsive_through_soft_constraints_and_recovery() -> None:
     app = create_digital_twin_app()
-    started = time.monotonic()
     sent_frames = 0
+    hello_ack_count = 0
+    owner_change_count = 0
+    unexpected_close_count = 0
 
-    with TestClient(app) as client, client.websocket_connect("/ws/v1/teleop") as ws:
-        ws.send_json({"v": 1, "type": "hello", "request_id": "hello"})
-        assert _receive_type(ws, "hello_ack")["request_id"] == "hello"
+    try:
+        with TestClient(app) as client, client.websocket_connect("/ws/v1/teleop") as ws:
+            ws.send_json({"v": 1, "type": "hello", "request_id": "hello"})
+            hello = _receive_type(ws, "hello_ack")
+            hello_ack_count += 1
+            assert hello["request_id"] == "hello"
+            owner_token = app.state.teleop_owner
+            assert owner_token is not None
+            connected_started = time.monotonic()
 
-        seq = 1
-        ws.send_json(_frame(seq, x=0.0, grip=False))
-        sent_frames += 1
-        released = _receive_ack(ws, seq)
-        assert released["mode"] == TeleopMode.READY
-        ws.send_json({"v": 1, "type": "arm_request", "request_id": "arm"})
-        arm_result = _receive_arm_result(ws)
-        assert arm_result == {"v": 1, "type": "arm_ack", "request_id": "arm"}
-
-        seq, active = _send_until_state(
-            ws,
-            seq,
-            x=0.0,
-            predicate=lambda state: state["mode"] == TeleopMode.ACTIVE,
-        )
-        sent_frames += seq - 1
-        assert active["fault"] is None
-
-        seq_before = seq
-        seq, boundary = _send_until_state(
-            ws,
-            seq,
-            x=0.30,
-            predicate=lambda state: state["constraint"] == "workspace_boundary",
-        )
-        sent_frames += seq - seq_before
-        assert boundary["mode"] == TeleopMode.ACTIVE
-        assert boundary["fault"] is None
-
-        seq_before = seq
-        seq, recovered = _send_until_state(
-            ws,
-            seq,
-            x=0.02,
-            predicate=lambda state: state["constraint"] is None,
-        )
-        sent_frames += seq - seq_before
-        assert recovered["mode"] == TeleopMode.ACTIVE
-
-        backend = app.state.backend
-        fake_client = backend._client
-        assert isinstance(fake_client, DigitalTwinLebaiClient)
-        fake_client.set_faults(DigitalTwinFaults(ik_failure=True))
-
-        seq_before = seq
-        seq, constrained = _send_until_state(
-            ws,
-            seq,
-            x=-0.04,
-            predicate=lambda state: state["constraint"] == "ik_boundary",
-        )
-        sent_frames += seq - seq_before
-        assert constrained["mode"] == TeleopMode.ACTIVE
-        assert constrained["fault"] is None
-
-        fake_client.set_faults(DigitalTwinFaults())
-        seq_before = seq
-        seq, recovered = _send_until_state(
-            ws,
-            seq,
-            x=0.0,
-            predicate=lambda state: state["constraint"] is None,
-        )
-        sent_frames += seq - seq_before
-        assert recovered["mode"] == TeleopMode.ACTIVE
-        assert recovered["fault"] is None
-
-        while time.monotonic() - started < 15.0 or sent_frames < 200:
-            seq += 1
+            seq = 1
+            ws.send_json(_frame(seq, x=0.0, grip=False))
             sent_frames += 1
-            x = 0.025 if seq % 40 < 20 else -0.025
-            ws.send_json(_frame(seq, x=x))
-            state = _receive_type(ws, "robot_state")
-            assert state["mode"] == TeleopMode.ACTIVE
-            assert state["fault"] is None
-            time.sleep(0.02)
+            released = _receive_ack(ws, seq)
+            assert released["mode"] == TeleopMode.READY
+            ws.send_json({"v": 1, "type": "arm_request", "request_id": "arm"})
+            arm_result = _receive_arm_result(ws)
+            assert arm_result == {"v": 1, "type": "arm_ack", "request_id": "arm"}
 
-        seq += 1
-        ws.send_json(_frame(seq, x=0.0, grip=False))
-        stopped = _receive_type(ws, "robot_state")
-        assert stopped["mode"] in {TeleopMode.HOLD, TeleopMode.DISARMED}
-        ws.send_json({"v": 1, "type": "disarm", "request_id": "disarm"})
-        assert _receive_type(ws, "disarm_ack")["request_id"] == "disarm"
+            seq, active = _send_until_state(
+                ws,
+                seq,
+                x=0.0,
+                predicate=lambda state: state["mode"] == TeleopMode.ACTIVE,
+            )
+            sent_frames += seq - 1
+            assert active["fault"] is None
 
-        assert app.state.teleop_owner is not None
-        assert sent_frames >= 200
-        assert time.monotonic() - started >= 15.0
+            seq_before = seq
+            seq, boundary = _send_until_state(
+                ws,
+                seq,
+                x=0.30,
+                predicate=lambda state: state["constraint"] == "workspace_boundary",
+            )
+            sent_frames += seq - seq_before
+            assert boundary["mode"] == TeleopMode.ACTIVE
+            assert boundary["fault"] is None
+
+            seq_before = seq
+            seq, recovered = _send_until_state(
+                ws,
+                seq,
+                x=0.02,
+                predicate=lambda state: state["constraint"] is None,
+            )
+            sent_frames += seq - seq_before
+            assert recovered["mode"] == TeleopMode.ACTIVE
+
+            backend = app.state.backend
+            fake_client = backend._client
+            assert isinstance(fake_client, DigitalTwinLebaiClient)
+            fake_client.set_faults(DigitalTwinFaults(ik_failure=True))
+
+            seq_before = seq
+            seq, constrained = _send_until_state(
+                ws,
+                seq,
+                x=-0.04,
+                predicate=lambda state: state["constraint"] == "ik_boundary",
+            )
+            sent_frames += seq - seq_before
+            assert constrained["mode"] == TeleopMode.ACTIVE
+            assert constrained["fault"] is None
+
+            fake_client.set_faults(DigitalTwinFaults())
+            seq_before = seq
+            seq, recovered = _send_until_state(
+                ws,
+                seq,
+                x=0.0,
+                predicate=lambda state: state["constraint"] is None,
+            )
+            sent_frames += seq - seq_before
+            assert recovered["mode"] == TeleopMode.ACTIVE
+            assert recovered["fault"] is None
+
+            while time.monotonic() - connected_started < 15.0 or sent_frames < 200:
+                seq += 1
+                sent_frames += 1
+                x = 0.025 if seq % 40 < 20 else -0.025
+                ws.send_json(_frame(seq, x=x))
+                state = _receive_type(ws, "robot_state")
+                assert state["mode"] == TeleopMode.ACTIVE
+                assert state["fault"] is None
+                if app.state.teleop_owner is not owner_token:
+                    owner_change_count += 1
+                time.sleep(0.02)
+
+            seq += 1
+            ws.send_json(_frame(seq, x=0.0, grip=False))
+            stopped = _receive_type(ws, "robot_state")
+            assert stopped["mode"] in {TeleopMode.HOLD, TeleopMode.DISARMED}
+            ws.send_json({"v": 1, "type": "disarm", "request_id": "disarm"})
+            assert _receive_type(ws, "disarm_ack")["request_id"] == "disarm"
+
+            assert app.state.teleop_owner is owner_token
+            assert hello_ack_count == 1
+            assert owner_change_count == 0
+            assert unexpected_close_count == 0
+            assert sent_frames >= 200
+            assert time.monotonic() - connected_started >= 15.0
+    except WebSocketDisconnect:
+        unexpected_close_count += 1
+        raise
 
     assert app.state.teleop_owner is None
+    assert unexpected_close_count == 0

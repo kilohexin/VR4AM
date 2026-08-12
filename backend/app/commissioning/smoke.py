@@ -409,7 +409,7 @@ async def run_smoke(
             clock=clock,
             recorder=recorder,
             mapper=_build_mapper(settings),
-            limiter=_build_limiter(settings),
+            limiter=_build_limiter(settings, "LEBAI"),
             constraint_clear_ms=settings.constraint_clear_ms,
             home_options=HomeOptions(
                 max_speed_radps=settings.home_joint_speed_radps,
