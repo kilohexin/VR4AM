@@ -2346,3 +2346,43 @@ async def test_out_of_real_envelope_holds_target_and_retreat_resumes() -> None:
 
     assert [command_id for command_id, _target in backend.targets] == [4]
     assert control.mode is TeleopMode.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_axis_clamp_keeps_other_axes_moving_and_reverse_clears_constraint() -> None:
+    limiter = SafetyLimiter(
+        workspace_half_extent_m=0.005,
+        max_rotation_from_anchor_rad=np.deg2rad(30),
+        workspace_boundary_mode="axis_clamp",
+        max_linear_speed=10.0,
+        max_linear_accel=100.0,
+    )
+    control, latest, backend, clock = make_control(limiter=limiter)
+    await activate(control, latest, clock)
+    hand_anchor = control.mapper._hand_anchor.model_copy(deep=True)
+    tcp_anchor = control.mapper._tcp_anchor.model_copy(deep=True)
+
+    latest.publish(frame(3, True, p=(0.02, 1.22, -0.3)), clock.now_ns())
+    await control.tick()
+    first = backend.targets[-1][1]
+
+    latest.publish(frame(4, True, p=(0.02, 1.195, -0.3)), clock.now_ns())
+    await control.tick()
+    second = backend.targets[-1][1]
+
+    assert [command_id for command_id, _target in backend.targets] == [3, 4]
+    assert first.p[0] <= 0.305 + 1e-12
+    assert second.p[0] <= 0.305 + 1e-12
+    assert second.p[1] < first.p[1]
+    assert (await control.state_message()).constraint == "workspace_boundary"
+    assert control.mode is TeleopMode.ACTIVE
+
+    latest.publish(frame(5, True, p=(0.004, 1.2, -0.3)), clock.now_ns())
+    await control.tick()
+    clock.advance_ms(101)
+    latest.publish(frame(6, True, p=(0.004, 1.2, -0.3)), clock.now_ns())
+    await control.tick()
+
+    assert (await control.state_message()).constraint is None
+    assert control.mapper._hand_anchor == hand_anchor
+    assert control.mapper._tcp_anchor == tcp_anchor

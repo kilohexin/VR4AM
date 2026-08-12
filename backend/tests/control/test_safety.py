@@ -97,7 +97,71 @@ def test_optional_box_envelope_constrains_each_axis_without_changing_defaults() 
 
     assert inside.constrained is False
     assert outside.constrained is True
+    assert outside.hold is True
     assert default.constrained is False
+
+
+def test_axis_clamp_limits_only_violating_axes_and_preserves_rotation() -> None:
+    anchor = Pose(p=(0.3, 0.0, 0.3), q=IDENTITY)
+    requested_q = tuple(
+        Rotation.from_euler("z", 20, degrees=True).as_quat()
+    )
+    limiter = SafetyLimiter(
+        workspace_half_extent_m=0.10,
+        max_rotation_from_anchor_rad=np.deg2rad(45),
+        workspace_boundary_mode="axis_clamp",
+    )
+    limiter.set_pose_anchor(anchor)
+
+    projection = limiter.project_workspace(
+        Pose(p=(0.45, 0.04, 0.27), q=requested_q),
+    )
+
+    assert projection.constrained is True
+    assert projection.hold is False
+    assert projection.pose.p == pytest.approx((0.4, 0.04, 0.27))
+    assert abs(
+        sum(
+            actual * expected
+            for actual, expected in zip(
+                projection.pose.q,
+                requested_q,
+                strict=True,
+            )
+        )
+    ) == pytest.approx(1.0)
+
+
+def test_axis_clamp_projects_rotation_and_reverse_request_is_unconstrained() -> None:
+    limiter = SafetyLimiter(
+        workspace_half_extent_m=0.10,
+        max_rotation_from_anchor_rad=np.deg2rad(30),
+        workspace_boundary_mode="axis_clamp",
+    )
+    limiter.set_pose_anchor(Pose(p=(0.3, 0.0, 0.3), q=IDENTITY))
+    outside = limiter.project_workspace(
+        Pose(
+            p=(0.3, 0.0, 0.3),
+            q=tuple(
+                Rotation.from_euler("z", 45, degrees=True).as_quat()
+            ),
+        )
+    )
+    reverse = limiter.project_workspace(
+        Pose(
+            p=(0.39, 0.0, 0.3),
+            q=tuple(
+                Rotation.from_euler("z", 25, degrees=True).as_quat()
+            ),
+        )
+    )
+
+    assert outside.constrained is True
+    assert outside.hold is False
+    assert Rotation.from_quat(outside.pose.q).magnitude() == pytest.approx(
+        np.deg2rad(30)
+    )
+    assert reverse.constrained is False
 
 
 def test_optional_orientation_envelope_uses_captured_tcp_orientation() -> None:

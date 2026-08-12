@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from scipy.spatial.transform import Rotation
 
 from app.schemas.messages import Pose
+
+WorkspaceBoundaryMode = Literal["hold", "axis_clamp"]
 
 
 class SafetyViolation(RuntimeError):
@@ -35,6 +38,7 @@ class SafetyLimiter:
         max_rotation_from_anchor_rad: float | None = None,
         max_linear_step_m: float | None = None,
         max_angular_step_rad: float | None = None,
+        workspace_boundary_mode: WorkspaceBoundaryMode = "hold",
     ) -> None:
         for name, value in (
             ("workspace_half_extent_m", workspace_half_extent_m),
@@ -44,6 +48,8 @@ class SafetyLimiter:
         ):
             if value is not None and (not math.isfinite(value) or value <= 0):
                 raise ValueError(f"{name}_must_be_positive_finite")
+        if workspace_boundary_mode not in {"hold", "axis_clamp"}:
+            raise ValueError("invalid_workspace_boundary_mode")
         self.anchor = np.asarray(anchor, dtype=float) if anchor is not None else None
         self.anchor_rotation: Rotation | None = None
         self.max_linear_speed = max_linear_speed
@@ -55,6 +61,7 @@ class SafetyLimiter:
         self.max_rotation_from_anchor_rad = max_rotation_from_anchor_rad
         self.max_linear_step_m = max_linear_step_m
         self.max_angular_step_rad = max_angular_step_rad
+        self.workspace_boundary_mode = workspace_boundary_mode
         self.linear_velocity = np.zeros(3)
         self.angular_velocity = np.zeros(3)
 
@@ -81,31 +88,55 @@ class SafetyLimiter:
         if self.anchor is None:
             return WorkspaceProjection(requested, False)
         target = np.asarray(requested.p, dtype=float)
-        displacement = target - self.anchor
+        projected_target = target.copy()
+        projected_rotation = Rotation.from_quat(requested.q)
+        constrained = False
+        displacement = projected_target - self.anchor
         if (
             self.workspace_half_extent_m is not None
             and np.any(
                 np.abs(displacement) > self.workspace_half_extent_m + 1e-12
             )
         ):
-            return WorkspaceProjection(requested, True, True)
+            if self.workspace_boundary_mode == "hold":
+                return WorkspaceProjection(requested, True, True)
+            projected_target = np.clip(
+                projected_target,
+                self.anchor - self.workspace_half_extent_m,
+                self.anchor + self.workspace_half_extent_m,
+            )
+            constrained = True
         if (
             self.max_rotation_from_anchor_rad is not None
             and self.anchor_rotation is not None
         ):
-            requested_rotation = Rotation.from_quat(requested.q)
-            orientation_delta = requested_rotation * self.anchor_rotation.inv()
-            if (
-                orientation_delta.magnitude()
-                > self.max_rotation_from_anchor_rad + 1e-12
-            ):
-                return WorkspaceProjection(requested, True, True)
+            orientation_delta = projected_rotation * self.anchor_rotation.inv()
+            orientation_angle = orientation_delta.magnitude()
+            if orientation_angle > self.max_rotation_from_anchor_rad + 1e-12:
+                if self.workspace_boundary_mode == "hold":
+                    return WorkspaceProjection(requested, True, True)
+                projected_rotation = (
+                    Rotation.from_rotvec(
+                        orientation_delta.as_rotvec()
+                        * (self.max_rotation_from_anchor_rad / orientation_angle)
+                    )
+                    * self.anchor_rotation
+                )
+                constrained = True
+        displacement = projected_target - self.anchor
         distance = float(np.linalg.norm(displacement))
-        if distance <= self.workspace_radius:
+        if distance > self.workspace_radius:
+            projected_target = self.anchor + displacement * (
+                self.workspace_radius / distance
+            )
+            constrained = True
+        if not constrained:
             return WorkspaceProjection(requested, False)
-        projected = self.anchor + displacement * (self.workspace_radius / distance)
         return WorkspaceProjection(
-            requested.model_copy(update={"p": tuple(projected)}),
+            Pose(
+                p=tuple(projected_target),
+                q=tuple(projected_rotation.as_quat()),
+            ),
             True,
         )
 

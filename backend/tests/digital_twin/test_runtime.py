@@ -29,6 +29,16 @@ def test_digital_twin_runtime_promotes_only_the_in_memory_copy() -> None:
     assert os.environ.get("VR4ARM_REAL_ROBOT_CONFIRM") is None
 
 
+def test_runtime_selects_axis_clamp_only_for_fake_backend() -> None:
+    settings = load_digital_twin_settings()
+
+    fake = app_main._build_limiter(settings, "LEBAI_FAKE")
+    real = app_main._build_limiter(settings, "LEBAI")
+
+    assert fake.workspace_boundary_mode == "axis_clamp"
+    assert real.workspace_boundary_mode == "hold"
+
+
 def test_digital_twin_app_reports_exact_fake_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

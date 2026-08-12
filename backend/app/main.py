@@ -95,7 +95,10 @@ def _build_mapper(settings: Settings) -> CoordinateMapper:
     )
 
 
-def _build_limiter(settings: Settings) -> SafetyLimiter:
+def _build_limiter(
+    settings: Settings,
+    runtime_backend: RuntimeBackend,
+) -> SafetyLimiter:
     if settings.backend == "lebai":
         if settings.lebai is None:
             raise RuntimeError("missing_lebai_settings")
@@ -112,6 +115,11 @@ def _build_limiter(settings: Settings) -> SafetyLimiter:
             max_linear_step_m=control.max_tcp_step_m,
             max_angular_step_rad=math.radians(
                 control.max_tcp_rotation_step_deg
+            ),
+            workspace_boundary_mode=(
+                "axis_clamp"
+                if runtime_backend == "LEBAI_FAKE"
+                else "hold"
             ),
         )
     return SafetyLimiter(
@@ -164,7 +172,7 @@ def create_app(
             clock=MonotonicClock(),
             recorder=recorder,
             mapper=_build_mapper(runtime_settings),
-            limiter=_build_limiter(runtime_settings),
+            limiter=_build_limiter(runtime_settings, runtime_backend),
             constraint_clear_ms=runtime_settings.constraint_clear_ms,
             home_options=HomeOptions(
                 max_speed_radps=runtime_settings.home_joint_speed_radps,
