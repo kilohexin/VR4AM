@@ -620,8 +620,7 @@
         "translation_scale": {
           "anyOf": [
             {
-              "minimum": 0.5,
-              "maximum": 2.0,
+              "exclusiveMinimum": 0,
               "type": "number"
             },
             {"type": "null"}

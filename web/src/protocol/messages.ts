@@ -460,6 +460,10 @@ function isSimulationScale(value: unknown): value is number {
   return scaled >= 5 && scaled <= 20 && Math.abs(value * 10 - scaled) <= 1e-9;
 }
 
+function isPositiveNumber(value: unknown): value is number {
+  return isFiniteNumber(value) && value > 0;
+}
+
 function codePointLength(value: string): number {
   return Array.from(value).length;
 }
@@ -671,7 +675,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
   if (
     Object.hasOwn(value, 'translation_scale') &&
     value.translation_scale !== null &&
-    !isSimulationScale(value.translation_scale)
+    !isPositiveNumber(value.translation_scale)
   ) {
     return false;
   }

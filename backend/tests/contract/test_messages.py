@@ -309,6 +309,16 @@ def test_motion_continuity_is_a_valid_robot_state_constraint() -> None:
     assert not list(validator.iter_errors(payload))
 
 
+def test_robot_state_allows_positive_readonly_real_translation_scale() -> None:
+    payload = load_fixture("robot-state-valid.json")
+    payload["backend"] = "LEBAI"
+    payload["translation_scale"] = 0.3
+
+    state = RobotStateMessage.model_validate(payload)
+
+    assert state.translation_scale == pytest.approx(0.3)
+
+
 @pytest.mark.parametrize("value", [0.5, 1.5, 2.0])
 def test_set_simulation_scale_accepts_exact_tenth_steps(value: float) -> None:
     message = SetSimulationScaleMessage.model_validate(

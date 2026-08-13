@@ -154,7 +154,8 @@ describe('protocol guards', () => {
     expect(isRobotStateMessage({...robotFixture, constraint: 'motion_continuity_boundary'})).toBe(true);
     expect(isRobotStateMessage({...robotFixture, backend: 'LEBAI_FAKE'})).toBe(true);
     expect(isRobotStateMessage({...robotFixture, translation_scale: 1.5})).toBe(true);
-    expect(isRobotStateMessage({...robotFixture, translation_scale: 1.55})).toBe(false);
+    expect(isRobotStateMessage({...robotFixture, backend: 'LEBAI', translation_scale: 0.3})).toBe(true);
+    expect(isRobotStateMessage({...robotFixture, translation_scale: 0})).toBe(false);
     expect(isRobotStateMessage({
       ...robotFixture,
       backend: 'LEBAI',

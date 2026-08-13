@@ -136,7 +136,7 @@ class RobotStateMessage(StrictMessage):
     real_robot_mode: Literal["readonly", "control"] | None = None
     preflight_ready: bool | None = None
     preflight_reason: str | None = None
-    translation_scale: float | None = Field(default=None, ge=0.5, le=2.0)
+    translation_scale: float | None = Field(default=None, gt=0)
 
 
 class DiagnosticEvent(StrictMessage):
