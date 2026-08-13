@@ -193,6 +193,83 @@
       ],
       "type": "object"
     },
+    "SetSimulationScaleMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "v": {"const": 1, "type": "integer"},
+        "type": {"const": "set_simulation_scale", "type": "string"},
+        "request_id": {
+          "minLength": 1,
+          "maxLength": 64,
+          "type": "string"
+        },
+        "translation_scale": {
+          "minimum": 0.5,
+          "maximum": 2.0,
+          "multipleOf": 0.1,
+          "type": "number"
+        }
+      },
+      "required": ["v", "type", "request_id", "translation_scale"],
+      "type": "object"
+    },
+    "SimulationScaleAccepted": {
+      "additionalProperties": false,
+      "properties": {
+        "v": {"const": 1, "type": "integer"},
+        "type": {"const": "simulation_scale_result", "type": "string"},
+        "request_id": {
+          "minLength": 1,
+          "maxLength": 64,
+          "type": "string"
+        },
+        "accepted": {"const": true, "type": "boolean"},
+        "translation_scale": {
+          "minimum": 0.5,
+          "maximum": 2.0,
+          "multipleOf": 0.1,
+          "type": "number"
+        }
+      },
+      "required": ["v", "type", "request_id", "accepted", "translation_scale"],
+      "type": "object"
+    },
+    "SimulationScaleRejected": {
+      "additionalProperties": false,
+      "properties": {
+        "v": {"const": 1, "type": "integer"},
+        "type": {"const": "simulation_scale_result", "type": "string"},
+        "request_id": {
+          "minLength": 1,
+          "maxLength": 64,
+          "type": "string"
+        },
+        "accepted": {"const": false, "type": "boolean"},
+        "translation_scale": {
+          "minimum": 0.5,
+          "maximum": 2.0,
+          "multipleOf": 0.1,
+          "type": "number"
+        },
+        "reason": {
+          "enum": [
+            "not_simulation",
+            "not_stopped",
+            "invalid_scale",
+            "automation_active"
+          ],
+          "type": "string"
+        }
+      },
+      "required": ["v", "type", "request_id", "accepted", "translation_scale", "reason"],
+      "type": "object"
+    },
+    "SimulationScaleResultMessage": {
+      "oneOf": [
+        {"$ref": "#/$defs/SimulationScaleAccepted"},
+        {"$ref": "#/$defs/SimulationScaleRejected"}
+      ]
+    },
     "HomeRejected": {
       "additionalProperties": false,
       "properties": {
@@ -539,6 +616,18 @@
           ],
           "default": null,
           "title": "Preflight Reason"
+        },
+        "translation_scale": {
+          "anyOf": [
+            {
+              "minimum": 0.5,
+              "maximum": 2.0,
+              "type": "number"
+            },
+            {"type": "null"}
+          ],
+          "default": null,
+          "title": "Translation Scale"
         }
       },
       "required": [

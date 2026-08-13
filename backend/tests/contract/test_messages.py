@@ -10,6 +10,8 @@ from pydantic import BaseModel, ValidationError
 from app.schemas import messages
 from app.schemas.messages import (
     ClientControlMessage,
+    SetSimulationScaleMessage,
+    SimulationScaleResultMessage,
     DiagnosticsMessage,
     RobotStateMessage,
     VRFrame,
@@ -304,6 +306,92 @@ def test_motion_continuity_is_a_valid_robot_state_constraint() -> None:
     )
 
     assert state.constraint == "motion_continuity_boundary"
+    assert not list(validator.iter_errors(payload))
+
+
+@pytest.mark.parametrize("value", [0.5, 1.5, 2.0])
+def test_set_simulation_scale_accepts_exact_tenth_steps(value: float) -> None:
+    message = SetSimulationScaleMessage.model_validate(
+        {
+            "v": 1,
+            "type": "set_simulation_scale",
+            "request_id": "scale-1",
+            "translation_scale": value,
+        }
+    )
+    assert message.translation_scale == value
+
+
+@pytest.mark.parametrize("value", [0.49, 2.01, 1.55, float("nan"), True])
+def test_set_simulation_scale_rejects_non_tenth_or_out_of_range_values(
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        SetSimulationScaleMessage.model_validate(
+            {
+                "v": 1,
+                "type": "set_simulation_scale",
+                "request_id": "scale-1",
+                "translation_scale": value,
+            }
+        )
+
+
+def test_simulation_scale_result_requires_exact_correlated_outcome() -> None:
+    accepted = SimulationScaleResultMessage.model_validate(
+        {
+            "v": 1,
+            "type": "simulation_scale_result",
+            "request_id": "scale-1",
+            "accepted": True,
+            "translation_scale": 1.5,
+        }
+    )
+    assert accepted.reason is None
+    with pytest.raises(ValidationError):
+        SimulationScaleResultMessage.model_validate(
+            {
+                "v": 1,
+                "type": "simulation_scale_result",
+                "request_id": "scale-1",
+                "accepted": False,
+                "translation_scale": 1.5,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("definition", "payload"),
+    [
+        (
+            "SetSimulationScaleMessage",
+            {
+                "v": 1,
+                "type": "set_simulation_scale",
+                "request_id": "scale-1",
+                "translation_scale": 1.5,
+            },
+        ),
+        (
+            "SimulationScaleResultMessage",
+            {
+                "v": 1,
+                "type": "simulation_scale_result",
+                "request_id": "scale-1",
+                "accepted": True,
+                "translation_scale": 1.5,
+            },
+        ),
+    ],
+)
+def test_protocol_schema_contains_simulation_scale_messages(
+    definition: str,
+    payload: dict[str, object],
+) -> None:
+    schema = load_protocol_schema()
+    validator = Draft202012Validator(
+        {**schema, "$ref": f"#/$defs/{definition}"}
+    )
     assert not list(validator.iter_errors(payload))
 
 

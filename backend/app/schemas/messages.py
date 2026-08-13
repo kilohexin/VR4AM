@@ -5,7 +5,7 @@ import math
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PROTOCOL_VERSION = 1
 Vec3 = tuple[float, float, float]
@@ -136,6 +136,7 @@ class RobotStateMessage(StrictMessage):
     real_robot_mode: Literal["readonly", "control"] | None = None
     preflight_ready: bool | None = None
     preflight_reason: str | None = None
+    translation_scale: float | None = Field(default=None, ge=0.5, le=2.0)
 
 
 class DiagnosticEvent(StrictMessage):
@@ -219,6 +220,61 @@ class ClientControlMessage(StrictMessage):
     client_mono_ms: float | None = Field(default=None, ge=0)
 
 
+SimulationScaleRejectReason = Literal[
+    "not_simulation",
+    "not_stopped",
+    "invalid_scale",
+    "automation_active",
+]
+
+
+def _validate_translation_scale(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("translation_scale must be numeric")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("translation_scale must be finite")
+    scaled = round(number * 10)
+    if (
+        not math.isclose(number * 10, scaled, abs_tol=1e-9)
+        or not 5 <= scaled <= 20
+    ):
+        raise ValueError("translation_scale must be 0.5..2.0 in 0.1 steps")
+    return scaled / 10
+
+
+class SetSimulationScaleMessage(StrictMessage):
+    v: Literal[1]
+    type: Literal["set_simulation_scale"]
+    request_id: str = Field(min_length=1, max_length=64)
+    translation_scale: float
+
+    @field_validator("translation_scale", mode="before")
+    @classmethod
+    def validate_translation_scale(cls, value: object) -> float:
+        return _validate_translation_scale(value)
+
+
+class SimulationScaleResultMessage(StrictMessage):
+    v: Literal[1] = 1
+    type: Literal["simulation_scale_result"] = "simulation_scale_result"
+    request_id: str = Field(min_length=1, max_length=64)
+    accepted: bool
+    translation_scale: float
+    reason: SimulationScaleRejectReason | None = None
+
+    @field_validator("translation_scale", mode="before")
+    @classmethod
+    def validate_translation_scale(cls, value: object) -> float:
+        return _validate_translation_scale(value)
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> "SimulationScaleResultMessage":
+        if self.accepted == (self.reason is not None):
+            raise ValueError("accepted result must omit reason; rejected result requires it")
+        return self
+
+
 class OfflineRehearsalBeginMessage(StrictMessage):
     v: Literal[1]
     type: Literal["offline_rehearsal_begin"]
@@ -278,6 +334,7 @@ class OfflineRehearsalFinishMessage(StrictMessage):
 
 ClientMessage = (
     VRFrame
+    | SetSimulationScaleMessage
     | ClientControlMessage
     | OfflineRehearsalBeginMessage
     | OfflineRehearsalPhaseMessage

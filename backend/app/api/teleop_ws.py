@@ -18,6 +18,8 @@ from app.schemas.messages import (
     OfflineRehearsalFinishMessage,
     OfflineRehearsalPhaseMessage,
     RuntimeBackend,
+    SetSimulationScaleMessage,
+    SimulationScaleResultMessage,
     TeleopMode,
     VRFrame,
 )
@@ -127,6 +129,8 @@ def _parse_message(payload: Any) -> ClientMessage:
         return OfflineRehearsalPhaseMessage.model_validate(payload)
     if message_type == "offline_rehearsal_finish":
         return OfflineRehearsalFinishMessage.model_validate(payload)
+    if message_type == "set_simulation_scale":
+        return SetSimulationScaleMessage.model_validate(payload)
     return ClientControlMessage.model_validate(payload)
 
 
@@ -334,6 +338,27 @@ async def _receive_messages(
         if isinstance(message, VRFrame):
             app.state.latest.publish(message, monotonic_ns())
             start_sender.set()
+            continue
+
+        if isinstance(message, SetSimulationScaleMessage):
+            result = await control.set_simulation_scale(
+                message.translation_scale,
+                automation_active=(
+                    rehearsal_active is not None
+                    and rehearsal_active.is_set()
+                ),
+            )
+            response = SimulationScaleResultMessage(
+                request_id=message.request_id,
+                accepted=result.accepted,
+                translation_scale=result.translation_scale,
+                reason=result.reason,
+            )
+            await _send_json(
+                websocket,
+                response.model_dump(mode="json", exclude_none=True),
+                send_lock,
+            )
             continue
 
         if isinstance(

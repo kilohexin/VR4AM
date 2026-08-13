@@ -51,6 +51,12 @@ HomeRejectReason = Literal[
     "control_loop_unavailable",
     "home_failed",
 ]
+SimulationScaleRejectReason = Literal[
+    "not_simulation",
+    "not_stopped",
+    "invalid_scale",
+    "automation_active",
+]
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,13 @@ class HomeResult:
     accepted: bool
     reason: HomeRejectReason | None = None
     message: str | None = None
+
+
+@dataclass(frozen=True)
+class SimulationScaleResult:
+    accepted: bool
+    translation_scale: float
+    reason: SimulationScaleRejectReason | None = None
 
 
 @dataclass(frozen=True)
@@ -196,6 +209,49 @@ class RobotControl:
         self._last_gripper_sent = state.gripper
         self._last_gripper_sent_ns = self.clock.now_ns()
         return state.gripper
+
+    async def set_simulation_scale(
+        self,
+        value: float,
+        *,
+        automation_active: bool,
+    ) -> SimulationScaleResult:
+        current = self.mapper.translation_scale
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            return SimulationScaleResult(False, current, "invalid_scale")
+        scaled = round(float(value) * 10)
+        if (
+            not math.isclose(float(value) * 10, scaled, abs_tol=1e-9)
+            or not 5 <= scaled <= 20
+        ):
+            return SimulationScaleResult(False, current, "invalid_scale")
+        if automation_active:
+            return SimulationScaleResult(False, current, "automation_active")
+        state = await self.backend.get_state()
+        if state.backend != "LEBAI_FAKE":
+            return SimulationScaleResult(False, current, "not_simulation")
+        if (
+            self.machine.mode
+            not in {TeleopMode.READY, TeleopMode.HOLD, TeleopMode.DISARMED}
+            or state.robot_state is not BackendState.IDLE
+            or self.mapper.has_anchor
+        ):
+            return SimulationScaleResult(False, current, "not_stopped")
+        requested = scaled / 10
+        if not math.isclose(current, requested, abs_tol=1e-12):
+            recorded = await self._record_critical(
+                "simulation_scale_changed",
+                {"previous": current, "current": requested},
+            )
+            if not recorded:
+                self._latch_recording_fault()
+                return SimulationScaleResult(False, current, "not_stopped")
+            self.mapper.set_translation_scale(requested)
+        return SimulationScaleResult(True, self.mapper.translation_scale)
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
@@ -750,6 +806,7 @@ class RobotControl:
                 "fault": self._fault or state.fault,
                 "constraint": self._constraint,
                 "recovery_phase": self._recovery_phase,
+                "translation_scale": self.mapper.translation_scale,
             }
         )
         try:

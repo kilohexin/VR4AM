@@ -30,6 +30,7 @@ with warnings.catch_warnings():
     from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.digital_twin.runtime import create_digital_twin_app
 from app.control.robot_control import FaultResetResult, HomeResult, LatestVRFrame
 from app.diagnostics.store import DiagnosticsStore
 from app.rehearsal.report import (
@@ -504,6 +505,50 @@ def test_home_request_returns_correlated_result() -> None:
         "mode": "DISARMED",
     }
     app.state.control.home.assert_awaited_once_with()
+
+
+def test_simulation_scale_request_returns_authoritative_correlated_result() -> None:
+    app = create_digital_twin_app()
+    with TestClient(app) as client, client.websocket_connect("/ws/v1/teleop") as ws:
+        ws.send_json(_valid_frame(seq=1))
+        _receive_until(ws, "robot_state")
+        ws.send_json(
+            {
+                "v": 1,
+                "type": "set_simulation_scale",
+                "request_id": "scale-1",
+                "translation_scale": 1.7,
+            }
+        )
+        result = _receive_until(ws, "simulation_scale_result")
+
+    assert result == {
+        "v": 1,
+        "type": "simulation_scale_result",
+        "request_id": "scale-1",
+        "accepted": True,
+        "translation_scale": 1.7,
+    }
+
+
+def test_real_runtime_rejects_simulation_scale_without_closing_socket() -> None:
+    app = create_app()
+    with TestClient(app) as client, client.websocket_connect("/ws/v1/teleop") as ws:
+        ws.send_json(
+            {
+                "v": 1,
+                "type": "set_simulation_scale",
+                "request_id": "scale-real",
+                "translation_scale": 1.7,
+            }
+        )
+        result = _receive_until(ws, "simulation_scale_result")
+        ws.send_json({"v": 1, "type": "ping", "request_id": "still-open"})
+        pong = _receive_until(ws, "pong")
+
+    assert result["accepted"] is False
+    assert result["reason"] == "not_simulation"
+    assert pong["request_id"] == "still-open"
 
 
 def test_accepted_fault_reset_sends_authoritative_state_before_exact_result() -> None:

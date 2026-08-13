@@ -53,6 +53,7 @@ class FakeBackend:
             tcp_matches=True,
             capabilities=("command_tcp", "home", "gripper"),
         )
+        self.backend_label = "LEBAI_FAKE"
 
     async def connect(self) -> None:
         self.connect_count += 1
@@ -84,6 +85,7 @@ class FakeBackend:
             actual_tcp=self.actual_tcp,
             actual_q=self.actual_q,
             gripper=self.gripper,
+            backend=self.backend_label,
         )
 
     async def preflight(self) -> BackendPreflight:
@@ -162,6 +164,51 @@ async def connect_release_arm(
     latest.publish(frame(1, False), clock.now_ns())
     await control.tick()
     await control.arm()
+
+
+@pytest.mark.asyncio
+async def test_simulation_scale_accepts_only_stopped_fake_runtime_and_records_change() -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+
+    result = await control.set_simulation_scale(1.5, automation_active=False)
+
+    assert result.accepted is True
+    assert result.translation_scale == pytest.approx(1.5)
+    assert control.mapper.translation_scale == pytest.approx(1.5)
+    assert [event for event in recorder.events if event["kind"] == "simulation_scale_changed"] == [
+        {
+            "kind": "simulation_scale_changed",
+            "payload": {"previous": 1.0, "current": 1.5},
+            "server_mono_ns": 1_000_000_000,
+        }
+    ]
+
+    backend.backend_label = "LEBAI"
+    rejected = await control.set_simulation_scale(1.6, automation_active=False)
+    assert rejected.accepted is False
+    assert rejected.reason == "not_simulation"
+    assert rejected.translation_scale == pytest.approx(1.5)
+
+
+@pytest.mark.asyncio
+async def test_simulation_scale_rejects_active_anchor_automation_and_invalid_values() -> None:
+    control, latest, _, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+
+    active = await control.set_simulation_scale(1.6, automation_active=False)
+    automated = await control.set_simulation_scale(1.6, automation_active=True)
+    invalid = await control.set_simulation_scale(1.55, automation_active=False)
+
+    assert (active.accepted, active.reason) == (False, "not_stopped")
+    assert (automated.accepted, automated.reason) == (False, "automation_active")
+    assert (invalid.accepted, invalid.reason) == (False, "invalid_scale")
+    assert control.mapper.translation_scale == pytest.approx(1.0)
 
 
 async def activate(

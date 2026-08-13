@@ -15,11 +15,24 @@ class CoordinateMapper:
     ) -> None:
         if not np.isclose(rotation_scale, 1.0):
             raise ValueError("rotation_scale_must_equal_one")
-        self.translation_scale = translation_scale
+        self._translation_scale = translation_scale
         self.rotation_scale = rotation_scale
         self.rotation_dead_zone_rad = np.deg2rad(rotation_dead_zone_deg)
         self._hand_anchor: Pose | None = None
         self._tcp_anchor: Pose | None = None
+
+    @property
+    def translation_scale(self) -> float:
+        return self._translation_scale
+
+    @property
+    def has_anchor(self) -> bool:
+        return self._hand_anchor is not None or self._tcp_anchor is not None
+
+    def set_translation_scale(self, value: float) -> None:
+        if self.has_anchor:
+            raise RuntimeError("translation_scale_requires_no_anchor")
+        self._translation_scale = value
 
     def capture(
         self,
@@ -38,7 +51,7 @@ class CoordinateMapper:
     def target(self, hand: Pose) -> Pose:
         if self._hand_anchor is None or self._tcp_anchor is None:
             raise RuntimeError("anchor_not_captured")
-        p = np.asarray(self._tcp_anchor.p) + self.translation_scale * (
+        p = np.asarray(self._tcp_anchor.p) + self._translation_scale * (
             np.asarray(hand.p) - np.asarray(self._hand_anchor.p)
         )
         r_now = Rotation.from_quat(hand.q)

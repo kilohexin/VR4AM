@@ -49,3 +49,23 @@ def test_fake_half_scale_inverse_hand_target_maps_to_twenty_millimetres() -> Non
 
     assert target.p == pytest.approx((0.32, 0.20, -0.20))
     assert Rotation.from_quat(target.q).magnitude() == pytest.approx(np.deg2rad(8))
+
+
+def test_translation_scale_changes_only_without_an_active_anchor() -> None:
+    mapper = CoordinateMapper(translation_scale=1.0, rotation_dead_zone_deg=0.0)
+    anchor = Pose(p=(0.0, 0.0, 0.0), q=(0.0, 0.0, 0.0, 1.0))
+
+    mapper.set_translation_scale(1.5)
+    mapper.capture(anchor, anchor)
+    target = mapper.target(
+        Pose(p=(0.1, 0.0, 0.0), q=(0.0, 0.0, 0.0, 1.0))
+    )
+
+    assert mapper.translation_scale == pytest.approx(1.5)
+    assert target.p == pytest.approx((0.15, 0.0, 0.0))
+    with pytest.raises(RuntimeError, match="translation_scale_requires_no_anchor"):
+        mapper.set_translation_scale(1.6)
+
+    mapper.clear()
+    mapper.set_translation_scale(1.6)
+    assert mapper.translation_scale == pytest.approx(1.6)
