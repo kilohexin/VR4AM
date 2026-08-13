@@ -236,7 +236,12 @@ class RobotControl:
             return SimulationScaleResult(False, current, "not_simulation")
         if (
             self.machine.mode
-            not in {TeleopMode.READY, TeleopMode.HOLD, TeleopMode.DISARMED}
+            not in {
+                TeleopMode.READY,
+                TeleopMode.HOLD,
+                TeleopMode.DISARMED,
+                TeleopMode.ARMED,
+            }
             or state.robot_state is not BackendState.IDLE
             or self.mapper.has_anchor
         ):

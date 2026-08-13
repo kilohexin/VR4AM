@@ -21,6 +21,17 @@ describe('SimulationSettingsPanel', () => {
     input.value = '1.8';
     button.click();
     expect(request).toHaveBeenCalledWith(1.8);
+    panel.handleResult({
+      v: 1, type: 'simulation_scale_result', request_id: 'scale-armed',
+      accepted: true, translation_scale: 1.8,
+    });
+
+    panel.update({
+      runtime: 'LEBAI_FAKE', connected: true, mode: 'ARMED', backendState: 'IDLE',
+      grip: false, automationActive: false, authoritativeScale: 1.5,
+    });
+    expect(input.disabled).toBe(false);
+    expect(button.disabled).toBe(false);
 
     panel.update({
       runtime: 'LEBAI_FAKE', connected: true, mode: 'ACTIVE', backendState: 'MOVING',

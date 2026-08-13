@@ -195,6 +195,19 @@ async def test_simulation_scale_accepts_only_stopped_fake_runtime_and_records_ch
 
 
 @pytest.mark.asyncio
+async def test_simulation_scale_accepts_armed_idle_fake_before_grip_anchor() -> None:
+    control, latest, _, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+
+    result = await control.set_simulation_scale(1.5, automation_active=False)
+
+    assert control.mode is TeleopMode.ARMED
+    assert control.mapper.has_anchor is False
+    assert result == robot_control_module.SimulationScaleResult(True, 1.5)
+    assert control.mapper.translation_scale == pytest.approx(1.5)
+
+
+@pytest.mark.asyncio
 async def test_simulation_scale_rejects_active_anchor_automation_and_invalid_values() -> None:
     control, latest, _, clock = make_control()
     await connect_release_arm(control, latest, clock)

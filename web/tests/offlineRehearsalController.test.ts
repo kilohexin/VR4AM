@@ -41,6 +41,7 @@ function robotState(overrides: Partial<RobotStateMessage> = {}): RobotStateMessa
     constraint: null,
     recovery_phase: null,
     backend: 'LEBAI_FAKE',
+    translation_scale: 1.5,
     // RealLebaiAdapter.get_state(), as used by create_digital_twin_app(),
     // leaves the health-only fields null on the WebSocket state contract.
     real_robot_mode: null,
@@ -292,6 +293,28 @@ function beginThroughAnchor(test: Harness): void {
     taskAnchor: FAKE_REHEARSAL_PREP_TCP,
   }]);
 }
+
+it('inverts Fake preparation motion with the authoritative 1.5 scale', () => {
+  const test = harness();
+  connectReady(test);
+  expect(test.controller.start()).toBe(true);
+  acceptBegin(test);
+  acknowledgePhase(test);
+  acceptLatestControl(test);
+  confirmState(test, {mode: 'DISARMED'});
+  acknowledgePhase(test);
+  acceptLatestControl(test);
+  confirmState(test, {mode: 'ACTIVE', robot_state: 'MOVING'});
+
+  const before = structuredClone(test.samples.at(-1)!);
+  for (let index = 0; index < 220; index += 1) {
+    test.emitState({mode: 'ACTIVE', robot_state: 'MOVING'});
+  }
+  const after = test.samples.at(-1)!;
+  expect(after.position).toEqual(FAKE_REHEARSAL_PREP_TCP.p.map((value, index) => (
+    before.position[index] + (value - ANCHOR.p[index]) / 1.5
+  )));
+});
 
 function driveCurrentMotionTarget(test: Harness): void {
   const target = test.controller.snapshot.targetTcp;
@@ -667,7 +690,7 @@ describe('OfflineRehearsalController happy path', () => {
     }
 
     expect(test.controller.snapshot).toMatchObject({phase: 'translate', step: '+x'});
-    expect(test.samples.at(-1)?.position[0]).toBeCloseTo(controllerAnchor.position[0] + 0.040);
+    expect(test.samples.at(-1)?.position[0]).toBeCloseTo(controllerAnchor.position[0] + 0.020 / 1.5);
     expect(test.samples.at(-1)).toMatchObject({
       position: [expect.any(Number), controllerAnchor.position[1], controllerAnchor.position[2]],
       grip: true,
@@ -678,6 +701,35 @@ describe('OfflineRehearsalController happy path', () => {
 });
 
 describe('OfflineRehearsalController fail-closed cleanup', () => {
+  it('rejects a rehearsal when the authoritative Fake scale is missing', () => {
+    const test = harness();
+    test.controller.onConnection({state: 'connected'});
+    test.emitDiagnostics();
+    test.emitState({translation_scale: null});
+
+    expect(test.controller.start()).toBe(false);
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'failed', failure: 'identity_preflight_failed', active: true,
+    });
+    expect(test.reports).toHaveLength(0);
+    expect(test.controls.at(-1)?.type).toBe('disarm');
+  });
+
+  it('fails closed if the authoritative Fake scale changes during a run', () => {
+    const test = harness();
+    connectReady(test);
+    expect(test.controller.start()).toBe(true);
+    acceptBegin(test);
+    acknowledgePhase(test);
+
+    test.emitState({translation_scale: 1.6});
+
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'failed', failure: 'translation_scale_changed', active: true,
+    });
+    expect(test.controls.at(-1)?.type).toBe('disarm');
+  });
+
   it('hard-stops a full rehearsal after 300 seconds through the verified cleanup path', () => {
     const test = harness();
     connectReady(test);

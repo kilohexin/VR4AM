@@ -65,7 +65,7 @@ export class SimulationSettingsPanel {
       state.runtime === 'LEBAI_FAKE' &&
       state.backendState === 'IDLE' &&
       state.mode !== null &&
-      ['READY', 'HOLD', 'DISARMED'].includes(state.mode) &&
+      ['READY', 'HOLD', 'DISARMED', 'ARMED'].includes(state.mode) &&
       !state.grip &&
       !state.automationActive;
     this.input.disabled = !stopped || this.pending;

@@ -167,6 +167,7 @@ export class OfflineRehearsalController {
   private carriedOffset: Vec3 | null = null;
   private trackingLossAckSeq: number | null = null;
   private recoverySafeAfterResetRequest = false;
+  private rehearsalTranslationScale: number | null = null;
 
   constructor(private readonly ports: OfflineRehearsalPorts) {}
 
@@ -177,12 +178,14 @@ export class OfflineRehearsalController {
 
   start(): boolean {
     if (this.disposed || this.isActive()) return false;
-    if (!this.isEligible()) {
+    const translationScale = this.latestState?.translation_scale;
+    if (!this.isEligible() || !isSupportedTranslationScale(translationScale)) {
       this.beginCleanup('identity_preflight_failed');
       return false;
     }
 
     this.resetRun();
+    this.rehearsalTranslationScale = translationScale;
     this.displayPhase = 'identity_preflight';
     this.currentPhase = 'identity_preflight';
     this.step = 'begin';
@@ -231,6 +234,13 @@ export class OfflineRehearsalController {
     }
     if (!hasFakeControlIdentity(state)) {
       this.beginCleanup('identity_lost');
+      return;
+    }
+    if (
+      !isSupportedTranslationScale(state.translation_scale)
+      || state.translation_scale !== this.rehearsalTranslationScale
+    ) {
+      this.beginCleanup('translation_scale_changed');
       return;
     }
     const authoritativeFailure = this.authoritativeFreshnessFailure();
@@ -585,12 +595,14 @@ export class OfflineRehearsalController {
       || this.prepControllerAnchor === null
       || this.prepTcpAnchor === null
     ) return;
+    const translationScale = this.translationScaleOrCleanup();
+    if (translationScale === null) return;
     this.sample = nextControllerSample({
       sample: this.sample,
       controllerAnchor: this.prepControllerAnchor,
       tcpAnchor: this.prepTcpAnchor,
       targetTcp: this.targetTcp,
-      translationScale: REHEARSAL_CONFIG.fakeTranslationScale,
+      translationScale,
       maxPositionStepM: REHEARSAL_CONFIG.maxPositionStepM,
       maxRotationStepRad: REHEARSAL_CONFIG.maxRotationStepRad,
     });
@@ -622,12 +634,14 @@ export class OfflineRehearsalController {
       || this.anchor === null
       || this.pendingReport !== null
     ) return;
+    const translationScale = this.translationScaleOrCleanup();
+    if (translationScale === null) return;
     this.sample = nextControllerSample({
       sample: this.sample,
       controllerAnchor: this.controllerAnchor,
       tcpAnchor: this.anchor,
       targetTcp: this.targetTcp,
-      translationScale: REHEARSAL_CONFIG.fakeTranslationScale,
+      translationScale,
       maxPositionStepM: REHEARSAL_CONFIG.maxPositionStepM,
       maxRotationStepRad: REHEARSAL_CONFIG.maxRotationStepRad,
     });
@@ -684,12 +698,14 @@ export class OfflineRehearsalController {
     ) return;
     const scene = this.readValidScene();
     if (scene === null) return;
+    const translationScale = this.translationScaleOrCleanup();
+    if (translationScale === null) return;
     this.sample = nextControllerSample({
       sample: this.sample,
       controllerAnchor: this.controllerAnchor,
       tcpAnchor: this.anchor,
       targetTcp: this.targetTcp,
-      translationScale: REHEARSAL_CONFIG.fakeTranslationScale,
+      translationScale,
       maxPositionStepM: REHEARSAL_CONFIG.maxPositionStepM,
       maxRotationStepRad: REHEARSAL_CONFIG.maxRotationStepRad,
     });
@@ -777,12 +793,14 @@ export class OfflineRehearsalController {
       || this.controllerAnchor === null
       || this.anchor === null
     ) return;
+    const translationScale = this.translationScaleOrCleanup();
+    if (translationScale === null) return;
     this.sample = nextControllerSample({
       sample: this.sample,
       controllerAnchor: this.controllerAnchor,
       tcpAnchor: this.anchor,
       targetTcp: this.targetTcp,
-      translationScale: REHEARSAL_CONFIG.fakeTranslationScale,
+      translationScale,
       maxPositionStepM: REHEARSAL_CONFIG.maxPositionStepM,
       maxRotationStepRad: REHEARSAL_CONFIG.maxRotationStepRad,
     });
@@ -1371,6 +1389,14 @@ export class OfflineRehearsalController {
     return this.confirmations >= SAFE_CONFIRMATIONS;
   }
 
+  private translationScaleOrCleanup(): number | null {
+    if (!isSupportedTranslationScale(this.rehearsalTranslationScale)) {
+      this.beginCleanup('invalid_translation_scale');
+      return null;
+    }
+    return this.rehearsalTranslationScale;
+  }
+
   private isEligible(): boolean {
     const state = this.latestState;
     const diagnostics = this.latestDiagnostics;
@@ -1454,6 +1480,7 @@ export class OfflineRehearsalController {
     this.carriedOffset = null;
     this.trackingLossAckSeq = null;
     this.recoverySafeAfterResetRequest = false;
+    this.rehearsalTranslationScale = null;
   }
 
   private nextRequestId(kind: string): string {
@@ -1572,4 +1599,12 @@ function isAbortReason(reason: string): boolean {
 
 function isNonEmptyString(value: string): boolean {
   return value.trim().length > 0;
+}
+
+function isSupportedTranslationScale(value: number | null | undefined): value is number {
+  if (!Number.isFinite(value)) return false;
+  const scaled = Math.round((value as number) * 10);
+  return scaled >= 5
+    && scaled <= 20
+    && Math.abs((value as number) * 10 - scaled) <= 1e-9;
 }

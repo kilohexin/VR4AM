@@ -286,7 +286,7 @@ function maybeRestorePreferredScale(): void {
     connectionState &&
     latestRobotState.backend === 'LEBAI_FAKE' &&
     latestRobotState.robot_state === 'IDLE' &&
-    ['READY', 'HOLD', 'DISARMED'].includes(latestRobotState.mode) &&
+    ['READY', 'HOLD', 'DISARMED', 'ARMED'].includes(latestRobotState.mode) &&
     !latestGrip && !rehearsalActive;
   if (!stopped || preferred === null || latestRobotState.translation_scale == null) return;
   preferredScaleAttempted = true;
