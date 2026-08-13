@@ -18,6 +18,7 @@ import {resolveTeleopSocketUrl} from './transport/socketUrl';
 import {TeleopSocket} from './transport/teleopSocket';
 import {ArmPanel} from './ui/armPanel';
 import {Hud} from './ui/hud';
+import {SimulationSettingsPanel} from './ui/simulationSettingsPanel';
 import {LatencyTracker} from './ui/latency';
 import {DiagnosticsPanel, DiagnosticsUpdateCoordinator} from './ui/diagnosticsPanel';
 import {
@@ -45,12 +46,17 @@ let armPanel: ArmPanel;
 let xrController: XRSessionController;
 let rehearsal: OfflineRehearsalController;
 let rehearsalPanel: OfflineRehearsalPanel;
+let settingsPanel: SimulationSettingsPanel;
 let rehearsalActive = false;
 let connectionState: OfflineRehearsalEligibility['connected'] = false;
 let latestRobotState: RobotStateMessage | null = null;
 let latestDiagnostics: DiagnosticsMessage | null = null;
 let xrState: XRSessionStatus['state'] = 'idle';
 let vrControlSequence = 0;
+let scaleRequestSequence = 0;
+let pendingScaleRequestId: string | null = null;
+let latestGrip = false;
+let preferredScaleAttempted = false;
 
 const socket = new TeleopSocket(
   resolveTeleopSocketUrl(window.location, import.meta.env.VITE_TELEOP_WS_URL),
@@ -67,8 +73,11 @@ const socket = new TeleopSocket(
     armPanel?.setConnectionStatus(status);
     xrController?.setConstraint(null);
     if (status.state !== 'connected') {
+      latestGrip = false;
+      pendingScaleRequestId = null;
       latestRobotState = null;
       latestDiagnostics = null;
+      preferredScaleAttempted = false;
       hud.setRuntimeIdentity(null, null);
       armPanel?.setRuntimeIdentity(null);
       diagnosticsUpdates.clear();
@@ -90,6 +99,15 @@ const socket = new TeleopSocket(
   },
   (message) => onDiagnostics(message),
   (message) => rehearsal?.onFeedback(message),
+  (message) => {
+    if (message.request_id !== pendingScaleRequestId) return;
+    pendingScaleRequestId = null;
+    if (latestRobotState) {
+      latestRobotState = {...latestRobotState, translation_scale: message.translation_scale};
+    }
+    settingsPanel?.handleResult(message);
+    refreshSettingsPanel();
+  },
 );
 
 armPanel = new ArmPanel(
@@ -126,6 +144,10 @@ rehearsalPanel = new OfflineRehearsalPanel(
   startRehearsal,
   () => rehearsal.requestStop('operator_stop'),
 );
+settingsPanel = new SimulationSettingsPanel(
+  hud.settingsContainer,
+  requestSimulationScale,
+);
 rehearsal = new OfflineRehearsalController({
   nowMs: () => performance.now(),
   sendControl: (message) => socket.sendControl(message),
@@ -149,8 +171,10 @@ window.addEventListener('pagehide', disposeForPageExit);
 window.addEventListener('beforeunload', disposeForPageExit);
 
 function updateController(controller: {tracking: boolean; grip: boolean; trigger: number}): void {
+  latestGrip = controller.grip;
   hud.setController(controller);
   if (controller.tracking) armPanel.observeGrip(controller.grip);
+  refreshSettingsPanel();
 }
 
 function sendVRDisarm(): void {
@@ -177,6 +201,8 @@ function updateXRStatus(status: XRSessionStatus): void {
     hud.clearSceneError();
   }
   refreshRehearsalPanel();
+  refreshSettingsPanel();
+  maybeRestorePreferredScale();
 }
 
 function sendFrame(frame: VRFrame, source: TeleopFrameSource): void {
@@ -210,6 +236,7 @@ function onRobotState(state: RobotStateMessage): void {
   });
   diagnosticsUpdates.onRobotState(state, recordAcknowledgement);
   refreshRehearsalPanel();
+  refreshSettingsPanel();
 }
 
 function onDiagnostics(diagnostics: DiagnosticsMessage): void {
@@ -224,6 +251,47 @@ function renderRehearsalSnapshot(snapshot: OfflineRehearsalSnapshot): void {
   scene.setAutomationActive(snapshot.active);
   armPanel.setAutomationActive(snapshot.active);
   rehearsalPanel.update(snapshot, rehearsalEligibility());
+  refreshSettingsPanel();
+}
+
+function refreshSettingsPanel(): void {
+  if (!settingsPanel) return;
+  settingsPanel.update({
+    runtime: latestRobotState?.backend ?? latestDiagnostics?.runtime ?? null,
+    connected: connectionState,
+    mode: latestRobotState?.mode ?? null,
+    backendState: latestRobotState?.robot_state ?? null,
+    grip: latestGrip,
+    automationActive: rehearsalActive,
+    authoritativeScale: latestRobotState?.translation_scale ?? null,
+  });
+}
+
+function requestSimulationScale(value: number): void {
+  scaleRequestSequence += 1;
+  pendingScaleRequestId = `simulation-scale-${scaleRequestSequence}`;
+  socket.sendSimulationScale({
+    v: PROTOCOL_VERSION,
+    type: 'set_simulation_scale',
+    request_id: pendingScaleRequestId,
+    translation_scale: value,
+  });
+}
+
+function maybeRestorePreferredScale(): void {
+  if (preferredScaleAttempted || !latestRobotState) return;
+  const preferred = settingsPanel.preferredScale();
+  const stopped =
+    connectionState &&
+    latestRobotState.backend === 'LEBAI_FAKE' &&
+    latestRobotState.robot_state === 'IDLE' &&
+    ['READY', 'HOLD', 'DISARMED'].includes(latestRobotState.mode) &&
+    !latestGrip && !rehearsalActive;
+  if (!stopped || preferred === null || latestRobotState.translation_scale == null) return;
+  preferredScaleAttempted = true;
+  if (Math.abs(preferred - latestRobotState.translation_scale) > 1e-9) {
+    requestSimulationScale(preferred);
+  }
 }
 
 function refreshRehearsalPanel(): void {

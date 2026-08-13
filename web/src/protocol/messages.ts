@@ -67,6 +67,7 @@ export interface RobotStateMessage {
   real_robot_mode?: RealRobotMode | null;
   preflight_ready?: boolean | null;
   preflight_reason?: string | null;
+  translation_scale?: number | null;
 }
 
 export type DiagnosticPayloadValue =
@@ -225,6 +226,36 @@ export interface OfflineRehearsalBeginMessage {
   request_id: string;
   plan_version: 1;
 }
+
+export interface SetSimulationScaleMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: 'set_simulation_scale';
+  request_id: string;
+  translation_scale: number;
+}
+
+export type SimulationScaleRejectReason =
+  | 'not_simulation'
+  | 'not_stopped'
+  | 'invalid_scale'
+  | 'automation_active';
+
+export type SimulationScaleResultMessage =
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'simulation_scale_result';
+      request_id: string;
+      accepted: true;
+      translation_scale: number;
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: 'simulation_scale_result';
+      request_id: string;
+      accepted: false;
+      translation_scale: number;
+      reason: SimulationScaleRejectReason;
+    };
 
 export interface OfflineRehearsalPhaseMessage {
   v: typeof PROTOCOL_VERSION;
@@ -423,6 +454,12 @@ function isUnitInterval(value: unknown): value is number {
   return isFiniteNumber(value) && value >= 0 && value <= 1;
 }
 
+function isSimulationScale(value: unknown): value is number {
+  if (!isFiniteNumber(value)) return false;
+  const scaled = Math.round(value * 10);
+  return scaled >= 5 && scaled <= 20 && Math.abs(value * 10 - scaled) <= 1e-9;
+}
+
 function codePointLength(value: string): number {
   return Array.from(value).length;
 }
@@ -571,6 +608,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
       [
         'ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase', 'backend',
         'real_robot_mode', 'preflight_ready', 'preflight_reason',
+        'translation_scale',
       ],
     ) ||
     value.v !== PROTOCOL_VERSION ||
@@ -627,6 +665,13 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
     Object.hasOwn(value, 'preflight_reason') &&
     value.preflight_reason !== null &&
     typeof value.preflight_reason !== 'string'
+  ) {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, 'translation_scale') &&
+    value.translation_scale !== null &&
+    !isSimulationScale(value.translation_scale)
   ) {
     return false;
   }
@@ -739,6 +784,39 @@ export function isFaultResetResultMessage(value: unknown): value is FaultResetRe
     hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'reason', 'message']) &&
     isEnumValue(FAULT_RESET_REJECT_REASONS, value.reason) &&
     typeof value.message === 'string'
+  );
+}
+
+export function isSetSimulationScaleMessage(
+  value: unknown,
+): value is SetSimulationScaleMessage {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ['v', 'type', 'request_id', 'translation_scale']) &&
+    value.v === PROTOCOL_VERSION &&
+    value.type === 'set_simulation_scale' &&
+    isIdentifier(value.request_id) &&
+    isSimulationScale(value.translation_scale)
+  );
+}
+
+export function isSimulationScaleResultMessage(
+  value: unknown,
+): value is SimulationScaleResultMessage {
+  if (
+    !isRecord(value) ||
+    value.v !== PROTOCOL_VERSION ||
+    value.type !== 'simulation_scale_result' ||
+    !isIdentifier(value.request_id) ||
+    !isSimulationScale(value.translation_scale)
+  ) return false;
+  if (value.accepted === true) {
+    return hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'translation_scale']);
+  }
+  return (
+    value.accepted === false &&
+    hasExactKeys(value, ['v', 'type', 'request_id', 'accepted', 'translation_scale', 'reason']) &&
+    isEnumValue(['not_simulation', 'not_stopped', 'invalid_scale', 'automation_active'], value.reason)
   );
 }
 

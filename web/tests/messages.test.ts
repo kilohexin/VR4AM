@@ -11,6 +11,7 @@ import {
   isHomeResultMessage,
   isOfflineRehearsalFeedbackMessage,
   isRobotStateMessage,
+  isSimulationScaleResultMessage,
   isVRFrame,
 } from '../src/protocol/messages';
 
@@ -152,6 +153,8 @@ describe('protocol guards', () => {
     expect(isRobotStateMessage({...robotFixture, constraint: 'self_collision'})).toBe(true);
     expect(isRobotStateMessage({...robotFixture, constraint: 'motion_continuity_boundary'})).toBe(true);
     expect(isRobotStateMessage({...robotFixture, backend: 'LEBAI_FAKE'})).toBe(true);
+    expect(isRobotStateMessage({...robotFixture, translation_scale: 1.5})).toBe(true);
+    expect(isRobotStateMessage({...robotFixture, translation_scale: 1.55})).toBe(false);
     expect(isRobotStateMessage({
       ...robotFixture,
       backend: 'LEBAI',
@@ -159,6 +162,31 @@ describe('protocol guards', () => {
       preflight_ready: false,
       preflight_reason: 'commissioning_not_ready',
     })).toBe(true);
+  });
+
+  it('accepts only exact simulation scale results', () => {
+    expect(isSimulationScaleResultMessage({
+      v: 1,
+      type: 'simulation_scale_result',
+      request_id: 'scale-1',
+      accepted: true,
+      translation_scale: 1.5,
+    })).toBe(true);
+    expect(isSimulationScaleResultMessage({
+      v: 1,
+      type: 'simulation_scale_result',
+      request_id: 'scale-2',
+      accepted: false,
+      translation_scale: 1.5,
+      reason: 'not_stopped',
+    })).toBe(true);
+    expect(isSimulationScaleResultMessage({
+      v: 1,
+      type: 'simulation_scale_result',
+      request_id: 'scale-3',
+      accepted: true,
+      translation_scale: 1.55,
+    })).toBe(false);
   });
 
   it('accepts every valid control type and optional nullable fields', () => {

@@ -7,6 +7,8 @@ import {
   isOfflineRehearsalClientMessage,
   isOfflineRehearsalFeedbackMessage,
   isRobotStateMessage,
+  isSetSimulationScaleMessage,
+  isSimulationScaleResultMessage,
   PROTOCOL_VERSION,
   type ClientControlMessage,
   type ArmFeedbackMessage,
@@ -16,6 +18,8 @@ import {
   type OfflineRehearsalClientMessage,
   type OfflineRehearsalFeedbackMessage,
   type RobotStateMessage,
+  type SetSimulationScaleMessage,
+  type SimulationScaleResultMessage,
   type VRFrame,
 } from '../protocol/messages';
 
@@ -54,6 +58,7 @@ export class TeleopSocket {
     private readonly onHomeResult: (message: HomeResultMessage) => void = () => {},
     private readonly onDiagnostics: (message: DiagnosticsMessage) => void = () => {},
     private readonly onOfflineRehearsalFeedback: (message: OfflineRehearsalFeedbackMessage) => void = () => {},
+    private readonly onSimulationScaleResult: (message: SimulationScaleResultMessage) => void = () => {},
   ) {}
 
   connect(): void {
@@ -77,6 +82,11 @@ export class TeleopSocket {
 
   sendRehearsal(message: OfflineRehearsalClientMessage): void {
     if (!isOfflineRehearsalClientMessage(message)) return;
+    this.send(message);
+  }
+
+  sendSimulationScale(message: SetSimulationScaleMessage): void {
+    if (!isSetSimulationScaleMessage(message)) return;
     this.send(message);
   }
 
@@ -137,6 +147,7 @@ export class TeleopSocket {
         else if (isHomeResultMessage(message)) this.onHomeResult(message);
         else if (isDiagnosticsMessage(message)) this.onDiagnostics(message);
         else if (isOfflineRehearsalFeedbackMessage(message)) this.onOfflineRehearsalFeedback(message);
+        else if (isSimulationScaleResultMessage(message)) this.onSimulationScaleResult(message);
       } catch {
         // Malformed or unsupported messages are ignored at the transport boundary.
       }
@@ -170,7 +181,7 @@ export class TeleopSocket {
     }, delay);
   }
 
-  private send(message: VRFrame | ClientControlMessage | OfflineRehearsalClientMessage): void {
+  private send(message: VRFrame | ClientControlMessage | OfflineRehearsalClientMessage | SetSimulationScaleMessage): void {
     if (this.socket?.readyState !== OPEN_READY_STATE) return;
     this.socket.send(JSON.stringify(message));
   }

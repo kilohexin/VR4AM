@@ -11,6 +11,7 @@ import type {
   OfflineRehearsalClientMessage,
   OfflineRehearsalFeedbackMessage,
   RobotStateMessage,
+  SimulationScaleResultMessage,
   VRFrame,
 } from '../src/protocol/messages';
 import {TeleopSocket, type TeleopConnectionStatus} from '../src/transport/teleopSocket';
@@ -366,6 +367,44 @@ describe('TeleopSocket', () => {
     sockets[0].message(JSON.stringify(validDiagnostics));
 
     expect(diagnostics).toEqual([validDiagnostics]);
+  });
+
+  it('sends scale requests and delivers strict correlated results', () => {
+    const results: SimulationScaleResultMessage[] = [];
+    const sockets: FakeSocket[] = [];
+    const client = new TeleopSocket(
+      'wss://test',
+      () => {},
+      () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      () => {}, () => {}, () => {}, () => {}, () => {}, () => {},
+      (message) => results.push(message),
+    );
+    client.connect();
+    sockets[0].open();
+
+    client.sendSimulationScale({
+      v: 1,
+      type: 'set_simulation_scale',
+      request_id: 'scale-1',
+      translation_scale: 1.8,
+    });
+    sockets[0].message(JSON.stringify({
+      v: 1,
+      type: 'simulation_scale_result',
+      request_id: 'scale-1',
+      accepted: true,
+      translation_scale: 1.8,
+    }));
+
+    expect(JSON.parse(sockets[0].sent.at(-1)!)).toMatchObject({
+      type: 'set_simulation_scale',
+      translation_scale: 1.8,
+    });
+    expect(results).toHaveLength(1);
   });
 
   it('delivers protocol-valid arm acknowledgements and rejections', () => {

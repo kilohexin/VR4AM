@@ -28,6 +28,7 @@ export class Hud {
   readonly actionContainer: HTMLElement;
   readonly rehearsalBanner: HTMLElement;
   readonly rehearsalContainer: HTMLElement;
+  readonly settingsContainer: HTMLElement;
   readonly diagnosticsContainer: HTMLElement;
 
   private readonly modeValue: HTMLElement;
@@ -102,6 +103,7 @@ export class Hud {
             <span class="status-value" data-field="constraint">无</span>
           </div>
           <div class="offline-rehearsal-rail" aria-label="离线演练控制台"></div>
+          <div class="simulation-settings-rail" aria-label="仿真操作设置"></div>
           <div class="diagnostics-rail" aria-label="LM3 diagnostics"></div>
         </aside>
       </main>
@@ -115,6 +117,7 @@ export class Hud {
     this.actionContainer = requireElement(root, '.command-actions-host');
     this.rehearsalBanner = requireElement(root, '.offline-rehearsal-banner');
     this.rehearsalContainer = requireElement(root, '.offline-rehearsal-rail');
+    this.settingsContainer = requireElement(root, '.simulation-settings-rail');
     this.diagnosticsContainer = requireElement(root, '.diagnostics-rail');
     this.modeValue = requireElement(root, '[data-field="mode"]');
     this.runtimeIdentityValue = requireElement(root, '.simulator-label');
