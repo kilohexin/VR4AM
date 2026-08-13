@@ -457,7 +457,7 @@ function isUnitInterval(value: unknown): value is number {
 function isSimulationScale(value: unknown): value is number {
   if (!isFiniteNumber(value)) return false;
   const scaled = Math.round(value * 10);
-  return scaled >= 5 && scaled <= 20 && Math.abs(value * 10 - scaled) <= 1e-9;
+  return scaled >= 5 && scaled <= 100 && Math.abs(value * 10 - scaled) <= 1e-9;
 }
 
 function isPositiveNumber(value: unknown): value is number {

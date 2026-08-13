@@ -226,7 +226,7 @@ class RobotControl:
         scaled = round(float(value) * 10)
         if (
             not math.isclose(float(value) * 10, scaled, abs_tol=1e-9)
-            or not 5 <= scaled <= 20
+            or not 5 <= scaled <= 100
         ):
             return SimulationScaleResult(False, current, "invalid_scale")
         if automation_active:

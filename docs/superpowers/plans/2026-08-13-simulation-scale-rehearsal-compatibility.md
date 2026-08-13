@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Only `LEBAI_FAKE` can change scale from the page; real `LEBAI` stays YAML-controlled and read-only.
-- Scale range remains `0.5–2.0` in exact `0.1` steps, default `1.5:1` from configuration.
+- Simulation scale range is `0.5–10.0` in exact `0.1` steps, default `1.5:1` from configuration; real-robot scale remains configuration-only.
 - Never change scale with Grip pressed, an active mapper anchor, motion in progress, or rehearsal active.
 - Rehearsal uses one WebSocket and ordinary VRFrame/control/safety paths; it never bypasses the mapper or limiter.
 

@@ -237,9 +237,9 @@ def _validate_translation_scale(value: object) -> float:
     scaled = round(number * 10)
     if (
         not math.isclose(number * 10, scaled, abs_tol=1e-9)
-        or not 5 <= scaled <= 20
+        or not 5 <= scaled <= 100
     ):
-        raise ValueError("translation_scale must be 0.5..2.0 in 0.1 steps")
+        raise ValueError("translation_scale must be 0.5..10.0 in 0.1 steps")
     return scaled / 10
 
 

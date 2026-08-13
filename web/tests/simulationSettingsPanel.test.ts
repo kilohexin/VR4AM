@@ -8,7 +8,7 @@ describe('SimulationSettingsPanel', () => {
     localStorage.clear();
   });
 
-  it('offers 0.5..2.0 in 0.1 steps and applies only while fake runtime is stopped', () => {
+  it('offers 0.5..10.0 in 0.1 steps and applies only while fake runtime is stopped', () => {
     const request = vi.fn();
     const panel = new SimulationSettingsPanel(document.querySelector('#panel')!, request);
     panel.update({
@@ -17,7 +17,7 @@ describe('SimulationSettingsPanel', () => {
     });
     const input = document.querySelector<HTMLInputElement>('[data-field="simulation-scale"]')!;
     const button = document.querySelector<HTMLButtonElement>('[data-action="apply-scale"]')!;
-    expect([input.min, input.max, input.step, input.value]).toEqual(['0.5', '2', '0.1', '1.5']);
+    expect([input.min, input.max, input.step, input.value]).toEqual(['0.5', '10', '0.1', '1.5']);
     input.value = '1.8';
     button.click();
     expect(request).toHaveBeenCalledWith(1.8);
@@ -49,6 +49,27 @@ describe('SimulationSettingsPanel', () => {
       grip: false, automationActive: false, authoritativeScale: 1.5,
     });
     expect(input.disabled).toBe(false);
+  });
+
+  it('accepts 10.0 and rejects values above the simulation maximum', () => {
+    const request = vi.fn();
+    const panel = new SimulationSettingsPanel(document.querySelector('#panel')!, request);
+    panel.update({
+      runtime: 'LEBAI_FAKE', connected: true, mode: 'READY', backendState: 'IDLE',
+      grip: false, automationActive: false, authoritativeScale: 1.5,
+    });
+    const input = document.querySelector<HTMLInputElement>('[data-field="simulation-scale"]')!;
+    const button = document.querySelector<HTMLButtonElement>('[data-action="apply-scale"]')!;
+
+    input.value = '10.0';
+    button.click();
+    expect(request).toHaveBeenLastCalledWith(10.0);
+
+    request.mockClear();
+    input.value = '10.1';
+    button.click();
+    expect(request).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-field="scale-status"]')?.textContent).toContain('0.5–10.0');
   });
 
   it('does not overwrite an in-progress scale edit during authoritative state refreshes', () => {

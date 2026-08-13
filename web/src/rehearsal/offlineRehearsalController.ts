@@ -1615,6 +1615,6 @@ function isSupportedTranslationScale(value: number | null | undefined): value is
   if (!Number.isFinite(value)) return false;
   const scaled = Math.round((value as number) * 10);
   return scaled >= 5
-    && scaled <= 20
+    && scaled <= 100
     && Math.abs((value as number) * 10 - scaled) <= 1e-9;
 }

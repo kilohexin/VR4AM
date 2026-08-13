@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver a `0.30 m/s`, 50 Hz simulation profile with an authoritative adjustable `0.5–2.0` translation scale, accurate soft-constraint labels, and independent PC right-drag orbit viewing without changing real-robot limits.
+**Goal:** Deliver a `0.30 m/s`, 50 Hz simulation profile with an authoritative adjustable `0.5–10.0` translation scale, accurate soft-constraint labels, and independent PC right-drag orbit viewing without changing real-robot limits.
 
 **Architecture:** Keep `LEBAI_FAKE` on the production-shaped CoordinateMapper → SafetyLimiter → IK → PVAT path, but give Fake its own responsive YAML values. Add a correlated WebSocket scale-setting protocol owned by `RobotControl`; the browser presents a stopped-only control and treats the backend reply as authority. Extract PC orbit math/input from robot input so right-click can never generate Grip, while WebXR remains unchanged.
 
@@ -12,7 +12,7 @@
 
 - User-facing runtime names remain only **仿真** and **真机**; do not introduce “数字孪生”.
 - `LEBAI_FAKE` uses `50 Hz` control/state/PVAT, `0.04 s` PVAT horizon, `0.30 m/s`, `1.2 m/s²`, `1.5 rad/s`, `4.0 rad/s²`, `0.006 m`, `2.0°`, `1.5 rad/s`, `4.0 rad/s²`, `0.06 rad`, and default translation scale `1.5`.
-- Simulation scale range is `0.5–2.0`, step `0.1`, default `1.5`; it applies only to the next Grip anchor after an authoritative stopped-state acknowledgement.
+- Simulation scale range is `0.5–10.0`, step `0.1`, default `1.5`; it applies only to the next Grip anchor after an authoritative stopped-state acknowledgement.
 - `config/real-robot.example.yaml` remains byte-for-byte unchanged and retains `0.03 m/s` and translation scale `0.5`.
 - Real joint soft limits, self-collision, Grip stop, stale/disconnect stop, single controller ownership, and hard-fault locking remain enabled.
 - No browser runtime switch from simulation to real hardware.
@@ -254,8 +254,8 @@ Use an integer-tenths validator rather than binary floating equality:
 
 ```python
 scaled = round(value * 10)
-if not math.isclose(value * 10, scaled, abs_tol=1e-9) or not 5 <= scaled <= 20:
-    raise ValueError("translation_scale must be 0.5..2.0 in 0.1 steps")
+if not math.isclose(value * 10, scaled, abs_tol=1e-9) or not 5 <= scaled <= 100:
+    raise ValueError("translation_scale must be 0.5..10.0 in 0.1 steps")
 ```
 
 Add the request model to `ClientMessage` before `ClientControlMessage` dispatch.
@@ -342,7 +342,7 @@ Add dedicated `SimulationScaleRequestMessage` and `SimulationScaleResultMessage`
 Build jsdom tests for:
 
 - label `平移倍率` and display `1.5 : 1`;
-- range `min=0.5 max=2 step=0.1` and decrement/increment buttons;
+- range `min=0.5 max=10 step=0.1` and decrement/increment buttons;
 - disabled while disconnected, non-Fake, `ACTIVE|ARMED|STALE|FAULT`, Grip pressed, automation active, or request pending;
 - real runtime shows YAML scale read-only;
 - persisted `1.8` is requested only after Fake connected/stopped authority arrives;
@@ -466,7 +466,7 @@ Expected after Tasks 1–5: pass with one socket and no hard fault.
 Document:
 
 - `0.30 m/s` is simulation-only;
-- scale defaults to `1.5`, range `0.5–2.0`, step `0.1`, changed only stopped/Grip released;
+- scale defaults to `1.5`, simulation range `0.5–10.0`, step `0.1`, changed only stopped/Grip released; real-robot scale remains configuration-only;
 - right-drag orbits, left-drag controls, wheel controls depth, and `复位视角`;
 - real IP comes from `real-robot.local.yaml`; SDK currently accepts IP only, while ports `8000/5173` belong to FastAPI/web;
 - current real view is a joint-state-driven 3D model; direct observation is mandatory for first tests; MR is a later stage.

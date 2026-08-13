@@ -319,7 +319,7 @@ def test_robot_state_allows_positive_readonly_real_translation_scale() -> None:
     assert state.translation_scale == pytest.approx(0.3)
 
 
-@pytest.mark.parametrize("value", [0.5, 1.5, 2.0])
+@pytest.mark.parametrize("value", [0.5, 1.5, 2.0, 10.0])
 def test_set_simulation_scale_accepts_exact_tenth_steps(value: float) -> None:
     message = SetSimulationScaleMessage.model_validate(
         {
@@ -332,7 +332,7 @@ def test_set_simulation_scale_accepts_exact_tenth_steps(value: float) -> None:
     assert message.translation_scale == value
 
 
-@pytest.mark.parametrize("value", [0.49, 2.01, 1.55, float("nan"), True])
+@pytest.mark.parametrize("value", [0.49, 10.1, 1.55, float("nan"), True])
 def test_set_simulation_scale_rejects_non_tenth_or_out_of_range_values(
     value: object,
 ) -> None:

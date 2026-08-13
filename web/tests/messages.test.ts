@@ -188,6 +188,20 @@ describe('protocol guards', () => {
       accepted: true,
       translation_scale: 1.55,
     })).toBe(false);
+    expect(isSimulationScaleResultMessage({
+      v: 1,
+      type: 'simulation_scale_result',
+      request_id: 'scale-10',
+      accepted: true,
+      translation_scale: 10.0,
+    })).toBe(true);
+    expect(isSimulationScaleResultMessage({
+      v: 1,
+      type: 'simulation_scale_result',
+      request_id: 'scale-over-max',
+      accepted: true,
+      translation_scale: 10.1,
+    })).toBe(false);
   });
 
   it('accepts every valid control type and optional nullable fields', () => {

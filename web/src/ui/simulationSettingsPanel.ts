@@ -38,7 +38,7 @@ export class SimulationSettingsPanel {
         <h2>操作设置</h2>
         <label data-field="scale-label" for="simulation-scale">仿真位移比例</label>
         <div class="simulation-scale-control">
-          <input id="simulation-scale" data-field="simulation-scale" type="number" min="0.5" max="2" step="0.1" value="1.5">
+          <input id="simulation-scale" data-field="simulation-scale" type="number" min="0.5" max="10" step="0.1" value="1.5">
           <span>: 1</span>
           <button type="button" data-action="apply-scale">应用</button>
         </div>
@@ -105,7 +105,7 @@ export class SimulationSettingsPanel {
     if (stored === null) return null;
     const value = Number(stored);
     const scaled = Math.round(value * 10);
-    return Number.isFinite(value) && scaled >= 5 && scaled <= 20 && Math.abs(value * 10 - scaled) <= 1e-9
+    return Number.isFinite(value) && scaled >= 5 && scaled <= 100 && Math.abs(value * 10 - scaled) <= 1e-9
       ? scaled / 10
       : null;
   }
@@ -113,8 +113,8 @@ export class SimulationSettingsPanel {
   private request(): void {
     const value = Number(this.input.value);
     const scaled = Math.round(value * 10);
-    if (!Number.isFinite(value) || scaled < 5 || scaled > 20 || Math.abs(value * 10 - scaled) > 1e-9) {
-      this.statusOverride = '请输入 0.5–2.0，步进 0.1';
+    if (!Number.isFinite(value) || scaled < 5 || scaled > 100 || Math.abs(value * 10 - scaled) > 1e-9) {
+      this.statusOverride = '请输入 0.5–10.0，步进 0.1';
       this.status.textContent = this.statusOverride;
       return;
     }
@@ -132,7 +132,7 @@ function rejectionCopy(reason: SimulationScaleRejectReason): string {
   return ({
     not_simulation: '真机比例只能通过 YAML 配置',
     not_stopped: '请先松开 Grip 并等待机械臂停止',
-    invalid_scale: '比例必须为 0.5–2.0，步进 0.1',
+    invalid_scale: '比例必须为 0.5–10.0，步进 0.1',
     automation_active: '自动演练进行中不能修改比例',
   } as Record<string, string>)[reason] ?? '比例修改被拒绝';
 }

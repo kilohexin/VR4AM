@@ -208,6 +208,19 @@ async def test_simulation_scale_accepts_armed_idle_fake_before_grip_anchor() -> 
 
 
 @pytest.mark.asyncio
+async def test_simulation_scale_accepts_ten_and_rejects_above_ten() -> None:
+    control, latest, _, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+
+    accepted = await control.set_simulation_scale(10.0, automation_active=False)
+    rejected = await control.set_simulation_scale(10.1, automation_active=False)
+
+    assert accepted == robot_control_module.SimulationScaleResult(True, 10.0)
+    assert (rejected.accepted, rejected.reason) == (False, "invalid_scale")
+    assert control.mapper.translation_scale == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
 async def test_simulation_scale_rejects_active_anchor_automation_and_invalid_values() -> None:
     control, latest, _, clock = make_control()
     await connect_release_arm(control, latest, clock)
