@@ -723,6 +723,7 @@ export class OfflineRehearsalController {
         this.targetTrigger = 1;
         this.setSampleTrigger(1);
         this.confirmations = 0;
+        this.renewPickStepDeadline();
       }
       return;
     }
@@ -783,6 +784,7 @@ export class OfflineRehearsalController {
       this.confirmations = 0;
       this.invalidConfirmations = 0;
       this.setSampleTrigger(0);
+      this.renewPickStepDeadline();
     }
   }
 
@@ -884,6 +886,8 @@ export class OfflineRehearsalController {
     this.deadlineMs = this.phaseStartedMs + (
       phase === 'translate' || phase === 'rotate'
         ? REHEARSAL_CONFIG.motionStepTimeoutMs
+        : phase === 'pick_place'
+          ? REHEARSAL_CONFIG.pickStepTimeoutMs
         : REHEARSAL_CONFIG.phaseTimeoutMs
     );
     this.confirmations = 0;
@@ -1040,7 +1044,12 @@ export class OfflineRehearsalController {
     }
     this.step = step;
     this.confirmations = 0;
+    this.renewPickStepDeadline();
     this.notify();
+  }
+
+  private renewPickStepDeadline(): void {
+    this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.pickStepTimeoutMs;
   }
 
   private prepareBoundary(): void {

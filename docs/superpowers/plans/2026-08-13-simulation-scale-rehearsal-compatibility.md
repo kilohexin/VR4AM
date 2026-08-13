@@ -51,6 +51,22 @@
 - [ ] Snapshot the scale at `start()`, replace fixed-scale calls with the snapshot, validate it on advancing states, and clear it when the run ends.
 - [ ] Re-run controller/trajectory tests and commit the scoped change.
 
+### Task 2B: Bound pick-and-place by confirmed substeps
+
+**Files:**
+- Modify: `web/tests/offlineRehearsalController.test.ts`
+- Modify: `web/src/rehearsal/offlineRehearsalController.ts`
+- Modify: `web/src/rehearsal/types.ts`
+
+**Interfaces:**
+- Consumes: existing pick/place steps and three-sample confirmation rule.
+- Produces: `pickStepTimeoutMs = 15_000`, renewed only when a pick/place substep is authoritatively completed; the 300-second full-run limit is unchanged.
+
+- [ ] Add a regression where each substep takes 9 seconds and must renew to a fresh 15-second budget after confirmation.
+- [ ] Run focused Vitest and confirm the existing shared 8-second phase deadline fails.
+- [ ] Add the pick-step timeout and renew it at `pick_attach`, `pick_lift`, `pick_transfer`, `pick_lower`, and `pick_release` transitions.
+- [ ] Re-run controller tests and the rendered full rehearsal.
+
 ### Task 3: Verification and rendered handoff
 
 **Files:**
@@ -64,4 +80,3 @@
 - [ ] Run full backend pytest, full frontend Vitest, and `npm.cmd run build`.
 - [ ] Restart `scripts/run_offline_rehearsal.py`, confirm ports 8000/5173 and Fake health.
 - [ ] Verify the page control is editable in stopped ARMED state and inspect the first rehearsal phase without claiming a complete browser rehearsal if the local certificate blocks Browser automation.
-

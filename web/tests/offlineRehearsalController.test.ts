@@ -698,6 +698,69 @@ describe('OfflineRehearsalController happy path', () => {
     confirmState(test, {mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: target});
     expect(test.controller.snapshot.step).toBe('+x_return');
   });
+
+  it('renews a 15 second deadline after each confirmed pick and place substep', () => {
+    const test = harness();
+    beginThroughAnchor(test);
+    acknowledgePhase(test);
+    driveMotionPhase(test, 'translate');
+    acknowledgePhase(test);
+    driveMotionPhase(test, 'rotate');
+    acknowledgePhase(test);
+    driveGripper(test);
+    acknowledgePhase(test);
+
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'pick_place', step: 'pick_approach', remainingTimeoutMs: 15_000,
+    });
+
+    const advancePickStep = (expectedStep: string, gripper: number, carried: boolean): void => {
+      for (let index = 0; index < 10; index += 1) {
+        test.advance(900);
+        test.emitState({
+          mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: FAKE_REHEARSAL_PREP_TCP, gripper,
+        });
+        test.emitDiagnostics();
+      }
+      const target = test.controller.snapshot.targetTcp;
+      if (target === null) throw new Error(`missing target for ${expectedStep}`);
+      if (carried) setCarriedBlockAtTcp(test, target);
+      confirmState(test, {
+        mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: target, gripper,
+      });
+    };
+
+    advancePickStep('pick_approach', 0, false);
+    expect(test.controller.snapshot).toMatchObject({step: 'pick_attach', remainingTimeoutMs: 15_000});
+    advancePickStep('pick_attach', 1, true);
+    expect(test.controller.snapshot).toMatchObject({step: 'pick_lift', remainingTimeoutMs: 15_000});
+    advancePickStep('pick_lift', 1, true);
+    expect(test.controller.snapshot).toMatchObject({step: 'pick_transfer', remainingTimeoutMs: 15_000});
+    advancePickStep('pick_transfer', 1, true);
+    expect(test.controller.snapshot).toMatchObject({step: 'pick_lower', remainingTimeoutMs: 15_000});
+    advancePickStep('pick_lower', 1, true);
+    expect(test.controller.snapshot).toMatchObject({step: 'pick_release', remainingTimeoutMs: 15_000});
+
+    for (let index = 0; index < 10; index += 1) {
+      test.advance(900);
+      test.emitState({
+        mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: FAKE_REHEARSAL_PREP_TCP, gripper: 0,
+      });
+      test.emitDiagnostics();
+    }
+    const releaseTarget = test.controller.snapshot.targetTcp;
+    const placementTarget = test.controller.snapshot.placementTarget;
+    if (releaseTarget === null || placementTarget === null) throw new Error('missing release target');
+    test.scene.carriedBlockId = null;
+    test.scene.invalidOverlap = false;
+    test.scene.blocks[0].position = structuredClone(placementTarget);
+    confirmState(test, {
+      mode: 'ACTIVE', robot_state: 'MOVING', actual_tcp: releaseTarget, gripper: 0,
+    });
+    expect(latestReport(test, 'offline_rehearsal_phase')).toMatchObject({
+      phase: 'pick_place', status: 'passed',
+    });
+  });
 });
 
 describe('OfflineRehearsalController fail-closed cleanup', () => {
