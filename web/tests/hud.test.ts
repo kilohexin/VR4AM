@@ -119,6 +119,7 @@ describe('Chinese simulator HUD', () => {
     ['workspace_boundary', '已到达操作边界，保持 Grip 向反方向退回'],
     ['ik_boundary', '当前姿态暂不可达，保持 Grip 退回上一个位置'],
     ['joint_boundary', '已到达关节操作边界，保持 Grip 反向退回'],
+    ['motion_continuity_boundary', '运动变化过快，保持 Grip 放慢或反向退回'],
   ] as const)('shows %s as a connected recoverable constraint', (constraint, copy) => {
     const hud = new Hud(document.querySelector('#app')!);
     hud.setConnectionStatus({state: 'connected'});

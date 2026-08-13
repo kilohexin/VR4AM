@@ -291,6 +291,19 @@ def test_self_collision_is_a_valid_robot_state_constraint() -> None:
     )
 
     assert state.constraint == "self_collision"
+
+
+def test_motion_continuity_is_a_valid_robot_state_constraint() -> None:
+    payload = load_fixture("robot-state-valid.json")
+    payload["constraint"] = "motion_continuity_boundary"
+
+    state = RobotStateMessage.model_validate(payload)
+    schema = load_protocol_schema()
+    validator = Draft202012Validator(
+        {**schema, "$ref": "#/$defs/RobotStateMessage"}
+    )
+
+    assert state.constraint == "motion_continuity_boundary"
     assert not list(validator.iter_errors(payload))
 
 

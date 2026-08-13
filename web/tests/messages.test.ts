@@ -150,6 +150,7 @@ describe('protocol guards', () => {
     expect(isVRFrame(vrFixture)).toBe(true);
     expect(isRobotStateMessage(robotFixture)).toBe(true);
     expect(isRobotStateMessage({...robotFixture, constraint: 'self_collision'})).toBe(true);
+    expect(isRobotStateMessage({...robotFixture, constraint: 'motion_continuity_boundary'})).toBe(true);
     expect(isRobotStateMessage({...robotFixture, backend: 'LEBAI_FAKE'})).toBe(true);
     expect(isRobotStateMessage({
       ...robotFixture,

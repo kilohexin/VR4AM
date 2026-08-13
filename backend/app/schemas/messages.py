@@ -23,6 +23,7 @@ ConstraintKind = Literal[
     "workspace_boundary",
     "ik_boundary",
     "joint_boundary",
+    "motion_continuity_boundary",
     "self_collision",
 ]
 RecoveryPhase = Literal["stopping", "homing", "stabilizing"]

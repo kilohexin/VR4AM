@@ -17,6 +17,7 @@
         "workspace_boundary",
         "ik_boundary",
         "joint_boundary",
+        "motion_continuity_boundary",
         "self_collision"
       ],
       "title": "ConstraintKind",

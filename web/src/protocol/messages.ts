@@ -19,6 +19,7 @@ export type ConstraintKind =
   | 'workspace_boundary'
   | 'ik_boundary'
   | 'joint_boundary'
+  | 'motion_continuity_boundary'
   | 'self_collision';
 export type RecoveryPhase = 'stopping' | 'homing' | 'stabilizing';
 
@@ -343,6 +344,7 @@ const CONSTRAINT_KINDS: readonly ConstraintKind[] = [
   'workspace_boundary',
   'ik_boundary',
   'joint_boundary',
+  'motion_continuity_boundary',
   'self_collision',
 ];
 const RECOVERY_PHASES: readonly RecoveryPhase[] = ['stopping', 'homing', 'stabilizing'];

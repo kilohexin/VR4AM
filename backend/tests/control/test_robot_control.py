@@ -2107,9 +2107,9 @@ async def test_self_collision_command_error_is_a_soft_constraint() -> None:
 @pytest.mark.parametrize(
     ("reason", "expected_constraint"),
     [
-        ("ik_joint_jump", "joint_boundary"),
+        ("ik_joint_jump", "motion_continuity_boundary"),
         ("ik_joint_limit", "joint_boundary"),
-        ("joint_speed_limit", "joint_boundary"),
+        ("joint_speed_limit", "motion_continuity_boundary"),
     ],
 )
 async def test_pvat_continuity_rejection_is_a_soft_constraint(

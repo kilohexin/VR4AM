@@ -706,11 +706,11 @@ class RobotControl:
                         self._set_constraint("ik_boundary")
                     elif code in {
                         "joint_safety_window",
-                        "ik_joint_jump",
                         "ik_joint_limit",
-                        "joint_speed_limit",
                     }:
                         self._set_constraint("joint_boundary")
+                    elif code in {"ik_joint_jump", "joint_speed_limit"}:
+                        self._set_constraint("motion_continuity_boundary")
                     elif code == "self_collision":
                         self._set_constraint("self_collision")
                     else:

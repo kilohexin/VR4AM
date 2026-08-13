@@ -302,6 +302,31 @@ async def test_fake_repeated_ik_misses_remain_soft_and_keep_pump_running() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "expected_constraint"),
+    [
+        ("ik_unreachable", "ik_boundary"),
+        ("ik_invalid", "ik_boundary"),
+        ("ik_joint_limit", "joint_boundary"),
+        ("ik_joint_jump", "motion_continuity_boundary"),
+        ("joint_speed_limit", "motion_continuity_boundary"),
+    ],
+)
+async def test_soft_ik_errors_keep_their_specific_constraint_category(
+    reason: str,
+    expected_constraint: str,
+) -> None:
+    adapter, _, _ = await _connected_control_adapter(
+        backend_label="LEBAI_FAKE",
+    )
+
+    adapter._note_soft_constraint(reason, persistent=False)
+
+    assert adapter.constraint == expected_constraint
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_fake_ik_fallback_sends_nearest_feasible_candidate() -> None:
     events: list[dict[str, object]] = []
 

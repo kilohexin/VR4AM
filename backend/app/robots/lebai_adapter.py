@@ -677,7 +677,12 @@ class RealLebaiAdapter:
         self._constraint = (
             "ik_boundary"
             if self._constraint_error == "ik_unreachable"
-            else "joint_boundary"
+            else (
+                "motion_continuity_boundary"
+                if self._constraint_error
+                in {"ik_joint_jump", "joint_speed_limit"}
+                else "joint_boundary"
+            )
         )
         if persistent and self._consecutive_ik_failures >= 5:
             raise BackendCommandError("ik_failure_persistent")
