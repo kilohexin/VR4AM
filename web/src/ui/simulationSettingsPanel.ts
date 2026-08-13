@@ -24,6 +24,8 @@ export class SimulationSettingsPanel {
   private readonly label: HTMLElement;
   private readonly status: HTMLElement;
   private pending = false;
+  private editing = false;
+  private statusOverride: string | null = null;
   private state: SimulationSettingsState | null = null;
 
   constructor(
@@ -47,6 +49,10 @@ export class SimulationSettingsPanel {
     this.apply = requireElement(root, '[data-action="apply-scale"]');
     this.label = requireElement(root, '[data-field="scale-label"]');
     this.status = requireElement(root, '[data-field="scale-status"]');
+    this.input.addEventListener('input', () => {
+      this.editing = true;
+      this.statusOverride = null;
+    });
     this.apply.addEventListener('click', () => this.request());
     requireElement<HTMLButtonElement>(root, '[data-action="reset-view"]')
       .addEventListener('click', onResetView);
@@ -54,12 +60,12 @@ export class SimulationSettingsPanel {
 
   update(state: SimulationSettingsState): void {
     this.state = state;
-    if (!state.connected) this.pending = false;
+    if (!state.connected) {
+      this.pending = false;
+      this.editing = false;
+    }
     const real = state.runtime === 'LEBAI';
     this.label.textContent = real ? '真机比例（配置只读）' : '仿真位移比例';
-    if (state.authoritativeScale !== null && !this.pending) {
-      this.input.value = state.authoritativeScale.toFixed(1);
-    }
     const stopped =
       state.connected &&
       state.runtime === 'LEBAI_FAKE' &&
@@ -68,23 +74,28 @@ export class SimulationSettingsPanel {
       ['READY', 'HOLD', 'DISARMED', 'ARMED'].includes(state.mode) &&
       !state.grip &&
       !state.automationActive;
+    if (!stopped && !this.pending) this.editing = false;
+    if (state.authoritativeScale !== null && !this.pending && !this.editing) {
+      this.input.value = state.authoritativeScale.toFixed(1);
+    }
     this.input.disabled = !stopped || this.pending;
     this.apply.disabled = !stopped || this.pending;
     this.status.textContent = real
       ? '真机比例由 YAML 配置，页面不可修改'
       : this.pending
         ? '等待仿真后端确认…'
-        : '仅在 Grip 松开且机械臂停止时可修改';
+        : this.statusOverride ?? '仅在 Grip 松开且机械臂停止时可修改';
   }
 
   handleResult(message: SimulationScaleResultMessage): void {
     this.pending = false;
+    this.editing = false;
     this.input.value = message.translation_scale.toFixed(1);
     if (message.accepted) {
       localStorage.setItem(STORAGE_KEY, message.translation_scale.toFixed(1));
-      this.status.textContent = `已应用 ${message.translation_scale.toFixed(1)} : 1`;
+      this.statusOverride = `已应用 ${message.translation_scale.toFixed(1)} : 1`;
     } else {
-      this.status.textContent = rejectionCopy(message.reason);
+      this.statusOverride = rejectionCopy(message.reason);
     }
     if (this.state) this.update({...this.state, authoritativeScale: message.translation_scale});
   }
@@ -103,10 +114,13 @@ export class SimulationSettingsPanel {
     const value = Number(this.input.value);
     const scaled = Math.round(value * 10);
     if (!Number.isFinite(value) || scaled < 5 || scaled > 20 || Math.abs(value * 10 - scaled) > 1e-9) {
-      this.status.textContent = '请输入 0.5–2.0，步进 0.1';
+      this.statusOverride = '请输入 0.5–2.0，步进 0.1';
+      this.status.textContent = this.statusOverride;
       return;
     }
     this.pending = true;
+    this.editing = false;
+    this.statusOverride = null;
     this.input.disabled = true;
     this.apply.disabled = true;
     this.status.textContent = '等待仿真后端确认…';

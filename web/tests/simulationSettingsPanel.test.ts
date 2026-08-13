@@ -51,6 +51,27 @@ describe('SimulationSettingsPanel', () => {
     expect(input.disabled).toBe(false);
   });
 
+  it('does not overwrite an in-progress scale edit during authoritative state refreshes', () => {
+    const request = vi.fn();
+    const panel = new SimulationSettingsPanel(document.querySelector('#panel')!, request);
+    const stoppedState = {
+      runtime: 'LEBAI_FAKE' as const, connected: true, mode: 'READY' as const,
+      backendState: 'IDLE' as const, grip: false, automationActive: false,
+      authoritativeScale: 1.5,
+    };
+    panel.update(stoppedState);
+
+    const input = document.querySelector<HTMLInputElement>('[data-field="simulation-scale"]')!;
+    input.value = '1.7';
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    panel.update(stoppedState);
+    panel.update(stoppedState);
+
+    expect(input.value).toBe('1.7');
+    document.querySelector<HTMLButtonElement>('[data-action="apply-scale"]')!.click();
+    expect(request).toHaveBeenCalledWith(1.7);
+  });
+
   it('stores only accepted values and renders real robot scale read-only', () => {
     const panel = new SimulationSettingsPanel(document.querySelector('#panel')!, vi.fn());
     panel.handleResult({
