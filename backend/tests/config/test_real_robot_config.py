@@ -5,8 +5,12 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from app.config import Settings
+
+
+ROOT = Path(__file__).resolve().parents[3]
 
 
 REAL_CONFIG_TEMPLATE = """
@@ -101,6 +105,18 @@ def test_readonly_lebai_config_loads_without_importing_sdk(
         -2.5,
         -6.0,
     )
+
+
+def test_real_robot_example_keeps_conservative_motion_values() -> None:
+    payload = yaml.safe_load(
+        (ROOT / "config" / "real-robot.example.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    control = payload["real_robot"]["control"]
+
+    assert control["max_tcp_speed_mps"] == pytest.approx(0.03)
+    assert control["translation_scale"] == pytest.approx(0.5)
 
 
 def test_control_mode_requires_exact_environment_confirmation(

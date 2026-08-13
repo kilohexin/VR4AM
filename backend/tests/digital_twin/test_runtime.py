@@ -44,6 +44,12 @@ def test_fake_profile_uses_responsive_but_bounded_motion_values() -> None:
     assert settings.lebai is not None
     control = settings.lebai.control
 
+    assert (control.loop_hz, control.state_hz, control.pvat_send_hz) == (
+        50,
+        50,
+        50,
+    )
+    assert control.pvat_horizon_s == pytest.approx(0.04)
     assert (
         control.max_tcp_speed_mps,
         control.max_tcp_rotation_radps,
@@ -59,18 +65,18 @@ def test_fake_profile_uses_responsive_but_bounded_motion_values() -> None:
         control.translation_scale,
     ) == pytest.approx(
         (
-            0.06,
-            0.50,
-            0.20,
-            1.00,
             0.30,
-            1.00,
-            0.015,
-            0.003,
-            1.5,
+            1.50,
+            1.20,
+            4.00,
+            1.50,
+            4.00,
+            0.060,
+            0.006,
+            2.0,
             0.16,
             45.0,
-            0.70,
+            1.50,
         )
     )
 

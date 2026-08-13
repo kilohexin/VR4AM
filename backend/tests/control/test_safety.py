@@ -202,20 +202,22 @@ def test_optional_hard_per_cycle_caps_apply_even_after_long_dt() -> None:
     assert delta.magnitude() <= np.deg2rad(1)
 
 
-def test_responsive_fake_limits_reach_fifty_mm_and_twenty_degrees_in_two_seconds() -> None:
+def test_high_response_fake_limits_reach_three_hundred_mm_per_second() -> None:
     translated = Pose(p=(0.0, 0.0, 0.0), q=IDENTITY)
-    translate_target = Pose(p=(0.05, 0.0, 0.0), q=IDENTITY)
+    translate_target = Pose(p=(1.0, 0.0, 0.0), q=IDENTITY)
     translation_limiter = SafetyLimiter(
-        max_linear_speed=0.06,
-        max_linear_accel=0.20,
-        max_linear_step_m=0.003,
+        max_linear_speed=0.30,
+        max_linear_accel=1.20,
+        max_linear_step_m=0.006,
     )
-    for _ in range(100):
+    positions = []
+    for _ in range(50):
         translated = translation_limiter.limit_motion(
             translated,
             translate_target,
             0.02,
         )
+        positions.append(translated.p[0])
 
     rotated = Pose(p=(0.0, 0.0, 0.0), q=IDENTITY)
     rotate_target = Pose(
@@ -223,9 +225,9 @@ def test_responsive_fake_limits_reach_fifty_mm_and_twenty_degrees_in_two_seconds
         q=tuple(Rotation.from_euler("z", 20, degrees=True).as_quat()),
     )
     rotation_limiter = SafetyLimiter(
-        max_angular_speed=0.50,
-        max_angular_accel=1.00,
-        max_angular_step_rad=np.deg2rad(1.5),
+        max_angular_speed=1.50,
+        max_angular_accel=4.00,
+        max_angular_step_rad=np.deg2rad(2.0),
     )
     for _ in range(100):
         rotated = rotation_limiter.limit_motion(
@@ -234,9 +236,10 @@ def test_responsive_fake_limits_reach_fifty_mm_and_twenty_degrees_in_two_seconds
             0.02,
         )
 
-    assert np.linalg.norm(
-        np.asarray(translated.p) - np.asarray(translate_target.p)
-    ) <= 0.003
+    per_tick = np.diff([0.0, *positions])
+    assert max(per_tick) <= 0.006 + 1e-12
+    assert positions[-1] >= 0.26
+    assert per_tick[-1] == pytest.approx(0.006)
     rotation_error = (
         Rotation.from_quat(rotate_target.q)
         * Rotation.from_quat(rotated.q).inv()
