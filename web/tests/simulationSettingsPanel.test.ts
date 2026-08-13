@@ -55,4 +55,11 @@ describe('SimulationSettingsPanel', () => {
     expect(document.body.textContent).toContain('真机比例（配置只读）');
     expect(document.querySelector<HTMLInputElement>('[data-field="simulation-scale"]')!.disabled).toBe(true);
   });
+
+  it('exposes a dedicated view reset without changing the scale', () => {
+    const reset = vi.fn();
+    new SimulationSettingsPanel(document.querySelector('#panel')!, vi.fn(), reset);
+    document.querySelector<HTMLButtonElement>('[data-action="reset-view"]')!.click();
+    expect(reset).toHaveBeenCalledOnce();
+  });
 });

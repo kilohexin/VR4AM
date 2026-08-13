@@ -29,6 +29,7 @@ export class SimulationSettingsPanel {
   constructor(
     root: Element,
     private readonly onScaleRequest: (value: number) => void,
+    onResetView: () => void = () => {},
   ) {
     root.innerHTML = `
       <section class="simulation-settings-panel" aria-label="仿真操作设置">
@@ -40,12 +41,15 @@ export class SimulationSettingsPanel {
           <button type="button" data-action="apply-scale">应用</button>
         </div>
         <p data-field="scale-status">仅在 Grip 松开且机械臂停止时可修改</p>
+        <button type="button" data-action="reset-view">复位视角</button>
       </section>`;
     this.input = requireElement(root, '[data-field="simulation-scale"]');
     this.apply = requireElement(root, '[data-action="apply-scale"]');
     this.label = requireElement(root, '[data-field="scale-label"]');
     this.status = requireElement(root, '[data-field="scale-status"]');
     this.apply.addEventListener('click', () => this.request());
+    requireElement<HTMLButtonElement>(root, '[data-action="reset-view"]')
+      .addEventListener('click', onResetView);
   }
 
   update(state: SimulationSettingsState): void {

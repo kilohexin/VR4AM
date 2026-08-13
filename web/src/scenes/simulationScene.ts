@@ -18,6 +18,7 @@ import {RobotStateBuffer} from '../robot/robotState';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
 import type {XRPresentationSample} from '../xr/session';
 import {ControllerHints} from './controllerHints';
+import {DesktopOrbitCamera} from './desktopOrbitCamera';
 import {
   type GraspBlock,
   KinematicGraspController,
@@ -235,6 +236,7 @@ export class SimulationScene {
   private lastFrameMs = Number.NEGATIVE_INFINITY;
   private readonly clockAnchor = new ServerClockAnchor();
   private readonly inputSafety: DesktopInputSafety;
+  private readonly orbitCamera: DesktopOrbitCamera;
   private readonly controllerPosition = new THREE.Vector3(...DESKTOP_CONTROLLER_POSITION);
   private readonly controllerQuaternion = new THREE.Quaternion(...DESKTOP_CONTROLLER_QUATERNION);
   private offlineController: OfflineControllerSample | null = null;
@@ -284,8 +286,7 @@ export class SimulationScene {
     this.inputSafety = new DesktopInputSafety(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(38, 1, 0.01, 50);
-    this.camera.position.set(1.55, 1.06, 1.9);
-    this.camera.lookAt(0.03, 0.42, 0);
+    this.orbitCamera = new DesktopOrbitCamera(this.renderer.domElement, this.camera);
 
     this.scene.background = new THREE.Color(0x07131e);
     this.robotVisualRoot.name = 'robot-visual-root';
@@ -424,6 +425,10 @@ export class SimulationScene {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
+  }
+
+  resetCameraView(): void {
+    this.orbitCamera.reset();
   }
 
   async startXR(session: XRSession, loop: XRFrameRequestCallback): Promise<void> {
@@ -629,6 +634,7 @@ export class SimulationScene {
   private addListeners(): void {
     const canvas = this.renderer.domElement;
     this.inputSafety.attach();
+    this.orbitCamera.attach();
     window.addEventListener('resize', this.resizeFromEvent);
     canvas.addEventListener('pointermove', this.onPointerMove);
     canvas.addEventListener('wheel', this.onWheel, {passive: false});
@@ -638,6 +644,7 @@ export class SimulationScene {
   private removeListeners(): void {
     const canvas = this.renderer.domElement;
     this.inputSafety.dispose();
+    this.orbitCamera.dispose();
     window.removeEventListener('resize', this.resizeFromEvent);
     canvas.removeEventListener('pointermove', this.onPointerMove);
     canvas.removeEventListener('wheel', this.onWheel);

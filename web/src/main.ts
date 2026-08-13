@@ -147,6 +147,7 @@ rehearsalPanel = new OfflineRehearsalPanel(
 settingsPanel = new SimulationSettingsPanel(
   hud.settingsContainer,
   requestSimulationScale,
+  () => scene.resetCameraView(),
 );
 rehearsal = new OfflineRehearsalController({
   nowMs: () => performance.now(),
