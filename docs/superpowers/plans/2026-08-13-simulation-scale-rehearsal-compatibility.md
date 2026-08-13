@@ -67,6 +67,21 @@
 - [ ] Add the pick-step timeout and renew it at `pick_attach`, `pick_lift`, `pick_transfer`, `pick_lower`, and `pick_release` transitions.
 - [ ] Re-run controller tests and the rendered full rehearsal.
 
+### Task 2C: Renew confirmed soft-boundary retreat
+
+**Files:**
+- Modify: `web/tests/offlineRehearsalController.test.ts`
+- Modify: `web/src/rehearsal/offlineRehearsalController.ts`
+
+**Interfaces:**
+- Consumes: three consecutive `workspace_boundary` confirmations.
+- Produces: one fresh 8-second retreat deadline while retaining the existing boundary distance and limiter behavior.
+
+- [ ] Add a regression proving two confirmations do not renew and the third enters retreat with 8 seconds.
+- [ ] Run focused Vitest and confirm the existing shared deadline remains partially consumed.
+- [ ] Renew only at the authoritative `boundary_outward -> boundary_retreat` transition.
+- [ ] Re-run controller tests and rendered rehearsal.
+
 ### Task 3: Verification and rendered handoff
 
 **Files:**

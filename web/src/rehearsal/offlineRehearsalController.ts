@@ -816,6 +816,7 @@ export class OfflineRehearsalController {
       this.step = 'boundary_retreat';
       this.targetTcp = copyPose(this.anchor);
       this.confirmations = 0;
+      this.deadlineMs = this.ports.nowMs() + REHEARSAL_CONFIG.motionStepTimeoutMs;
       return;
     }
     const clearAndHome = state.constraint === null

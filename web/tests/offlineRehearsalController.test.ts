@@ -761,6 +761,46 @@ describe('OfflineRehearsalController happy path', () => {
       phase: 'pick_place', status: 'passed',
     });
   });
+
+  it('renews the boundary retreat deadline only after three boundary confirmations', () => {
+    const test = harness();
+    beginThroughAnchor(test);
+    acknowledgePhase(test);
+    driveMotionPhase(test, 'translate');
+    acknowledgePhase(test);
+    driveMotionPhase(test, 'rotate');
+    acknowledgePhase(test);
+    driveGripper(test);
+    acknowledgePhase(test);
+    drivePickPlace(test);
+    acknowledgePhase(test);
+
+    expect(test.controller.snapshot).toMatchObject({
+      phase: 'soft_boundary', step: 'boundary_outward', remainingTimeoutMs: 8_000,
+    });
+    for (let index = 0; index < 10; index += 1) {
+      test.advance(500);
+      test.emitState({mode: 'ACTIVE', robot_state: 'MOVING', constraint: null});
+      test.emitDiagnostics();
+    }
+    confirmState(test, {
+      mode: 'ACTIVE', robot_state: 'HOLD', constraint: 'workspace_boundary',
+    }, 1);
+    test.emitDiagnostics();
+    confirmState(test, {
+      mode: 'ACTIVE', robot_state: 'HOLD', constraint: 'workspace_boundary',
+    }, 1);
+    expect(test.controller.snapshot.failure).toBeNull();
+    expect(test.controller.snapshot).toMatchObject({
+      step: 'boundary_outward', remainingTimeoutMs: 3_000,
+    });
+    confirmState(test, {
+      mode: 'ACTIVE', robot_state: 'HOLD', constraint: 'workspace_boundary',
+    });
+    expect(test.controller.snapshot).toMatchObject({
+      step: 'boundary_retreat', remainingTimeoutMs: 8_000,
+    });
+  });
 });
 
 describe('OfflineRehearsalController fail-closed cleanup', () => {
