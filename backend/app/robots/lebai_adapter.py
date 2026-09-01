@@ -751,6 +751,21 @@ class RealLebaiAdapter:
                 latencies,
                 deadline_ns=deadline_ns,
             )
+            robot_state = map_robot_state(raw_state)
+            running_motion = _running_motion(raw_running)
+            if (
+                robot_state is BackendState.IDLE
+                and running_motion is not None
+            ):
+                raw_motion_state = await self._timed(
+                    "get_motion_state",
+                    lambda: client.get_motion_state(running_motion),
+                    latencies,
+                    deadline_ns=deadline_ns,
+                    timeout_error="sdk_timeout:get_motion_state",
+                )
+                if str(raw_motion_state).strip().upper() == "FINISHED":
+                    running_motion = None
         if not isinstance(raw_kin, Mapping):
             raise BackendCommandError("invalid_sdk_kin_data")
         if not isinstance(raw_tcp, Mapping):
@@ -759,7 +774,7 @@ class RealLebaiAdapter:
             raise BackendCommandError("invalid_sdk_claw")
         snapshot = LebaiSnapshot(
             captured_ns=captured_ns,
-            robot_state=map_robot_state(raw_state),
+            robot_state=robot_state,
             estop=estop_fault(raw_estop),
             actual_q=joint_vector(
                 raw_kin.get("actual_joint_pose"),
@@ -790,7 +805,7 @@ class RealLebaiAdapter:
             actual_flange=_pose_field(raw_kin, "actual_flange_pose"),
             tcp_setting=pose_from_lebai(raw_tcp),
             gripper=self._gripper_from_claw(raw_claw),
-            running_motion=_running_motion(raw_running),
+            running_motion=running_motion,
             sdk_latencies_ms=latencies,
         )
         self._snapshot = snapshot
@@ -804,6 +819,7 @@ class RealLebaiAdapter:
         latencies: dict[str, float],
         *,
         deadline_ns: int | None = None,
+        timeout_error: str | None = None,
     ) -> Any:
         started = self._clock()
         deadline_limited = False
@@ -821,9 +837,11 @@ class RealLebaiAdapter:
                 raise BackendCommandError("robot_state_stale")
             return result
         except TimeoutError:
-            if deadline_limited:
+            if deadline_limited and timeout_error is None:
                 raise BackendCommandError("robot_state_stale") from None
-            raise BackendCommandError(f"sdk_timeout:{name}") from None
+            raise BackendCommandError(
+                timeout_error or f"sdk_timeout:{name}"
+            ) from None
         except BackendCommandError:
             raise
         except Exception:

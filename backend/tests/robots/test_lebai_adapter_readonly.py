@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -33,6 +34,11 @@ async def _connected_readonly(
     return adapter, fake
 
 
+def _set_active_motion(client: FakeLebaiClient) -> None:
+    client.running_motion = 7
+    client.motion_state = "RUNNING"
+
+
 @pytest.mark.asyncio
 async def test_readonly_preflight_reads_state_without_writes() -> None:
     adapter, client = await _connected_readonly()
@@ -46,6 +52,79 @@ async def test_readonly_preflight_reads_state_without_writes() -> None:
     assert result.actual_tcp.p == pytest.approx((0.3, 0.0, 0.4))
     assert result.tcp_matches is True
     assert "pvat" in result.capabilities
+    assert client.write_calls == []
+
+
+@pytest.mark.asyncio
+async def test_readonly_ignores_finished_running_motion_id() -> None:
+    client = FakeLebaiClient.idle()
+    client.running_motion = 391
+    client.motion_state = "FINISHED"
+    adapter, client = await _connected_readonly(client)
+
+    result = await adapter.preflight()
+
+    assert result.ready is False
+    assert result.reason == "real_robot_readonly"
+    assert client.write_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("motion_state", ["WAIT", "RUNNING", "UNKNOWN"])
+async def test_readonly_blocks_non_finished_motion_state(
+    motion_state: str,
+) -> None:
+    client = FakeLebaiClient.idle()
+    client.running_motion = 391
+    client.motion_state = motion_state
+    adapter, client = await _connected_readonly(client)
+
+    result = await adapter.preflight()
+
+    assert result.ready is False
+    assert result.reason == "motion_running"
+    assert client.write_calls == []
+
+
+@pytest.mark.asyncio
+async def test_readonly_surfaces_motion_state_query_failure() -> None:
+    client = FakeLebaiClient.idle()
+    client.running_motion = 391
+    client.get_motion_state = AsyncMock(side_effect=RuntimeError("sdk failure"))
+    adapter = RealLebaiAdapter(
+        readonly_settings(),
+        client_factory=AsyncMock(return_value=client),
+    )
+
+    with pytest.raises(
+        BackendCommandError,
+        match="^sdk_call_failed:get_motion_state$",
+    ):
+        await adapter.connect()
+
+    assert client.write_calls == []
+
+
+@pytest.mark.asyncio
+async def test_readonly_surfaces_motion_state_query_timeout() -> None:
+    async def blocked_motion_state(_motion_id: object) -> object:
+        await asyncio.Event().wait()
+        return "FINISHED"
+
+    client = FakeLebaiClient.idle()
+    client.running_motion = 391
+    client.get_motion_state = AsyncMock(side_effect=blocked_motion_state)
+    adapter = RealLebaiAdapter(
+        readonly_settings(),
+        client_factory=AsyncMock(return_value=client),
+    )
+
+    with pytest.raises(
+        BackendCommandError,
+        match="^sdk_timeout:get_motion_state$",
+    ):
+        await adapter.connect()
+
     assert client.write_calls == []
 
 
@@ -93,7 +172,7 @@ async def test_readonly_state_normalizes_gripper_without_writing() -> None:
     ("mutate", "reason"),
     [
         (lambda client: setattr(client, "robot_state", "MOVING"), "robot_not_idle"),
-        (lambda client: setattr(client, "running_motion", 7), "motion_running"),
+        (_set_active_motion, "motion_running"),
         (lambda client: setattr(client, "estop_reason", 4), "estop:hard_estop"),
         (
             lambda client: client.tcp.update({"z": 0.20}),
