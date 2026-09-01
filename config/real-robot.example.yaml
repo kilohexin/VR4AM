@@ -17,6 +17,9 @@ real_robot:
 
   # Never guess these values. Record and approve them onsite.
   home_q: []
+  # A separately approved, collision-free joint pose for Cartesian teleoperation.
+  # Keep J3 and J5 at least 5 degrees away from zero.
+  teleop_ready_q: []
   soft_joint_min_rad: []
   soft_joint_max_rad: []
   joint_limit_margin_rad: 0.05

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from app.commissioning.actions import (
     GripperAction,
     HomeAction,
+    PrepareAction,
     RotationAction,
     SmokeAction,
     SmokeOptions,
@@ -80,6 +81,20 @@ def test_rotate_accepts_signed_two_degrees(angle: float) -> None:
     assert options.action == RotationAction("roll", angle)
 
 
+def test_prepare_parses_as_an_explicit_action() -> None:
+    options = parse_smoke_args(
+        [
+            "prepare",
+            "--config",
+            str(CONFIG),
+            "--confirm",
+            REAL_ROBOT_CONFIRMATION,
+        ]
+    )
+
+    assert options.action == PrepareAction()
+
+
 def _control_config(tmp_path: Path) -> Path:
     path = tmp_path / "control.yaml"
     path.write_text(
@@ -123,6 +138,7 @@ async def test_run_smoke_rejects_unbounded_constructed_actions_before_connecting
         (TranslationAction("x", 0.005), {"move_pvat", "stop_move"}),
         (RotationAction("yaw", 2.0), {"move_pvat", "stop_move"}),
         (GripperAction("close"), {"set_claw", "stop_move"}),
+        (PrepareAction(), {"movej"}),
         (HomeAction(), {"stop_move", "movej"}),
         (StopAction(), {"stop_move"}),
     ],
@@ -134,6 +150,24 @@ async def test_each_commissioning_action_uses_one_write_category(
     expected_methods: set[str],
 ) -> None:
     client = FakeLebaiClient.idle()
+    if isinstance(action, PrepareAction):
+        client.kin_data["actual_joint_pose"] = [0.0, -1.0, 0.0, 0.0, 0.0, 0.0]
+        client.kin_data["target_joint_pose"] = [0.0, -1.0, 0.0, 0.0, 0.0, 0.0]
+        original_movej = client.movej
+
+        async def converging_prepare_movej(
+            p: list[float],
+            a: float,
+            v: float,
+            t: float,
+            r: float,
+        ) -> object:
+            result = await original_movej(p, a, v, t, r)
+            client.kin_data["actual_joint_pose"] = list(p)
+            client.kin_data["target_joint_pose"] = list(p)
+            return result
+
+        client.movej = converging_prepare_movej  # type: ignore[method-assign]
     if isinstance(action, (TranslationAction, RotationAction)):
         requested_pose: dict[str, float] | None = None
 
@@ -178,7 +212,14 @@ async def test_each_commissioning_action_uses_one_write_category(
     )
 
     methods = {str(call[0]) for call in client.write_calls}
-    assert result.action in {"translate", "rotate", "gripper", "home", "stop"}
+    assert result.action in {
+        "translate",
+        "rotate",
+        "gripper",
+        "prepare",
+        "home",
+        "stop",
+    }
     assert result.stable is True
     assert methods == expected_methods
     assert not methods & {
@@ -231,6 +272,45 @@ async def test_commissioning_motion_times_out_without_authoritative_progress(
     methods = [call[0] for call in client.write_calls]
     assert "move_pvat" in methods
     assert "stop_move" in methods
+
+
+@pytest.mark.asyncio
+async def test_home_commissioning_can_leave_a_singular_pose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle(q=[0.0, -1.0, 0.0, 0.0, 0.2, 0.0])
+    original_movej = client.movej
+
+    async def converging_movej(
+        p: list[float],
+        a: float,
+        v: float,
+        t: float,
+        r: float,
+    ) -> object:
+        result = await original_movej(p, a, v, t, r)
+        client.kin_data["actual_joint_pose"] = list(p)
+        client.kin_data["target_joint_pose"] = list(p)
+        return result
+
+    client.movej = converging_movej  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "app.commissioning.smoke.COMMISSIONING_LOG_ROOT",
+        tmp_path / "logs",
+    )
+
+    result = await run_smoke(
+        SmokeOptions(
+            config_path=_control_config(tmp_path),
+            action=HomeAction(),
+            confirmation=REAL_ROBOT_CONFIRMATION,
+        ),
+        AsyncMock(return_value=client),
+    )
+
+    assert result.action == "home"
+    assert any(call[0] == "movej" for call in client.write_calls)
 
 
 @pytest.mark.asyncio

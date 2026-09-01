@@ -15,6 +15,7 @@ from scipy.spatial.transform import Rotation
 from app.commissioning.actions import (
     GripperAction,
     HomeAction,
+    PrepareAction,
     RotationAction,
     SmokeAction,
     SmokeOptions,
@@ -69,6 +70,7 @@ def parse_smoke_args(argv: Sequence[str] | None = None) -> SmokeOptions:
     gripper.add_argument("--target", choices=("open", "close"), required=True)
 
     _add_safety_inputs(commands.add_parser("home"))
+    _add_safety_inputs(commands.add_parser("prepare"))
     _add_safety_inputs(commands.add_parser("stop"))
     args = parser.parse_args(argv)
     confirmation = str(args.confirm)
@@ -98,6 +100,8 @@ def parse_smoke_args(argv: Sequence[str] | None = None) -> SmokeOptions:
         action = GripperAction(args.target)
     elif args.command == "home":
         action = HomeAction()
+    elif args.command == "prepare":
+        action = PrepareAction()
     else:
         action = StopAction()
     return SmokeOptions(Path(args.config), action, confirmation)
@@ -127,6 +131,8 @@ def _action_name(action: SmokeAction) -> str:
         return "gripper"
     if isinstance(action, HomeAction):
         return "home"
+    if isinstance(action, PrepareAction):
+        return "prepare"
     return "stop"
 
 
@@ -153,7 +159,7 @@ def _validate_smoke_action(action: SmokeAction) -> None:
         if action.target not in {"open", "close"}:
             raise ValueError("smoke_gripper_target_invalid")
         return
-    if isinstance(action, (HomeAction, StopAction)):
+    if isinstance(action, (PrepareAction, HomeAction, StopAction)):
         return
     raise ValueError("smoke_action_invalid")
 
@@ -209,7 +215,7 @@ async def _run_motion_action(
     clock: MonotonicClock,
     settings: Settings,
     action: TranslationAction | RotationAction | GripperAction,
-) -> None:
+) -> RobotStateMessage | None:
     # The released sample is deliberately ticked before arming so the
     # RobotControl session guards remain the sole authority for motion.
     observed_trigger = await control.initialize_observed_gripper()
@@ -229,6 +235,7 @@ async def _run_motion_action(
     if settings.lebai is None:
         raise RuntimeError("missing_lebai_settings")
     sequence = 3
+    reached_state: RobotStateMessage | None = None
     try:
         if isinstance(action, (TranslationAction, RotationAction)):
             initial = await control.backend.get_state()
@@ -270,6 +277,7 @@ async def _run_motion_action(
                     raise RuntimeError("smoke_motion_overshoot")
                 if abs(displacement - requested) <= tolerance:
                     reached = True
+                    reached_state = current
                     break
             if not reached:
                 raise RuntimeError("smoke_motion_timeout")
@@ -285,6 +293,7 @@ async def _run_motion_action(
         )
         await control.tick()
         await control.disarm()
+    return reached_state
 
 
 def _commissioning_target_frame(
@@ -401,7 +410,41 @@ async def run_smoke(
             clock.now_ns(),
         )
         if not preflight.ready:
-            raise RuntimeError(f"smoke_preflight_failed:{preflight.reason}")
+            if not (
+                isinstance(options.action, (PrepareAction, HomeAction))
+                and preflight.reason == "singular_configuration"
+            ):
+                raise RuntimeError(
+                    f"smoke_preflight_failed:{preflight.reason}"
+                )
+
+        home_options = HomeOptions(
+            max_speed_radps=settings.home_joint_speed_radps,
+            timeout_s=settings.home_timeout_s,
+            position_tolerance_rad=settings.home_position_tolerance_rad,
+            velocity_tolerance_radps=settings.home_velocity_tolerance_radps,
+            stable_seconds=settings.home_stable_ms / 1000,
+        )
+        before = await backend.get_state()
+        if isinstance(options.action, PrepareAction):
+            await backend.prepare(home_options, lambda _phase: None)
+            prepared = await backend.preflight()
+            if not prepared.ready:
+                raise RuntimeError(
+                    f"smoke_prepare_failed:{prepared.reason}"
+                )
+            after = await _wait_for_stable_state(
+                backend,
+                settings.home_timeout_s,
+            )
+            result = SmokeResult(action_name, before, after, stable=True)
+            await recorder.write_critical_event(
+                "smoke_result",
+                result.to_dict(),
+                clock.now_ns(),
+            )
+            print(json.dumps(result.to_dict(), separators=(",", ":")))
+            return result
 
         control = RobotControl(
             backend=backend,
@@ -411,18 +454,18 @@ async def run_smoke(
             mapper=_build_mapper(settings),
             limiter=_build_limiter(settings, "LEBAI"),
             constraint_clear_ms=settings.constraint_clear_ms,
-            home_options=HomeOptions(
-                max_speed_radps=settings.home_joint_speed_radps,
-                timeout_s=settings.home_timeout_s,
-                position_tolerance_rad=settings.home_position_tolerance_rad,
-                velocity_tolerance_radps=settings.home_velocity_tolerance_radps,
-                stable_seconds=settings.home_stable_ms / 1000,
-            ),
+            home_options=home_options,
         )
         await control.connect()
-        before = await backend.get_state()
+        reached_state: RobotStateMessage | None = None
         if isinstance(options.action, (TranslationAction, RotationAction, GripperAction)):
-            await _run_motion_action(control, latest, clock, settings, options.action)
+            reached_state = await _run_motion_action(
+                control,
+                latest,
+                clock,
+                settings,
+                options.action,
+            )
         elif isinstance(options.action, HomeAction):
             latest.publish(_frame(1, grip=False), clock.now_ns())
             home = await control.home()
@@ -431,7 +474,41 @@ async def run_smoke(
         else:
             await control.disarm()
         after = await _wait_for_stable_state(backend, settings.home_timeout_s)
-        result = SmokeResult(action_name, before, after, stable=True)
+        requested_displacement: float | None = None
+        reached_displacement: float | None = None
+        settled_displacement: float | None = None
+        displacement_unit: str | None = None
+        if isinstance(options.action, (TranslationAction, RotationAction)):
+            requested_displacement, _ = _requested_displacement(options.action)
+            if reached_state is not None:
+                reached_displacement = _authoritative_action_displacement(
+                    before,
+                    reached_state,
+                    options.action,
+                )
+            settled_displacement = _authoritative_action_displacement(
+                before,
+                after,
+                options.action,
+            )
+            displacement_unit = (
+                "m" if isinstance(options.action, TranslationAction) else "deg"
+            )
+        result = SmokeResult(
+            action_name,
+            before,
+            after,
+            stable=True,
+            requested_displacement=requested_displacement,
+            reached_displacement=reached_displacement,
+            settled_displacement=settled_displacement,
+            displacement_unit=displacement_unit,
+        )
+        await recorder.write_critical_event(
+            "smoke_result",
+            result.to_dict(),
+            clock.now_ns(),
+        )
         print(json.dumps(result.to_dict(), separators=(",", ":")))
         return result
     except BaseException as error:

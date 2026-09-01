@@ -134,6 +134,7 @@ async def test_readonly_surfaces_motion_state_query_timeout() -> None:
     [
         lambda adapter: adapter.command_tcp(None, 1),
         lambda adapter: adapter.set_gripper(0.5),
+        lambda adapter: adapter.prepare(HOME_OPTIONS, lambda phase: None),
         lambda adapter: adapter.home(HOME_OPTIONS, lambda phase: None),
     ],
 )

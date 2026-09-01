@@ -74,6 +74,7 @@ real_robot:
 - LM3 局域网 IP；
 - 原厂 LMG-90 的 `get_tcp()` 六个值；
 - 经现场批准的 `home_q`；
+- 经现场批准、无碰撞且避开 J3/J5 零位的 `teleop_ready_q`；
 - 六轴软限位和限位余量；
 - 当前初始姿态允许的 TCP 三轴启动包络；
 - TCP 对比容差；
@@ -84,6 +85,8 @@ LM3 的 IP 写在 `config/real-robot.local.yaml` 的 `real_robot.ip`，该文件
 真机控制页面显示的是 SDK 状态驱动的 3D 机械臂模型、TCP、关节和诊断数据；当前版本没有接入相机视频，也不是 Quest 透视 MR。首次现场测试应由操作者直接观察真机，并安排独立观察员守在急停旁。MR 透视与外部/腕部相机叠加属于后续阶段，不能作为当前安全观察手段。
 
 `expected_tcp` 是工具 TCP 配置，不是当前末端实时位置。LMG-90 虽是标配，也必须用 `get_tcp()` 核对，不可凭外观猜测。
+
+`home_q` 与 `teleop_ready_q` 的职责不同：Home 是安全回位点，可以不是笛卡尔遥操作的理想起点；`teleop_ready_q` 是进入平移/旋转测试前由操作者显式执行的准备姿态。程序不会在连接真机时自动移动。配置加载会拒绝距离 J3 或 J5 零位小于 5° 的准备姿态。2026-09-01 现场已验证的候选值为 `[0.0004, -1.5681, 0.2520, -1.5722, 0.4017, -0.0011]`，再次使用前仍须由现场操作者确认周围无碰撞风险。
 
 确认本地文件不会进入提交：
 
@@ -155,6 +158,7 @@ PowerShell：
 
 ```powershell
 $env:VR4ARM_REAL_ROBOT_CONFIRM = "I_UNDERSTAND_REAL_ROBOT_MOTION"
+python scripts/real_robot_smoke.py prepare --config $env:VR4ARM_CONFIG --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
 python scripts/real_robot_smoke.py translate --config $env:VR4ARM_CONFIG --axis x --distance-m 0.005 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
 python scripts/real_robot_smoke.py rotate --config $env:VR4ARM_CONFIG --axis roll --angle-deg 2 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
 python scripts/real_robot_smoke.py gripper --config $env:VR4ARM_CONFIG --target open --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
@@ -166,6 +170,7 @@ Linux：
 
 ```bash
 export VR4ARM_REAL_ROBOT_CONFIRM="I_UNDERSTAND_REAL_ROBOT_MOTION"
+python scripts/real_robot_smoke.py prepare --config "$VR4ARM_CONFIG" --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
 python scripts/real_robot_smoke.py translate --config "$VR4ARM_CONFIG" --axis x --distance-m 0.005 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
 python scripts/real_robot_smoke.py rotate --config "$VR4ARM_CONFIG" --axis roll --angle-deg 2 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
 python scripts/real_robot_smoke.py gripper --config "$VR4ARM_CONFIG" --target open --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
@@ -174,8 +179,9 @@ python scripts/real_robot_smoke.py stop --config "$VR4ARM_CONFIG" --confirm I_UN
 ```
 
 Each subcommand is mutually exclusive: run one process, observe the real
-result, and stop before starting the next. The complete staged lab sequence
-is: translate `+x`, `-x`, `+y`, `-y`, `+z`, `-z`; then rotate `+roll`,
+result, and stop before starting the next. First run `prepare` once and verify
+the resulting joint pose before any Cartesian command. The complete staged lab
+sequence is: prepare; translate `+x`, `-x`, `+y`, `-y`, `+z`, `-z`; then rotate `+roll`,
 `-roll`, `+pitch`, `-pitch`, `+yaw`, `-yaw`; then test gripper open/close,
 Home, stop/E-stop, and only then a lightweight grasp/release. A negative-axis
 check uses the same magnitude with a signed negative value (for example,
@@ -187,6 +193,8 @@ The staged sequence above is mandatory; do not shorten it to unsigned
 translation-only checks. The script rejects motion beyond the configured
 bound, an incorrect confirmation, readonly configuration, non-IDLE state,
 missing TCP/Home data, or failed preflight.
+
+平移/旋转成功输出额外包含 `requested_displacement`、`reached_displacement`、`settled_displacement` 和单位，用于区分“首次达到目标”与松开 Grip、稳定停止后的最终位移。若准备姿态未执行或当前 J3/J5 过于接近零位，笛卡尔预检会以 `singular_configuration` 拒绝且不发送 IK/PVAT；只有显式 `prepare` 和 `home` 可在其他安全检查全部通过时从该状态执行关节运动。
 
 若方向错误、抖动、意外转动或停止不完整：
 

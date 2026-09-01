@@ -23,6 +23,7 @@ def readonly_settings(**changes) -> LebaiSettings:
             rx=0.0,
         ),
         home_q=(0.0, -1.0, 1.0, 0.0, 1.57, 0.0),
+        teleop_ready_q=(0.0, -1.0, 1.0, 0.0, 0.2, 0.0),
         soft_joint_min_rad=(-3.0, -2.5, -2.5, -3.0, -2.5, -6.0),
         soft_joint_max_rad=(3.0, 2.5, 2.5, 3.0, 2.5, 6.0),
         joint_limit_margin_rad=0.05,

@@ -200,8 +200,20 @@ class SafetyLimiter:
             limited_angle = limited_delta.magnitude()
             if limited_angle > self.max_angular_step_rad:
                 rotation_axis = limited_delta.as_rotvec() / limited_angle
+                # Quaternion composition and round-tripping can reconstruct
+                # an angle slightly above the requested hard cap, especially
+                # from a non-identity start. Keep a negligible numerical
+                # margin inside the safety boundary.
+                inward_margin = max(
+                    1e-12,
+                    self.max_angular_step_rad * 1e-12,
+                )
+                safe_step = max(
+                    0.0,
+                    self.max_angular_step_rad - inward_margin,
+                )
                 limited_rotation = (
-                    Rotation.from_rotvec(rotation_axis * self.max_angular_step_rad)
+                    Rotation.from_rotvec(rotation_axis * safe_step)
                     * start_rotation
                 )
 

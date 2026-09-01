@@ -11,6 +11,7 @@ import yaml
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "default.yaml"
 REAL_ROBOT_CONFIRMATION = "I_UNDERSTAND_REAL_ROBOT_MOTION"
+TELEOP_SINGULARITY_GUARD_RAD = math.radians(5.0)
 
 BackendKind = Literal["simulator", "lebai"]
 RealRobotMode = Literal["readonly", "control"]
@@ -60,6 +61,7 @@ class LebaiSettings:
     ip: str
     expected_tcp: TcpExpectation
     home_q: tuple[float, float, float, float, float, float]
+    teleop_ready_q: tuple[float, float, float, float, float, float]
     soft_joint_min_rad: tuple[float, float, float, float, float, float]
     soft_joint_max_rad: tuple[float, float, float, float, float, float]
     joint_limit_margin_rad: float
@@ -188,6 +190,7 @@ def _parse_lebai(payload: dict[str, Any]) -> LebaiSettings:
         }
     )
     home_q = _finite_tuple(real, "home_q", 6)
+    teleop_ready_q = _finite_tuple(real, "teleop_ready_q", 6)
     joint_min = _finite_tuple(real, "soft_joint_min_rad", 6)
     joint_max = _finite_tuple(real, "soft_joint_max_rad", 6)
     margin = _positive_float(real, "joint_limit_margin_rad")
@@ -206,6 +209,21 @@ def _parse_lebai(payload: dict[str, Any]) -> LebaiSettings:
         )
     ):
         raise RuntimeError("invalid_config:home_q")
+    if any(
+        value < lower + margin or value > upper - margin
+        for value, lower, upper in zip(
+            teleop_ready_q,
+            joint_min,
+            joint_max,
+            strict=True,
+        )
+    ):
+        raise RuntimeError("invalid_config:teleop_ready_q")
+    if (
+        abs(teleop_ready_q[2]) <= TELEOP_SINGULARITY_GUARD_RAD
+        or abs(teleop_ready_q[4]) <= TELEOP_SINGULARITY_GUARD_RAD
+    ):
+        raise RuntimeError("invalid_config:teleop_ready_q_singular")
 
     startup_min = _finite_tuple(real, "startup_tcp_min_m", 3)
     startup_max = _finite_tuple(real, "startup_tcp_max_m", 3)
@@ -286,6 +304,7 @@ def _parse_lebai(payload: dict[str, Any]) -> LebaiSettings:
         ip=ip.strip(),
         expected_tcp=expected_tcp,
         home_q=home_q,
+        teleop_ready_q=teleop_ready_q,
         soft_joint_min_rad=joint_min,
         soft_joint_max_rad=joint_max,
         joint_limit_margin_rad=margin,

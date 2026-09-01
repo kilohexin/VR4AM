@@ -202,6 +202,33 @@ def test_optional_hard_per_cycle_caps_apply_even_after_long_dt() -> None:
     assert delta.magnitude() <= np.deg2rad(1)
 
 
+def test_angular_step_cap_holds_from_non_identity_arbitrary_axis() -> None:
+    cap = np.deg2rad(1)
+    rng = np.random.default_rng(42)
+    for _ in range(256):
+        limiter = SafetyLimiter(
+            max_linear_speed=100,
+            max_angular_speed=100,
+            max_linear_accel=100,
+            max_angular_accel=100,
+            max_angular_step_rad=cap,
+        )
+        previous_rotation = Rotation.random(random_state=rng)
+        axis = rng.normal(size=3)
+        axis /= np.linalg.norm(axis)
+        requested_rotation = (
+            Rotation.from_rotvec(axis * rng.uniform(cap * 2, 3.0))
+            * previous_rotation
+        )
+        previous = Pose(p=(0, 0, 0), q=tuple(previous_rotation.as_quat()))
+        requested = Pose(p=(0, 0, 0), q=tuple(requested_rotation.as_quat()))
+
+        actual = limiter.limit_motion(previous, requested, 1.0)
+
+        delta = Rotation.from_quat(actual.q) * previous_rotation.inv()
+        assert delta.magnitude() <= cap
+
+
 def test_high_response_fake_limits_reach_three_hundred_mm_per_second() -> None:
     translated = Pose(p=(0.0, 0.0, 0.0), q=IDENTITY)
     translate_target = Pose(p=(1.0, 0.0, 0.0), q=IDENTITY)

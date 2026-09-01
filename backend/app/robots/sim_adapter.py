@@ -141,6 +141,13 @@ class SimRobotAdapter:
                 raise BackendCommandError("home_timeout")
             await asyncio.sleep(self.STEP_SECONDS)
 
+    async def prepare(
+        self,
+        options: HomeOptions,
+        on_phase: Callable[[HomePhase], None],
+    ) -> None:
+        await self.home(options, on_phase)
+
     async def get_state(self) -> RobotStateMessage:
         async with self._lock:
             backend_state = (

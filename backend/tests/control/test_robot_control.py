@@ -299,6 +299,28 @@ async def test_manual_home_requires_released_grip_and_ends_disarmed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_home_allows_only_singularity_preflight_exception() -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    backend.preflight_result = BackendPreflight(
+        ready=False,
+        reason="singular_configuration",
+        robot_state=BackendState.IDLE,
+        actual_tcp=backend.actual_tcp,
+        actual_q=backend.actual_q,
+        tcp_matches=True,
+        capabilities=("command_tcp", "home", "gripper"),
+    )
+
+    result = await control.home()
+
+    assert result == robot_control_module.HomeResult(True)
+    assert backend.home_phases == ["homing", "stabilizing"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "reason",
     [

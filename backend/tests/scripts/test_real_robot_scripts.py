@@ -286,5 +286,16 @@ async def test_smoke_runs_until_authoritative_target_and_verified_stop(
     assert result.action == "translate"
     assert result.stable is True
     assert result.after.robot_state.value == "IDLE"
+    assert result.requested_displacement == pytest.approx(0.005)
+    assert result.reached_displacement == pytest.approx(0.005)
+    assert result.settled_displacement == pytest.approx(0.005)
+    assert result.displacement_unit == "m"
     assert "move_pvat" in methods
     assert "stop_move" in methods
+    log_path = next((tmp_path / "logs").glob("*/session.jsonl"))
+    entries = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    result_entry = next(entry for entry in entries if entry["kind"] == "smoke_result")
+    assert result_entry["settled_displacement"] == pytest.approx(0.005)

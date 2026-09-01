@@ -34,12 +34,22 @@ class HomeAction:
 
 
 @dataclass(frozen=True)
+class PrepareAction:
+    pass
+
+
+@dataclass(frozen=True)
 class StopAction:
     pass
 
 
 SmokeAction = (
-    TranslationAction | RotationAction | GripperAction | HomeAction | StopAction
+    TranslationAction
+    | RotationAction
+    | GripperAction
+    | PrepareAction
+    | HomeAction
+    | StopAction
 )
 
 
@@ -56,6 +66,10 @@ class SmokeResult:
     before: RobotStateMessage
     after: RobotStateMessage
     stable: bool
+    requested_displacement: float | None = None
+    reached_displacement: float | None = None
+    settled_displacement: float | None = None
+    displacement_unit: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -63,4 +77,8 @@ class SmokeResult:
             "before": self.before.model_dump(mode="json"),
             "after": self.after.model_dump(mode="json"),
             "stable": self.stable,
+            "requested_displacement": self.requested_displacement,
+            "reached_displacement": self.reached_displacement,
+            "settled_displacement": self.settled_displacement,
+            "displacement_unit": self.displacement_unit,
         }

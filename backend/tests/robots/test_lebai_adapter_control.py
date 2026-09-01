@@ -641,6 +641,131 @@ async def test_home_uses_configured_joint_pose_and_acceleration() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "q",
+    [
+        [0.0, -1.0, 0.0, 0.0, 0.2, 0.0],
+        [0.0, -1.0, 0.08726646259971647, 0.0, 0.2, 0.0],
+        [0.0, -1.0, 0.2, 0.0, 0.08726646259971647, 0.0],
+    ],
+)
+async def test_control_preflight_rejects_cartesian_singularity(
+    q: list[float],
+) -> None:
+    client = FakeLebaiClient.idle(q=q)
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+    )
+    await adapter.connect()
+
+    preflight = await adapter.preflight()
+
+    assert preflight.ready is False
+    assert preflight.reason == "singular_configuration"
+    assert client.write_calls == []
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_prepare_moves_from_singular_home_to_configured_ready_pose() -> None:
+    client = FakeLebaiClient.idle(q=[0.0, -1.0, 0.0, 0.0, 0.0, 0.0])
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+    )
+    original_movej = client.movej
+
+    async def converging_movej(
+        p: list[float],
+        a: float,
+        v: float,
+        t: float,
+        r: float,
+    ) -> object:
+        result = await original_movej(p, a, v, t, r)
+        client.kin_data["actual_joint_pose"] = list(p)
+        client.kin_data["target_joint_pose"] = list(p)
+        return result
+
+    client.movej = converging_movej  # type: ignore[method-assign]
+    await adapter.connect()
+    phases: list[str] = []
+
+    await adapter.prepare(HOME_OPTIONS, phases.append)
+
+    movej = next(call for call in client.write_calls if call[0] == "movej")
+    assert movej[1] == list(adapter.settings.teleop_ready_q)
+    assert phases == ["homing", "stabilizing"]
+    assert (await adapter.preflight()).ready is True
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_prepare_timeout_stops_ambiguously_accepted_movej() -> None:
+    client = FakeLebaiClient.idle(q=[0.0, -1.0, 0.0, 0.0, 0.0, 0.0])
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+    )
+
+    async def accepted_but_no_reply(
+        p: list[float],
+        a: float,
+        v: float,
+        t: float,
+        r: float,
+    ) -> object:
+        client.write_calls.append(("movej", list(p), a, v, t, r))
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    client.movej = accepted_but_no_reply  # type: ignore[method-assign]
+    await adapter.connect()
+
+    with pytest.raises(BackendCommandError, match="^sdk_timeout:movej$"):
+        await adapter.prepare(HOME_OPTIONS, lambda _phase: None)
+
+    assert [call[0] for call in client.write_calls] == ["movej", "stop_move"]
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_home_remains_available_from_singular_pose() -> None:
+    client = FakeLebaiClient.idle(q=[0.0, -1.0, 0.0, 0.0, 0.0, 0.0])
+    clock = FakeClock()
+    settings = control_settings(
+        home_q=(0.0, -1.0, 0.0, 0.0, 0.0, 0.0),
+    )
+    adapter = RealLebaiAdapter(
+        settings,
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+    )
+    await adapter.connect()
+
+    await adapter.home(HOME_OPTIONS, lambda _phase: None)
+
+    assert any(call[0] == "movej" for call in client.write_calls)
+    preflight = await adapter.preflight()
+    assert preflight.reason == "singular_configuration"
+    with pytest.raises(BackendCommandError, match="^preflight_not_ready$"):
+        await adapter.command_tcp(_target(), command_id=1)
+    assert "move_pvat" not in [call[0] for call in client.write_calls]
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_home_rejects_non_idle_without_writing() -> None:
     adapter, client, _ = await _connected_control_adapter()
     client.robot_state = "MOVING"
@@ -743,13 +868,113 @@ async def test_snapshot_timestamp_is_conservative_and_total_read_deadline_is_enf
     with pytest.raises(BackendCommandError, match="^robot_state_stale$"):
         await adapter.get_state()
 
-    async def expired_get_tcp() -> dict[str, object]:
+    async def slow_get_tcp() -> dict[str, object]:
         clock.advance_ms(90)
+        return await original_get_tcp()
+
+    client.get_tcp = slow_get_tcp  # type: ignore[method-assign]
+    state = await adapter.get_state()
+    assert clock.now_ns() - state.server_mono_ns == 90_000_000
+
+    async def acquisition_budget_get_tcp() -> dict[str, object]:
+        clock.advance_ms(250)
+        return await original_get_tcp()
+
+    client.get_tcp = acquisition_budget_get_tcp  # type: ignore[method-assign]
+    state = await adapter.get_state()
+    assert clock.now_ns() - state.server_mono_ns == 250_000_000
+
+    async def expired_get_tcp() -> dict[str, object]:
+        clock.advance_ms(301)
         return await original_get_tcp()
 
     client.get_tcp = expired_get_tcp  # type: ignore[method-assign]
     with pytest.raises(BackendCommandError, match="^robot_state_stale$"):
         await adapter.get_state()
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_pvat_rechecks_freshness_after_slow_ik() -> None:
+    adapter, client, clock = await _connected_control_adapter()
+
+    async def slow_ik(
+        pose: dict[str, float],
+        joints: list[float],
+    ) -> object:
+        client.ik_calls.append((dict(pose), list(joints)))
+        clock.advance_ms(81)
+        return list(joints)
+
+    client.kinematics_inverse = slow_ik  # type: ignore[method-assign]
+
+    try:
+        await adapter.command_tcp(_target(0.31), command_id=8)
+        await _wait_until(
+            lambda: adapter.pump_fault is not None
+            or any(call[0] == "move_pvat" for call in client.write_calls)
+        )
+
+        assert str(adapter.pump_fault) == "robot_state_stale"
+        assert len(client.ik_calls) == 1
+        assert "move_pvat" not in [call[0] for call in client.write_calls]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_recovery_does_not_start_another_ik_after_state_goes_stale() -> None:
+    adapter, client, clock = await _connected_control_adapter(
+        backend_label="LEBAI_FAKE",
+    )
+    await adapter.command_tcp(_target(0.30), command_id=8)
+    await client.wait_for_write("move_pvat")
+    client.write_calls.clear()
+    client.ik_calls.clear()
+
+    async def stale_failed_ik(
+        pose: dict[str, float],
+        joints: list[float],
+    ) -> object:
+        client.ik_calls.append((dict(pose), list(joints)))
+        clock.advance_ms(81)
+        return None
+
+    client.kinematics_inverse = stale_failed_ik  # type: ignore[method-assign]
+
+    try:
+        await adapter.command_tcp(_target(0.31), command_id=9)
+        await _wait_until(
+            lambda: adapter.pump_fault is not None
+            or len(client.ik_calls) > 1
+        )
+
+        assert str(adapter.pump_fault) == "robot_state_stale"
+        assert len(client.ik_calls) == 1
+        assert "move_pvat" not in [call[0] for call in client.write_calls]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_pvat_rejects_snapshot_older_than_command_age_after_full_read() -> None:
+    adapter, client, clock = await _connected_control_adapter()
+    original_get_tcp = client.get_tcp
+
+    async def slow_get_tcp() -> dict[str, object]:
+        clock.advance_ms(90)
+        return await original_get_tcp()
+
+    client.get_tcp = slow_get_tcp  # type: ignore[method-assign]
+    client.read_calls.clear()
+
+    await adapter.command_tcp(_target(0.31), command_id=7)
+    await _wait_until(lambda: adapter.pump_fault is not None)
+
+    assert str(adapter.pump_fault) == "robot_state_stale"
+    assert "get_running_motion" in client.read_calls
+    assert client.ik_calls == []
+    assert "move_pvat" not in [call[0] for call in client.write_calls]
     await adapter.disconnect()
 
 

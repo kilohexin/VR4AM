@@ -396,7 +396,10 @@ class RobotControl:
                         "home_failed",
                         "Home preflight could not be recorded safely.",
                     )
-                if not preflight.ready:
+                if (
+                    not preflight.ready
+                    and preflight.reason != "singular_configuration"
+                ):
                     self._lock_after_home_failure()
                     return HomeResult(
                         False,

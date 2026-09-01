@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from scipy.spatial.transform import Rotation
 
-from app.config import LebaiSettings
+from app.config import TELEOP_SINGULARITY_GUARD_RAD, LebaiSettings
 from app.robots.base import (
     BackendCommandError,
     BackendPreflight,
@@ -50,6 +50,7 @@ RECOVERABLE_IK_ERRORS = {
     "ik_joint_jump",
     "joint_speed_limit",
 }
+_SNAPSHOT_READ_TIMEOUT_NS = 300_000_000
 
 
 @dataclass(frozen=True)
@@ -180,7 +181,7 @@ class RealLebaiAdapter:
         snapshot = self._snapshot
         if snapshot is None:
             raise BackendCommandError("robot_state_stale")
-        max_age_ns = self._snapshot_max_age_ns()
+        max_age_ns = self._command_snapshot_max_age_ns()
         if self._clock() - snapshot.captured_ns > max_age_ns:
             raise BackendCommandError("robot_state_stale")
         if self._pump.fault is not None:
@@ -375,21 +376,68 @@ class RealLebaiAdapter:
         if client is None:
             raise BackendCommandError("robot_disconnected")
         snapshot = await self._read_snapshot()
-        preflight = self._preflight_from_snapshot(snapshot)
+        preflight = self._preflight_from_snapshot(
+            snapshot,
+            allow_singular=True,
+        )
         if not preflight.ready:
             raise BackendCommandError(
                 f"preflight_not_ready:{preflight.reason}"
             )
+        await self._move_to_joint_pose(
+            self.settings.home_q,
+            options,
+            on_phase,
+            failure="home_failed",
+        )
+
+    async def prepare(
+        self,
+        options: HomeOptions,
+        on_phase: Callable[[HomePhase], None],
+    ) -> None:
+        self._require_control()
+        if self._client is None:
+            raise BackendCommandError("robot_disconnected")
+        snapshot = await self._read_snapshot()
+        preflight = self._preflight_from_snapshot(
+            snapshot,
+            allow_singular=True,
+        )
+        if not preflight.ready:
+            raise BackendCommandError(
+                f"preflight_not_ready:{preflight.reason}"
+            )
+        await self._move_to_joint_pose(
+            self.settings.teleop_ready_q,
+            options,
+            on_phase,
+            failure="prepare_failed",
+        )
+
+    async def _move_to_joint_pose(
+        self,
+        target_q: JointVector,
+        options: HomeOptions,
+        on_phase: Callable[[HomePhase], None],
+        *,
+        failure: str,
+    ) -> None:
+        client = self._client
+        if client is None:
+            raise BackendCommandError("robot_disconnected")
         if self._pump.has_pending:
             raise BackendCommandError("home_command_pending")
+        self._preflight_ready = False
         self._pump.invalidate()
         self._reset_pvat_history()
         on_phase("homing")
-        async with self._sdk_lock:
-            try:
+        try:
+            async with self._sdk_lock:
+                self._motion_accepted = True
                 motion_id = await asyncio.wait_for(
                     client.movej(
-                        list(self.settings.home_q),
+                        list(target_q),
                         self.settings.control.max_joint_acceleration_radps2,
                         options.max_speed_radps,
                         0.0,
@@ -397,11 +445,15 @@ class RealLebaiAdapter:
                     ),
                     timeout=0.20,
                 )
-            except TimeoutError:
-                raise BackendCommandError("sdk_timeout:movej") from None
-            except Exception:
-                raise BackendCommandError("sdk_call_failed:movej") from None
-        self._motion_accepted = True
+        except asyncio.CancelledError:
+            await asyncio.shield(self.stop(StopReason.HOME))
+            raise
+        except TimeoutError:
+            await self.stop(StopReason.HOME)
+            raise BackendCommandError("sdk_timeout:movej") from None
+        except Exception:
+            await self.stop(StopReason.HOME)
+            raise BackendCommandError("sdk_call_failed:movej") from None
         started_ns = self._clock()
         stable_since_ns: int | None = None
         stabilizing = False
@@ -422,13 +474,13 @@ class RealLebaiAdapter:
                         "sdk_call_failed:get_motion_state"
                     ) from None
             if str(motion_state).upper() in {"ERROR", "FAILED", "CANCELLED"}:
-                raise BackendCommandError("home_failed")
+                raise BackendCommandError(failure)
             now_ns = self._clock()
             position_error = max(
                 abs(actual - target)
                 for actual, target in zip(
                     snapshot.actual_q,
-                    self.settings.home_q,
+                    target_q,
                     strict=True,
                 )
             )
@@ -496,6 +548,8 @@ class RealLebaiAdapter:
     def _preflight_from_snapshot(
         self,
         snapshot: LebaiSnapshot,
+        *,
+        allow_singular: bool = False,
     ) -> BackendPreflight:
         tcp_matches = self._tcp_matches(snapshot.tcp_setting)
         reason: str | None = None
@@ -518,6 +572,12 @@ class RealLebaiAdapter:
             and not self._capabilities.control_ready
         ):
             reason = "sdk_capability_missing"
+        elif (
+            self.settings.mode == "control"
+            and not allow_singular
+            and self._cartesian_singularity_guarded(snapshot.actual_q)
+        ):
+            reason = "singular_configuration"
         elif self.settings.mode == "readonly":
             reason = "real_robot_readonly"
         return BackendPreflight(
@@ -530,10 +590,28 @@ class RealLebaiAdapter:
             capabilities=self._capabilities.names,
         )
 
+    @staticmethod
+    def _cartesian_singularity_guarded(actual_q: JointVector) -> bool:
+        return (
+            abs(actual_q[2]) <= TELEOP_SINGULARITY_GUARD_RAD
+            or abs(actual_q[4]) <= TELEOP_SINGULARITY_GUARD_RAD
+        )
+
+    def _ensure_command_snapshot_fresh(
+        self,
+        snapshot: LebaiSnapshot,
+    ) -> None:
+        if (
+            self._clock() - snapshot.captured_ns
+            > self._command_snapshot_max_age_ns()
+        ):
+            raise BackendCommandError("robot_state_stale")
+
     async def _send_target(self, request: PvatRequest) -> None:
         snapshot = await self._read_snapshot()
         if not self._pump.is_current(request.generation):
             return
+        self._ensure_command_snapshot_fresh(snapshot)
         client = self._client
         if client is None:
             raise BackendCommandError("robot_disconnected")
@@ -562,6 +640,7 @@ class RealLebaiAdapter:
                 request.target,
                 fake=self._backend_label == "LEBAI_FAKE",
             ):
+                self._ensure_command_snapshot_fresh(snapshot)
                 try:
                     point = await self._solve_candidate(
                         client,
@@ -575,6 +654,7 @@ class RealLebaiAdapter:
                     continue
                 if not self._pump.is_current(request.generation):
                     return
+                self._ensure_command_snapshot_fresh(snapshot)
                 pvat_started = self._clock()
                 try:
                     await asyncio.wait_for(
@@ -704,7 +784,7 @@ class RealLebaiAdapter:
         latencies: dict[str, float] = {}
         async with self._sdk_lock:
             captured_ns = self._clock()
-            deadline_ns = captured_ns + self._snapshot_max_age_ns()
+            deadline_ns = captured_ns + _SNAPSHOT_READ_TIMEOUT_NS
             connected = await self._timed(
                 "is_connected",
                 client.is_connected,
@@ -827,9 +907,8 @@ class RealLebaiAdapter:
                 remaining_ns = deadline_ns - self._clock()
                 if remaining_ns <= 0:
                     raise BackendCommandError("robot_state_stale")
-                remaining_s = remaining_ns / 1_000_000_000
-                deadline_limited = remaining_s < timeout_s
-                timeout_s = min(timeout_s, remaining_s)
+                timeout_s = remaining_ns / 1_000_000_000
+                deadline_limited = True
             result = await asyncio.wait_for(operation(), timeout=timeout_s)
             if deadline_ns is not None and self._clock() > deadline_ns:
                 raise BackendCommandError("robot_state_stale")
@@ -847,7 +926,7 @@ class RealLebaiAdapter:
         finally:
             latencies[name] = max(0.0, (self._clock() - started) / 1_000_000)
 
-    def _snapshot_max_age_ns(self) -> int:
+    def _command_snapshot_max_age_ns(self) -> int:
         return int(
             (1 / self.settings.control.state_hz + 0.04) * 1_000_000_000
         )

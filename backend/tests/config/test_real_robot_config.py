@@ -26,6 +26,7 @@ real_robot:
     ry: 0
     rx: 0
   home_q: [0, -1.0, 1.0, 0, 1.57, 0]
+  teleop_ready_q: [0, -1.0, 1.0, 0, 0.20, 0]
   soft_joint_min_rad: [-3.0, -2.5, -2.5, -3.0, -2.5, -6.0]
   soft_joint_max_rad: [3.0, 2.5, 2.5, 3.0, 2.5, 6.0]
   joint_limit_margin_rad: 0.05
@@ -105,6 +106,14 @@ def test_readonly_lebai_config_loads_without_importing_sdk(
         -2.5,
         -6.0,
     )
+    assert settings.lebai.teleop_ready_q == (
+        0.0,
+        -1.0,
+        1.0,
+        0.0,
+        0.2,
+        0.0,
+    )
 
 
 def test_real_robot_example_keeps_conservative_motion_values() -> None:
@@ -181,6 +190,16 @@ def test_settings_load_accepts_explicit_path_without_mutating_environment(
             "home_q: [0, -1.0, 1.0, 0, 1.57, 0]",
             "home_q: [3.0, -1.0, 1.0, 0, 1.57, 0]",
             "home_q",
+        ),
+        (
+            "teleop_ready_q: [0, -1.0, 1.0, 0, 0.20, 0]",
+            "teleop_ready_q: [0, -1.0, 0.0, 0, 0.20, 0]",
+            "teleop_ready_q_singular",
+        ),
+        (
+            "teleop_ready_q: [0, -1.0, 1.0, 0, 0.20, 0]",
+            "teleop_ready_q: [0, -1.0, 0.08726646259971647, 0, 0.20, 0]",
+            "teleop_ready_q_singular",
         ),
         (
             "startup_tcp_max_m: [0.50, 0.30, 0.60]",
