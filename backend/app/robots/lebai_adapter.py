@@ -180,9 +180,7 @@ class RealLebaiAdapter:
         snapshot = self._snapshot
         if snapshot is None:
             raise BackendCommandError("robot_state_stale")
-        max_age_ns = int(
-            (1 / self.settings.control.state_hz + 0.04) * 1_000_000_000
-        )
+        max_age_ns = self._snapshot_max_age_ns()
         if self._clock() - snapshot.captured_ns > max_age_ns:
             raise BackendCommandError("robot_state_stale")
         if self._pump.fault is not None:
@@ -703,10 +701,10 @@ class RealLebaiAdapter:
         client = self._client
         if client is None:
             raise BackendCommandError("robot_disconnected")
-        captured_ns = self._clock()
-        deadline_ns = captured_ns + self._snapshot_max_age_ns()
         latencies: dict[str, float] = {}
         async with self._sdk_lock:
+            captured_ns = self._clock()
+            deadline_ns = captured_ns + self._snapshot_max_age_ns()
             connected = await self._timed(
                 "is_connected",
                 client.is_connected,

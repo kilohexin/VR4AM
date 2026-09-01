@@ -753,6 +753,35 @@ async def test_snapshot_timestamp_is_conservative_and_total_read_deadline_is_enf
     await adapter.disconnect()
 
 
+@pytest.mark.asyncio
+async def test_snapshot_deadline_starts_after_waiting_for_sdk_lock() -> None:
+    adapter, client, clock = await _connected_control_adapter(block_ik=True)
+    client.ik_results = deque(
+        [[0.0032, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+    state_task: asyncio.Task | None = None
+    try:
+        await adapter.command_tcp(_target(0.31), command_id=7)
+        await client.ik_started.wait()
+
+        state_task = asyncio.create_task(adapter.get_state())
+        await asyncio.sleep(0)
+        clock.advance_ms(81)
+        client.release_ik.set()
+
+        state = await state_task
+
+        assert state.actual_tcp == _target()
+        assert state.server_mono_ns == 81_000_000
+    finally:
+        client.release_ik.set()
+        if state_task is not None and not state_task.done():
+            state_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await state_task
+        await adapter.disconnect()
+
+
 async def _send_and_wait_for_ik(
     adapter: RealLebaiAdapter,
     client: FakeLebaiClient,
