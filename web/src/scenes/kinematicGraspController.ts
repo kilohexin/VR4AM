@@ -16,6 +16,8 @@ export interface KinematicGraspOptions {
   visualRoot: THREE.Object3D;
   blocks: readonly GraspBlock[];
   tableTopY: number;
+  tableCenterX?: number;
+  tableCenterZ?: number;
   tableHalfWidth: number;
   tableHalfDepth: number;
   captureHalfExtents?: THREE.Vector3;
@@ -143,12 +145,16 @@ export class KinematicGraspController {
     const {
       blocks,
       tableTopY,
+      tableCenterX = 0,
+      tableCenterZ = 0,
       tableHalfWidth,
       tableHalfDepth,
       visualRoot,
     } = this.options;
     if (
       !Number.isFinite(tableTopY)
+      || !Number.isFinite(tableCenterX)
+      || !Number.isFinite(tableCenterZ)
       || !isPositiveFinite(tableHalfWidth)
       || !isPositiveFinite(tableHalfDepth)
       || !isPositiveVector(this.captureHalfExtents)
@@ -226,13 +232,13 @@ export class KinematicGraspController {
     const half = released.sizeM / 2;
     let x = THREE.MathUtils.clamp(
       released.object.position.x,
-      -this.options.tableHalfWidth + half,
-      this.options.tableHalfWidth - half,
+      (this.options.tableCenterX ?? 0) - this.options.tableHalfWidth + half,
+      (this.options.tableCenterX ?? 0) + this.options.tableHalfWidth - half,
     );
     let z = THREE.MathUtils.clamp(
       released.object.position.z,
-      -this.options.tableHalfDepth + half,
-      this.options.tableHalfDepth - half,
+      (this.options.tableCenterZ ?? 0) - this.options.tableHalfDepth + half,
+      (this.options.tableCenterZ ?? 0) + this.options.tableHalfDepth - half,
     );
     const support = this.highestSupport(released, x, z);
     let supportTop = this.tableTopY;

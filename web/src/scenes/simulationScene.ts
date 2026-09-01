@@ -37,6 +37,10 @@ const FRAME_INTERVAL_MS = 1_000 / 60;
 const DESKTOP_CONTROLLER_POSITION: Vec3 = [0.56, 0.42, 0.18];
 const DESKTOP_CONTROLLER_QUATERNION: Quat = [0, 0, 0, 1];
 const GRASP_PLATFORM_TOP_Y = 0.53;
+const GRASP_PLATFORM_CENTER_X = -0.17;
+const GRASP_PLATFORM_CENTER_Z = -0.12;
+const GRASP_PLATFORM_HALF_WIDTH = 0.19;
+const GRASP_PLATFORM_HALF_DEPTH = 0.20;
 
 export interface VRFrameInput {
   sessionId: string;
@@ -304,8 +308,10 @@ export class SimulationScene {
       visualRoot: this.robotVisualRoot,
       blocks: this.graspBlocks,
       tableTopY: GRASP_PLATFORM_TOP_Y,
-      tableHalfWidth: 0.61,
-      tableHalfDepth: 0.43,
+      tableCenterX: GRASP_PLATFORM_CENTER_X,
+      tableCenterZ: GRASP_PLATFORM_CENTER_Z,
+      tableHalfWidth: GRASP_PLATFORM_HALF_WIDTH,
+      tableHalfDepth: GRASP_PLATFORM_HALF_DEPTH,
     });
     this.createTargetMarker();
     this.controllerHints = new ControllerHints(this.scene);
@@ -709,11 +715,19 @@ export function createGraspBlocks(): GraspBlock[] {
 
 function createGraspPlatform(): THREE.Mesh {
   const platform = new THREE.Mesh(
-    new THREE.BoxGeometry(0.38, 0.03, 0.40),
+    new THREE.BoxGeometry(
+      GRASP_PLATFORM_HALF_WIDTH * 2,
+      0.03,
+      GRASP_PLATFORM_HALF_DEPTH * 2,
+    ),
     new THREE.MeshStandardMaterial({color: 0x264656, metalness: 0.18, roughness: 0.72}),
   );
   platform.name = 'grasp-platform';
-  platform.position.set(-0.17, GRASP_PLATFORM_TOP_Y - 0.015, -0.12);
+  platform.position.set(
+    GRASP_PLATFORM_CENTER_X,
+    GRASP_PLATFORM_TOP_Y - 0.015,
+    GRASP_PLATFORM_CENTER_Z,
+  );
   platform.receiveShadow = true;
   return platform;
 }

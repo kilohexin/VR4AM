@@ -4,6 +4,7 @@ from scipy.spatial.transform import Rotation
 
 from app.robots.sim_adapter import SimRobotAdapter
 from app.schemas.messages import Pose
+from app.control.safety import SafetyLimiter
 from app.sim.cartesian_servo import cartesian_servo_step
 from app.sim.kinematics import forward_pose
 from app.sim.lm3_model import LM3Model
@@ -37,6 +38,45 @@ def test_position_priority_servo_reaches_one_small_six_dof_target() -> None:
     assert result is not None
     assert result.position_error_m < 0.01
     assert result.orientation_error_rad < 0.08
+
+
+@pytest.mark.parametrize(
+    "block_center",
+    [
+        (-0.05, 0.56, -0.23),
+        (-0.14, 0.56, -0.26),
+        (-0.24, 0.56, -0.25),
+        (-0.27, 0.56, -0.14),
+        (-0.16, 0.56, -0.10),
+    ],
+)
+def test_fake_home_workspace_and_ik_reach_each_grasp_block(
+    block_center: tuple[float, float, float],
+) -> None:
+    model = LM3Model()
+    q = np.asarray(model.home_q)
+    home = forward_pose(q, model)
+    target = Pose(p=block_center, q=home.q)
+    limiter = SafetyLimiter(
+        workspace_half_extent_m=0.16,
+        workspace_boundary_mode="axis_clamp",
+    )
+    limiter.set_pose_anchor(home)
+
+    projection = limiter.project_workspace(target)
+    assert projection.constrained is False
+    for _ in range(300):
+        result = cartesian_servo_step(
+            projection.pose,
+            q,
+            model,
+            dt=0.02,
+            max_linear_speed_mps=0.60,
+        )
+        q = np.asarray(result.q)
+        assert result.self_collision_limited is False
+
+    assert result.position_error_m < 0.01
 
 
 @pytest.mark.asyncio

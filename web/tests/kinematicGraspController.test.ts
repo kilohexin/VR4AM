@@ -151,6 +151,26 @@ describe('KinematicGraspController', () => {
     expect(blocks[0].object.position.toArray()).toEqual([0.2, 0.025, -0.2]);
   });
 
+  it('clamps release to an offset platform footprint without floating outside it', () => {
+    const {visualRoot, blocks} = createWorld([[0, 0.56, 0]]);
+    const controller = new KinematicGraspController({
+      visualRoot,
+      blocks,
+      tableTopY: 0.53,
+      tableCenterX: -0.17,
+      tableCenterZ: -0.12,
+      tableHalfWidth: 0.19,
+      tableHalfDepth: 0.20,
+    });
+
+    controller.update(pose([0, 0.56, 0]), 0.2);
+    controller.update(pose([0, 0.56, 0]), 0.7);
+    controller.update(pose([0.3, 0.8, 0.4]), 0.7);
+    controller.update(pose([0.3, 0.8, 0.4]), 0.2);
+
+    expect(blocks[0].object.position.toArray()).toEqual([-0.01, 0.56, 0.05]);
+  });
+
   it('releases onto a configured Fake rehearsal support plane and reset restores the table', () => {
     const {blocks, controller} = createWorld([[0, 0.66, 0]]);
     controller.setTableTopY(0.63);
