@@ -65,14 +65,14 @@ def test_fake_profile_uses_responsive_but_bounded_motion_values() -> None:
         control.translation_scale,
     ) == pytest.approx(
         (
-            0.30,
+            0.60,
             1.50,
-            1.20,
+            2.40,
             4.00,
             1.50,
             4.00,
             0.060,
-            0.006,
+            0.012,
             2.0,
             0.16,
             45.0,

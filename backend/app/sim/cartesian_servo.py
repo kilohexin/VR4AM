@@ -71,9 +71,17 @@ def cartesian_servo_step(
     model: LM3Model,
     *,
     dt: float = 0.02,
+    max_linear_speed_mps: float = 0.30,
 ) -> CartesianServoResult:
     q = np.asarray(actual_q, dtype=float)
-    if q.shape != (6,) or not np.all(np.isfinite(q)) or not np.isfinite(dt) or dt <= 0:
+    if (
+        q.shape != (6,)
+        or not np.all(np.isfinite(q))
+        or not np.isfinite(dt)
+        or dt <= 0
+        or not np.isfinite(max_linear_speed_mps)
+        or max_linear_speed_mps <= 0
+    ):
         raise IKError("ik_singular")
 
     current = forward_pose(q, model)
@@ -82,7 +90,7 @@ def cartesian_servo_step(
     position_jacobian = jacobian[:3]
     rotation_jacobian = jacobian[3:]
 
-    position_command = _clip_norm(4.0 * position_error, 0.30)
+    position_command = _clip_norm(4.0 * position_error, max_linear_speed_mps)
     position_inverse = _damped_pseudoinverse(position_jacobian)
     position_velocity = position_inverse @ position_command
 

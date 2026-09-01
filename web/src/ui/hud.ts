@@ -109,7 +109,7 @@ export class Hud {
       </main>
       <footer class="help-strip">
         ${icon('info')}
-        <span>右 Grip 建立末端零位 · Trigger 控制夹爪 · 左摇杆平移工作台 · 左 Grip+摇杆调高度</span>
+        <span>右 Grip 建立末端零位 · Trigger 控制夹爪 · 左摇杆平移平台 · 左 Grip+摇杆调高度 · 按下左摇杆归零</span>
       </footer>
     `;
 

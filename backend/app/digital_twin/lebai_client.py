@@ -174,6 +174,7 @@ class DigitalTwinLebaiClient:
             # ceiling with margin.  Using the slower PVAT cadence here can
             # manufacture a joint jump for an otherwise valid TCP command.
             dt=0.5 / self.settings.control.loop_hz,
+            max_linear_speed_mps=self.settings.control.max_tcp_speed_mps,
         )
         if result.self_collision_limited:
             return None

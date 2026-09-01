@@ -36,7 +36,7 @@ describe('VR safety presentation', () => {
     expect(describeVrSafety(state(phase), true)).toEqual({
       title,
       instruction,
-      footer: 'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
+      footer: 'A解锁 B停止/Home · 右Grip末端 Trigger夹爪 · 左摇杆平台/按下归零 · 左Grip+摇杆升降',
       statusLine: 'SIMULATOR · TCP — · —',
       tone,
       shape,
@@ -175,7 +175,7 @@ describe('VR safety presentation', () => {
     expect(describeVrSafety(state('locked'), false)).toEqual({
       title: '手柄不受支持',
       instruction: '当前配置不支持 A/B 安全控制',
-      footer: 'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
+      footer: 'A解锁 B停止/Home · 右Grip末端 Trigger夹爪 · 左摇杆平台/按下归零 · 左Grip+摇杆升降',
       statusLine: 'SIMULATOR · TCP — · —',
       tone: 'red',
       shape: 'warning',
@@ -262,7 +262,7 @@ describe('VR safety sprite resources', () => {
     expect(panel.sprite.parent).toBe(parent);
     expect(panel.sprite.position.toArray()).toEqual([-0.82, 1.52, -0.72]);
     expect(describeVrSafety(state('stopped'), true).footer).toBe(
-      'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪',
+      'A解锁 B停止/Home · 右Grip末端 Trigger夹爪 · 左摇杆平台/按下归零 · 左Grip+摇杆升降',
     );
     expect(describeVrSafety(state('stopped'), true).instruction).toBe(
       '保持 Grip 松开：A 解锁，B 回 Home',

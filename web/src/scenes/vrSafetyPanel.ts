@@ -3,7 +3,7 @@ import type {Pose, RealRobotMode, RuntimeBackend} from '../protocol/messages';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
 import {readableConstraint, readableFault} from '../ui/hud';
 
-const CONTROL_FOOTER = 'A 解锁 · B 停止/回 Home · Grip 移动 · Trigger 夹爪' as const;
+const CONTROL_FOOTER = 'A解锁 B停止/Home · 右Grip末端 Trigger夹爪 · 左摇杆平台/按下归零 · 左Grip+摇杆升降' as const;
 
 export interface RobotRuntimeSummary {
   backend: RuntimeBackend | null;
@@ -229,7 +229,7 @@ export class VrSafetyPanel {
     context.lineTo(984, 174);
     context.stroke();
     context.fillStyle = '#c9d8e2';
-    context.font = "500 28px 'Microsoft YaHei', 'Noto Sans SC', sans-serif";
+    context.font = "500 20px 'Microsoft YaHei', 'Noto Sans SC', sans-serif";
     context.fillText(view.footer, 52, 220);
   }
 

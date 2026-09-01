@@ -37,13 +37,23 @@ describe('grasp block resources', () => {
       0xa77bff,
     ]);
     expect(blocks.map(({object}) => object.position.toArray())).toEqual([
-      [0.18, 0.025, -0.32],
-      [0.32, 0.025, -0.22],
-      [0.04, 0.025, -0.28],
-      [0.28, 0.025, -0.38],
-      [0.10, 0.025, -0.18],
+      [-0.05, 0.56, -0.23],
+      [-0.14, 0.56, -0.26],
+      [-0.24, 0.56, -0.25],
+      [-0.27, 0.56, -0.14],
+      [-0.16, 0.56, -0.10],
     ]);
     expect(blocks.every(({sizeM}) => sizeM === 0.06)).toBe(true);
+  });
+
+  it('keeps every block center comfortably inside the Fake Home workspace', () => {
+    const homeTcp = [-0.14378786228061097, 0.6959976154948492, -0.12063003385763715];
+
+    for (const {object} of createGraspBlocks()) {
+      object.position.toArray().forEach((value, axis) => {
+        expect(Math.abs(value - homeTcp[axis])).toBeLessThanOrEqual(0.145);
+      });
+    }
   });
 });
 
@@ -452,7 +462,7 @@ describe('XR render-loop handoff', () => {
   it.each([
     ['locked', false, false, true],
     ['stopped', false, false, true],
-    ['armed', false, false, false],
+    ['armed', false, false, true],
     ['locked', true, false, false],
     ['locked', false, true, false],
   ] as const)(

@@ -64,6 +64,10 @@ describe('SimulationSettingsPanel', () => {
     input.value = '10.0';
     button.click();
     expect(request).toHaveBeenLastCalledWith(10.0);
+    panel.handleResult({
+      v: 1, type: 'simulation_scale_result', request_id: 'scale-max',
+      accepted: true, translation_scale: 10.0,
+    });
 
     request.mockClear();
     input.value = '10.1';

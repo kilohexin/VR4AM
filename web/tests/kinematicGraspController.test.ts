@@ -70,6 +70,20 @@ function positionOf(block: GraspBlock): [number, number, number] {
 }
 
 describe('KinematicGraspController', () => {
+  it('captures the nearest block within the expanded VR assist volume', () => {
+    const {blocks, controller} = createWorld([
+      [0.09, 0.07, 0.09],
+      [0.20, 0, 0],
+    ]);
+
+    controller.update(pose([0, 0, 0]), 0.2);
+    controller.update(pose([0, 0, 0]), 0.7);
+    controller.update(pose([0.3, 0.2, -0.1]), 0.7);
+
+    expect(blocks[0].object.position.toArray()).toEqual([0.3, 0.2, -0.1]);
+    expect(blocks[1].object.position.toArray()).toEqual([0.20, 0, 0]);
+  });
+
   it('selects the closest block inside the oriented TCP capture box', () => {
     const {blocks, controller} = createWorld([
       [0, 0.04, 0],

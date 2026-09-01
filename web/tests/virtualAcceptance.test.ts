@@ -9,7 +9,7 @@ import {
 import {createGraspBlocks} from '../src/scenes/simulationScene';
 
 
-const TABLE_TOP_Y = -0.005;
+const TABLE_TOP_Y = 0.53;
 
 function pose(
   p: readonly [number, number, number],
@@ -89,8 +89,8 @@ describe('virtual LM3 interaction acceptance', () => {
       const blockTcp = positionOf(block);
       controller.update(pose(blockTcp), 0.2);
       controller.update(pose(blockTcp), 0.7);
-      controller.update(pose([0, 0.3, 0]), 0.7);
-      controller.update(pose([0, 0.3, 0]), 0.2);
+      controller.update(pose([-0.07, 0.72, -0.13]), 0.7);
+      controller.update(pose([-0.07, 0.72, -0.13]), 0.2);
 
       expectNoStaticOverlap(blocks);
       expect(block.object.parent).toBe(visualRoot);
@@ -99,11 +99,11 @@ describe('virtual LM3 interaction acceptance', () => {
     }
 
     expect(blocks.map(({object}) => object.position.y)).toEqual([
-      0.025,
-      0.085,
-      0.145,
-      0.205,
-      0.265,
+      0.56,
+      0.62,
+      0.68,
+      0.74,
+      0.80,
     ]);
 
     controller.reset();

@@ -87,6 +87,30 @@ async def test_self_collision_limited_ik_returns_none_without_mutating_state() -
 
 
 @pytest.mark.asyncio
+async def test_fake_ik_uses_the_profile_tcp_speed_cap() -> None:
+    settings = control_settings()
+    client = DigitalTwinLebaiClient.idle(settings)
+    result = CartesianServoResult(
+        q=tuple(IDLE_Q),
+        joint_velocity=(0.0,) * 6,
+        position_error_m=0.01,
+        orientation_error_rad=0.0,
+        joint_limited=False,
+        self_collision_limited=False,
+    )
+
+    with patch(
+        "app.digital_twin.lebai_client.cartesian_servo_step",
+        return_value=result,
+    ) as servo:
+        await client.kinematics_inverse(ACTUAL_TCP, list(IDLE_Q))
+
+    assert servo.call_args.kwargs["max_linear_speed_mps"] == pytest.approx(
+        settings.control.max_tcp_speed_mps
+    )
+
+
+@pytest.mark.asyncio
 async def test_disconnect_rejects_reads_and_writes() -> None:
     client = DigitalTwinLebaiClient.idle(
         control_settings(),
