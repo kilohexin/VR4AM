@@ -6,6 +6,7 @@ import json
 import math
 import os
 import platform
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -34,6 +35,7 @@ from app.robots.lebai_sdk_bridge import connect_real_client
 from app.schemas.messages import (
     BackendState,
     ControllerState,
+    JointVector,
     RobotStateMessage,
     VRFrame,
 )
@@ -54,6 +56,39 @@ class _MotionActionResult:
     reached_state: RobotStateMessage | None
     measurement_initial: RobotStateMessage | None
     max_cross_axis_drift_m: float | None
+
+
+class _SmokeRecorder(CommissioningRecorder):
+    def __init__(self, root: Path, metadata: dict[str, object]) -> None:
+        super().__init__(root, metadata)
+        self._actual_qd: JointVector | None = None
+        self._kinematics_ns: int | None = None
+
+    async def write_event(self, event: object, server_mono_ns: int) -> None:
+        if isinstance(event, Mapping) and event.get("kind") == "robot_kinematics":
+            self._actual_qd = _joint_velocity(event.get("actual_qd"))
+            self._kinematics_ns = server_mono_ns
+        await super().write_event(event, server_mono_ns)
+
+    def maximum_joint_speed_for(self, state: RobotStateMessage) -> float | None:
+        if (
+            self._actual_qd is None
+            or self._kinematics_ns != state.server_mono_ns
+        ):
+            return None
+        return max(abs(value) for value in self._actual_qd)
+
+
+def _joint_velocity(value: object) -> JointVector | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 6:
+        return None
+    try:
+        velocity = tuple(float(component) for component in value)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(component) for component in velocity):
+        return None
+    return velocity  # type: ignore[return-value]
 
 
 def parse_smoke_args(argv: Sequence[str] | None = None) -> SmokeOptions:
@@ -202,9 +237,9 @@ async def _wait_for_stable_state(
     while True:
         state = await backend.get_state()
         now = loop.time()
-        # RobotStateMessage intentionally does not expose joint velocity.  The
-        # RealLebaiAdapter stop path has already verified qd <= 0.02 rad/s for
-        # 300 ms; this post-action poll keeps the reported state idle and fresh.
+        # The motion loop and RealLebaiAdapter stop path have already verified
+        # the configured joint-velocity stability window.  This post-action
+        # poll additionally requires the controller-reported state to stay idle.
         if state.robot_state is BackendState.IDLE:
             if stable_since is None:
                 stable_since = now
@@ -221,6 +256,7 @@ async def _run_motion_action(
     control: RobotControl,
     latest: LatestVRFrame,
     clock: MonotonicClock,
+    recorder: _SmokeRecorder,
     settings: Settings,
     action: TranslationAction | RotationAction | GripperAction,
 ) -> _MotionActionResult:
@@ -263,6 +299,16 @@ async def _run_motion_action(
             reached = False
             target_axis_reached = False
             cross_axes_converged_after_target = False
+            release_pose_reached = False
+            stable_velocity_samples = 0
+            required_stable_samples = (
+                math.ceil(
+                    settings.home_stable_ms
+                    / 1000
+                    / period_s
+                )
+                + 1
+            )
             for _ in range(maximum_frames):
                 latest.publish(
                     target_frame.model_copy(
@@ -310,7 +356,23 @@ async def _run_motion_action(
                     )
                     if target_axis_reached and cross_axis_converged:
                         cross_axes_converged_after_target = True
-                if target_axis_reached_now and cross_axis_converged:
+                release_pose_reached_now = (
+                    target_axis_reached_now and cross_axis_converged
+                )
+                release_pose_reached = (
+                    release_pose_reached or release_pose_reached_now
+                )
+                maximum_joint_speed = recorder.maximum_joint_speed_for(current)
+                velocity_converged = (
+                    maximum_joint_speed is not None
+                    and maximum_joint_speed
+                    <= settings.home_velocity_tolerance_radps
+                )
+                if release_pose_reached_now and velocity_converged:
+                    stable_velocity_samples += 1
+                else:
+                    stable_velocity_samples = 0
+                if stable_velocity_samples >= required_stable_samples:
                     reached = True
                     reached_state = current
                     break
@@ -321,6 +383,8 @@ async def _run_motion_action(
                     and not cross_axes_converged_after_target
                 ):
                     raise RuntimeError("smoke_cross_axis_not_settled")
+                if release_pose_reached:
+                    raise RuntimeError("smoke_velocity_not_settled")
                 raise RuntimeError("smoke_motion_timeout")
         else:
             await asyncio.sleep(1 / settings.lebai.gripper.command_hz)
@@ -432,7 +496,7 @@ async def run_smoke(
     if settings.lebai is None or settings.lebai.mode != "control":
         raise RuntimeError("smoke_requires_control_mode")
     action_name = _action_name(options.action)
-    recorder = CommissioningRecorder(
+    recorder = _SmokeRecorder(
         COMMISSIONING_LOG_ROOT,
         metadata={
             "backend": "LEBAI",
@@ -521,6 +585,7 @@ async def run_smoke(
                 control,
                 latest,
                 clock,
+                recorder,
                 settings,
                 options.action,
             )

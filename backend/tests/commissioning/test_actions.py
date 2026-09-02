@@ -435,6 +435,151 @@ async def test_translation_waits_for_cross_axis_convergence_before_disarm(
 
 
 @pytest.mark.asyncio
+async def test_translation_waits_for_joint_velocity_to_settle_before_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    requested_pose: dict[str, float] | None = None
+    move_count = 0
+    speed_at_stop: list[float] = []
+
+    async def converging_ik(
+        pose: dict[str, float],
+        joints: list[float],
+    ) -> object:
+        nonlocal requested_pose
+        requested_pose = dict(pose)
+        client.read_calls.append("kinematics_inverse")
+        client.ik_calls.append((dict(pose), list(joints)))
+        return list(joints)
+
+    original_move_pvat = client.move_pvat
+
+    async def position_first_move_pvat(
+        p: list[float],
+        v: list[float],
+        a: list[float],
+        t: float,
+    ) -> object:
+        nonlocal move_count
+        result = await original_move_pvat(p, v, a, t)
+        move_count += 1
+        assert requested_pose is not None
+        client.kin_data["actual_tcp_pose"] = dict(requested_pose)
+        return result
+
+    original_get_kin_data = client.get_kin_data
+
+    async def position_first_kinematics() -> dict[str, object]:
+        if requested_pose == client.kin_data["actual_tcp_pose"]:
+            client.kin_data["actual_joint_speed"] = (
+                [0.0, 0.0, 0.0, -0.03, 0.0, 0.0]
+                if len(client.ik_calls) < 30
+                else [0.0] * 6
+            )
+        return await original_get_kin_data()
+
+    original_stop_move = client.stop_move
+
+    async def reject_moving_stop() -> None:
+        maximum_speed = max(
+            abs(float(value))
+            for value in client.kin_data["actual_joint_speed"]
+        )
+        speed_at_stop.append(maximum_speed)
+        if maximum_speed > 0.02:
+            raise RuntimeError("stop_requested_while_moving")
+        await original_stop_move()
+
+    client.kinematics_inverse = converging_ik  # type: ignore[method-assign]
+    client.move_pvat = position_first_move_pvat  # type: ignore[method-assign]
+    client.get_kin_data = position_first_kinematics  # type: ignore[method-assign]
+    client.stop_move = reject_moving_stop  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "app.commissioning.smoke.COMMISSIONING_LOG_ROOT",
+        tmp_path / "logs",
+    )
+
+    result = await run_smoke(
+        SmokeOptions(
+            config_path=_control_config(tmp_path),
+            action=TranslationAction("y", -0.002),
+            confirmation=REAL_ROBOT_CONFIRMATION,
+        ),
+        AsyncMock(return_value=client),
+    )
+
+    assert result.stable is True
+    assert move_count >= 2
+    assert len(client.ik_calls) >= 30
+    assert speed_at_stop
+    assert speed_at_stop[0] <= 0.02
+
+
+@pytest.mark.asyncio
+async def test_translation_reports_velocity_not_settled_before_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    requested_pose: dict[str, float] | None = None
+
+    async def converging_ik(
+        pose: dict[str, float],
+        joints: list[float],
+    ) -> object:
+        nonlocal requested_pose
+        requested_pose = dict(pose)
+        client.read_calls.append("kinematics_inverse")
+        client.ik_calls.append((dict(pose), list(joints)))
+        return list(joints)
+
+    original_move_pvat = client.move_pvat
+
+    async def moving_at_target_pvat(
+        p: list[float],
+        v: list[float],
+        a: list[float],
+        t: float,
+    ) -> object:
+        result = await original_move_pvat(p, v, a, t)
+        assert requested_pose is not None
+        client.kin_data["actual_tcp_pose"] = dict(requested_pose)
+        client.kin_data["actual_joint_speed"] = [0.03, 0, 0, 0, 0, 0]
+        return result
+
+    original_stop_move = client.stop_move
+
+    async def stop_and_settle() -> None:
+        client.kin_data["actual_joint_speed"] = [0.0] * 6
+        await original_stop_move()
+
+    client.kinematics_inverse = converging_ik  # type: ignore[method-assign]
+    client.move_pvat = moving_at_target_pvat  # type: ignore[method-assign]
+    client.stop_move = stop_and_settle  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "app.commissioning.smoke.COMMISSIONING_MOTION_TIMEOUT_S",
+        0.2,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.commissioning.smoke.COMMISSIONING_LOG_ROOT",
+        tmp_path / "logs",
+    )
+
+    with pytest.raises(RuntimeError, match="^smoke_velocity_not_settled$"):
+        await run_smoke(
+            SmokeOptions(
+                config_path=_control_config(tmp_path),
+                action=TranslationAction("y", -0.002),
+                confirmation=REAL_ROBOT_CONFIRMATION,
+            ),
+            AsyncMock(return_value=client),
+        )
+
+
+@pytest.mark.asyncio
 async def test_translation_reports_cross_axis_not_settled_instead_of_passing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
