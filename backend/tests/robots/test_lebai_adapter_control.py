@@ -18,6 +18,7 @@ from app.robots.lebai_adapter import RealLebaiAdapter
 from app.robots.lebai_codec import pose_to_lebai
 from app.schemas.messages import (
     ControllerState,
+    JointVector,
     Pose,
     TeleopMode,
     VRFrame,
@@ -80,6 +81,20 @@ async def _wait_until(predicate, timeout: float = 1.0) -> None:
     await asyncio.wait_for(wait(), timeout)
 
 
+async def _wait_for_pvat_count(
+    client: FakeLebaiClient,
+    expected: int,
+) -> None:
+    await _wait_until(
+        lambda: [call[0] for call in client.write_calls].count("move_pvat")
+        == expected
+    )
+
+
+def _last_pvat_event(events: list[dict[str, object]]) -> dict[str, object]:
+    return [event for event in events if event.get("kind") == "pvat_sent"][-1]
+
+
 async def _connected_control_adapter(
     *,
     block_ik: bool = False,
@@ -100,6 +115,35 @@ async def _connected_control_adapter(
     return adapter, fake, test_clock
 
 
+async def _adapter_with_accepted_history(
+    *,
+    actual_q: JointVector = tuple(IDLE_Q),  # type: ignore[assignment]
+    solution: JointVector,
+    target: Pose,
+    backend_label: Literal["LEBAI", "LEBAI_FAKE"] = "LEBAI",
+) -> tuple[RealLebaiAdapter, FakeLebaiClient, list[dict[str, object]]]:
+    events: list[dict[str, object]] = []
+
+    async def recorder(event: dict[str, object], _timestamp: int) -> None:
+        events.append(event)
+
+    client = FakeLebaiClient.idle(q=list(actual_q))
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=recorder,
+        backend_label=backend_label,
+    )
+    await adapter.connect()
+    adapter._last_accepted_solution_q = solution
+    adapter._last_sent_tcp = target.model_copy(deep=True)
+    adapter._accepted_target_command_id = 1
+    return adapter, client, events
+
+
 @pytest.mark.asyncio
 async def test_control_command_uses_vendor_ik_and_pvat_in_order() -> None:
     adapter, client, _ = await _connected_control_adapter()
@@ -118,6 +162,124 @@ async def test_control_command_uses_vendor_ik_and_pvat_in_order() -> None:
     assert v[0] == pytest.approx(0.04)
     assert a[0] == pytest.approx(0.5)
     assert horizon == pytest.approx(0.08)
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_second_ik_uses_previous_accepted_solution_as_seed() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    first_solution = [0.04, -1.0, 1.0, 0.0, 1.57, 0.0]
+    second_solution = [0.08, -1.0, 1.0, 0.0, 1.57, 0.0]
+    client.ik_results = deque([first_solution, second_solution])
+
+    await adapter.command_tcp(_target(0.301), command_id=1)
+    await _wait_for_pvat_count(client, 1)
+    await adapter.command_tcp(_target(0.302), command_id=2)
+    await _wait_for_pvat_count(client, 2)
+
+    assert client.ik_calls[1][1] == first_solution
+    assert adapter._last_accepted_solution_q == tuple(second_solution)
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_pvat_event_distinguishes_full_solution_from_physical_point() -> None:
+    events: list[dict[str, object]] = []
+
+    async def recorder(event: dict[str, object], _timestamp: int) -> None:
+        events.append(event)
+
+    client = FakeLebaiClient.idle()
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=recorder,
+    )
+    await adapter.connect()
+    solution = [0.04, -1.0, 1.0, 0.0, 1.57, 0.0]
+    client.ik_results = deque([solution])
+
+    await adapter.command_tcp(_target(0.301), command_id=7)
+    await _wait_for_pvat_count(client, 1)
+    await _wait_until(
+        lambda: any(event.get("kind") == "pvat_sent" for event in events)
+    )
+
+    event = _last_pvat_event(events)
+    assert event["ik_solution_q"] == solution
+    assert event["p"][0] == pytest.approx(0.0032)  # type: ignore[index]
+    assert event["solution_step_rad"] == pytest.approx(0.04)
+    assert event["tracking_error_rad"] == pytest.approx(0.04)
+    assert event["pvat_mode"] == "advance"
+    assert event["accepted_target_command_id"] == 7
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_failed_pvat_write_does_not_commit_solution_history() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    solution = [0.04, -1.0, 1.0, 0.0, 1.57, 0.0]
+    client.ik_results = deque([solution])
+    client.move_pvat = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("write_failed")
+    )
+
+    await adapter.command_tcp(_target(0.301), command_id=8)
+    await _wait_until(lambda: adapter.pump_fault is not None)
+
+    assert adapter._last_accepted_solution_q is None
+    assert adapter._last_sent_tcp is None
+    assert adapter._accepted_target_command_id is None
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["stop", "home", "disconnect"])
+async def test_lifecycle_operation_clears_accepted_solution_history(
+    operation: str,
+) -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    client.ik_results = deque(
+        [[0.04, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+    await adapter.command_tcp(_target(0.301), command_id=9)
+    await _wait_for_pvat_count(client, 1)
+
+    if operation == "stop":
+        await adapter.stop(StopReason.GRIP_RELEASED)
+    elif operation == "home":
+        await adapter.home(HOME_OPTIONS, lambda _phase: None)
+    else:
+        await adapter.disconnect()
+
+    assert adapter._last_accepted_solution_q is None
+    assert adapter._last_sent_tcp is None
+    assert adapter._previous_sent_qd is None
+    assert adapter._accepted_target_command_id is None
+    if operation != "disconnect":
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_runtime_fault_clears_accepted_solution_history() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    client.ik_results = deque(
+        [[0.04, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+    await adapter.command_tcp(_target(0.301), command_id=10)
+    await _wait_for_pvat_count(client, 1)
+
+    client.robot_state = "ERROR"
+    await adapter.command_tcp(_target(0.302), command_id=11)
+    await _wait_until(lambda: adapter.pump_fault is not None)
+
+    assert adapter._last_accepted_solution_q is None
+    assert adapter._last_sent_tcp is None
+    assert adapter._previous_sent_qd is None
+    assert adapter._accepted_target_command_id is None
     await adapter.disconnect()
 
 
