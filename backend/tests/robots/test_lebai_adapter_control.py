@@ -243,13 +243,26 @@ async def test_stop_invalidates_delayed_ik_before_any_pvat_write() -> None:
 async def test_command_rejects_stale_cached_robot_state() -> None:
     clock = FakeClock()
     adapter, client, _ = await _connected_control_adapter(clock=clock)
-    clock.advance_ms(81)
+    clock.advance_ms(341)
 
     with pytest.raises(BackendCommandError, match="^robot_state_stale$"):
         await adapter.command_tcp(_target(), command_id=1)
 
     assert client.ik_calls == []
     assert client.write_calls == []
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_command_accepts_cached_state_within_aligned_budget() -> None:
+    clock = FakeClock()
+    adapter, client, _ = await _connected_control_adapter(clock=clock)
+    clock.advance_ms(340)
+
+    await adapter.command_tcp(_target(), command_id=1)
+    await client.wait_for_write("move_pvat")
+
+    assert adapter.pump_fault is None
     await adapter.disconnect()
 
 
@@ -895,7 +908,7 @@ async def test_snapshot_timestamp_is_conservative_and_total_read_deadline_is_enf
 
 
 @pytest.mark.asyncio
-async def test_pvat_rechecks_freshness_after_slow_ik() -> None:
+async def test_pvat_accepts_state_after_eighty_one_ms_ik_jitter() -> None:
     adapter, client, clock = await _connected_control_adapter()
 
     async def slow_ik(
@@ -914,6 +927,31 @@ async def test_pvat_rechecks_freshness_after_slow_ik() -> None:
             lambda: adapter.pump_fault is not None
             or any(call[0] == "move_pvat" for call in client.write_calls)
         )
+
+        assert adapter.pump_fault is None
+        assert len(client.ik_calls) == 1
+        assert "move_pvat" in [call[0] for call in client.write_calls]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_pvat_rejects_successful_ik_after_aligned_budget_expires() -> None:
+    adapter, client, clock = await _connected_control_adapter()
+
+    async def expired_ik(
+        pose: dict[str, float],
+        joints: list[float],
+    ) -> object:
+        client.ik_calls.append((dict(pose), list(joints)))
+        clock.advance_ms(341)
+        return list(joints)
+
+    client.kinematics_inverse = expired_ik  # type: ignore[method-assign]
+
+    try:
+        await adapter.command_tcp(_target(0.31), command_id=9)
+        await _wait_until(lambda: adapter.pump_fault is not None)
 
         assert str(adapter.pump_fault) == "robot_state_stale"
         assert len(client.ik_calls) == 1
@@ -937,7 +975,7 @@ async def test_recovery_does_not_start_another_ik_after_state_goes_stale() -> No
         joints: list[float],
     ) -> object:
         client.ik_calls.append((dict(pose), list(joints)))
-        clock.advance_ms(81)
+        clock.advance_ms(341)
         return None
 
     client.kinematics_inverse = stale_failed_ik  # type: ignore[method-assign]
@@ -957,24 +995,34 @@ async def test_recovery_does_not_start_another_ik_after_state_goes_stale() -> No
 
 
 @pytest.mark.asyncio
-async def test_pvat_rejects_snapshot_older_than_command_age_after_full_read() -> None:
+async def test_pvat_accepts_full_read_and_ik_within_aligned_command_budget() -> None:
     adapter, client, clock = await _connected_control_adapter()
     original_get_tcp = client.get_tcp
 
     async def slow_get_tcp() -> dict[str, object]:
-        clock.advance_ms(90)
+        clock.advance_ms(250)
         return await original_get_tcp()
 
+    async def jittered_ik(
+        pose: dict[str, float],
+        joints: list[float],
+    ) -> object:
+        client.ik_calls.append((dict(pose), list(joints)))
+        clock.advance_ms(80)
+        return list(joints)
+
     client.get_tcp = slow_get_tcp  # type: ignore[method-assign]
+    client.kinematics_inverse = jittered_ik  # type: ignore[method-assign]
     client.read_calls.clear()
 
     await adapter.command_tcp(_target(0.31), command_id=7)
-    await _wait_until(lambda: adapter.pump_fault is not None)
+    await client.wait_for_write("move_pvat")
 
-    assert str(adapter.pump_fault) == "robot_state_stale"
+    assert adapter.pump_fault is None
     assert "get_running_motion" in client.read_calls
-    assert client.ik_calls == []
-    assert "move_pvat" not in [call[0] for call in client.write_calls]
+    assert len(client.ik_calls) == 1
+    assert "move_pvat" in [call[0] for call in client.write_calls]
+    client.get_tcp = original_get_tcp  # type: ignore[method-assign]
     await adapter.disconnect()
 
 

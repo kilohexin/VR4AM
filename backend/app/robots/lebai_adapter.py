@@ -927,8 +927,8 @@ class RealLebaiAdapter:
             latencies[name] = max(0.0, (self._clock() - started) / 1_000_000)
 
     def _command_snapshot_max_age_ns(self) -> int:
-        return int(
-            (1 / self.settings.control.state_hz + 0.04) * 1_000_000_000
+        return _SNAPSHOT_READ_TIMEOUT_NS + int(
+            1 / self.settings.control.state_hz * 1_000_000_000
         )
 
     def _runtime_motion_fault(self, snapshot: LebaiSnapshot) -> str | None:

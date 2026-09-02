@@ -735,7 +735,7 @@ async def _run_disconnect_case() -> int:
 async def _run_stale_snapshot_case() -> int:
     async with fake_real_harness() as harness:
         await _prepare_active(harness)
-        harness.clock.advance(0.081)
+        harness.clock.advance(0.341)
         await _publish_motion(harness, 3, 0.005)
         assert "stop_move" in _methods(harness)
         fault_state = await _publish_state(harness)
