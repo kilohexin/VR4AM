@@ -2227,6 +2227,30 @@ async def test_pvat_continuity_rejection_is_a_soft_constraint(
 
 
 @pytest.mark.asyncio
+async def test_tracking_lag_is_public_motion_continuity_boundary() -> None:
+    control, latest, backend, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    safe_target = control.last_target
+
+    backend.command_tcp = AsyncMock(
+        side_effect=BackendCommandError("ik_tracking_lag")
+    )
+    latest.publish(
+        frame(3, True, p=(0.0, 1.2, -0.31)),
+        clock.now_ns(),
+    )
+    await control.tick()
+
+    state = await control.state_message()
+    assert state.constraint == "motion_continuity_boundary"
+    assert control.mode is TeleopMode.ACTIVE
+    assert control._fault is None
+    assert control.last_target == safe_target
+
+
+@pytest.mark.asyncio
 async def test_stop_is_idempotent_and_uses_shutdown_reason() -> None:
     control, _latest, backend, _clock = make_control()
 

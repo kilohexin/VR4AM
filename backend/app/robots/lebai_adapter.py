@@ -734,7 +734,10 @@ class RealLebaiAdapter:
                 )
                 if not self._pump.is_current(request.generation):
                     return
-                if selected.recovery_fraction == 1.0:
+                if selected.pvat_mode == "catch_up":
+                    self._constraint = "motion_continuity_boundary"
+                    self._constraint_error = "ik_tracking_lag"
+                elif selected.recovery_fraction == 1.0:
                     self._constraint = None
                     self._constraint_error = None
                     self._consecutive_ik_failures = 0
@@ -882,15 +885,17 @@ class RealLebaiAdapter:
         for attempt in range(3):
             if not self._pump.is_current(request.generation):
                 return None
-            target = (
-                request.target
-                if fraction == 1.0
-                else interpolate_pose(
-                    self._last_sent_tcp,
+            if fraction == 1.0:
+                target = request.target
+            else:
+                recovery_start = self._last_sent_tcp
+                if recovery_start is None:
+                    raise BackendCommandError("ik_joint_jump")
+                target = interpolate_pose(
+                    recovery_start,
                     request.target,
                     fraction,
                 )
-            )
             try:
                 selected = await self._solve_candidate(
                     client,
@@ -903,6 +908,36 @@ class RealLebaiAdapter:
             except _CandidateRejected as error:
                 if not self._pump.is_current(request.generation):
                     return None
+                if (
+                    str(error) == "ik_tracking_diverged"
+                    and self._last_accepted_solution_q is not None
+                    and self._last_sent_tcp is not None
+                ):
+                    diagnostic_events.append(
+                        {
+                            "kind": "ik_tracking_backpressure",
+                            "command_id": request.command_id,
+                            "actual_q": list(snapshot.actual_q),
+                            "accepted_solution_q": list(
+                                self._last_accepted_solution_q
+                            ),
+                            "requested_solution_q": list(
+                                error.metrics.solution_q
+                            ),
+                            "tracking_error_rad": (
+                                error.metrics.tracking_error_rad
+                            ),
+                            "max_joint_tracking_error_rad": (
+                                self.settings.control
+                                .max_joint_tracking_error_rad
+                            ),
+                            "pvat_mode": "catch_up",
+                            "accepted_target_command_id": (
+                                self._accepted_target_command_id
+                            ),
+                        }
+                    )
+                    return self._build_catch_up_candidate(snapshot, request)
                 if (
                     str(error) != "ik_joint_jump"
                     or attempt == 2
@@ -923,6 +958,41 @@ class RealLebaiAdapter:
                 return None
             return selected
         raise AssertionError("unreachable_recovery_loop")
+
+    def _build_catch_up_candidate(
+        self,
+        snapshot: LebaiSnapshot,
+        request: PvatRequest,
+    ) -> _SolvedCandidate:
+        solution = self._last_accepted_solution_q
+        target = self._last_sent_tcp
+        if solution is None or target is None:
+            raise BackendCommandError("ik_joint_jump")
+        metrics = evaluate_ik_candidate(
+            solution,
+            snapshot.actual_q,
+            previous_solution_q=solution,
+        )
+        if (
+            metrics.tracking_error_rad
+            > self.settings.control.max_joint_tracking_error_rad
+        ):
+            raise BackendCommandError("ik_tracking_diverged")
+        point = build_pvat_point(
+            solution_q=solution,
+            actual_q=snapshot.actual_q,
+            actual_qd=snapshot.actual_qd,
+            previous_qd=self._previous_sent_qd,
+            limits=self._pvat_limits,
+        )
+        return _SolvedCandidate(
+            target=target.model_copy(deep=True),
+            metrics=metrics,
+            point=point,
+            recovery_fraction=0.0,
+            pvat_mode="catch_up",
+            advances_target=False,
+        )
 
     async def _inverse_kinematics(
         self,

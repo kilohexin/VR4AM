@@ -389,6 +389,261 @@ async def test_real_discontinuous_target_stops_after_three_ik_attempts() -> None
 
 
 @pytest.mark.asyncio
+async def test_tracking_lag_reuses_last_solution_without_advancing_history() -> None:
+    adapter, client, events = await _adapter_with_accepted_history(
+        solution=(0.22, -1.0, 1.0, 0.0, 1.57, 0.0),
+        target=_target(0.301),
+    )
+    client.ik_results = deque(
+        [[0.26, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+
+    try:
+        await adapter.command_tcp(_target(0.302), command_id=2)
+        await _wait_for_pvat_count(client, 1)
+        await _wait_until(
+            lambda: any(
+                event.get("kind") == "pvat_sent" for event in events
+            )
+        )
+
+        assert adapter._last_accepted_solution_q[0] == pytest.approx(0.22)
+        assert adapter._last_sent_tcp == _target(0.301)
+        assert adapter._accepted_target_command_id == 1
+        assert adapter.constraint == "motion_continuity_boundary"
+        assert adapter.pump_fault is None
+        assert _last_pvat_event(events)["pvat_mode"] == "catch_up"
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_repeated_tracking_lag_never_becomes_persistent_ik_failure() -> None:
+    adapter, client, _ = await _adapter_with_accepted_history(
+        solution=(0.22, -1.0, 1.0, 0.0, 1.57, 0.0),
+        target=_target(0.301),
+    )
+    client.ik_results = deque(
+        [[0.26, -1.0, 1.0, 0.0, 1.57, 0.0]] * 7
+    )
+
+    try:
+        for command_id in range(2, 8):
+            if command_id == 2:
+                await adapter.command_tcp(_target(0.302), command_id)
+            else:
+                with pytest.raises(
+                    BackendCommandError,
+                    match="^ik_tracking_lag$",
+                ):
+                    await adapter.command_tcp(_target(0.302), command_id)
+            await _wait_for_pvat_count(client, command_id - 1)
+
+        assert adapter.pump_fault is None
+        assert adapter._consecutive_ik_failures == 0
+        assert adapter._last_accepted_solution_q[0] == pytest.approx(0.22)
+
+        client.kin_data["actual_joint_pose"] = [
+            0.04,
+            -1.0,
+            1.0,
+            0.0,
+            1.57,
+            0.0,
+        ]
+        client.ik_results.append(
+            [0.26, -1.0, 1.0, 0.0, 1.57, 0.0]
+        )
+        with pytest.raises(
+            BackendCommandError,
+            match="^ik_tracking_lag$",
+        ):
+            await adapter.command_tcp(_target(0.302), command_id=8)
+        await _wait_for_pvat_count(client, 7)
+        await _wait_until(lambda: adapter.constraint is None)
+
+        assert adapter._last_accepted_solution_q[0] == pytest.approx(0.26)
+        assert adapter._accepted_target_command_id == 8
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_accepted_solution_outside_tracking_envelope_is_hard_fault() -> None:
+    adapter, client, _ = await _adapter_with_accepted_history(
+        solution=(0.26, -1.0, 1.0, 0.0, 1.57, 0.0),
+        target=_target(0.301),
+    )
+    client.ik_results = deque(
+        [[0.27, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+
+    try:
+        await adapter.command_tcp(_target(0.302), command_id=2)
+        await _wait_until(lambda: adapter.pump_fault is not None)
+
+        assert str(adapter.pump_fault) == "ik_tracking_diverged"
+        assert "move_pvat" not in [
+            call[0] for call in client.write_calls
+        ]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_tracking_backpressure_diagnostic_is_best_effort() -> None:
+    events: list[dict[str, object]] = []
+
+    async def recorder(event: dict[str, object], _timestamp: int) -> None:
+        events.append(event)
+        if event.get("kind") == "ik_tracking_backpressure":
+            raise RuntimeError("diagnostic_sink_failed")
+
+    adapter, client, _ = await _adapter_with_accepted_history(
+        solution=(0.22, -1.0, 1.0, 0.0, 1.57, 0.0),
+        target=_target(0.301),
+    )
+    adapter._event_callback = recorder
+    client.ik_results = deque(
+        [[0.26, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+
+    try:
+        await adapter.command_tcp(_target(0.302), command_id=2)
+        await _wait_for_pvat_count(client, 1)
+        await _wait_until(
+            lambda: any(
+                event.get("kind") == "ik_tracking_backpressure"
+                for event in events
+            )
+        )
+
+        assert adapter.pump_fault is None
+        assert adapter.constraint == "motion_continuity_boundary"
+        assert adapter._last_accepted_solution_q[0] == pytest.approx(0.22)
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_tracking_diagnostic_does_not_hold_sdk_lock_from_stop() -> None:
+    diagnostic_started = asyncio.Event()
+    release_diagnostic = asyncio.Event()
+
+    async def recorder(event: dict[str, object], _timestamp: int) -> None:
+        if event.get("kind") == "ik_tracking_backpressure":
+            diagnostic_started.set()
+            await release_diagnostic.wait()
+
+    adapter, client, _ = await _adapter_with_accepted_history(
+        solution=(0.22, -1.0, 1.0, 0.0, 1.57, 0.0),
+        target=_target(0.301),
+    )
+    adapter._event_callback = recorder
+    client.ik_results = deque(
+        [[0.26, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+    stop_task: asyncio.Task[None] | None = None
+
+    try:
+        await adapter.command_tcp(_target(0.302), command_id=2)
+        await asyncio.wait_for(diagnostic_started.wait(), timeout=0.5)
+
+        stop_task = asyncio.create_task(adapter.stop(StopReason.STALE))
+        await client.wait_for_write("stop_move", timeout=0.5)
+    finally:
+        release_diagnostic.set()
+        if stop_task is not None:
+            await stop_task
+        assert adapter._last_accepted_solution_q is None
+        assert adapter._last_sent_tcp is None
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_stop_during_catch_up_ik_cannot_restore_history_or_write_pvat() -> None:
+    adapter, client, _ = await _adapter_with_accepted_history(
+        solution=(0.22, -1.0, 1.0, 0.0, 1.57, 0.0),
+        target=_target(0.301),
+    )
+    client.block_ik = True
+    client.ik_results = deque(
+        [[0.26, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+    stop_task: asyncio.Task[None] | None = None
+
+    try:
+        await adapter.command_tcp(_target(0.302), command_id=2)
+        await client.ik_started.wait()
+
+        stop_task = asyncio.create_task(adapter.stop(StopReason.STALE))
+        await asyncio.sleep(0)
+        client.release_ik.set()
+        await stop_task
+
+        assert "move_pvat" not in [
+            call[0] for call in client.write_calls
+        ]
+        assert adapter._last_accepted_solution_q is None
+        assert adapter._last_sent_tcp is None
+        assert adapter._motion_accepted is False
+        assert adapter.pump_fault is None
+    finally:
+        client.release_ik.set()
+        if stop_task is not None and not stop_task.done():
+            await stop_task
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_stop_during_pvat_write_prevents_late_history_commit() -> None:
+    adapter, client, _ = await _adapter_with_accepted_history(
+        solution=(0.22, -1.0, 1.0, 0.0, 1.57, 0.0),
+        target=_target(0.301),
+    )
+    pvat_started = asyncio.Event()
+    release_pvat = asyncio.Event()
+
+    async def blocked_move_pvat(
+        p: list[float],
+        v: list[float],
+        a: list[float],
+        t: float,
+    ) -> object:
+        client.write_calls.append(("move_pvat", p, v, a, t))
+        pvat_started.set()
+        await release_pvat.wait()
+        return 1
+
+    client.move_pvat = blocked_move_pvat  # type: ignore[method-assign]
+    client.ik_results = deque(
+        [[0.24, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+    stop_task: asyncio.Task[None] | None = None
+
+    try:
+        await adapter.command_tcp(_target(0.302), command_id=2)
+        await asyncio.wait_for(pvat_started.wait(), timeout=0.5)
+
+        stop_task = asyncio.create_task(adapter.stop(StopReason.STALE))
+        await asyncio.sleep(0)
+        release_pvat.set()
+        await stop_task
+
+        assert [call[0] for call in client.write_calls].count("move_pvat") == 1
+        assert [call[0] for call in client.write_calls].count("stop_move") == 1
+        assert adapter._last_accepted_solution_q is None
+        assert adapter._last_sent_tcp is None
+        assert adapter._motion_accepted is False
+        assert adapter.pump_fault is None
+    finally:
+        release_pvat.set()
+        if stop_task is not None and not stop_task.done():
+            await stop_task
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_rejected_ik_candidate_records_runtime_joint_delta_without_pvat() -> None:
     events: list[dict[str, object]] = []
 
