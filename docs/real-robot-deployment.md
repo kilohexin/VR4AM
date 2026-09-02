@@ -180,8 +180,8 @@ python scripts/real_robot_smoke.py stop --config "$VR4ARM_CONFIG" --confirm I_UN
 
 Each subcommand is mutually exclusive: run one process, observe the real
 result, and stop before starting the next. First run `prepare` once and verify
-the resulting joint pose before any Cartesian command. The complete staged lab
-sequence is: prepare; translate `+x`, `-x`, `+y`, `-y`, `+z`, `-z`; then rotate `+roll`,
+the resulting joint pose before any Cartesian command. The current staged lab
+sequence is: prepare; translate `+x`, `-x`, `+y`, `-y`, `-z`; then rotate `+roll`,
 `-roll`, `+pitch`, `-pitch`, `+yaw`, `-yaw`; then test gripper open/close,
 Home, stop/E-stop, and only then a lightweight grasp/release. A negative-axis
 check uses the same magnitude with a signed negative value (for example,
@@ -189,14 +189,20 @@ check uses the same magnitude with a signed negative value (for example,
 the axis name. After every individual move, the observer confirms direction
 and complete stop before the next process.
 
-The staged sequence above is mandatory; do not shorten it to unsigned
-translation-only checks. The script rejects motion beyond the configured
+The staged sequence above is mandatory except that `+z` is explicitly blocked
+until a new preparation pose or workspace solution is approved; do not add it
+back or shorten the remaining sequence to unsigned translation-only checks.
+The script rejects motion beyond the configured
 bound, an incorrect confirmation, readonly configuration, non-IDLE state,
 missing TCP/Home data, or failed preflight.
 
 平移/旋转成功输出额外包含 `requested_displacement`、`reached_displacement`、`settled_displacement` 和单位，用于区分“首次达到目标”与松开 Grip、稳定停止后的最终位移。若准备姿态未执行或当前 J3/J5 过于接近零位，笛卡尔预检会以 `singular_configuration` 拒绝且不发送 IK/PVAT；只有显式 `prepare` 和 `home` 可在其他安全检查全部通过时从该状态执行关节运动。
 
 真机快照读取与命令新鲜度使用同一预算关系：完整 SDK 快照读取最多 `300 ms`，命令发送门槛再保留一个状态采样周期（`state_hz=25` 时总计 `340 ms`）。读取、锁等待与 IK 的短时抖动在该范围内不会误报 stale；在发送 IK/PVAT 前超过总门槛仍会以 `robot_state_stale` 拒绝，不会取消陈旧状态保护。
+
+真机示例配置将 `max_joint_step_rad` 设为 `0.05 rad`。该阈值用于拒绝明显的 IK 分支跳变，不是每个 PVAT 点实际执行的关节位移：连续但较远的 IK 解会先按 `max_joint_speed_radps=0.15` 截断目标速度，再按 `max_joint_acceleration_radps2=0.5` 限制速度变化。以 `pvat_horizon_s=0.08`、静止起步为例，第一个 PVAT 点最大只前进 `0.0032 rad`。现场本地配置不会随 Git 更新，更新代码后须手动把同一字段从 `0.01` 改为 `0.05`。
+
+当前准备姿态的 `+z` 方向仍需单独处理：现场记录显示该方向接近工作空间/IK 边界，不得通过继续放大 `max_joint_step_rad` 来掩盖。复测顺序先限定为 `+y`、`-y`、`-z`；`+z` 等新的准备姿态或工作空间方案确认后再测。
 
 若方向错误、抖动、意外转动或停止不完整：
 

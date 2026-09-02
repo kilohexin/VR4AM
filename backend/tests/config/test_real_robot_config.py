@@ -45,7 +45,7 @@ real_robot:
     max_tcp_angular_acceleration_radps2: 0.5
     max_joint_speed_radps: 0.15
     max_joint_acceleration_radps2: 0.5
-    max_joint_step_rad: 0.01
+    max_joint_step_rad: 0.05
     max_tcp_step_m: 0.002
     max_tcp_rotation_step_deg: 1.0
     max_relative_translation_m: 0.10
@@ -126,6 +126,7 @@ def test_real_robot_example_keeps_conservative_motion_values() -> None:
 
     assert control["max_tcp_speed_mps"] == pytest.approx(0.03)
     assert control["translation_scale"] == pytest.approx(0.5)
+    assert control["max_joint_step_rad"] == pytest.approx(0.05)
 
 
 def test_control_mode_requires_exact_environment_confirmation(

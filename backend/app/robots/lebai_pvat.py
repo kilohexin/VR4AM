@@ -59,9 +59,12 @@ def build_pvat_point(
     delta_q = solution - actual
     if np.max(np.abs(delta_q)) > limits.max_joint_step_rad:
         raise BackendCommandError("ik_joint_jump")
-    qd = delta_q / limits.horizon_s
-    if np.max(np.abs(qd)) > limits.max_joint_speed_radps:
-        raise BackendCommandError("joint_speed_limit")
+    desired_qd = delta_q / limits.horizon_s
+    qd = np.clip(
+        desired_qd,
+        -limits.max_joint_speed_radps,
+        limits.max_joint_speed_radps,
+    )
 
     velocity_delta = qd - reference_speed
     max_velocity_delta = (

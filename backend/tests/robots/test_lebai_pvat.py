@@ -10,7 +10,7 @@ LIMITS = PvatLimits(
     horizon_s=0.08,
     max_joint_speed_radps=0.15,
     max_joint_acceleration_radps2=0.5,
-    max_joint_step_rad=0.01,
+    max_joint_step_rad=0.05,
     soft_joint_min_rad=(-3.0, -2.5, -2.5, -3.0, -2.5, -6.0),
     soft_joint_max_rad=(3.0, 2.5, 2.5, 3.0, 2.5, 6.0),
 )
@@ -38,7 +38,7 @@ def test_small_continuous_solution_produces_consistent_pvat() -> None:
         ([0, 0, 0, 0, 0], "ik_invalid"),
         ([float("nan"), 0, 0, 0, 0, 0], "ik_invalid"),
         ([3.01, 0, 0, 0, 0, 0], "ik_joint_limit"),
-        ([0.02, 0, 0, 0, 0, 0], "ik_joint_jump"),
+        ([0.051, 0, 0, 0, 0, 0], "ik_joint_jump"),
     ],
 )
 def test_invalid_or_discontinuous_ik_is_rejected(
@@ -55,24 +55,50 @@ def test_invalid_or_discontinuous_ik_is_rejected(
         )
 
 
-def test_speed_over_limit_is_rejected_before_send() -> None:
-    limits = PvatLimits(
-        horizon_s=0.08,
-        max_joint_speed_radps=0.15,
-        max_joint_acceleration_radps2=0.5,
-        max_joint_step_rad=0.02,
-        soft_joint_min_rad=LIMITS.soft_joint_min_rad,
-        soft_joint_max_rad=LIMITS.soft_joint_max_rad,
+def test_solution_at_joint_step_limit_is_accepted_and_bounded() -> None:
+    point = build_pvat_point(
+        solution_q=[0.05, 0, 0, 0, 0, 0],
+        actual_q=ZERO,
+        actual_qd=ZERO,
+        previous_qd=None,
+        limits=LIMITS,
     )
 
-    with pytest.raises(BackendCommandError, match="^joint_speed_limit$"):
-        build_pvat_point(
-            solution_q=[0.013, 0, 0, 0, 0, 0],
-            actual_q=ZERO,
-            actual_qd=ZERO,
-            previous_qd=None,
-            limits=limits,
-        )
+    assert point.q[0] == pytest.approx(0.0032)
+    assert point.qd[0] == pytest.approx(0.04)
+    assert point.qdd[0] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("solution_delta", [0.0231, -0.0214, -0.0467])
+def test_continuous_field_ik_solution_is_speed_and_acceleration_bounded(
+    solution_delta: float,
+) -> None:
+    point = build_pvat_point(
+        solution_q=[solution_delta, 0, 0, 0, 0, 0],
+        actual_q=ZERO,
+        actual_qd=ZERO,
+        previous_qd=None,
+        limits=LIMITS,
+    )
+
+    expected_sign = 1.0 if solution_delta > 0 else -1.0
+    assert point.q[0] == pytest.approx(expected_sign * 0.0032)
+    assert point.qd[0] == pytest.approx(expected_sign * 0.04)
+    assert point.qdd[0] == pytest.approx(expected_sign * 0.5)
+
+
+def test_speed_cap_applies_before_acceleration_limit_from_previous_command() -> None:
+    point = build_pvat_point(
+        solution_q=[0.0231, 0, 0, 0, 0, 0],
+        actual_q=ZERO,
+        actual_qd=ZERO,
+        previous_qd=(0.12, 0, 0, 0, 0, 0),
+        limits=LIMITS,
+    )
+
+    assert point.q[0] == pytest.approx(0.012)
+    assert point.qd[0] == pytest.approx(0.15)
+    assert point.qdd[0] == pytest.approx(0.375)
 
 
 def test_acceleration_limit_shortens_target_instead_of_exceeding_limit() -> None:
@@ -103,5 +129,16 @@ def test_invalid_reference_speed_is_rejected(reference_qd) -> None:
             actual_q=ZERO,
             actual_qd=ZERO,
             previous_qd=reference_qd,
+            limits=LIMITS,
+        )
+
+
+def test_measured_joint_speed_over_limit_is_rejected() -> None:
+    with pytest.raises(BackendCommandError, match="^joint_speed_limit$"):
+        build_pvat_point(
+            solution_q=[0.001, 0, 0, 0, 0, 0],
+            actual_q=ZERO,
+            actual_qd=(0.16, 0, 0, 0, 0, 0),
+            previous_qd=ZERO,
             limits=LIMITS,
         )
