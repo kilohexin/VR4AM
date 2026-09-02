@@ -179,6 +179,23 @@ async def test_rejected_ik_candidate_records_runtime_joint_delta_without_pvat() 
 
 
 @pytest.mark.asyncio
+async def test_first_frame_solution_over_continuity_limit_is_rejected() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    client.ik_results = deque(
+        [[0.051, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+
+    await adapter.command_tcp(_target(0.301), command_id=18)
+    await _wait_until(
+        lambda: adapter.constraint == "motion_continuity_boundary"
+    )
+
+    assert "move_pvat" not in [call[0] for call in client.write_calls]
+    assert adapter.pump_fault is None
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("solution", "actual_speed", "expected_reason"),
     [

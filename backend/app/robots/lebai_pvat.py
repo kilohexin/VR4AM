@@ -13,7 +13,7 @@ class PvatLimits:
     horizon_s: float
     max_joint_speed_radps: float
     max_joint_acceleration_radps2: float
-    max_joint_step_rad: float
+    max_joint_tracking_error_rad: float
     soft_joint_min_rad: JointVector
     soft_joint_max_rad: JointVector
 
@@ -57,8 +57,8 @@ def build_pvat_point(
         raise BackendCommandError("joint_speed_limit")
 
     delta_q = solution - actual
-    if np.max(np.abs(delta_q)) > limits.max_joint_step_rad:
-        raise BackendCommandError("ik_joint_jump")
+    if np.max(np.abs(delta_q)) > limits.max_joint_tracking_error_rad:
+        raise BackendCommandError("ik_tracking_diverged")
     desired_qd = delta_q / limits.horizon_s
     qd = _scale_to_max_abs(
         desired_qd,

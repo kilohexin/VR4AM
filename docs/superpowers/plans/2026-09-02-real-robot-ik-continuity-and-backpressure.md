@@ -320,11 +320,15 @@ acceleration-vector proportional scaling, soft joint bounds, or
 `settings.control.max_joint_tracking_error_rad`.
 
 In the adapter's existing `_solve_candidate()` path, evaluate the solution with
-`previous_solution_q=None` and reject when
-`metrics.solution_step_rad > settings.control.max_joint_step_rad` before calling
-`build_pvat_point()`. Task 4 will replace the temporary actual-joint reference
-with committed full-solution history. This preserves the exact pre-Task-3
-first-frame safety behavior at every commit. Update the existing
+`previous_solution_q=None`. Preserve the established error precedence by first
+calling the pure `build_pvat_point()` calculation so soft joint limits and
+measured-speed violations remain authoritative. If that calculation reports
+`ik_tracking_diverged` while the first-frame solution step exceeds
+`settings.control.max_joint_step_rad`, translate it to `ik_joint_jump`; otherwise
+reject a returned point when the same continuity threshold is exceeded. Task 4
+will replace the temporary actual-joint reference with committed full-solution
+history. This preserves the exact pre-Task-3 first-frame safety behavior at
+every commit. Update the existing
 `ik_candidate_rejected` payload to read `max_joint_step_rad` from
 `settings.control`, because that field no longer belongs to `PvatLimits`.
 

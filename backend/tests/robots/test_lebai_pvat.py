@@ -10,7 +10,7 @@ LIMITS = PvatLimits(
     horizon_s=0.08,
     max_joint_speed_radps=0.15,
     max_joint_acceleration_radps2=0.5,
-    max_joint_step_rad=0.05,
+    max_joint_tracking_error_rad=0.25,
     soft_joint_min_rad=(-3.0, -2.5, -2.5, -3.0, -2.5, -6.0),
     soft_joint_max_rad=(3.0, 2.5, 2.5, 3.0, 2.5, 6.0),
 )
@@ -38,10 +38,9 @@ def test_small_continuous_solution_produces_consistent_pvat() -> None:
         ([0, 0, 0, 0, 0], "ik_invalid"),
         ([float("nan"), 0, 0, 0, 0, 0], "ik_invalid"),
         ([3.01, 0, 0, 0, 0, 0], "ik_joint_limit"),
-        ([0.051, 0, 0, 0, 0, 0], "ik_joint_jump"),
     ],
 )
-def test_invalid_or_discontinuous_ik_is_rejected(
+def test_invalid_or_out_of_bounds_ik_is_rejected(
     solution: list[float],
     reason: str,
 ) -> None:
@@ -55,9 +54,9 @@ def test_invalid_or_discontinuous_ik_is_rejected(
         )
 
 
-def test_solution_at_joint_step_limit_is_accepted_and_bounded() -> None:
+def test_large_safe_tracking_target_is_physically_bounded() -> None:
     point = build_pvat_point(
-        solution_q=[0.05, 0, 0, 0, 0, 0],
+        solution_q=[0.196, 0, 0, 0, 0, 0],
         actual_q=ZERO,
         actual_qd=ZERO,
         previous_qd=None,
@@ -67,6 +66,20 @@ def test_solution_at_joint_step_limit_is_accepted_and_bounded() -> None:
     assert point.q[0] == pytest.approx(0.0032)
     assert point.qd[0] == pytest.approx(0.04)
     assert point.qdd[0] == pytest.approx(0.5)
+
+
+def test_solution_beyond_tracking_envelope_is_rejected() -> None:
+    with pytest.raises(
+        BackendCommandError,
+        match="^ik_tracking_diverged$",
+    ):
+        build_pvat_point(
+            solution_q=[0.251, 0, 0, 0, 0, 0],
+            actual_q=ZERO,
+            actual_qd=ZERO,
+            previous_qd=None,
+            limits=LIMITS,
+        )
 
 
 @pytest.mark.parametrize("solution_delta", [0.0231, -0.0214, -0.0467])
@@ -106,7 +119,7 @@ def test_speed_limit_preserves_multi_joint_direction() -> None:
         horizon_s=0.08,
         max_joint_speed_radps=0.15,
         max_joint_acceleration_radps2=100.0,
-        max_joint_step_rad=0.05,
+        max_joint_tracking_error_rad=0.25,
         soft_joint_min_rad=LIMITS.soft_joint_min_rad,
         soft_joint_max_rad=LIMITS.soft_joint_max_rad,
     )
@@ -129,7 +142,7 @@ def test_acceleration_limit_preserves_multi_joint_direction() -> None:
         horizon_s=0.08,
         max_joint_speed_radps=1.0,
         max_joint_acceleration_radps2=0.5,
-        max_joint_step_rad=0.05,
+        max_joint_tracking_error_rad=0.25,
         soft_joint_min_rad=LIMITS.soft_joint_min_rad,
         soft_joint_max_rad=LIMITS.soft_joint_max_rad,
     )
@@ -171,7 +184,7 @@ def test_speed_limit_is_strict_at_floating_point_boundary() -> None:
         horizon_s=0.08,
         max_joint_speed_radps=0.15,
         max_joint_acceleration_radps2=100.0,
-        max_joint_step_rad=0.05,
+        max_joint_tracking_error_rad=0.25,
         soft_joint_min_rad=LIMITS.soft_joint_min_rad,
         soft_joint_max_rad=LIMITS.soft_joint_max_rad,
     )
@@ -192,7 +205,7 @@ def test_acceleration_limit_is_strict_at_floating_point_boundary() -> None:
         horizon_s=0.13974763565931475,
         max_joint_speed_radps=20.0,
         max_joint_acceleration_radps2=36.52484392478274,
-        max_joint_step_rad=2.0,
+        max_joint_tracking_error_rad=2.0,
         soft_joint_min_rad=(-20.0,) * 6,
         soft_joint_max_rad=(20.0,) * 6,
     )

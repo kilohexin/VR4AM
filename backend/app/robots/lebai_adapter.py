@@ -24,6 +24,7 @@ from app.robots.lebai_codec import (
     pose_from_lebai,
     pose_to_lebai,
 )
+from app.robots.lebai_ik_policy import evaluate_ik_candidate
 from app.robots.lebai_sdk_bridge import (
     LebaiClientProtocol,
     SdkCapabilities,
@@ -105,7 +106,9 @@ class RealLebaiAdapter:
             max_joint_acceleration_radps2=(
                 settings.control.max_joint_acceleration_radps2
             ),
-            max_joint_step_rad=settings.control.max_joint_step_rad,
+            max_joint_tracking_error_rad=(
+                settings.control.max_joint_tracking_error_rad
+            ),
             soft_joint_min_rad=tuple(
                 value + margin for value in settings.soft_joint_min_rad
             ),
@@ -750,21 +753,42 @@ class RealLebaiAdapter:
             raise BackendCommandError("sdk_call_failed:ik") from None
         if solution is None:
             raise BackendCommandError("ik_unreachable")
+        metrics = evaluate_ik_candidate(
+            solution,
+            snapshot.actual_q,
+            previous_solution_q=None,
+        )
         try:
-            return build_pvat_point(
-                solution_q=solution,
-                actual_q=snapshot.actual_q,
-                actual_qd=snapshot.actual_qd,
-                previous_qd=self._previous_sent_qd,
-                limits=self._pvat_limits,
-            )
+            try:
+                point = build_pvat_point(
+                    solution_q=metrics.solution_q,
+                    actual_q=snapshot.actual_q,
+                    actual_qd=snapshot.actual_qd,
+                    previous_qd=self._previous_sent_qd,
+                    limits=self._pvat_limits,
+                )
+            except BackendCommandError as error:
+                if (
+                    str(error) == "ik_tracking_diverged"
+                    and metrics.solution_step_rad
+                    > self.settings.control.max_joint_step_rad
+                ):
+                    raise BackendCommandError("ik_joint_jump") from None
+                raise
+            if (
+                metrics.solution_step_rad
+                > self.settings.control.max_joint_step_rad
+            ):
+                raise BackendCommandError("ik_joint_jump")
+            return point
         except BackendCommandError as error:
             if str(error) in {
                 "ik_joint_limit",
                 "ik_joint_jump",
+                "ik_tracking_diverged",
                 "joint_speed_limit",
             }:
-                solution_q = joint_vector(list(solution), "ik_solution")
+                solution_q = metrics.solution_q
                 delta_q = tuple(
                     solved - actual
                     for solved, actual in zip(
@@ -797,7 +821,7 @@ class RealLebaiAdapter:
                             abs(component) for component in delta_q
                         ),
                         "max_joint_step_rad": (
-                            self._pvat_limits.max_joint_step_rad
+                            self.settings.control.max_joint_step_rad
                         ),
                         "prior_pvat_sent": prior_pvat_sent,
                         "previous_command_id": (
