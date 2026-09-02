@@ -101,6 +101,113 @@ def test_speed_cap_applies_before_acceleration_limit_from_previous_command() -> 
     assert point.qdd[0] == pytest.approx(0.375)
 
 
+def test_speed_limit_preserves_multi_joint_direction() -> None:
+    speed_limited = PvatLimits(
+        horizon_s=0.08,
+        max_joint_speed_radps=0.15,
+        max_joint_acceleration_radps2=100.0,
+        max_joint_step_rad=0.05,
+        soft_joint_min_rad=LIMITS.soft_joint_min_rad,
+        soft_joint_max_rad=LIMITS.soft_joint_max_rad,
+    )
+
+    point = build_pvat_point(
+        solution_q=[0.02, 0.01, 0, 0, 0, 0],
+        actual_q=ZERO,
+        actual_qd=ZERO,
+        previous_qd=None,
+        limits=speed_limited,
+    )
+
+    assert point.q[:2] == pytest.approx((0.012, 0.006))
+    assert point.qd[:2] == pytest.approx((0.15, 0.075))
+    assert point.qdd[:2] == pytest.approx((1.875, 0.9375))
+
+
+def test_acceleration_limit_preserves_multi_joint_direction() -> None:
+    acceleration_limited = PvatLimits(
+        horizon_s=0.08,
+        max_joint_speed_radps=1.0,
+        max_joint_acceleration_radps2=0.5,
+        max_joint_step_rad=0.05,
+        soft_joint_min_rad=LIMITS.soft_joint_min_rad,
+        soft_joint_max_rad=LIMITS.soft_joint_max_rad,
+    )
+
+    point = build_pvat_point(
+        solution_q=[0.008, 0.004, 0, 0, 0, 0],
+        actual_q=ZERO,
+        actual_qd=ZERO,
+        previous_qd=None,
+        limits=acceleration_limited,
+    )
+
+    assert point.q[:2] == pytest.approx((0.0032, 0.0016))
+    assert point.qd[:2] == pytest.approx((0.04, 0.02))
+    assert point.qdd[:2] == pytest.approx((0.5, 0.25))
+
+
+def test_acceleration_limit_preserves_correction_direction_from_previous_speed() -> None:
+    point = build_pvat_point(
+        solution_q=[0.012, 0.006, 0, 0, 0, 0],
+        actual_q=ZERO,
+        actual_qd=ZERO,
+        previous_qd=(0.12, 0.03, 0, 0, 0, 0),
+        limits=LIMITS,
+    )
+
+    velocity_change = (
+        point.qd[0] - 0.12,
+        point.qd[1] - 0.03,
+    )
+    assert velocity_change == pytest.approx((0.0266666667, 0.04))
+    assert point.qd[:2] == pytest.approx((0.1466666667, 0.07))
+    assert max(abs(component) for component in point.qd) <= 0.15
+    assert max(abs(component) for component in point.qdd) <= 0.5
+
+
+def test_speed_limit_is_strict_at_floating_point_boundary() -> None:
+    speed_limited = PvatLimits(
+        horizon_s=0.08,
+        max_joint_speed_radps=0.15,
+        max_joint_acceleration_radps2=100.0,
+        max_joint_step_rad=0.05,
+        soft_joint_min_rad=LIMITS.soft_joint_min_rad,
+        soft_joint_max_rad=LIMITS.soft_joint_max_rad,
+    )
+
+    point = build_pvat_point(
+        solution_q=[-0.045112659100558075, 0, 0, 0, 0, 0],
+        actual_q=ZERO,
+        actual_qd=ZERO,
+        previous_qd=None,
+        limits=speed_limited,
+    )
+
+    assert max(abs(component) for component in point.qd) <= 0.15
+
+
+def test_acceleration_limit_is_strict_at_floating_point_boundary() -> None:
+    acceleration_limited = PvatLimits(
+        horizon_s=0.13974763565931475,
+        max_joint_speed_radps=20.0,
+        max_joint_acceleration_radps2=36.52484392478274,
+        max_joint_step_rad=2.0,
+        soft_joint_min_rad=(-20.0,) * 6,
+        soft_joint_max_rad=(20.0,) * 6,
+    )
+
+    point = build_pvat_point(
+        solution_q=[1.2781016720224045, -1.3435364708943174, 0, 0, 0, 0],
+        actual_q=ZERO,
+        actual_qd=ZERO,
+        previous_qd=None,
+        limits=acceleration_limited,
+    )
+
+    assert max(abs(component) for component in point.qdd) <= 36.52484392478274
+
+
 def test_acceleration_limit_shortens_target_instead_of_exceeding_limit() -> None:
     point = build_pvat_point(
         solution_q=[0.008, 0, 0, 0, 0, 0],

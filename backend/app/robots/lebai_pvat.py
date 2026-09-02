@@ -60,9 +60,8 @@ def build_pvat_point(
     if np.max(np.abs(delta_q)) > limits.max_joint_step_rad:
         raise BackendCommandError("ik_joint_jump")
     desired_qd = delta_q / limits.horizon_s
-    qd = np.clip(
+    qd = _scale_to_max_abs(
         desired_qd,
-        -limits.max_joint_speed_radps,
         limits.max_joint_speed_radps,
     )
 
@@ -70,13 +69,20 @@ def build_pvat_point(
     max_velocity_delta = (
         limits.max_joint_acceleration_radps2 * limits.horizon_s
     )
-    bounded_delta = np.clip(
+    bounded_delta = _scale_to_max_abs(
         velocity_delta,
-        -max_velocity_delta,
         max_velocity_delta,
     )
-    qd = reference_speed + bounded_delta
-    qdd = bounded_delta / limits.horizon_s
+    qd = np.clip(
+        reference_speed + bounded_delta,
+        -limits.max_joint_speed_radps,
+        limits.max_joint_speed_radps,
+    )
+    qdd = np.clip(
+        bounded_delta / limits.horizon_s,
+        -limits.max_joint_acceleration_radps2,
+        limits.max_joint_acceleration_radps2,
+    )
     bounded_q = actual + qd * limits.horizon_s
     return PvatPoint(
         q=_joint_tuple(bounded_q),
@@ -94,6 +100,14 @@ def _vector(value: object, reason: str) -> np.ndarray:
     if vector.shape != (6,) or not np.all(np.isfinite(vector)):
         raise BackendCommandError(reason)
     return vector
+
+
+def _scale_to_max_abs(vector: np.ndarray, max_abs: float) -> np.ndarray:
+    largest_component = float(np.max(np.abs(vector)))
+    if largest_component <= max_abs:
+        return vector
+    scaled = vector * (max_abs / largest_component)
+    return np.clip(scaled, -max_abs, max_abs)
 
 
 def _joint_tuple(value: np.ndarray) -> JointVector:
