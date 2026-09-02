@@ -290,6 +290,9 @@ async def test_smoke_runs_until_authoritative_target_and_verified_stop(
     assert result.reached_displacement == pytest.approx(0.005)
     assert result.settled_displacement == pytest.approx(0.005)
     assert result.displacement_unit == "m"
+    assert result.reached_cross_axis_drift_m == pytest.approx(0.0)
+    assert result.settled_cross_axis_drift_m == pytest.approx(0.0)
+    assert result.max_cross_axis_drift_m == pytest.approx(0.0)
     assert "move_pvat" in methods
     assert "stop_move" in methods
     log_path = next((tmp_path / "logs").glob("*/session.jsonl"))
@@ -299,3 +302,6 @@ async def test_smoke_runs_until_authoritative_target_and_verified_stop(
     ]
     result_entry = next(entry for entry in entries if entry["kind"] == "smoke_result")
     assert result_entry["settled_displacement"] == pytest.approx(0.005)
+    assert result_entry["reached_cross_axis_drift_m"] == pytest.approx(0.0)
+    assert result_entry["settled_cross_axis_drift_m"] == pytest.approx(0.0)
+    assert result_entry["max_cross_axis_drift_m"] == pytest.approx(0.0)

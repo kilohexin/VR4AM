@@ -6,6 +6,7 @@ import json
 import math
 import os
 import platform
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -46,6 +47,13 @@ _ORIGIN = (0.0, 0.0, 0.0)
 COMMISSIONING_MOTION_TIMEOUT_S = 4.0
 TRANSLATION_TOLERANCE_M = 0.0005
 ROTATION_TOLERANCE_DEG = 0.2
+
+
+@dataclass(frozen=True)
+class _MotionActionResult:
+    reached_state: RobotStateMessage | None
+    measurement_initial: RobotStateMessage | None
+    max_cross_axis_drift_m: float | None
 
 
 def parse_smoke_args(argv: Sequence[str] | None = None) -> SmokeOptions:
@@ -215,7 +223,7 @@ async def _run_motion_action(
     clock: MonotonicClock,
     settings: Settings,
     action: TranslationAction | RotationAction | GripperAction,
-) -> RobotStateMessage | None:
+) -> _MotionActionResult:
     # The released sample is deliberately ticked before arming so the
     # RobotControl session guards remain the sole authority for motion.
     observed_trigger = await control.initialize_observed_gripper()
@@ -236,9 +244,12 @@ async def _run_motion_action(
         raise RuntimeError("missing_lebai_settings")
     sequence = 3
     reached_state: RobotStateMessage | None = None
+    measurement_initial: RobotStateMessage | None = None
+    max_cross_axis_drift_m: float | None = None
     try:
         if isinstance(action, (TranslationAction, RotationAction)):
             initial = await control.backend.get_state()
+            measurement_initial = initial
             target_frame = _commissioning_target_frame(
                 action,
                 settings,
@@ -250,6 +261,8 @@ async def _run_motion_action(
                 math.ceil(COMMISSIONING_MOTION_TIMEOUT_S / period_s),
             )
             reached = False
+            target_axis_reached = False
+            cross_axes_converged_after_target = False
             for _ in range(maximum_frames):
                 latest.publish(
                     target_frame.model_copy(
@@ -275,11 +288,39 @@ async def _run_motion_action(
                     raise RuntimeError("smoke_motion_wrong_direction")
                 if signed_progress > abs(requested) + tolerance:
                     raise RuntimeError("smoke_motion_overshoot")
-                if abs(displacement - requested) <= tolerance:
+                target_axis_reached_now = (
+                    abs(displacement - requested) <= tolerance
+                )
+                target_axis_reached = (
+                    target_axis_reached or target_axis_reached_now
+                )
+                cross_axis_converged = True
+                if isinstance(action, TranslationAction):
+                    cross_axis_drift = _translation_cross_axis_drift(
+                        initial,
+                        current,
+                        action,
+                    )
+                    max_cross_axis_drift_m = max(
+                        max_cross_axis_drift_m or 0.0,
+                        cross_axis_drift,
+                    )
+                    cross_axis_converged = (
+                        cross_axis_drift <= TRANSLATION_TOLERANCE_M
+                    )
+                    if target_axis_reached and cross_axis_converged:
+                        cross_axes_converged_after_target = True
+                if target_axis_reached_now and cross_axis_converged:
                     reached = True
                     reached_state = current
                     break
             if not reached:
+                if (
+                    isinstance(action, TranslationAction)
+                    and target_axis_reached
+                    and not cross_axes_converged_after_target
+                ):
+                    raise RuntimeError("smoke_cross_axis_not_settled")
                 raise RuntimeError("smoke_motion_timeout")
         else:
             await asyncio.sleep(1 / settings.lebai.gripper.command_hz)
@@ -293,7 +334,11 @@ async def _run_motion_action(
         )
         await control.tick()
         await control.disarm()
-    return reached_state
+    return _MotionActionResult(
+        reached_state=reached_state,
+        measurement_initial=measurement_initial,
+        max_cross_axis_drift_m=max_cross_axis_drift_m,
+    )
 
 
 def _commissioning_target_frame(
@@ -335,6 +380,19 @@ def _authoritative_action_displacement(
     ).as_rotvec()
     index = {"roll": 0, "pitch": 1, "yaw": 2}[action.axis]
     return math.degrees(float(relative[index]))
+
+
+def _translation_cross_axis_drift(
+    initial: RobotStateMessage,
+    current: RobotStateMessage,
+    action: TranslationAction,
+) -> float:
+    commanded_index = {"x": 0, "y": 1, "z": 2}[action.axis]
+    return max(
+        abs(current.actual_tcp.p[index] - initial.actual_tcp.p[index])
+        for index in range(3)
+        if index != commanded_index
+    )
 
 
 def _requested_displacement(
@@ -457,9 +515,9 @@ async def run_smoke(
             home_options=home_options,
         )
         await control.connect()
-        reached_state: RobotStateMessage | None = None
+        motion_result = _MotionActionResult(None, None, None)
         if isinstance(options.action, (TranslationAction, RotationAction, GripperAction)):
-            reached_state = await _run_motion_action(
+            motion_result = await _run_motion_action(
                 control,
                 latest,
                 clock,
@@ -478,22 +536,39 @@ async def run_smoke(
         reached_displacement: float | None = None
         settled_displacement: float | None = None
         displacement_unit: str | None = None
+        reached_cross_axis_drift_m: float | None = None
+        settled_cross_axis_drift_m: float | None = None
         if isinstance(options.action, (TranslationAction, RotationAction)):
+            measurement_initial = motion_result.measurement_initial or before
             requested_displacement, _ = _requested_displacement(options.action)
-            if reached_state is not None:
+            if motion_result.reached_state is not None:
                 reached_displacement = _authoritative_action_displacement(
-                    before,
-                    reached_state,
+                    measurement_initial,
+                    motion_result.reached_state,
                     options.action,
                 )
             settled_displacement = _authoritative_action_displacement(
-                before,
+                measurement_initial,
                 after,
                 options.action,
             )
             displacement_unit = (
                 "m" if isinstance(options.action, TranslationAction) else "deg"
             )
+            if isinstance(options.action, TranslationAction):
+                if motion_result.reached_state is not None:
+                    reached_cross_axis_drift_m = (
+                        _translation_cross_axis_drift(
+                            measurement_initial,
+                            motion_result.reached_state,
+                            options.action,
+                        )
+                    )
+                settled_cross_axis_drift_m = _translation_cross_axis_drift(
+                    measurement_initial,
+                    after,
+                    options.action,
+                )
         result = SmokeResult(
             action_name,
             before,
@@ -503,6 +578,9 @@ async def run_smoke(
             reached_displacement=reached_displacement,
             settled_displacement=settled_displacement,
             displacement_unit=displacement_unit,
+            reached_cross_axis_drift_m=reached_cross_axis_drift_m,
+            settled_cross_axis_drift_m=settled_cross_axis_drift_m,
+            max_cross_axis_drift_m=motion_result.max_cross_axis_drift_m,
         )
         await recorder.write_critical_event(
             "smoke_result",

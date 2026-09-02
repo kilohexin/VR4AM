@@ -70,6 +70,9 @@ class SmokeResult:
     reached_displacement: float | None = None
     settled_displacement: float | None = None
     displacement_unit: str | None = None
+    reached_cross_axis_drift_m: float | None = None
+    settled_cross_axis_drift_m: float | None = None
+    max_cross_axis_drift_m: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -81,4 +84,7 @@ class SmokeResult:
             "reached_displacement": self.reached_displacement,
             "settled_displacement": self.settled_displacement,
             "displacement_unit": self.displacement_unit,
+            "reached_cross_axis_drift_m": self.reached_cross_axis_drift_m,
+            "settled_cross_axis_drift_m": self.settled_cross_axis_drift_m,
+            "max_cross_axis_drift_m": self.max_cross_axis_drift_m,
         }

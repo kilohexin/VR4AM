@@ -196,7 +196,9 @@ The script rejects motion beyond the configured
 bound, an incorrect confirmation, readonly configuration, non-IDLE state,
 missing TCP/Home data, or failed preflight.
 
-平移/旋转成功输出额外包含 `requested_displacement`、`reached_displacement`、`settled_displacement` 和单位，用于区分“首次达到目标”与松开 Grip、稳定停止后的最终位移。若准备姿态未执行或当前 J3/J5 过于接近零位，笛卡尔预检会以 `singular_configuration` 拒绝且不发送 IK/PVAT；只有显式 `prepare` 和 `home` 可在其他安全检查全部通过时从该状态执行关节运动。
+平移/旋转成功输出额外包含 `requested_displacement`、`reached_displacement`、`settled_displacement` 和单位，用于区分“首次达到目标”与松开 Grip、稳定停止后的最终位移。平移动作还输出 `reached_cross_axis_drift_m`、`settled_cross_axis_drift_m` 和 `max_cross_axis_drift_m`。完成判定要求目标轴误差与两个正交轴漂移同时不超过 `0.5 mm`；若目标轴曾经到达但正交轴在超时前始终没有收敛，命令以 `smoke_cross_axis_not_settled` 失败，不会把中间姿态记为成功。`max_cross_axis_drift_m` 仅记录路径中的峰值，本次修复不会把关节空间路径改成笛卡尔直线。
+
+若准备姿态未执行或当前 J3/J5 过于接近零位，笛卡尔预检会以 `singular_configuration` 拒绝且不发送 IK/PVAT；只有显式 `prepare` 和 `home` 可在其他安全检查全部通过时从该状态执行关节运动。
 
 真机快照读取与命令新鲜度使用同一预算关系：完整 SDK 快照读取最多 `300 ms`，命令发送门槛再保留一个状态采样周期（`state_hz=25` 时总计 `340 ms`）。读取、锁等待与 IK 的短时抖动在该范围内不会误报 stale；在发送 IK/PVAT 前超过总门槛仍会以 `robot_state_stale` 拒绝，不会取消陈旧状态保护。
 
