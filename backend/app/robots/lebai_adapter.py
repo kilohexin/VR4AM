@@ -27,6 +27,7 @@ from app.robots.lebai_codec import (
 from app.robots.lebai_ik_policy import (
     IkCandidateMetrics,
     evaluate_ik_candidate,
+    proportional_recovery_fraction,
 )
 from app.robots.lebai_sdk_bridge import (
     LebaiClientProtocol,
@@ -36,7 +37,7 @@ from app.robots.lebai_sdk_bridge import (
 )
 from app.robots.lebai_pump import PvatPump, PvatRequest
 from app.robots.lebai_pvat import PvatLimits, PvatPoint, build_pvat_point
-from app.robots.lebai_recovery import recovery_candidates
+from app.robots.lebai_recovery import interpolate_pose, recovery_candidates
 from app.schemas.messages import (
     BackendState,
     JointVector,
@@ -86,6 +87,12 @@ class _SolvedCandidate:
     recovery_fraction: float
     pvat_mode: PvatMode
     advances_target: bool
+
+
+class _CandidateRejected(BackendCommandError):
+    def __init__(self, reason: str, metrics: IkCandidateMetrics) -> None:
+        super().__init__(reason)
+        self.metrics = metrics
 
 
 class RealLebaiAdapter:
@@ -655,26 +662,48 @@ class RealLebaiAdapter:
         last_recoverable_error: str | None = None
         diagnostic_events: list[dict[str, object]] = []
         async with self._sdk_lock:
-            for fraction, candidate in recovery_candidates(
-                self._last_sent_tcp,
-                request.target,
-                fake=self._backend_label == "LEBAI_FAKE",
-            ):
-                self._ensure_command_snapshot_fresh(snapshot)
+            selected: _SolvedCandidate | None = None
+            if self._backend_label == "LEBAI_FAKE":
+                for fraction, candidate in recovery_candidates(
+                    self._last_sent_tcp,
+                    request.target,
+                    fake=True,
+                ):
+                    self._ensure_command_snapshot_fresh(snapshot)
+                    try:
+                        selected = await self._solve_candidate(
+                            client,
+                            snapshot,
+                            candidate,
+                            fraction=fraction,
+                            command_id=request.command_id,
+                            diagnostic_events=diagnostic_events,
+                        )
+                    except BackendCommandError as error:
+                        if not self._pump.is_current(request.generation):
+                            return
+                        if str(error) not in RECOVERABLE_IK_ERRORS:
+                            raise
+                        last_recoverable_error = str(error)
+                        continue
+                    break
+            else:
                 try:
-                    selected = await self._solve_candidate(
+                    selected = await self._select_advancing_candidate(
                         client,
                         snapshot,
-                        candidate,
-                        fraction=fraction,
-                        command_id=request.command_id,
+                        request,
                         diagnostic_events=diagnostic_events,
                     )
                 except BackendCommandError as error:
                     if str(error) not in RECOVERABLE_IK_ERRORS:
                         raise
                     last_recoverable_error = str(error)
-                    continue
+            if selected is None and not self._pump.is_current(
+                request.generation
+            ):
+                return
+            if selected is not None:
                 if not self._pump.is_current(request.generation):
                     return
                 self._ensure_command_snapshot_fresh(snapshot)
@@ -690,8 +719,12 @@ class RealLebaiAdapter:
                         timeout=0.06,
                     )
                 except TimeoutError:
+                    if not self._pump.is_current(request.generation):
+                        return
                     raise BackendCommandError("sdk_timeout:move_pvat") from None
                 except Exception:
+                    if not self._pump.is_current(request.generation):
+                        return
                     raise BackendCommandError(
                         "sdk_call_failed:move_pvat"
                     ) from None
@@ -722,7 +755,6 @@ class RealLebaiAdapter:
                 self._command_id = request.command_id
                 self._motion_accepted = True
                 accepted = (selected, pvat_latency_ms)
-                break
         if accepted is None:
             try:
                 self._note_soft_constraint(
@@ -836,7 +868,61 @@ class RealLebaiAdapter:
                         ),
                     }
                 )
-            raise
+            raise _CandidateRejected(str(error), metrics) from None
+
+    async def _select_advancing_candidate(
+        self,
+        client: LebaiClientProtocol,
+        snapshot: LebaiSnapshot,
+        request: PvatRequest,
+        *,
+        diagnostic_events: list[dict[str, object]],
+    ) -> _SolvedCandidate | None:
+        fraction = 1.0
+        for attempt in range(3):
+            if not self._pump.is_current(request.generation):
+                return None
+            target = (
+                request.target
+                if fraction == 1.0
+                else interpolate_pose(
+                    self._last_sent_tcp,
+                    request.target,
+                    fraction,
+                )
+            )
+            try:
+                selected = await self._solve_candidate(
+                    client,
+                    snapshot,
+                    target,
+                    fraction=fraction,
+                    command_id=request.command_id,
+                    diagnostic_events=diagnostic_events,
+                )
+            except _CandidateRejected as error:
+                if not self._pump.is_current(request.generation):
+                    return None
+                if (
+                    str(error) != "ik_joint_jump"
+                    or attempt == 2
+                    or self._last_sent_tcp is None
+                ):
+                    raise
+                fraction = proportional_recovery_fraction(
+                    error.metrics.solution_step_rad,
+                    self.settings.control.max_joint_step_rad,
+                    previous_fraction=None if attempt == 0 else fraction,
+                )
+                continue
+            except BackendCommandError:
+                if not self._pump.is_current(request.generation):
+                    return None
+                raise
+            if not self._pump.is_current(request.generation):
+                return None
+            return selected
+        raise AssertionError("unreachable_recovery_loop")
 
     async def _inverse_kinematics(
         self,

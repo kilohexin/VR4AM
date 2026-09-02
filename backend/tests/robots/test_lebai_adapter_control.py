@@ -284,6 +284,111 @@ async def test_runtime_fault_clears_accepted_solution_history() -> None:
 
 
 @pytest.mark.asyncio
+async def test_real_target_uses_proportional_cartesian_recovery() -> None:
+    adapter, client, events = await _adapter_with_accepted_history(
+        solution=(0.04, -1.0, 1.0, 0.0, 1.57, 0.0),
+        target=_target(0.301),
+    )
+    client.ik_results = deque(
+        [
+            [0.14, -1.0, 1.0, 0.0, 1.57, 0.0],
+            [0.08, -1.0, 1.0, 0.0, 1.57, 0.0],
+        ]
+    )
+
+    try:
+        await adapter.command_tcp(_target(0.311), command_id=2)
+        await _wait_until(
+            lambda: len(client.ik_calls) >= 2 or adapter.constraint is not None
+        )
+        assert len(client.ik_calls) == 2
+        await _wait_for_pvat_count(client, 1)
+        await _wait_until(
+            lambda: any(
+                event.get("kind") == "pvat_sent" for event in events
+            )
+        )
+
+        event = _last_pvat_event(events)
+        assert event["pvat_mode"] == "interpolated_advance"
+        assert event["recovery_fraction"] == pytest.approx(0.4)
+        assert event["solution_step_rad"] == pytest.approx(0.04)
+        assert client.ik_calls[1][0] == pytest.approx(
+            pose_to_lebai(_target(0.305))
+        )
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_real_target_halves_fraction_for_second_recovery_solve() -> None:
+    adapter, client, events = await _adapter_with_accepted_history(
+        solution=(0.04, -1.0, 1.0, 0.0, 1.57, 0.0),
+        target=_target(0.301),
+    )
+    client.ik_results = deque(
+        [
+            [0.14, -1.0, 1.0, 0.0, 1.57, 0.0],
+            [0.10, -1.0, 1.0, 0.0, 1.57, 0.0],
+            [0.08, -1.0, 1.0, 0.0, 1.57, 0.0],
+        ]
+    )
+
+    try:
+        await adapter.command_tcp(_target(0.311), command_id=2)
+        await _wait_until(
+            lambda: len(client.ik_calls) >= 3 or adapter.constraint is not None
+        )
+        assert len(client.ik_calls) == 3
+        await _wait_for_pvat_count(client, 1)
+        await _wait_until(
+            lambda: any(
+                event.get("kind") == "pvat_sent" for event in events
+            )
+        )
+
+        event = _last_pvat_event(events)
+        assert event["recovery_fraction"] == pytest.approx(0.2)
+        assert client.ik_calls[2][0] == pytest.approx(
+            pose_to_lebai(_target(0.303))
+        )
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_real_discontinuous_target_stops_after_three_ik_attempts() -> None:
+    adapter, client, _ = await _adapter_with_accepted_history(
+        solution=(0.04, -1.0, 1.0, 0.0, 1.57, 0.0),
+        target=_target(0.301),
+    )
+    client.ik_results = deque(
+        [
+            [0.14, -1.0, 1.0, 0.0, 1.57, 0.0],
+            [0.11, -1.0, 1.0, 0.0, 1.57, 0.0],
+            [0.10, -1.0, 1.0, 0.0, 1.57, 0.0],
+        ]
+    )
+
+    try:
+        await adapter.command_tcp(_target(0.311), command_id=2)
+        await _wait_until(
+            lambda: len(client.ik_calls) >= 3 or adapter.constraint is not None
+        )
+
+        assert len(client.ik_calls) == 3
+        assert adapter.constraint == "motion_continuity_boundary"
+        assert adapter.pump_fault is None
+        assert "move_pvat" not in [
+            call[0] for call in client.write_calls
+        ]
+        assert adapter._last_accepted_solution_q[0] == pytest.approx(0.04)
+        assert adapter._last_sent_tcp == _target(0.301)
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_rejected_ik_candidate_records_runtime_joint_delta_without_pvat() -> None:
     events: list[dict[str, object]] = []
 
