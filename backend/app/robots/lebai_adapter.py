@@ -634,6 +634,7 @@ class RealLebaiAdapter:
             raise BackendCommandError(self._latched_fault or "stop_unverified")
         accepted: tuple[float, Pose, PvatPoint, float] | None = None
         last_recoverable_error: str | None = None
+        diagnostic_events: list[dict[str, object]] = []
         async with self._sdk_lock:
             for fraction, candidate in recovery_candidates(
                 self._last_sent_tcp,
@@ -646,6 +647,8 @@ class RealLebaiAdapter:
                         client,
                         snapshot,
                         candidate,
+                        command_id=request.command_id,
+                        diagnostic_events=diagnostic_events,
                     )
                 except BackendCommandError as error:
                     if str(error) not in RECOVERABLE_IK_ERRORS:
@@ -679,10 +682,19 @@ class RealLebaiAdapter:
                 accepted = (fraction, candidate, point, pvat_latency_ms)
                 break
         if accepted is None:
-            self._note_soft_constraint(
-                last_recoverable_error or "ik_unreachable",
-                persistent=self._backend_label != "LEBAI_FAKE",
-            )
+            try:
+                self._note_soft_constraint(
+                    last_recoverable_error or "ik_unreachable",
+                    persistent=self._backend_label != "LEBAI_FAKE",
+                )
+            except BackendCommandError:
+                for event in diagnostic_events:
+                    await self._emit_diagnostic_event(event)
+                if not self._pump.is_current(request.generation):
+                    return
+                raise
+            for event in diagnostic_events:
+                await self._emit_diagnostic_event(event)
             return
         fraction, candidate, point, pvat_latency_ms = accepted
         if fraction == 1.0:
@@ -712,12 +724,17 @@ class RealLebaiAdapter:
                 "sdk_latency_ms": pvat_latency_ms,
             }
         )
+        for event in diagnostic_events:
+            await self._emit_diagnostic_event(event)
 
     async def _solve_candidate(
         self,
         client: LebaiClientProtocol,
         snapshot: LebaiSnapshot,
         target: Pose,
+        *,
+        command_id: int,
+        diagnostic_events: list[dict[str, object]],
     ) -> PvatPoint:
         try:
             solution = await asyncio.wait_for(
@@ -733,13 +750,62 @@ class RealLebaiAdapter:
             raise BackendCommandError("sdk_call_failed:ik") from None
         if solution is None:
             raise BackendCommandError("ik_unreachable")
-        return build_pvat_point(
-            solution_q=solution,
-            actual_q=snapshot.actual_q,
-            actual_qd=snapshot.actual_qd,
-            previous_qd=self._previous_sent_qd,
-            limits=self._pvat_limits,
-        )
+        try:
+            return build_pvat_point(
+                solution_q=solution,
+                actual_q=snapshot.actual_q,
+                actual_qd=snapshot.actual_qd,
+                previous_qd=self._previous_sent_qd,
+                limits=self._pvat_limits,
+            )
+        except BackendCommandError as error:
+            if str(error) in {
+                "ik_joint_limit",
+                "ik_joint_jump",
+                "joint_speed_limit",
+            }:
+                solution_q = joint_vector(list(solution), "ik_solution")
+                delta_q = tuple(
+                    solved - actual
+                    for solved, actual in zip(
+                        solution_q,
+                        snapshot.actual_q,
+                        strict=True,
+                    )
+                )
+                target_rotation_delta = (
+                    Rotation.from_quat(target.q)
+                    * Rotation.from_quat(snapshot.actual_tcp.q).inv()
+                )
+                prior_pvat_sent = self._last_sent_tcp is not None
+                diagnostic_events.append(
+                    {
+                        "kind": "ik_candidate_rejected",
+                        "reason": str(error),
+                        "command_id": command_id,
+                        "target_translation_delta_m": math.dist(
+                            target.p,
+                            snapshot.actual_tcp.p,
+                        ),
+                        "target_rotation_delta_deg": math.degrees(
+                            target_rotation_delta.magnitude()
+                        ),
+                        "actual_q": list(snapshot.actual_q),
+                        "solution_q": list(solution_q),
+                        "delta_q": list(delta_q),
+                        "max_abs_delta_q": max(
+                            abs(component) for component in delta_q
+                        ),
+                        "max_joint_step_rad": (
+                            self._pvat_limits.max_joint_step_rad
+                        ),
+                        "prior_pvat_sent": prior_pvat_sent,
+                        "previous_command_id": (
+                            self._command_id if prior_pvat_sent else None
+                        ),
+                    }
+                )
+            raise
 
     def _note_soft_constraint(
         self,
@@ -776,6 +842,17 @@ class RealLebaiAdapter:
             await self._event_callback(event, self._clock())
         except Exception:
             raise BackendCommandError("recording_unavailable") from None
+
+    async def _emit_diagnostic_event(
+        self,
+        event: dict[str, object],
+    ) -> None:
+        if self._event_callback is None:
+            return
+        try:
+            await self._event_callback(event, self._clock())
+        except Exception:
+            return
 
     async def _read_snapshot(self) -> LebaiSnapshot:
         client = self._client

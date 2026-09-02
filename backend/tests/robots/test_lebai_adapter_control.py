@@ -122,6 +122,371 @@ async def test_control_command_uses_vendor_ik_and_pvat_in_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rejected_ik_candidate_records_runtime_joint_delta_without_pvat() -> None:
+    events: list[dict[str, object]] = []
+
+    async def recorder(event: dict[str, object], _timestamp: int) -> None:
+        events.append(event)
+
+    client = FakeLebaiClient.idle()
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=recorder,
+    )
+    await adapter.connect()
+    target = Pose(
+        p=(0.301, 0.002, 0.4),
+        q=(0.0, 0.0, 0.0087265355, 0.9999619231),
+    )
+    rejected_solution = [0.20, -1.02, 1.01, 0.03, 1.55, -0.01]
+    client.ik_results = deque([rejected_solution])
+
+    await adapter.command_tcp(target, command_id=17)
+    await _wait_until(
+        lambda: any(
+            event.get("kind") == "ik_candidate_rejected"
+            for event in events
+        )
+    )
+
+    rejected = next(
+        event
+        for event in events
+        if event.get("kind") == "ik_candidate_rejected"
+    )
+    assert rejected == {
+        "kind": "ik_candidate_rejected",
+        "reason": "ik_joint_jump",
+        "command_id": 17,
+        "target_translation_delta_m": pytest.approx(
+            0.00223606797749979
+        ),
+        "target_rotation_delta_deg": pytest.approx(1.0),
+        "actual_q": list(IDLE_Q),
+        "solution_q": rejected_solution,
+        "delta_q": pytest.approx([0.20, -0.02, 0.01, 0.03, -0.02, -0.01]),
+        "max_abs_delta_q": pytest.approx(0.20),
+        "max_joint_step_rad": pytest.approx(0.05),
+        "prior_pvat_sent": False,
+        "previous_command_id": None,
+    }
+    assert "move_pvat" not in [call[0] for call in client.write_calls]
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("solution", "actual_speed", "expected_reason"),
+    [
+        ([3.0, -1.0, 1.0, 0.0, 1.57, 0.0], [0.0] * 6, "ik_joint_limit"),
+        (list(IDLE_Q), [0.16, 0.0, 0.0, 0.0, 0.0, 0.0], "joint_speed_limit"),
+    ],
+)
+async def test_other_rejected_ik_candidate_reasons_are_diagnosed(
+    solution: list[float],
+    actual_speed: list[float],
+    expected_reason: str,
+) -> None:
+    events: list[dict[str, object]] = []
+
+    async def recorder(event: dict[str, object], _timestamp: int) -> None:
+        events.append(event)
+
+    client = FakeLebaiClient.idle()
+    client.kin_data["actual_joint_speed"] = actual_speed
+    client.ik_results = deque([solution])
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=recorder,
+    )
+    await adapter.connect()
+
+    await adapter.command_tcp(_target(0.301), command_id=22)
+    await _wait_until(
+        lambda: any(
+            event.get("kind") == "ik_candidate_rejected"
+            for event in events
+        )
+    )
+
+    rejected = next(
+        event
+        for event in events
+        if event.get("kind") == "ik_candidate_rejected"
+    )
+    assert rejected["reason"] == expected_reason
+    assert "move_pvat" not in [call[0] for call in client.write_calls]
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_accepted_ik_candidate_does_not_record_rejection() -> None:
+    events: list[dict[str, object]] = []
+
+    async def recorder(event: dict[str, object], _timestamp: int) -> None:
+        events.append(event)
+
+    client = FakeLebaiClient.idle()
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=recorder,
+    )
+    await adapter.connect()
+    client.ik_results = deque(
+        [[0.0032, -1.0, 1.0, 0.0, 1.57, 0.0]]
+    )
+
+    await adapter.command_tcp(_target(0.301), command_id=18)
+    await client.wait_for_write("move_pvat")
+
+    assert not any(
+        event.get("kind") == "ik_candidate_rejected"
+        for event in events
+    )
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_rejected_ik_candidate_identifies_previous_successful_pvat() -> None:
+    events: list[dict[str, object]] = []
+
+    async def recorder(event: dict[str, object], _timestamp: int) -> None:
+        events.append(event)
+
+    client = FakeLebaiClient.idle()
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=recorder,
+    )
+    await adapter.connect()
+    client.ik_results = deque(
+        [
+            [0.0032, -1.0, 1.0, 0.0, 1.57, 0.0],
+            [0.20, -1.02, 1.01, 0.03, 1.55, -0.01],
+        ]
+    )
+
+    await adapter.command_tcp(_target(0.301), command_id=18)
+    await client.wait_for_write("move_pvat")
+    await adapter.command_tcp(_target(0.302), command_id=19)
+    await _wait_until(
+        lambda: any(
+            event.get("kind") == "ik_candidate_rejected"
+            for event in events
+        )
+    )
+
+    rejected = next(
+        event
+        for event in events
+        if event.get("kind") == "ik_candidate_rejected"
+    )
+    assert rejected["prior_pvat_sent"] is True
+    assert rejected["previous_command_id"] == 18
+    assert [call[0] for call in client.write_calls].count("move_pvat") == 1
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_rejected_ik_diagnostic_failure_preserves_soft_constraint() -> None:
+    async def broken_recorder(
+        event: dict[str, object],
+        _timestamp: int,
+    ) -> None:
+        if event.get("kind") == "ik_candidate_rejected":
+            raise RuntimeError("diagnostic_sink_failed")
+
+    client = FakeLebaiClient.idle()
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=broken_recorder,
+    )
+    await adapter.connect()
+    client.ik_results = deque(
+        [[0.20, -1.02, 1.01, 0.03, 1.55, -0.01]]
+    )
+
+    await adapter.command_tcp(_target(0.301), command_id=20)
+    await _wait_until(lambda: len(client.ik_calls) == 1)
+    await asyncio.sleep(0)
+
+    assert adapter.constraint == "motion_continuity_boundary"
+    assert adapter.pump_fault is None
+    assert "move_pvat" not in [call[0] for call in client.write_calls]
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_rejected_ik_diagnostic_does_not_hold_sdk_lock_from_stop() -> None:
+    diagnostic_started = asyncio.Event()
+    release_diagnostic = asyncio.Event()
+
+    async def blocking_recorder(
+        event: dict[str, object],
+        _timestamp: int,
+    ) -> None:
+        if event.get("kind") == "ik_candidate_rejected":
+            diagnostic_started.set()
+            await release_diagnostic.wait()
+
+    client = FakeLebaiClient.idle()
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=blocking_recorder,
+    )
+    await adapter.connect()
+    client.ik_results = deque(
+        [[0.20, -1.02, 1.01, 0.03, 1.55, -0.01]]
+    )
+    stop_task: asyncio.Task[None] | None = None
+    try:
+        await adapter.command_tcp(_target(0.301), command_id=21)
+        await asyncio.wait_for(diagnostic_started.wait(), timeout=0.5)
+
+        stop_task = asyncio.create_task(adapter.stop(StopReason.STALE))
+        await client.wait_for_write("stop_move", timeout=0.5)
+    finally:
+        release_diagnostic.set()
+        if stop_task is not None:
+            await stop_task
+        assert adapter._motion_accepted is False
+        assert adapter._last_sent_tcp is None
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_fake_fallback_diagnostic_cannot_restore_state_after_stop() -> None:
+    diagnostic_started = asyncio.Event()
+    release_diagnostic = asyncio.Event()
+    diagnostic_finished = asyncio.Event()
+
+    async def blocking_recorder(
+        event: dict[str, object],
+        _timestamp: int,
+    ) -> None:
+        if event.get("kind") == "ik_candidate_rejected":
+            diagnostic_started.set()
+            await release_diagnostic.wait()
+            diagnostic_finished.set()
+
+    client = FakeLebaiClient.idle()
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=blocking_recorder,
+        backend_label="LEBAI_FAKE",
+    )
+    await adapter.connect()
+    client.ik_results = deque(
+        [
+            [0.0032, -1.0, 1.0, 0.0, 1.57, 0.0],
+            [0.20, -1.02, 1.01, 0.03, 1.55, -0.01],
+            [0.0040, -1.0, 1.0, 0.0, 1.57, 0.0],
+        ]
+    )
+    stop_task: asyncio.Task[None] | None = None
+    try:
+        await adapter.command_tcp(_target(0.300), command_id=30)
+        await client.wait_for_write("move_pvat")
+        await adapter.command_tcp(_target(0.304), command_id=31)
+        await asyncio.wait_for(diagnostic_started.wait(), timeout=0.5)
+
+        stop_task = asyncio.create_task(adapter.stop(StopReason.STALE))
+        await _wait_until(
+            lambda: [call[0] for call in client.write_calls].count(
+                "stop_move"
+            )
+            == 1
+        )
+    finally:
+        release_diagnostic.set()
+        if stop_task is not None:
+            await stop_task
+        await asyncio.wait_for(diagnostic_finished.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        assert adapter._motion_accepted is False
+        assert adapter._last_sent_tcp is None
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_stop_invalidates_persistent_ik_fault_waiting_on_diagnostic() -> None:
+    diagnostic_count = 0
+    fifth_diagnostic_started = asyncio.Event()
+    release_fifth_diagnostic = asyncio.Event()
+
+    async def recorder(event: dict[str, object], _timestamp: int) -> None:
+        nonlocal diagnostic_count
+        if event.get("kind") != "ik_candidate_rejected":
+            return
+        diagnostic_count += 1
+        if diagnostic_count == 5:
+            fifth_diagnostic_started.set()
+            await release_fifth_diagnostic.wait()
+
+    client = FakeLebaiClient.idle()
+    clock = FakeClock()
+    adapter = RealLebaiAdapter(
+        control_settings(),
+        client_factory=AsyncMock(return_value=client),
+        clock=clock.now_ns,
+        sleep=clock.sleep,
+        event_callback=recorder,
+    )
+    await adapter.connect()
+    client.ik_results = deque(
+        [[0.20, -1.02, 1.01, 0.03, 1.55, -0.01]] * 5
+    )
+    stop_task: asyncio.Task[None] | None = None
+    try:
+        for command_id in range(1, 5):
+            await _send_and_wait_for_ik(adapter, client, command_id)
+            await _wait_until(lambda: diagnostic_count == command_id)
+        with pytest.raises(BackendCommandError, match="^ik_joint_jump$"):
+            await adapter.command_tcp(_target(0.305), command_id=5)
+        await asyncio.wait_for(fifth_diagnostic_started.wait(), timeout=0.5)
+
+        stop_task = asyncio.create_task(adapter.stop(StopReason.STALE))
+        await client.wait_for_write("stop_move", timeout=0.5)
+    finally:
+        release_fifth_diagnostic.set()
+        if stop_task is not None:
+            await stop_task
+        await asyncio.sleep(0)
+        assert adapter.pump_fault is None
+        assert adapter._motion_accepted is False
+        assert adapter._last_sent_tcp is None
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("runtime_state", "estop_reason", "expected_fault"),
     [
