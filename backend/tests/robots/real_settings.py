@@ -43,6 +43,7 @@ def readonly_settings(**changes) -> LebaiSettings:
             max_joint_speed_radps=0.15,
             max_joint_acceleration_radps2=0.5,
             max_joint_step_rad=0.05,
+            max_joint_tracking_error_rad=0.25,
             max_tcp_step_m=0.002,
             max_tcp_rotation_step_deg=1.0,
             max_relative_translation_m=0.1,

@@ -40,6 +40,7 @@ class LebaiControlSettings:
     max_joint_speed_radps: float
     max_joint_acceleration_radps2: float
     max_joint_step_rad: float
+    max_joint_tracking_error_rad: float
     max_tcp_step_m: float
     max_tcp_rotation_step_deg: float
     max_relative_translation_m: float
@@ -260,6 +261,10 @@ def _parse_lebai(payload: dict[str, Any]) -> LebaiSettings:
         max_joint_step_rad=_positive_float(
             control_payload, "max_joint_step_rad"
         ),
+        max_joint_tracking_error_rad=_positive_float(
+            control_payload,
+            "max_joint_tracking_error_rad",
+        ),
         max_tcp_step_m=_positive_float(control_payload, "max_tcp_step_m"),
         max_tcp_rotation_step_deg=_positive_float(
             control_payload, "max_tcp_rotation_step_deg"
@@ -276,6 +281,12 @@ def _parse_lebai(payload: dict[str, Any]) -> LebaiSettings:
         raise RuntimeError("invalid_config:pvat_send_hz")
     if control.pvat_horizon_s <= 1 / control.pvat_send_hz:
         raise RuntimeError("invalid_config:pvat_horizon_s")
+    if not (
+        control.max_joint_step_rad
+        <= control.max_joint_tracking_error_rad
+        <= 0.50
+    ):
+        raise RuntimeError("invalid_config:max_joint_tracking_error_rad")
 
     gripper_payload = _mapping(real, "gripper")
     gripper = LebaiGripperSettings(

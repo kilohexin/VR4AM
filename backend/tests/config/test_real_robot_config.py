@@ -46,6 +46,7 @@ real_robot:
     max_joint_speed_radps: 0.15
     max_joint_acceleration_radps2: 0.5
     max_joint_step_rad: 0.05
+    max_joint_tracking_error_rad: 0.25
     max_tcp_step_m: 0.002
     max_tcp_rotation_step_deg: 1.0
     max_relative_translation_m: 0.10
@@ -98,6 +99,9 @@ def test_readonly_lebai_config_loads_without_importing_sdk(
     assert settings.lebai is not None
     assert settings.lebai.mode == "readonly"
     assert settings.lebai.control.pvat_horizon_s == pytest.approx(0.08)
+    assert settings.lebai.control.max_joint_tracking_error_rad == pytest.approx(
+        0.25
+    )
     assert settings.lebai.soft_joint_min_rad == (
         -3.0,
         -2.5,
@@ -127,6 +131,55 @@ def test_real_robot_example_keeps_conservative_motion_values() -> None:
     assert control["max_tcp_speed_mps"] == pytest.approx(0.03)
     assert control["translation_scale"] == pytest.approx(0.5)
     assert control["max_joint_step_rad"] == pytest.approx(0.05)
+    assert control["max_joint_tracking_error_rad"] == pytest.approx(0.25)
+
+
+def test_tracking_error_limit_must_cover_solution_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = REAL_CONFIG_TEMPLATE.format(mode="readonly").replace(
+        "max_joint_tracking_error_rad: 0.25",
+        "max_joint_tracking_error_rad: 0.04",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^invalid_config:max_joint_tracking_error_rad$",
+    ):
+        _load(tmp_path, monkeypatch, text)
+
+
+def test_tracking_error_limit_rejects_values_above_half_radian(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = REAL_CONFIG_TEMPLATE.format(mode="readonly").replace(
+        "max_joint_tracking_error_rad: 0.25",
+        "max_joint_tracking_error_rad: 0.51",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^invalid_config:max_joint_tracking_error_rad$",
+    ):
+        _load(tmp_path, monkeypatch, text)
+
+
+def test_tracking_error_limit_is_required(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = REAL_CONFIG_TEMPLATE.format(mode="readonly").replace(
+        "    max_joint_tracking_error_rad: 0.25\n",
+        "",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^invalid_config:max_joint_tracking_error_rad$",
+    ):
+        _load(tmp_path, monkeypatch, text)
 
 
 def test_control_mode_requires_exact_environment_confirmation(
