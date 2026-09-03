@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from app.robots.base import BackendCommandError
@@ -79,6 +81,27 @@ def test_solution_beyond_tracking_envelope_is_rejected() -> None:
             actual_qd=ZERO,
             previous_qd=None,
             limits=LIMITS,
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0.0, -0.1, float("nan"), float("inf")],
+)
+def test_invalid_tracking_envelope_fails_closed(value: float) -> None:
+    with pytest.raises(
+        BackendCommandError,
+        match="^invalid_pvat_limits$",
+    ):
+        build_pvat_point(
+            solution_q=[0.001, 0, 0, 0, 0, 0],
+            actual_q=ZERO,
+            actual_qd=ZERO,
+            previous_qd=None,
+            limits=replace(
+                LIMITS,
+                max_joint_tracking_error_rad=value,
+            ),
         )
 
 

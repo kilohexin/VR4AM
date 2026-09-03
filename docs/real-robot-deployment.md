@@ -28,7 +28,7 @@ Linux：
 ```bash
 git clone https://github.com/kilohexin/VR4AM.git
 cd VR4AM
-git checkout codex/teleoperation-ux-recovery
+git checkout codex/offline-rehearsal
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e "./backend[dev,real]"
@@ -42,7 +42,7 @@ PowerShell：
 ```powershell
 git clone https://github.com/kilohexin/VR4AM.git
 Set-Location VR4AM
-git checkout codex/teleoperation-ux-recovery
+git checkout codex/offline-rehearsal
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".\backend[dev,real]"
@@ -78,6 +78,7 @@ real_robot:
 - 六轴软限位和限位余量；
 - 当前初始姿态允许的 TCP 三轴启动包络；
 - TCP 对比容差；
+- IK 相邻解连续性阈值与跟踪误差包络；
 - 夹爪开/闭幅值方向。
 
 LM3 的 IP 写在 `config/real-robot.local.yaml` 的 `real_robot.ip`，该文件只保留在实验室电脑，不提交 Git。当前乐白 Python SDK 连接入口只接收机器人 IP，项目没有额外配置“机械臂端口”；`8000` 是本项目 FastAPI/WebSocket 后端端口，`5173` 是本项目 HTTPS 前端端口，二者都不是 LM3 控制端口。
@@ -150,7 +151,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 - `real_robot_enabled: false`；
 - `preflight_reason: "real_robot_readonly"`。
 
-## 5. 切换 control 与单轴 5 mm smoke
+## 5. 切换 control 与当前 `+roll 1°` smoke
 
 只有验收报告中“只读阶段”和物理安全项全部通过后，才把本地 YAML 的 `mode` 改为 `control`。
 
@@ -159,11 +160,7 @@ PowerShell：
 ```powershell
 $env:VR4ARM_REAL_ROBOT_CONFIRM = "I_UNDERSTAND_REAL_ROBOT_MOTION"
 python scripts/real_robot_smoke.py prepare --config $env:VR4ARM_CONFIG --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
-python scripts/real_robot_smoke.py translate --config $env:VR4ARM_CONFIG --axis x --distance-m 0.005 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
-python scripts/real_robot_smoke.py rotate --config $env:VR4ARM_CONFIG --axis roll --angle-deg 2 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
-python scripts/real_robot_smoke.py gripper --config $env:VR4ARM_CONFIG --target open --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
-python scripts/real_robot_smoke.py home --config $env:VR4ARM_CONFIG --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
-python scripts/real_robot_smoke.py stop --config $env:VR4ARM_CONFIG --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py rotate --config $env:VR4ARM_CONFIG --axis roll --angle-deg 1 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
 ```
 
 Linux：
@@ -171,30 +168,22 @@ Linux：
 ```bash
 export VR4ARM_REAL_ROBOT_CONFIRM="I_UNDERSTAND_REAL_ROBOT_MOTION"
 python scripts/real_robot_smoke.py prepare --config "$VR4ARM_CONFIG" --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
-python scripts/real_robot_smoke.py translate --config "$VR4ARM_CONFIG" --axis x --distance-m 0.005 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
-python scripts/real_robot_smoke.py rotate --config "$VR4ARM_CONFIG" --axis roll --angle-deg 2 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
-python scripts/real_robot_smoke.py gripper --config "$VR4ARM_CONFIG" --target open --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
-python scripts/real_robot_smoke.py home --config "$VR4ARM_CONFIG" --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
-python scripts/real_robot_smoke.py stop --config "$VR4ARM_CONFIG" --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
+python scripts/real_robot_smoke.py rotate --config "$VR4ARM_CONFIG" --axis roll --angle-deg 1 --confirm I_UNDERSTAND_REAL_ROBOT_MOTION
 ```
 
-Each subcommand is mutually exclusive: run one process, observe the real
-result, and stop before starting the next. First run `prepare` once and verify
-the resulting joint pose before any Cartesian command. The current staged lab
-sequence is: prepare; translate `+x`, `-x`, `+y`, `-y`, `-z`; then rotate `+roll`,
-`-roll`, `+pitch`, `-pitch`, `+yaw`, `-yaw`; then test gripper open/close,
-Home, stop/E-stop, and only then a lightweight grasp/release. A negative-axis
-check uses the same magnitude with a signed negative value (for example,
-`--distance-m -0.005` or `--angle-deg -2`); it is never inferred by changing
-the axis name. After every individual move, the observer confirms direction
-and complete stop before the next process.
+当前现场动作严格限定为两个独立进程：先执行一次 `prepare` 并核对实际关节到达
+`teleop_ready_q`，再只执行一次 `+roll 1°`。保存完整日志后立即停止本轮并把配置
+改回 `readonly`，不得接着测试 `-roll`、`±pitch`、`±yaw`、`+z`、Quest 真机
+连续遥操作、速度提升或 PVAT 频率调整。只有主机端复核新会话后，才会给出下一
+个单动作指令。
 
-The staged sequence above is mandatory except that `+z` is explicitly blocked
-until a new preparation pose or workspace solution is approved; do not add it
-back or shorten the remaining sequence to unsigned translation-only checks.
-The script rejects motion beyond the configured
-bound, an incorrect confirmation, readonly configuration, non-IDLE state,
-missing TCP/Home data, or failed preflight.
+截至 2026-09-02，`+x/-x/+y/-y/-z` 平移已取得现场通过记录；`+z` 仍因准备
+位形接近工作空间/IK 边界而暂停。此前 `+roll 1°` 日志暴露的是完整 IK 目标相对
+实际关节的跟踪积压，不是机械臂单帧实际跳动相同角度。本次复测用于验证新的
+连续性/跟踪分离与回压策略，不能扩展为多轴验收。
+
+脚本仍会拒绝超出配置边界、确认词错误、readonly 配置、非 IDLE、TCP/Home
+缺失或预检失败的运动请求。
 
 平移/旋转成功输出额外包含 `requested_displacement`、`reached_displacement`、`settled_displacement` 和单位，用于区分“满足释放条件”与松开 Grip、稳定停止后的最终位移。平移动作还输出 `reached_cross_axis_drift_m`、`settled_cross_axis_drift_m` 和 `max_cross_axis_drift_m`。释放前必须同时满足目标轴误差与两个正交轴漂移不超过 `0.5 mm`，并且已有运动学日志中的 `max(|actual_qd|)` 不超过配置的 `home_velocity_tolerance_radps`（默认 `0.02 rad/s`），以上条件连续保持 `home_stable_ms`（默认 `300 ms`）。若目标轴曾经到达但正交轴在超时前始终没有收敛，命令以 `smoke_cross_axis_not_settled` 失败；位置已经收敛但关节速度未在超时前持续稳定，则以 `smoke_velocity_not_settled` 失败。两种情况都不会把运动中的中间姿态记为成功。`max_cross_axis_drift_m` 仅记录路径中的峰值，本次修复不会把关节空间路径改成笛卡尔直线。
 
@@ -202,11 +191,39 @@ missing TCP/Home data, or failed preflight.
 
 真机快照读取与命令新鲜度使用同一预算关系：完整 SDK 快照读取最多 `300 ms`，命令发送门槛再保留一个状态采样周期（`state_hz=25` 时总计 `340 ms`）。读取、锁等待与 IK 的短时抖动在该范围内不会误报 stale；在发送 IK/PVAT 前超过总门槛仍会以 `robot_state_stale` 拒绝，不会取消陈旧状态保护。
 
-真机示例配置将 `max_joint_step_rad` 设为 `0.05 rad`。该阈值用于拒绝明显的 IK 分支跳变，不是每个 PVAT 点实际执行的关节位移：连续但较远的 IK 解会先按 `max_joint_speed_radps=0.15` 限制目标速度，再按 `max_joint_acceleration_radps2=0.5` 限制速度变化。速度上限对完整六关节目标速度向量同比例缩放，加速度上限对相对上一周期速度的六关节修正向量同比例缩放，避免逐关节截断任一向量的方向。静止起步时这会保持 IK 关节运动方向；上一周期速度非零时，加速度连续性可能使瞬时运动方向暂时偏离 IK 方向。该方式不承诺 TCP 路径为严格笛卡尔直线。以 `pvat_horizon_s=0.08`、静止起步为例，第一个 PVAT 点最大只前进 `0.0032 rad`。现场本地配置不会随 Git 更新，更新代码后须手动把同一字段从 `0.01` 改为 `0.05`。
+现场本地配置不会随 Git 更新。拉取本次代码后，必须手动在
+`real_robot.control` 中确认以下两项同时存在：
 
-当 SDK 返回了六轴 IK 解、但该解被关节限位、关节跳变或关节速度保护拒绝时，`session.jsonl` 会写入 `ik_candidate_rejected`。该事件记录本次实际提交目标相对快照 TCP 的平移量和旋转角、`actual_q`、`solution_q`、逐轴 `delta_q`、最大关节差、当前 `max_joint_step_rad`、命令 ID，以及当前连续控制段内此前是否已经成功发送过 PVAT。事件只提供诊断，不改变阈值、控制路径或写入行为；被拒绝的候选仍不会发送 `move_pvat`。现场遇到旋转拒绝时先保存该事件，不得仅凭离线整角度 IK 探针直接放宽阈值。
+```yaml
+max_joint_step_rad: 0.05
+max_joint_tracking_error_rad: 0.25
+```
 
-当前准备姿态的 `+z` 方向仍需单独处理：现场记录显示该方向接近工作空间/IK 边界，不得通过继续放大 `max_joint_step_rad` 来掩盖。复测顺序先限定为 `+y`、`-y`、`-z`；`+z` 等新的准备姿态或工作空间方案确认后再测。
+缺少新字段、跟踪包络小于连续性阈值或大于 `0.50 rad` 时配置会失败关闭。
+`max_joint_step_rad` 现在只表示相邻两个完整 IK 解的最大轴差，用于识别解分支
+跳变；`max_joint_tracking_error_rad` 表示完整 IK 解相对最新实际关节的最大允许
+积压。`0.25 rad` 不代表关节可以一次跳动 `0.25 rad`。
+
+实际 PVAT 点仍先按 `max_joint_speed_radps=0.15` 对完整六轴速度向量同比例
+缩放，再按 `max_joint_acceleration_radps2=0.5` 对速度修正向量同比例缩放。
+以 `pvat_horizon_s=0.08`、静止起步为例，第一个 PVAT 点最大只前进
+`0.0032 rad`。该方式保持关节向量方向，但不承诺 TCP 路径是严格笛卡尔
+直线。
+
+每次 `pvat_sent` 的 `pvat_mode` 有三种：`advance` 表示完整请求已安全推进；
+`interpolated_advance` 表示原请求的相邻解不连续，经过最多两次 Cartesian
+插值重求解后推进了较近目标；`catch_up` 表示新目标连续但真机积压过大，本
+周期只追赶最后已接受完整解，不推进 TCP/IK 历史。`catch_up` 会伴随 best-
+effort 的 `ik_tracking_backpressure` 诊断，并在 HUD 复用“运动连续性边界”软
+提示；它不累计 `ik_failure_persistent`。
+
+当候选被关节限位、真实解分支跳变或关节速度保护拒绝时，`session.jsonl`
+仍会写入 `ik_candidate_rejected`。日志中的 `solution_step_rad` 应与
+`tracking_error_rad` 分开解释，不得再把 `solution_q-actual_q` 全部当作单帧
+关节跳变，也不得仅凭一次离线整角度 IK 探针继续放宽阈值。
+
+当前准备姿态的 `+z` 方向仍需单独处理：现场记录显示该方向接近工作空间/IK
+边界，不得通过继续放大任一 IK 阈值来掩盖。
 
 若方向错误、抖动、意外转动或停止不完整：
 
@@ -216,6 +233,9 @@ missing TCP/Home data, or failed preflight.
 4. 保存会话日志并在验收报告记录现象。
 
 ## 6. Quest 真机遥操作
+
+本节是后续阶段说明。当前 `+roll 1°` smoke 未经新会话复核前，不得进入
+Quest 真机连续遥操作；可继续使用 Quest 控制仿真机械臂。
 
 后端仍只监听服务器回环地址：
 
@@ -288,3 +308,11 @@ logs/commissioning/<session-id>/
 - 后端终端输出。
 
 不要上传包含密码、令牌或未批准网络信息的文件。首次实验反馈至少给出 Git 提交、配置哈希/参数版本、预检报告、会话目录、异常时间点和现场观察。
+
+## 9. 当前变更回滚
+
+若 `+roll 1°` 出现突跳、抖动、异常平移、停止失败或日志无法解释，立即停止并
+将本地配置改回 `readonly`。代码回滚基线为诊断提交 `5e49d3a`；切换后必须
+重新运行第 4 节只读预检，不得在旧版本下保留 control 模式继续试错。新增的
+`max_joint_tracking_error_rad` 会被旧提交忽略，但可保留在未跟踪的本地 YAML
+中。回滚和预检结果都要写入验收报告。

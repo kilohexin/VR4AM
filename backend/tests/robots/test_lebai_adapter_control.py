@@ -16,6 +16,7 @@ from app.robots.base import (
 )
 from app.robots.lebai_adapter import RealLebaiAdapter
 from app.robots.lebai_codec import pose_to_lebai
+from app.robots.lebai_ik_policy import evaluate_ik_candidate
 from app.schemas.messages import (
     ControllerState,
     JointVector,
@@ -33,6 +34,41 @@ HOME_OPTIONS = HomeOptions(
     position_tolerance_rad=0.01,
     velocity_tolerance_radps=0.02,
     stable_seconds=0.3,
+)
+
+FIELD_ROLL_SOLUTIONS: tuple[JointVector, ...] = (
+    (
+        -0.0030881,
+        -1.5400230,
+        0.1983114,
+        -1.5647952,
+        0.4032416,
+        0.0189356,
+    ),
+    (
+        -0.0048767,
+        -1.5215283,
+        0.1622087,
+        -1.5568198,
+        0.4041157,
+        0.0293936,
+    ),
+    (
+        -0.0049698,
+        -1.5204396,
+        0.1600690,
+        -1.5562742,
+        0.4041618,
+        0.0299422,
+    ),
+)
+FIELD_ROLL_ACTUAL_Q: JointVector = (
+    0.0,
+    -1.5669614,
+    0.2494636,
+    -1.5721386,
+    0.4016153,
+    -0.0010546,
 )
 
 
@@ -640,6 +676,69 @@ async def test_stop_during_pvat_write_prevents_late_history_commit() -> None:
         release_pvat.set()
         if stop_task is not None and not stop_task.done():
             await stop_task
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_field_roll_sequence_separates_continuity_from_tracking_lag() -> None:
+    first_metrics = evaluate_ik_candidate(
+        FIELD_ROLL_SOLUTIONS[1],
+        actual_q=FIELD_ROLL_ACTUAL_Q,
+        previous_solution_q=FIELD_ROLL_SOLUTIONS[0],
+    )
+    assert first_metrics.solution_step_rad == pytest.approx(0.0361, abs=1e-4)
+    assert first_metrics.tracking_error_rad == pytest.approx(0.0873, abs=1e-4)
+
+    adapter, client, events = await _adapter_with_accepted_history(
+        actual_q=FIELD_ROLL_ACTUAL_Q,
+        solution=FIELD_ROLL_SOLUTIONS[0],
+        target=_target(0.301),
+    )
+    client.ik_results = deque(FIELD_ROLL_SOLUTIONS[1:])
+
+    try:
+        await adapter.command_tcp(_target(0.302), command_id=12)
+        await _wait_for_pvat_count(client, 1)
+        await adapter.command_tcp(_target(0.303), command_id=14)
+        await _wait_for_pvat_count(client, 2)
+        await _wait_until(
+            lambda: len(
+                [
+                    event
+                    for event in events
+                    if event.get("kind") == "pvat_sent"
+                ]
+            )
+            == 2
+        )
+
+        pvat_events = [
+            event for event in events if event.get("kind") == "pvat_sent"
+        ]
+        assert all(
+            float(event["tracking_error_rad"]) > 0.05
+            for event in pvat_events
+        )
+        assert all(event["pvat_mode"] == "advance" for event in pvat_events)
+        assert not any(
+            event.get("kind") == "ik_candidate_rejected"
+            for event in events
+        )
+        assert client.ik_calls[0][1] == pytest.approx(
+            FIELD_ROLL_SOLUTIONS[0]
+        )
+        assert client.ik_calls[1][1] == pytest.approx(
+            FIELD_ROLL_SOLUTIONS[1]
+        )
+        assert all(
+            max(abs(float(value)) for value in event["v"]) <= 0.15
+            for event in pvat_events
+        )
+        assert all(
+            max(abs(float(value)) for value in event["a"]) <= 0.5
+            for event in pvat_events
+        )
+    finally:
         await adapter.disconnect()
 
 

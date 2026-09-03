@@ -45,6 +45,8 @@ def build_pvat_point(
     if (
         not np.isfinite(limits.horizon_s)
         or limits.horizon_s <= 0
+        or not np.isfinite(limits.max_joint_tracking_error_rad)
+        or limits.max_joint_tracking_error_rad <= 0
         or not np.all(joint_min < joint_max)
     ):
         raise BackendCommandError("invalid_pvat_limits")

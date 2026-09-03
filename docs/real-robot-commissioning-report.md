@@ -34,6 +34,8 @@
 | 批准的 Home q |  |
 | 六轴软限位 |  |
 | 关节限位余量 |  |
+| `max_joint_step_rad` | 0.05 / 其他： |
+| `max_joint_tracking_error_rad` | 0.25 / 其他： |
 | 启动 TCP 最小/最大值 |  |
 | 配置文件 SHA-256（不附敏感内容） |  |
 
@@ -103,13 +105,45 @@
 | 最大停止确认延迟 |  |
 | 是否触发 `stop_sys` |  |
 
-## 6. 单轴 5 mm smoke
+## 6. 当前单动作 smoke
 
 每个轴必须使用独立进程。确认一个轴已经停止后才能运行下一轴。
 
 - [ ] `teleop_ready_q` 已由现场负责人确认无碰撞并写入本地配置。
 - [ ] 显式 `prepare` 完成，实际关节到达准备姿态，过程中无碰撞或异常运动。
 - [ ] 准备前的奇异 Home 会报告 `singular_configuration`，且不会发送 IK/PVAT。
+
+### 6.1 本轮唯一动作：`+roll 1°`
+
+- [ ] 拉取的 Git 提交与主机端指定提交一致。
+- [ ] 本地 YAML 已显式加入 `max_joint_tracking_error_rad: 0.25`。
+- [ ] readonly 预检重新通过，随后才切换 control。
+- [ ] `prepare` 单独运行并稳定停止。
+- [ ] 只运行一次 `+roll 1°`，没有继续其他轴或 Quest 真机遥操作。
+- [ ] 操作者观察 roll 方向正确，无突跳、抖动、碰撞趋势。
+- [ ] 操作者未观察到异常 TCP 平移；若有，记录方向和最大估计值。
+- [ ] 动作结束后机器人为 IDLE，六轴速度满足稳定停止阈值。
+- [ ] 未出现 `ik_failure_persistent`、`ik_joint_limit`、stale 或停止失败。
+- [ ] 完整会话已保存，配置已改回 readonly，等待主机端复核。
+
+| 新策略日志指标 | 现场填写 |
+| --- | --- |
+| `ik_tracking_backpressure` 数量 |  |
+| 最大 `solution_step_rad` |  |
+| 最大 `tracking_error_rad` |  |
+| `advance` 数量 |  |
+| `interpolated_advance` 数量 |  |
+| `catch_up` 数量 |  |
+| 实际最大 `max(abs(actual_qd))` |  |
+| PVAT 最大 `max(abs(v))` |  |
+| PVAT 最大 `max(abs(a))` |  |
+| 最终 robot state / qd |  |
+| 实际 roll 方向与角度 |  |
+| 异常平移/抖动/声音 |  |
+
+### 6.2 后续轴记录（本轮不要执行）
+
+以下表格留给主机端复核后逐项授权的后续会话；本轮不得填写为通过。
 
 | 轴 | 命令距离 | 实际方向正确 | 无意外转动 | 已确认停止 | 备注/视频时间 |
 | --- | ---: | --- | --- | --- | --- |
@@ -193,7 +227,7 @@
 
 ## 10. 结论
 
-- [ ] **PASS**：本报告全部必需项通过，可进入下一阶段的小规模数据采集设计。
+- [ ] **PASS**：本轮指定动作通过，可等待主机端授权下一项单动作测试。
 - [ ] **CONDITIONAL**：仅允许继续只读或指定受限试验，限制如下。
 - [ ] **FAIL**：不得继续真机运动，已恢复 readonly/断电并保存证据。
 
