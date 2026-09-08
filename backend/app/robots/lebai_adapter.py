@@ -145,6 +145,7 @@ class RealLebaiAdapter:
             sleep=pump_sleep,
         )
         self._previous_sent_qd: JointVector | None = None
+        self._last_pvat_started_ns: int | None = None
         self._last_sent_tcp: Pose | None = None
         self._last_accepted_solution_q: JointVector | None = None
         self._accepted_target_command_id: int | None = None
@@ -660,6 +661,7 @@ class RealLebaiAdapter:
                 raise BackendCommandError(runtime_fault)
             raise BackendCommandError(self._latched_fault or "stop_unverified")
         accepted: tuple[_SolvedCandidate, float] | None = None
+        previous_pvat_gap_ms: float | None = None
         last_recoverable_error: str | None = None
         diagnostic_events: list[dict[str, object]] = []
         async with self._sdk_lock:
@@ -709,6 +711,10 @@ class RealLebaiAdapter:
                     return
                 self._ensure_command_snapshot_fresh(snapshot)
                 pvat_started = self._clock()
+                if self._last_pvat_started_ns is not None:
+                    previous_pvat_gap_ms = (
+                        pvat_started - self._last_pvat_started_ns
+                    ) / 1_000_000
                 try:
                     await asyncio.wait_for(
                         client.move_pvat(
@@ -748,6 +754,7 @@ class RealLebaiAdapter:
                         persistent=False,
                     )
                 self._previous_sent_qd = selected.point.qd
+                self._last_pvat_started_ns = pvat_started
                 if selected.advances_target:
                     self._last_sent_tcp = selected.target.model_copy(
                         deep=True
@@ -778,6 +785,7 @@ class RealLebaiAdapter:
         await self._emit_event(
             {
                 "kind": "pvat_sent",
+                "previous_pvat_gap_ms": previous_pvat_gap_ms,
                 "command_id": request.command_id,
                 "requested_tcp": request.target.model_dump(),
                 "target_tcp": selected.target.model_dump(),
@@ -983,7 +991,7 @@ class RealLebaiAdapter:
             solution_q=solution,
             actual_q=snapshot.actual_q,
             actual_qd=snapshot.actual_qd,
-            previous_qd=self._previous_sent_qd,
+            previous_qd=self._continuous_pvat_velocity(),
             limits=self._pvat_limits,
         )
         return _SolvedCandidate(
@@ -1032,7 +1040,7 @@ class RealLebaiAdapter:
                 solution_q=metrics.solution_q,
                 actual_q=snapshot.actual_q,
                 actual_qd=snapshot.actual_qd,
-                previous_qd=self._previous_sent_qd,
+                previous_qd=self._continuous_pvat_velocity(),
                 limits=self._pvat_limits,
             )
         except BackendCommandError as error:
@@ -1083,8 +1091,20 @@ class RealLebaiAdapter:
         if persistent and self._consecutive_ik_failures >= 5:
             raise BackendCommandError("ik_failure_persistent")
 
+    def _continuous_pvat_velocity(self) -> JointVector | None:
+        # The controller decelerates when the point stream exceeds its
+        # horizon. A previous commanded velocity is then not a valid initial
+        # condition: let build_pvat_point use the observed joint velocity.
+        if self._last_pvat_started_ns is None:
+            return None
+        elapsed_ns = self._clock() - self._last_pvat_started_ns
+        if not 0 <= elapsed_ns < self._pvat_limits.horizon_s * 1_000_000_000:
+            return None
+        return self._previous_sent_qd
+
     def _reset_pvat_history(self) -> None:
         self._previous_sent_qd = None
+        self._last_pvat_started_ns = None
         self._last_sent_tcp = None
         self._last_accepted_solution_q = None
         self._accepted_target_command_id = None

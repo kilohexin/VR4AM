@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from collections import deque
 from typing import Literal
 from unittest.mock import AsyncMock
@@ -26,6 +27,57 @@ from app.schemas.messages import (
 )
 from tests.robots.fake_lebai import FakeLebaiClient, IDLE_Q
 from tests.robots.real_settings import control_settings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gap_ms", [80, 125, 172])
+async def test_expired_pvat_velocity_does_not_push_field_target_past_ik(gap_ms):
+    # 20260908T105538Z-5a4675df, command 20: actual state is already
+    # decelerated, while the previous commanded J2 velocity is -0.15 rad/s.
+    actual = (-0.02233859522358465, -1.5843145324881387, 0.31408256631958503,
+              -1.577603366541139, 0.4081347633768234, 0.003163835375014135)
+    solution = (-0.023437552134708103, -1.591424341099449, 0.3216762730733289,
+                -1.5778736444670027, 0.40918539179789826, 0.003974225602916637)
+    actual_speed = (0., -0.019174759848570515, 0.009587379924285258, 0., 0., 0.)
+    previous = (-0.013736960075216376, -0.1499921353971312, 0.1404613709191302,
+                -0.0033784743139919637, 0.013132854005969141, 0.010129876891947165)
+    clock = FakeClock()
+    client = FakeLebaiClient.idle(q=list(actual))
+    client.kin_data["actual_joint_speed"] = list(actual_speed)
+    adapter = RealLebaiAdapter(control_settings(), client_factory=AsyncMock(return_value=client),
+                               clock=clock.now_ns, sleep=clock.sleep)
+    await adapter.connect()
+    try:
+        adapter._previous_sent_qd = previous
+        adapter._last_pvat_started_ns = clock.now_ns()
+        clock.advance_ms(gap_ms)
+        snapshot = replace(adapter._snapshot, captured_ns=clock.now_ns())
+        metrics = evaluate_ik_candidate(solution, actual, previous_solution_q=solution)
+        candidate = adapter._build_advancing_candidate(snapshot, _target(), metrics, 1.)
+        for q, start, goal in zip(candidate.point.q, actual, solution):
+            assert min(start, goal) - 1e-12 <= q <= max(start, goal) + 1e-12
+        assert max(abs(a) for a in candidate.point.qdd) <= .5
+        for v, measured in zip(candidate.point.qd, actual_speed):
+            assert abs(v - measured) <= .5 * .08 + 1e-12
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("gap_ms", "expected_speed"), [(40, .15), (80, .04)])
+async def test_pvat_velocity_history_is_used_only_within_its_horizon(gap_ms, expected_speed):
+    adapter, client, clock = await _connected_control_adapter()
+    try:
+        adapter._previous_sent_qd = (.12, 0., 0., 0., 0., 0.)
+        adapter._last_pvat_started_ns = clock.now_ns()
+        clock.advance_ms(gap_ms)
+        solution = (.024, -1., 1., 0., 1.57, 0.)
+        snapshot = replace(adapter._snapshot, captured_ns=clock.now_ns())
+        metrics = evaluate_ik_candidate(solution, snapshot.actual_q, previous_solution_q=solution)
+        candidate = adapter._build_advancing_candidate(snapshot, _target(), metrics, 1.)
+        assert candidate.point.qd[0] == pytest.approx(expected_speed)
+    finally:
+        await adapter.disconnect()
 
 
 HOME_OPTIONS = HomeOptions(
