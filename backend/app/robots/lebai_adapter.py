@@ -78,6 +78,7 @@ class LebaiSnapshot:
     running_motion: object | None
     sdk_latencies_ms: dict[str, float]
     raw_robot_state: str | int | None = None
+    sdk_lock_wait_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -636,7 +637,9 @@ class RealLebaiAdapter:
             raise BackendCommandError("robot_state_stale")
 
     async def _send_target(self, request: PvatRequest) -> None:
+        handler_started_ns = self._clock()
         snapshot = await self._read_snapshot()
+        snapshot_finished_ns = self._clock()
         if not self._pump.is_current(request.generation):
             return
         self._ensure_command_snapshot_fresh(snapshot)
@@ -664,7 +667,9 @@ class RealLebaiAdapter:
         previous_pvat_gap_ms: float | None = None
         last_recoverable_error: str | None = None
         diagnostic_events: list[dict[str, object]] = []
+        lock_requested_ns = self._clock()
         async with self._sdk_lock:
+            lock_acquired_ns = self._clock()
             selected: _SolvedCandidate | None = None
             if self._backend_label == "LEBAI_FAKE":
                 for fraction, candidate in recovery_candidates(
@@ -739,6 +744,7 @@ class RealLebaiAdapter:
                     0.0,
                     (self._clock() - pvat_started) / 1_000_000,
                 )
+                send_finished_ns = self._clock()
                 if not self._pump.is_current(request.generation):
                     return
                 if selected.pvat_mode == "catch_up":
@@ -786,6 +792,15 @@ class RealLebaiAdapter:
             {
                 "kind": "pvat_sent",
                 "previous_pvat_gap_ms": previous_pvat_gap_ms,
+                "timing_ms": {
+                    "snapshot_read": (snapshot_finished_ns - handler_started_ns) / 1_000_000,
+                    "snapshot_lock_wait": snapshot.sdk_lock_wait_ms,
+                    "command_lock_wait": (lock_acquired_ns - lock_requested_ns) / 1_000_000,
+                    "candidate_selection": (pvat_started - lock_acquired_ns) / 1_000_000,
+                    "send_sdk": pvat_latency_ms,
+                    "handler_to_send_complete": (send_finished_ns - handler_started_ns) / 1_000_000,
+                    "snapshot_age_at_send": (pvat_started - snapshot.captured_ns) / 1_000_000,
+                },
                 "command_id": request.command_id,
                 "requested_tcp": request.target.model_dump(),
                 "target_tcp": selected.target.model_dump(),
@@ -1133,8 +1148,10 @@ class RealLebaiAdapter:
         if client is None:
             raise BackendCommandError("robot_disconnected")
         latencies: dict[str, float] = {}
+        read_requested_ns = self._clock()
         async with self._sdk_lock:
             captured_ns = self._clock()
+            sdk_lock_wait_ms = (captured_ns - read_requested_ns) / 1_000_000
             deadline_ns = captured_ns + _SNAPSHOT_READ_TIMEOUT_NS
             connected = await self._timed(
                 "is_connected",
@@ -1237,6 +1254,7 @@ class RealLebaiAdapter:
             running_motion=running_motion,
             sdk_latencies_ms=latencies,
             raw_robot_state=raw_state,
+            sdk_lock_wait_ms=sdk_lock_wait_ms,
         )
         self._snapshot = snapshot
         await self._emit_kinematics(snapshot)
@@ -1311,6 +1329,7 @@ class RealLebaiAdapter:
             return
         event = {
             "kind": "robot_kinematics",
+            "snapshot_lock_wait_ms": snapshot.sdk_lock_wait_ms,
             "raw_robot_state": snapshot.raw_robot_state,
             "robot_state": snapshot.robot_state.value,
             "estop": snapshot.estop,

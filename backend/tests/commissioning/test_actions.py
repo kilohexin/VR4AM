@@ -283,6 +283,16 @@ async def test_each_commissioning_action_uses_one_write_category(
     )
 
     methods = {str(call[0]) for call in client.write_calls}
+    if isinstance(action, (TranslationAction, RotationAction)):
+        events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
+                  for line in p.read_text(encoding="utf-8").splitlines()]
+        timings = [e for e in events if e["kind"] == "smoke_cycle_timing"]
+        assert timings
+        for timing in timings:
+            assert timing["tick_ms"] >= 0
+            assert timing["sleep_ms"] >= 0
+            assert timing["state_read_ms"] >= 0
+            assert timing["cycle_to_state_ms"] >= timing["tick_ms"]
     assert result.action in {
         "translate",
         "rotate",

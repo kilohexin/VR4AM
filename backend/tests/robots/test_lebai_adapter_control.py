@@ -203,6 +203,64 @@ async def _connected_control_adapter(
     return adapter, fake, test_clock
 
 
+@pytest.mark.asyncio
+async def test_pvat_timing_separates_snapshot_candidate_and_sdk_costs():
+    adapter, client, clock = await _connected_control_adapter()
+    events = []
+
+    async def record(event, _timestamp):
+        events.append(event)
+
+    original_read = client.get_kin_data
+    original_ik = client.kinematics_inverse
+    original_send = client.move_pvat
+
+    async def delayed_read():
+        clock.advance_ms(7)
+        return await original_read()
+
+    async def delayed_ik(pose, joints):
+        clock.advance_ms(11)
+        return await original_ik(pose, joints)
+
+    async def delayed_send(p, v, a, t):
+        clock.advance_ms(5)
+        return await original_send(p, v, a, t)
+
+    adapter._event_callback = record
+    client.get_kin_data = delayed_read
+    client.kinematics_inverse = delayed_ik
+    client.move_pvat = delayed_send
+    try:
+        await adapter.command_tcp(_target(), command_id=1)
+        await _wait_until(lambda: any(e.get("kind") == "pvat_sent" for e in events))
+        timing = _last_pvat_event(events)["timing_ms"]
+        assert timing["snapshot_read"] == pytest.approx(7)
+        assert timing["command_lock_wait"] == pytest.approx(0)
+        assert timing["candidate_selection"] == pytest.approx(11)
+        assert timing["send_sdk"] == pytest.approx(5)
+        assert timing["handler_to_send_complete"] == pytest.approx(23)
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_timing_includes_contended_sdk_lock_wait():
+    adapter, client, clock = await _connected_control_adapter()
+    await adapter._sdk_lock.acquire()
+    task = asyncio.create_task(adapter._read_snapshot())
+    try:
+        await asyncio.sleep(0)
+        clock.advance_ms(9)
+        adapter._sdk_lock.release()
+        snapshot = await task
+        assert snapshot.sdk_lock_wait_ms == pytest.approx(9)
+    finally:
+        if adapter._sdk_lock.locked():
+            adapter._sdk_lock.release()
+        await adapter.disconnect()
+
+
 async def _adapter_with_accepted_history(
     *,
     actual_q: JointVector = tuple(IDLE_Q),  # type: ignore[assignment]

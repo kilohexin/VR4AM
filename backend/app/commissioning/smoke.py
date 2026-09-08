@@ -312,6 +312,7 @@ async def _run_motion_action(
                 + 1
             )
             for _ in range(maximum_frames):
+                cycle_started_ns = clock.now_ns()
                 latest.publish(
                     target_frame.model_copy(
                         update={
@@ -322,9 +323,23 @@ async def _run_motion_action(
                     clock.now_ns(),
                 )
                 await control.tick()
+                tick_finished_ns = clock.now_ns()
                 sequence += 1
                 await asyncio.sleep(period_s)
+                sleep_finished_ns = clock.now_ns()
                 current = await control.backend.get_state()
+                state_finished_ns = clock.now_ns()
+                await recorder.write_event(
+                    {
+                        "kind": "smoke_cycle_timing",
+                        "seq": sequence - 1,
+                        "tick_ms": (tick_finished_ns - cycle_started_ns) / 1_000_000,
+                        "sleep_ms": (sleep_finished_ns - tick_finished_ns) / 1_000_000,
+                        "state_read_ms": (state_finished_ns - sleep_finished_ns) / 1_000_000,
+                        "cycle_to_state_ms": (state_finished_ns - cycle_started_ns) / 1_000_000,
+                    },
+                    state_finished_ns,
+                )
                 displacement = _authoritative_action_displacement(
                     initial,
                     current,
