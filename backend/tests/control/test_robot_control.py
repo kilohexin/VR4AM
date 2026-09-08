@@ -2360,6 +2360,21 @@ async def test_stop_records_request_before_backend_and_confirmation_after() -> N
 
 
 @pytest.mark.asyncio
+async def test_failed_grip_stop_records_original_error_without_confirmation() -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await activate(control, latest, clock)
+    backend.stop = AsyncMock(side_effect=BackendCommandError("stop_incomplete"))
+    latest.publish(frame(10, grip=False), clock.now_ns())
+    await control.tick()
+    failure = next(e for e in recorder.events if e["kind"] == "stop_failed")
+    assert failure["payload"]["reason"] == "grip_released"
+    assert failure["payload"]["error"] == "stop_incomplete"
+    assert not any(e["kind"] == "stop_confirmed" for e in recorder.events)
+    assert control.mode is TeleopMode.FAULT
+
+
+@pytest.mark.asyncio
 async def test_disarm_ignores_a_queued_grip_held_frame_after_revoking_motion() -> None:
     control, latest, backend, clock = make_control()
     await activate(control, latest, clock)

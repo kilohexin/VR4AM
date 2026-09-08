@@ -77,6 +77,7 @@ class LebaiSnapshot:
     gripper: float
     running_motion: object | None
     sdk_latencies_ms: dict[str, float]
+    raw_robot_state: str | int | None = None
 
 
 @dataclass(frozen=True)
@@ -1215,6 +1216,7 @@ class RealLebaiAdapter:
             gripper=self._gripper_from_claw(raw_claw),
             running_motion=running_motion,
             sdk_latencies_ms=latencies,
+            raw_robot_state=raw_state,
         )
         self._snapshot = snapshot
         await self._emit_kinematics(snapshot)
@@ -1289,6 +1291,10 @@ class RealLebaiAdapter:
             return
         event = {
             "kind": "robot_kinematics",
+            "raw_robot_state": snapshot.raw_robot_state,
+            "robot_state": snapshot.robot_state.value,
+            "estop": snapshot.estop,
+            "running_motion": snapshot.running_motion,
             "actual_q": list(snapshot.actual_q),
             "actual_qd": list(snapshot.actual_qd),
             "actual_qdd": list(snapshot.actual_qdd),

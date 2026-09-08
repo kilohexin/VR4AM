@@ -925,6 +925,15 @@ class RobotControl:
                 fault,
                 from_cancelled_stop=isinstance(error, asyncio.CancelledError),
             )
+            await self._record_critical(
+                "stop_failed",
+                {
+                    "reason": reason.value,
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                    "fault": fault,
+                },
+            )
             if not recorded:
                 self._latch_recording_fault()
             raise

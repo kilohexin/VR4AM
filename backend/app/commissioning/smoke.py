@@ -236,6 +236,8 @@ async def _wait_for_stable_state(
     stable_since: float | None = None
     while True:
         state = await backend.get_state()
+        if state.fault is not None:
+            raise RuntimeError(f"smoke_stop_failed:{state.fault}")
         now = loop.time()
         # The motion loop and RealLebaiAdapter stop path have already verified
         # the configured joint-velocity stability window.  This post-action
@@ -531,7 +533,7 @@ async def run_smoke(
             },
             clock.now_ns(),
         )
-        if not preflight.ready:
+        if not preflight.ready and not isinstance(options.action, StopAction):
             if not (
                 isinstance(options.action, (PrepareAction, HomeAction))
                 and preflight.reason == "singular_configuration"
@@ -579,6 +581,18 @@ async def run_smoke(
             home_options=home_options,
         )
         await control.connect()
+        if isinstance(options.action, StopAction):
+            # Stopping requires authorization and a connected adapter, not
+            # permission to start moving. Adapter.stop verifies joint velocity;
+            # a stationary HOLD must not be relabelled as motion-ready IDLE.
+            await control.stop()
+            after = await backend.get_state()
+            result = SmokeResult(action_name, before, after, stable=True)
+            await recorder.write_critical_event(
+                "smoke_result", result.to_dict(), clock.now_ns(),
+            )
+            print(json.dumps(result.to_dict(), separators=(",", ":")))
+            return result
         motion_result = _MotionActionResult(None, None, None)
         if isinstance(options.action, (TranslationAction, RotationAction, GripperAction)):
             motion_result = await _run_motion_action(
@@ -661,6 +675,20 @@ async def run_smoke(
         if control is not None:
             try:
                 await control.stop()
+                final_preflight = await backend.preflight()
+                final_state = await backend.get_state()
+                await recorder.write_critical_event(
+                    "smoke_final_state",
+                    {
+                        "stop_confirmed": True,
+                        "robot_state": final_state.robot_state.value,
+                        "fault": final_state.fault,
+                        "preflight_ready": final_preflight.ready,
+                        "preflight_reason": final_preflight.reason,
+                        "state": final_state.model_dump(mode="json"),
+                    },
+                    clock.now_ns(),
+                )
             except BaseException as error:
                 cleanup_error = error
         if backend_connected:

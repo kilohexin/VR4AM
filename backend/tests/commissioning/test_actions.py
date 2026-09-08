@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from app.commissioning.actions import (
     TranslationAction,
 )
 from app.commissioning.smoke import parse_smoke_args, run_smoke
+from app.commissioning.smoke import _wait_for_stable_state
+from app.schemas.messages import BackendState, Pose, RobotStateMessage
 from app.config import REAL_ROBOT_CONFIRMATION
 from tests.config.test_real_robot_config import REAL_CONFIG_TEMPLATE
 from tests.robots.fake_lebai import FakeLebaiClient
@@ -25,6 +28,74 @@ from tests.robots.fake_lebai import FakeLebaiClient
 
 ROOT = Path(__file__).resolve().parents[3]
 CONFIG = ROOT / "config" / "fake-lebai.yaml"
+
+
+@pytest.mark.asyncio
+async def test_stability_wait_preserves_stop_fault_instead_of_timing_out() -> None:
+    state = RobotStateMessage(
+        server_mono_ns=1, mode="FAULT", robot_state=BackendState.HOLD,
+        actual_tcp=Pose(p=(0, 0, 0), q=(0, 0, 0, 1)),
+        actual_q=(0, 0, 0, 0, 0, 0), gripper=1,
+        fault="stop_incomplete",
+    )
+    backend = AsyncMock()
+    backend.get_state.return_value = state
+    with pytest.raises(RuntimeError, match="^smoke_stop_failed:stop_incomplete$"):
+        await _wait_for_stable_state(backend, 0.01)
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_from_hold_does_not_authorize_motion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    client.robot_state = "PAUSED"
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    result = await run_smoke(
+        SmokeOptions(_control_config(tmp_path), StopAction(), REAL_ROBOT_CONFIRMATION),
+        AsyncMock(return_value=client),
+    )
+    assert result.stable
+    assert result.after.robot_state is BackendState.HOLD
+    assert {call[0] for call in client.write_calls} == {"stop_move"}
+    events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
+              for line in p.read_text(encoding="utf-8").splitlines()]
+    final = next(e for e in events if e["kind"] == "smoke_final_state")
+    assert final["stop_confirmed"] is True
+    assert final["preflight_ready"] is False
+    assert final["preflight_reason"] == "robot_not_idle"
+    kin = next(e for e in events if e["kind"] == "robot_kinematics")
+    assert kin["raw_robot_state"] == "PAUSED"
+    assert kin["robot_state"] == "HOLD"
+
+
+@pytest.mark.asyncio
+async def test_hold_still_blocks_translation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    client.robot_state = "PAUSED"
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    with pytest.raises(RuntimeError, match="smoke_preflight_failed:robot_not_idle"):
+        await run_smoke(
+            SmokeOptions(_control_config(tmp_path), TranslationAction("x", .002), REAL_ROBOT_CONFIRMATION),
+            AsyncMock(return_value=client),
+        )
+    assert not client.write_calls
+
+
+@pytest.mark.asyncio
+async def test_smoke_reports_failed_release_stop_before_stability_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    client.stop_move = AsyncMock(side_effect=RuntimeError("stop transport failed"))
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    with pytest.raises(RuntimeError, match="^smoke_stop_failed:stop_unverified$"):
+        await run_smoke(
+            SmokeOptions(_control_config(tmp_path), GripperAction("close"), REAL_ROBOT_CONFIRMATION),
+            AsyncMock(return_value=client),
+        )
 
 
 @pytest.mark.parametrize("distance", [-0.005, 0.005])
