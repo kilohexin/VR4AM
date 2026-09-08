@@ -1,4 +1,3 @@
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -13,7 +12,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from app.sim.kinematics import forward_pose
-from app.sim.lm3_model import MODEL_CONFIG, LM3Model
+from app.sim.lm3_model import MODEL_CONFIG, LM3Model, model_config_sha256
 
 
 def build_fixture(
@@ -38,7 +37,7 @@ def build_fixture(
         "version": 2,
         "generator_seed": seed,
         "sample_count": sample_count,
-        "model_sha256": hashlib.sha256(MODEL_CONFIG.read_bytes()).hexdigest(),
+        "model_sha256": model_config_sha256(MODEL_CONFIG),
         "rows": rows,
     }
 

@@ -1,4 +1,3 @@
-import hashlib
 import json
 from pathlib import Path
 
@@ -9,7 +8,7 @@ from scipy.spatial.transform import Rotation
 from app.schemas.messages import Pose
 from app.sim.ik import IKError, solve_ik
 from app.sim.kinematics import forward_pose
-from app.sim.lm3_model import MODEL_CONFIG, LM3Model
+from app.sim.lm3_model import MODEL_CONFIG, LM3Model, model_config_sha256
 
 
 def test_ik_recovers_known_nearby_joint_pose() -> None:
@@ -76,9 +75,7 @@ def test_ik_solves_at_least_99_percent_of_reachability_fixture(fixture_path: Pat
     assert fixture["version"] == 2
     assert fixture["generator_seed"] == 42
     assert fixture["sample_count"] == 1000
-    assert fixture["model_sha256"] == hashlib.sha256(
-        MODEL_CONFIG.read_bytes()
-    ).hexdigest()
+    assert fixture["model_sha256"] == model_config_sha256(MODEL_CONFIG)
     rows = fixture["rows"]
     model = LM3Model()
     successes = 0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -12,6 +13,15 @@ MODEL_CONFIG = (
     / "config"
     / "lm3_visual_kinematics_v1.json"
 )
+
+
+def model_config_sha256(path: Path = MODEL_CONFIG) -> str:
+    """Fingerprint model bytes, normalizing only Windows CRLF to LF.
+
+    Keep parameter, whitespace and all other byte changes detectable while
+    preserving compatibility with fixtures generated from Git's LF content.
+    """
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 CHAIN_POINT_NAMES = frozenset(
     {
