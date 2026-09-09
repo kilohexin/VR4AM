@@ -1243,6 +1243,32 @@ class RealLebaiAdapter:
         except Exception:
             return
 
+    async def read_stop_observation(self) -> dict[str, object]:
+        """Read evidence despite a latched fault; never clear it or issue writes.
+
+        The commissioning caller uses this only after stopping, not as another
+        concurrent SDK poller during motion. This is not a motion preflight.
+        """
+        snapshot = await self._read_snapshot(emit_kinematics=False)
+        return {
+            "captured_ns": snapshot.captured_ns,
+            "observed_ns": self._clock(),
+            "raw_robot_state": snapshot.raw_robot_state,
+            "robot_state": snapshot.robot_state.value,
+            "estop": snapshot.estop,
+            "latched_fault": self._latched_fault,
+            "running_motion": snapshot.running_motion,
+            "actual_q": list(snapshot.actual_q),
+            "actual_qd": list(snapshot.actual_qd),
+            "actual_qdd": list(snapshot.actual_qdd),
+            "actual_tcp": snapshot.actual_tcp.model_dump(mode="json"),
+            "target_q": list(snapshot.target_q),
+            "target_qd": list(snapshot.target_qd),
+            "target_tcp": snapshot.target_tcp.model_dump(mode="json"),
+            "sdk_latencies_ms": dict(snapshot.sdk_latencies_ms),
+            "snapshot_lock_wait_ms": snapshot.sdk_lock_wait_ms,
+        }
+
     async def _read_snapshot(self, *, emit_kinematics: bool = True) -> LebaiSnapshot:
         client = self._client
         if client is None:

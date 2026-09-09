@@ -25,12 +25,13 @@ from app.commissioning.actions import (
     StopAction,
     TranslationAction,
 )
+from app.commissioning.stop_observation import observe_after_stop, validate_observation_seconds
 from app.config import REAL_ROBOT_CONFIRMATION, Settings
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.main import _build_limiter, _build_mapper, build_backend
 from app.recording.commissioning import CommissioningRecorder
 from app.robots.base import HomeOptions, RobotBackend
-from app.robots.lebai_adapter import ClientFactory
+from app.robots.lebai_adapter import ClientFactory, RealLebaiAdapter
 from app.robots.lebai_sdk_bridge import connect_real_client
 from app.schemas.messages import (
     BackendState,
@@ -147,12 +148,15 @@ def parse_smoke_args(argv: Sequence[str] | None = None) -> SmokeOptions:
         action = PrepareAction()
     else:
         action = StopAction()
-    return SmokeOptions(Path(args.config), action, confirmation)
+    validate_observation_seconds(args.observe_stop_seconds)
+    return SmokeOptions(Path(args.config), action, confirmation, args.observe_stop_seconds)
 
 
 def _add_safety_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--confirm", required=True)
+    parser.add_argument("--observe-stop-seconds", type=float, default=0.0,
+                        help="Read-only observation after stop (0 disables; max 120 seconds).")
 
 
 def _configured_mode(config_path: Path) -> object:
@@ -488,6 +492,11 @@ async def run_smoke(
     options: SmokeOptions,
     client_factory: ClientFactory = connect_real_client,
 ) -> SmokeResult:
+    validate_observation_seconds(options.observe_stop_seconds)
+    if options.observe_stop_seconds > 0 and isinstance(options.action, PrepareAction):
+        # prepare has its own cleanup/disconnect path; do not delay that stop
+        # with an observation tail or add new stop writes to that workflow.
+        raise ValueError("smoke_observation_not_supported_for_prepare")
     if options.confirmation != REAL_ROBOT_CONFIRMATION:
         raise ValueError("smoke_confirmation_required")
     _validate_smoke_action(options.action)
@@ -521,6 +530,7 @@ async def run_smoke(
             "workflow": "single_guarded_commissioning_action",
             "action": action_name,
             "python_version": platform.python_version(),
+            "observe_stop_seconds": options.observe_stop_seconds,
         },
     )
     backend = build_backend(settings, recorder, client_factory)
@@ -706,6 +716,30 @@ async def run_smoke(
                 )
             except BaseException as error:
                 cleanup_error = error
+        # Existing motion samples and stop_diagnostics cover the active/stop
+        # phases. Only now add polling, on the same adapter/SDK lock, before
+        # disconnecting. A failed stop must not discard its subsequent evidence.
+        if (
+            backend_connected and control is not None and options.observe_stop_seconds > 0
+            and not isinstance(primary_error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit))
+            and not isinstance(cleanup_error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit))
+        ):
+            try:
+                if not isinstance(backend, RealLebaiAdapter):
+                    raise RuntimeError("stop_observation_backend_unsupported")
+                prior_error = primary_error or cleanup_error
+                if prior_error is not None:
+                    print(f"动作或停止流程失败：{prior_error}。正在只读记录，不会自动恢复。"
+                          "若发现实际位移，请立即按现场安全规程处理，不要等待观察结束。", flush=True)
+                else:
+                    print("停止处理已结束，正在只读观察；请勿操作机械臂或启动其它控制程序。", flush=True)
+                await observe_after_stop(
+                    backend, recorder, options.observe_stop_seconds,
+                    prior_error=None if prior_error is None else str(prior_error),
+                )
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
         if backend_connected:
             try:
                 await backend.disconnect()

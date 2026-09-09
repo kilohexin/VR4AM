@@ -58,6 +58,7 @@ class SmokeOptions:
     config_path: Path
     action: SmokeAction
     confirmation: str
+    observe_stop_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
