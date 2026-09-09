@@ -1248,6 +1248,13 @@ async def test_runtime_error_or_estop_closes_production_pump_before_ik_or_pvat(
     expected_fault: str,
 ) -> None:
     adapter, client, clock = await _connected_control_adapter()
+    stop_events = []
+
+    async def record_stop(event, _timestamp):
+        if event.get("kind") == "stop_diagnostics":
+            stop_events.append(event)
+
+    adapter._event_callback = record_stop
     latest = LatestVRFrame()
     control = RobotControl(
         backend=adapter,
@@ -1272,10 +1279,14 @@ async def test_runtime_error_or_estop_closes_production_pump_before_ik_or_pvat(
     state = await control.state_message()
 
     assert state.mode is TeleopMode.FAULT
-    assert state.fault == expected_fault
+    # A fault/estop with zero speed is not evidence that the controller
+    # completed stopping. Preserve the originating fault in the audit record.
+    assert state.fault == "stop_incomplete"
+    assert any(event["initial_fault"] == expected_fault for event in stop_events)
     assert client.ik_calls == []
     assert "move_pvat" not in [call[0] for call in client.write_calls]
     assert "stop_move" in [call[0] for call in client.write_calls]
+    assert "stop_sys" in [call[0] for call in client.write_calls]
 
     client.robot_state = "IDLE"
     client.estop_reason = 0
@@ -1708,7 +1719,7 @@ async def test_stop_move_failure_retains_primary_error_when_escalation_fails(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verification_failure", ["state", "recorder"])
-async def test_stop_verification_failure_escalates_and_latches_unverified_stop(
+async def test_stop_state_read_failure_escalates_but_recorder_failure_is_isolated(
     verification_failure: str,
 ) -> None:
     fail_recorder = False
@@ -1734,19 +1745,29 @@ async def test_stop_verification_failure_escalates_and_latches_unverified_stop(
     else:
         fail_recorder = True
 
-    with pytest.raises(BackendCommandError):
-        await adapter.stop(StopReason.STALE)
-
-    assert client.write_calls[:2] == [("stop_move",), ("stop_sys",)]
-    if verification_failure == "state":
-        client.get_kin_data = AsyncMock(  # type: ignore[method-assign]
-            return_value=dict(client.kin_data)
-        )
-    fail_recorder = False
-    state = await adapter.get_state()
-    assert state.robot_state.value == "FAULT"
-    assert state.fault == "stop_unverified"
-    await adapter.disconnect()
+    try:
+        if verification_failure == "state":
+            with pytest.raises(BackendCommandError):
+                await adapter.stop(StopReason.STALE)
+            assert client.write_calls[:2] == [("stop_move",), ("stop_sys",)]
+            client.get_kin_data = AsyncMock(  # type: ignore[method-assign]
+                return_value=dict(client.kin_data)
+            )
+        else:
+            # Losing diagnostics must not turn a physically verified stop into
+            # an automatic system shutdown. Ordinary recording remains guarded.
+            await adapter.stop(StopReason.STALE)
+            assert client.write_calls == [("stop_move",)]
+            assert clock.value >= 300_000_000
+        fail_recorder = False
+        state = await adapter.get_state()
+        if verification_failure == "state":
+            assert state.robot_state.value == "FAULT"
+            assert state.fault == "stop_unverified"
+        else:
+            assert state.fault is None
+    finally:
+        await adapter.disconnect()
 
 
 @pytest.mark.asyncio

@@ -57,6 +57,11 @@ RECOVERABLE_IK_ERRORS = {
     "joint_speed_limit",
 }
 _SNAPSHOT_READ_TIMEOUT_NS = 300_000_000
+# These raw controller states can be stationary; generic mapped HOLD cannot.
+# PAUSED/STOP still fail motion preflight even after a verified stop.
+_STOP_SETTLED_STATES = frozenset({"IDLE", "PAUSED", "STOP", 5, 6, 12})
+_STOP_JOINT_DRIFT_RAD = 0.001
+_STOP_TCP_DRIFT_M = 0.0005
 
 
 @dataclass(frozen=True)
@@ -266,6 +271,62 @@ class RealLebaiAdapter:
     async def stop(self, reason: StopReason) -> None:
         if self.settings.mode == "readonly":
             return
+        diagnostics: dict[str, Any] = {
+            "kind": "stop_diagnostics",
+            "reason": reason.value,
+            "initial_fault": self._latched_fault,
+            "started_ns": self._clock(),
+            "rpc_calls": [],
+            "samples": [],
+            "outcome": "failed",
+        }
+        try:
+            await self._stop_verified(reason, diagnostics)
+            diagnostics["outcome"] = "confirmed"
+        except BaseException as error:
+            diagnostics["error"] = str(error)
+            diagnostics["error_type"] = type(error).__name__
+            raise
+        finally:
+            diagnostics["completed_ns"] = self._clock()
+            diagnostics["latched_fault"] = self._latched_fault
+            # Never delay the stop or its escalation on the recorder. Flush only
+            # after the safety work, outside the SDK lock, with a bounded wait.
+            try:
+                await asyncio.wait_for(
+                    self._emit_diagnostic_event(diagnostics), timeout=0.05,
+                )
+            except TimeoutError:
+                pass
+
+    async def _call_stop_rpc(
+        self, client: LebaiClientProtocol, method: str,
+        diagnostics: dict[str, Any],
+    ) -> object:
+        call: dict[str, Any] = {
+            "method": method, "started_ns": self._clock(), "timeout_ms": 200,
+        }
+        diagnostics["rpc_calls"].append(call)
+        try:
+            result = await asyncio.wait_for(getattr(client, method)(), timeout=0.20)
+            call["outcome"] = "returned"
+            if method == "is_connected":
+                call["connected"] = bool(result)
+            return result
+        except BaseException as error:
+            call["outcome"] = (
+                "timeout" if isinstance(error, TimeoutError)
+                else "cancelled" if isinstance(error, asyncio.CancelledError)
+                else "error"
+            )
+            call["error_type"] = type(error).__name__
+            raise
+        finally:
+            call["completed_ns"] = self._clock()
+
+    async def _stop_verified(
+        self, reason: StopReason, diagnostics: dict[str, Any],
+    ) -> None:
         self._pump.invalidate()
         self._reset_pvat_history()
         self._preflight_ready = False
@@ -275,33 +336,70 @@ class RealLebaiAdapter:
             raise BackendCommandError("robot_disconnected")
         try:
             async with self._sdk_lock:
-                await asyncio.wait_for(client.stop_move(), timeout=0.20)
+                await self._call_stop_rpc(client, "stop_move", diagnostics)
         except asyncio.CancelledError:
             await asyncio.shield(
                 self._fail_unverified_stop(
                     client,
+                    diagnostics=diagnostics,
                     from_cancelled_stop=True,
                 )
             )
             raise
         except TimeoutError:
-            await self._fail_unverified_stop(client)
+            await self._fail_unverified_stop(client, diagnostics=diagnostics)
             raise BackendCommandError("sdk_timeout:stop_move") from None
         except Exception:
-            await self._fail_unverified_stop(client)
+            await self._fail_unverified_stop(client, diagnostics=diagnostics)
             raise BackendCommandError("sdk_call_failed:stop_move") from None
         started_ns = self._clock()
         stable_since_ns: int | None = None
+        stable_anchor: LebaiSnapshot | None = None
         try:
             while True:
-                snapshot = await self._read_snapshot()
+                snapshot = await self._read_snapshot(emit_kinematics=False)
                 now_ns = self._clock()
                 stationary = (
                     max(abs(value) for value in snapshot.actual_qd) <= 0.02
+                    and (
+                        snapshot.raw_robot_state.strip().upper()
+                        if isinstance(snapshot.raw_robot_state, str)
+                        else snapshot.raw_robot_state
+                    ) in _STOP_SETTLED_STATES
+                    and snapshot.estop is None
+                    and snapshot.running_motion is None
                 )
+                joint_drift = 0.0
+                tcp_drift = 0.0
+                if stable_anchor is not None:
+                    joint_drift = max(abs(a - b) for a, b in zip(
+                        snapshot.actual_q, stable_anchor.actual_q,
+                    ))
+                    tcp_drift = math.dist(
+                        snapshot.actual_tcp.p, stable_anchor.actual_tcp.p,
+                    )
+                    stationary = (
+                        stationary
+                        and joint_drift <= _STOP_JOINT_DRIFT_RAD
+                        and tcp_drift <= _STOP_TCP_DRIFT_M
+                    )
+                diagnostics["samples"].append({
+                    "captured_ns": snapshot.captured_ns,
+                    "observed_ns": now_ns,
+                    "raw_robot_state": snapshot.raw_robot_state,
+                    "estop": snapshot.estop,
+                    "running_motion": snapshot.running_motion,
+                    "actual_q": list(snapshot.actual_q),
+                    "actual_qd": list(snapshot.actual_qd),
+                    "actual_tcp": snapshot.actual_tcp.model_dump(mode="json"),
+                    "stationary": stationary,
+                    "joint_drift_rad": joint_drift,
+                    "tcp_drift_m": tcp_drift,
+                })
                 if stationary:
                     if stable_since_ns is None:
                         stable_since_ns = now_ns
+                        stable_anchor = snapshot
                     elif now_ns - stable_since_ns >= 300_000_000:
                         self._motion_accepted = False
                         if reason is StopReason.DISCONNECT:
@@ -309,10 +407,12 @@ class RealLebaiAdapter:
                         return
                 else:
                     stable_since_ns = None
+                    stable_anchor = None
                 if now_ns - started_ns >= 500_000_000:
                     self._latched_fault = "stop_incomplete"
                     await self._fail_unverified_stop(
                         client,
+                        diagnostics=diagnostics,
                         preserve_fault=True,
                     )
                     raise BackendCommandError("stop_incomplete")
@@ -321,6 +421,7 @@ class RealLebaiAdapter:
             await asyncio.shield(
                 self._fail_unverified_stop(
                     client,
+                    diagnostics=diagnostics,
                     from_cancelled_stop=True,
                 )
             )
@@ -328,14 +429,14 @@ class RealLebaiAdapter:
         except BackendCommandError as error:
             if str(error) == "stop_incomplete":
                 raise
-            await self._fail_unverified_stop(client)
+            await self._fail_unverified_stop(client, diagnostics=diagnostics)
             if str(error) == "robot_disconnected":
                 raise BackendCommandError(
                     "stop_unverified_disconnected"
                 ) from None
             raise
         except Exception:
-            await self._fail_unverified_stop(client)
+            await self._fail_unverified_stop(client, diagnostics=diagnostics)
             raise BackendCommandError("stop_unverified") from None
 
     def _latch_unverified_stop(
@@ -354,6 +455,7 @@ class RealLebaiAdapter:
         self,
         client: LebaiClientProtocol,
         *,
+        diagnostics: dict[str, Any],
         preserve_fault: bool = False,
         from_cancelled_stop: bool = False,
     ) -> None:
@@ -366,7 +468,7 @@ class RealLebaiAdapter:
             self._preflight_ready = False
             self._pump.invalidate()
             self._reset_pvat_history()
-        await self._safety_escalate_stop_sys(client)
+        await self._safety_escalate_stop_sys(client, diagnostics)
 
     def _resolve_cancelled_stop_with_verified_disconnect(self) -> None:
         if not self._latched_fault_from_cancelled_stop:
@@ -379,19 +481,17 @@ class RealLebaiAdapter:
     async def _safety_escalate_stop_sys(
         self,
         client: LebaiClientProtocol,
+        diagnostics: dict[str, Any],
     ) -> None:
         async with self._sdk_lock:
             try:
-                connected = await asyncio.wait_for(
-                    client.is_connected(),
-                    timeout=0.20,
-                )
+                connected = await self._call_stop_rpc(client, "is_connected", diagnostics)
             except Exception:
                 connected = False
             if not connected:
                 return
             try:
-                await asyncio.wait_for(client.stop_sys(), timeout=0.20)
+                await self._call_stop_rpc(client, "stop_sys", diagnostics)
             except Exception:
                 return
 
@@ -1143,7 +1243,7 @@ class RealLebaiAdapter:
         except Exception:
             return
 
-    async def _read_snapshot(self) -> LebaiSnapshot:
+    async def _read_snapshot(self, *, emit_kinematics: bool = True) -> LebaiSnapshot:
         client = self._client
         if client is None:
             raise BackendCommandError("robot_disconnected")
@@ -1257,7 +1357,8 @@ class RealLebaiAdapter:
             sdk_lock_wait_ms=sdk_lock_wait_ms,
         )
         self._snapshot = snapshot
-        await self._emit_kinematics(snapshot)
+        if emit_kinematics:
+            await self._emit_kinematics(snapshot)
         return snapshot
 
     async def _timed(
