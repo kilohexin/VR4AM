@@ -123,6 +123,9 @@ class RealLebaiAdapter:
         self._backend_label = backend_label
         self._client: LebaiClientProtocol | None = None
         self._sdk_lock = asyncio.Lock()
+        self._sdk_request_id = 0
+        self._sdk_diagnostic_tasks: set[asyncio.Task[None]] = set()
+        self._sdk_diagnostics_dropped = 0
         self._snapshot: LebaiSnapshot | None = None
         self._capabilities = SdkCapabilities(names=())
         self._command_id: int | None = None
@@ -204,6 +207,13 @@ class RealLebaiAdapter:
         ):
             await self.stop(StopReason.SHUTDOWN)
         await self._pump.stop()
+        if self._sdk_diagnostic_tasks:
+            _, pending = await asyncio.wait(
+                tuple(self._sdk_diagnostic_tasks), timeout=0.05
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.sleep(0)
         self._reset_pvat_history()
         self._snapshot = None
         self._client = None
@@ -737,6 +747,37 @@ class RealLebaiAdapter:
             raise BackendCommandError("robot_state_stale")
 
     async def _send_target(self, request: PvatRequest) -> None:
+        lifecycle: dict[str, object] = {}
+        try:
+            await self._send_target_impl(request, lifecycle)
+        finally:
+            # The implementation has released the SDK lock before recording,
+            # including early returns after generation invalidation.
+            if lifecycle:
+                self._schedule_sdk_diagnostic(lifecycle)
+
+    def _schedule_sdk_diagnostic(self, event: dict[str, object]) -> None:
+        # Never wait for logging before publishing a motion error. Even a
+        # callback that ignores cancellation cannot create unbounded tasks.
+        if len(self._sdk_diagnostic_tasks) >= 16:
+            self._sdk_diagnostics_dropped += 1
+            return
+        event["diagnostics_dropped_total"] = self._sdk_diagnostics_dropped
+        task = asyncio.create_task(self._emit_diagnostic_event(event))
+        self._sdk_diagnostic_tasks.add(task)
+        timer = asyncio.get_running_loop().call_later(0.05, task.cancel)
+
+        def completed(done: asyncio.Task[None]) -> None:
+            timer.cancel()
+            self._sdk_diagnostic_tasks.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(completed)
+
+    async def _send_target_impl(
+        self, request: PvatRequest, lifecycle: dict[str, object]
+    ) -> None:
         handler_started_ns = self._clock()
         snapshot = await self._read_snapshot()
         snapshot_finished_ns = self._clock()
@@ -820,6 +861,21 @@ class RealLebaiAdapter:
                     previous_pvat_gap_ms = (
                         pvat_started - self._last_pvat_started_ns
                     ) / 1_000_000
+                self._sdk_request_id += 1
+                # Local call evidence, not an acknowledgement of remote execution.
+                lifecycle.update({
+                    "kind": "sdk_request_lifecycle",
+                    "method": "move_pvat",
+                    "request_id": self._sdk_request_id,
+                    "command_id": request.command_id,
+                    "generation": request.generation,
+                    "started_ns": pvat_started,
+                    "rpc_outcome": "started",
+                    "p": list(selected.point.q),
+                    "v": list(selected.point.qd),
+                    "a": list(selected.point.qdd),
+                    "horizon_s": selected.point.horizon_s,
+                })
                 try:
                     await asyncio.wait_for(
                         client.move_pvat(
@@ -830,16 +886,28 @@ class RealLebaiAdapter:
                         ),
                         timeout=0.06,
                     )
+                    lifecycle["rpc_outcome"] = "returned"
+                except asyncio.CancelledError:
+                    lifecycle["rpc_outcome"] = "cancelled"
+                    raise
                 except TimeoutError:
+                    lifecycle["rpc_outcome"] = "timeout"
                     if not self._pump.is_current(request.generation):
                         return
                     raise BackendCommandError("sdk_timeout:move_pvat") from None
-                except Exception:
+                except Exception as error:
+                    lifecycle["rpc_outcome"] = "error"
+                    lifecycle["error_type"] = type(error).__name__
                     if not self._pump.is_current(request.generation):
                         return
                     raise BackendCommandError(
                         "sdk_call_failed:move_pvat"
                     ) from None
+                finally:
+                    lifecycle["completed_ns"] = self._clock()
+                    lifecycle["invalidated"] = not self._pump.is_current(
+                        request.generation
+                    )
                 pvat_latency_ms = max(
                     0.0,
                     (self._clock() - pvat_started) / 1_000_000,
