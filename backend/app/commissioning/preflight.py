@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import platform
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Sequence
@@ -27,6 +28,7 @@ class _CaptureRecorder(NoopRecorder):
             and event.get("kind") == "robot_kinematics"
         ):
             self.kinematics = dict(event)
+            self.kinematics["captured_ns"] = server_mono_ns
 
 
 def _package_version(distribution: str) -> str | None:
@@ -69,13 +71,21 @@ async def run_preflight(
     recorder = _CaptureRecorder()
     backend = build_backend(settings, recorder, client_factory)
     connected = False
+    started_utc = datetime.now(UTC).isoformat()
     try:
         await backend.connect()
         connected = True
         preflight = await backend.preflight()
+        preflight_observation = dict(recorder.kinematics or {})
         state = await backend.get_state()
         kinematics = recorder.kinematics or {}
         report = {
+            "started_utc": started_utc,
+            "sampled_utc": datetime.now(UTC).isoformat(),
+            # Preserve the two reads separately: state may change after preflight.
+            # estop is the adapter's decoded SDK value, not a visual inspection.
+            "preflight_observation": preflight_observation,
+            "state_observation": {**kinematics, "fault": state.fault},
             "complete": bool(
                 preflight.reason == "real_robot_readonly"
                 and kinematics.get("kind") == "robot_kinematics"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -41,6 +42,42 @@ async def test_preflight_script_never_arms_or_writes(tmp_path: Path) -> None:
     assert "lebai_sdk_version" in report
     assert len(report["actual_q"]) == 6
     assert report["actual_tcp"]["p"] == pytest.approx([0.3, 0.0, 0.4])
+    assert client.write_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('raw_state', 'estop', 'tcp_x', 'reason', 'fault'), [
+    ('IDLE', 0, .3, 'real_robot_readonly', None),
+    ('IDLE', 'HardEstop', .3, 'estop:hard_estop', 'estop:hard_estop'),
+    ('STOP', 'HardEstop', .3, 'robot_not_idle', 'estop:hard_estop'),
+    ('IDLE', 0, .8, 'tcp_outside_startup_envelope', None),
+])
+async def test_preflight_preserves_observed_safety_fields_even_when_rejected(
+    tmp_path, raw_state, estop, tcp_x, reason, fault,
+):
+    client = FakeLebaiClient.idle()
+    client.robot_state = raw_state
+    client.estop_reason = estop
+    client.kin_data['actual_tcp_pose']['x'] = tcp_x
+    output = tmp_path / 'observed.json'
+    result = await run_preflight(_config(tmp_path, 'readonly'), output,
+                                 AsyncMock(return_value=client))
+    report = json.loads(output.read_text(encoding='utf-8'))
+    assert report['preflight_reason'] == reason
+    assert result == (0 if reason == 'real_robot_readonly' else 2)
+    observed = report['state_observation']
+    assert observed['raw_robot_state'] == raw_state
+    assert observed['estop'] == fault
+    assert observed['fault'] == fault
+    assert observed['actual_tcp']['p'][0] == tcp_x
+    assert observed['actual_qd'] == [0.] * 6
+    assert 'running_motion' in observed
+    assert observed['captured_ns'] >= report['preflight_observation']['captured_ns']
+    assert report['preflight_observation']['raw_robot_state'] == raw_state
+    start = datetime.fromisoformat(report['started_utc'])
+    finish = datetime.fromisoformat(report['sampled_utc'])
+    assert start.utcoffset().total_seconds() == 0
+    assert finish >= start
     assert client.write_calls == []
 
 
