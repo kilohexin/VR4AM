@@ -458,17 +458,28 @@ def test_diagnostics_are_sent_only_to_owner_and_sender_tasks_are_cleaned_up() ->
         assert app.state.teleop_sender_tasks == set()
 
 
-def test_hello_and_frame_ack() -> None:
+@pytest.mark.parametrize("frame_send_delay", [0.0, 0.12])
+def test_hello_and_frame_ack(frame_send_delay: float) -> None:
     with TestClient(create_app()) as client, client.websocket_connect(
         "/ws/v1/teleop"
     ) as ws:
         ws.send_json({"v": 1, "type": "hello", "request_id": "h1"})
         assert ws.receive_json()["type"] == "hello_ack"
+        # hello starts periodic state streaming before any VR frame arrives.
+        # Those queued states need not acknowledge the subsequently sent frame.
+        time.sleep(frame_send_delay)
         ws.send_json(_valid_frame())
 
-        states = [_receive_until(ws, "robot_state") for _ in range(3)]
-
-        assert any(state["ack_seq"] == 1 for state in states)
+        states = []
+        for _ in range(50):
+            state = _receive_until(ws, "robot_state")
+            states.append(state)
+            if state["ack_seq"] == 1:
+                break
+        assert any(state["ack_seq"] == 1 for state in states), (
+            f"frame 1 not acknowledged; received ack_seq values: "
+            f"{[state['ack_seq'] for state in states]}"
+        )
 
 
 def test_arm_before_grip_release_is_rejected_with_chinese_reason() -> None:
