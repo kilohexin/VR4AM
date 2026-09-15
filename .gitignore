@@ -9,4 +9,5 @@ dist/
 *.log
 config/real-robot.local.yaml
 logs/commissioning/
-artifacts/acceptance/
+artifacts/
+.tmp/
