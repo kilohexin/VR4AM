@@ -214,20 +214,30 @@ def test_rehearsal_begin_phase_finish_are_correlated_and_never_call_motion(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("worker_start_delay", [0.0, 0.10])
 async def test_slow_rehearsal_provenance_does_not_block_frames_or_control_ticks(
     tmp_path: Path,
+    worker_start_delay: float,
 ) -> None:
     from app.api import teleop_ws
 
-    slow_started = threading.Event()
+    loop = asyncio.get_running_loop()
+    slow_started = asyncio.Event()
+    release_provenance = threading.Event()
+    slow_finished = threading.Event()
 
     def slow_provenance() -> dict[str, object]:
-        slow_started.set()
-        time.sleep(0.15)
-        return {
-            "git": {"commit": "a" * 40, "dirty": False, "dirty_paths": []},
-            "model": {},
-        }
+        time.sleep(worker_start_delay)
+        loop.call_soon_threadsafe(slow_started.set)
+        try:
+            if not release_provenance.wait(2.0):
+                raise TimeoutError("test did not release provenance worker")
+            return {
+                "git": {"commit": "a" * 40, "dirty": False, "dirty_paths": []},
+                "model": {},
+            }
+        finally:
+            slow_finished.set()
 
     store = RehearsalReportStore(
         root=tmp_path,
@@ -275,28 +285,38 @@ async def test_slow_rehearsal_provenance_does_not_block_frames_or_control_ticks(
         "request_id": "slow-begin",
         "plan_version": 1,
     })
-    await incoming.put(_valid_frame(seq=2))
-    await incoming.put(_valid_frame(seq=3))
-
     session = asyncio.create_task(
         teleop_ws._run_coupled_session(Socket(), Control(), set(), object(), asyncio.Event())
     )
-    started = asyncio.get_running_loop().time()
     try:
-        while (
-            (latest.snapshot() is None or latest.snapshot().frame.seq != 3)
-            and asyncio.get_running_loop().time() - started < 0.08
-        ):
-            await asyncio.sleep(0.002)
+        # Establish the blocked-work interval before sending the frames under
+        # test. Thread startup order is not a production latency guarantee.
+        await asyncio.wait_for(slow_started.wait(), timeout=1.0)
+        assert not slow_finished.is_set()
+        ticks_before = len(ticks)
+        await incoming.put(_valid_frame(seq=2))
+        await incoming.put(_valid_frame(seq=3))
 
-        assert slow_started.is_set()
+        async def wait_for_progress() -> None:
+            while (
+                latest.snapshot() is None or latest.snapshot().frame.seq != 3
+                or len(ticks) < ticks_before + 2
+            ):
+                await asyncio.sleep(0.002)
+
+        await asyncio.wait_for(wait_for_progress(), timeout=1.0)
         snapshot = latest.snapshot()
         assert snapshot is not None and snapshot.frame.seq == 3
-        assert asyncio.get_running_loop().time() - started < 0.08
-        assert len(ticks) >= 2
+        assert len(ticks) >= ticks_before + 2
+        assert not slow_finished.is_set()
+        assert not any(message.get("type") == "offline_rehearsal_begin_result" for message in sent)
+        release_provenance.set()
 
-        while not any(message.get("type") == "offline_rehearsal_begin_result" for message in sent):
-            await asyncio.sleep(0.002)
+        async def wait_for_message(message_type: str) -> None:
+            while not any(message.get("type") == message_type for message in sent):
+                await asyncio.sleep(0.002)
+
+        await asyncio.wait_for(wait_for_message("offline_rehearsal_begin_result"), timeout=1.0)
         begun = next(
             message for message in sent
             if message.get("type") == "offline_rehearsal_begin_result"
@@ -305,8 +325,7 @@ async def test_slow_rehearsal_provenance_does_not_block_frames_or_control_ticks(
         assert begun["accepted"] is True
         run_id = str(begun["run_id"])
         await incoming.put(_rehearsal_phase(run_id, REHEARSAL_PHASES[0]))
-        while not any(message.get("type") == "offline_rehearsal_phase_ack" for message in sent):
-            await asyncio.sleep(0.002)
+        await asyncio.wait_for(wait_for_message("offline_rehearsal_phase_ack"), timeout=1.0)
         ack = next(
             message for message in sent
             if message.get("type") == "offline_rehearsal_phase_ack"
@@ -315,6 +334,7 @@ async def test_slow_rehearsal_provenance_does_not_block_frames_or_control_ticks(
         assert ack["run_id"] == run_id
         assert ack["phase"] == REHEARSAL_PHASES[0]
     finally:
+        release_provenance.set()
         session.cancel()
         with pytest.raises(asyncio.CancelledError):
             await session
