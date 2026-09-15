@@ -37,6 +37,7 @@ from app.robots.lebai_sdk_bridge import (
 )
 from app.robots.lebai_pump import PvatPump, PvatRequest
 from app.robots.lebai_pvat import PvatLimits, PvatPoint, build_pvat_point
+from app.robots.lebai_stop_transaction import StopTransaction
 from app.robots.lebai_recovery import interpolate_pose, recovery_candidates
 from app.schemas.messages import (
     BackendState,
@@ -123,6 +124,10 @@ class RealLebaiAdapter:
         self._backend_label = backend_label
         self._client: LebaiClientProtocol | None = None
         self._sdk_lock = asyncio.Lock()
+        self._stop_lock = asyncio.Lock()
+        self._disconnecting = 0
+        self._stop_transaction: StopTransaction | None = None
+        self._stop_episode_id = 0
         self._sdk_request_id = 0
         self._sdk_diagnostic_tasks: set[asyncio.Task[None]] = set()
         self._sdk_diagnostics_dropped = 0
@@ -174,8 +179,16 @@ class RealLebaiAdapter:
         return self._pump.fault
 
     async def connect(self) -> None:
+        if self._disconnecting:
+            raise BackendCommandError("disconnect_in_progress")
         if self._client is not None:
             return
+        if self._stop_transaction is not None:
+            if any(not r.task.done() for r in self._stop_transaction.requests.values()):
+                raise BackendCommandError("stop_request_pending")
+            # A new connection must never reuse the previous client's requests.
+            # Faults remain latched; connecting cannot grant motion permission.
+            self._stop_transaction = None
         try:
             client = await asyncio.wait_for(
                 self._client_factory(self.settings.ip),
@@ -200,13 +213,26 @@ class RealLebaiAdapter:
             raise
 
     async def disconnect(self) -> None:
-        if (
-            self.settings.mode == "control"
-            and self._motion_accepted
-            and self._client is not None
-        ):
-            await self.stop(StopReason.SHUTDOWN)
+        self._disconnecting += 1
+        try:
+            async with self._stop_lock:
+                try:
+                    if (
+                        self.settings.mode == "control"
+                        and self._motion_accepted
+                        and self._client is not None
+                    ):
+                        self._ensure_stop_transaction()
+                        await self._stop_in_transaction(StopReason.SHUTDOWN)
+                finally:
+                    await self._disconnect_local_resources()
+        finally:
+            self._disconnecting -= 1
+
+    async def _disconnect_local_resources(self) -> None:
         await self._pump.stop()
+        if self._stop_transaction is not None:
+            await self._stop_transaction.close()
         if self._sdk_diagnostic_tasks:
             _, pending = await asyncio.wait(
                 tuple(self._sdk_diagnostic_tasks), timeout=0.05
@@ -281,8 +307,22 @@ class RealLebaiAdapter:
     async def stop(self, reason: StopReason) -> None:
         if self.settings.mode == "readonly":
             return
+        async with self._stop_lock:
+            self._ensure_stop_transaction()
+            await self._stop_in_transaction(reason)
+
+    def _ensure_stop_transaction(self) -> None:
+        if self._stop_transaction is None:
+            self._stop_episode_id += 1
+            self._stop_transaction = StopTransaction(
+                self._stop_episode_id, self._clock, self._schedule_sdk_diagnostic,
+            )
+
+    async def _stop_in_transaction(self, reason: StopReason) -> None:
+        assert self._stop_transaction is not None
         diagnostics: dict[str, Any] = {
             "kind": "stop_diagnostics",
+            "episode_id": self._stop_transaction.episode_id,
             "reason": reason.value,
             "initial_fault": self._latched_fault,
             "started_ns": self._clock(),
@@ -318,7 +358,11 @@ class RealLebaiAdapter:
         }
         diagnostics["rpc_calls"].append(call)
         try:
-            result = await asyncio.wait_for(getattr(client, method)(), timeout=0.20)
+            if method in {"stop_move", "stop_sys"}:
+                assert self._stop_transaction is not None
+                result = await self._stop_transaction.call(method, getattr(client, method), call)
+            else:
+                result = await asyncio.wait_for(getattr(client, method)(), timeout=0.20)
             call["outcome"] = "returned"
             if method == "is_connected":
                 call["connected"] = bool(result)
@@ -362,9 +406,13 @@ class RealLebaiAdapter:
         except Exception:
             await self._fail_unverified_stop(client, diagnostics=diagnostics)
             raise BackendCommandError("sdk_call_failed:stop_move") from None
-        started_ns = self._clock()
-        stable_since_ns: int | None = None
-        stable_anchor: LebaiSnapshot | None = None
+        transaction = self._stop_transaction
+        assert transaction is not None
+        if transaction.verification_started_ns is None:
+            transaction.verification_started_ns = self._clock()
+        started_ns = transaction.verification_started_ns
+        stable_since_ns = transaction.stable_since_ns
+        stable_anchor: LebaiSnapshot | None = transaction.stable_anchor
         try:
             while True:
                 snapshot = await self._read_snapshot(emit_kinematics=False)
@@ -410,14 +458,19 @@ class RealLebaiAdapter:
                     if stable_since_ns is None:
                         stable_since_ns = now_ns
                         stable_anchor = snapshot
-                    elif now_ns - stable_since_ns >= 300_000_000:
+                        transaction.stable_since_ns = stable_since_ns
+                        transaction.stable_anchor = stable_anchor
+                    elif (now_ns - stable_since_ns >= 300_000_000
+                          and (transaction.confirmed or now_ns - started_ns < 500_000_000)):
                         self._motion_accepted = False
-                        if reason is StopReason.DISCONNECT:
-                            self._resolve_cancelled_stop_with_verified_disconnect()
+                        transaction.confirmed = True
                         return
                 else:
                     stable_since_ns = None
                     stable_anchor = None
+                    transaction.stable_since_ns = None
+                    transaction.stable_anchor = None
+                    transaction.confirmed = False
                 if now_ns - started_ns >= 500_000_000:
                     self._latched_fault = "stop_incomplete"
                     await self._fail_unverified_stop(
@@ -454,7 +507,8 @@ class RealLebaiAdapter:
         *,
         from_cancelled_stop: bool = False,
     ) -> None:
-        self._latched_fault = "stop_unverified"
+        if self._latched_fault not in {"stop_unverified", "stop_incomplete"}:
+            self._latched_fault = "stop_unverified"
         self._latched_fault_from_cancelled_stop = from_cancelled_stop
         self._motion_accepted = False
         self._preflight_ready = False
@@ -480,20 +534,19 @@ class RealLebaiAdapter:
             self._reset_pvat_history()
         await self._safety_escalate_stop_sys(client, diagnostics)
 
-    def _resolve_cancelled_stop_with_verified_disconnect(self) -> None:
-        if not self._latched_fault_from_cancelled_stop:
-            return
-        if self._latched_fault != "stop_unverified":
-            return
-        self._latched_fault = None
-        self._latched_fault_from_cancelled_stop = False
-
     async def _safety_escalate_stop_sys(
         self,
         client: LebaiClientProtocol,
         diagnostics: dict[str, Any],
     ) -> None:
         async with self._sdk_lock:
+            if (self._stop_transaction is not None
+                    and "stop_sys" in self._stop_transaction.requests):
+                try:
+                    await self._call_stop_rpc(client, "stop_sys", diagnostics)
+                except Exception:
+                    pass
+                return
             try:
                 connected = await self._call_stop_rpc(client, "is_connected", diagnostics)
             except Exception:
@@ -573,6 +626,7 @@ class RealLebaiAdapter:
         on_phase("homing")
         try:
             async with self._sdk_lock:
+                self._begin_motion_epoch()
                 self._motion_accepted = True
                 motion_id = await asyncio.wait_for(
                     client.movej(
@@ -856,6 +910,7 @@ class RealLebaiAdapter:
                 if not self._pump.is_current(request.generation):
                     return
                 self._ensure_command_snapshot_fresh(snapshot)
+                self._begin_motion_epoch()
                 pvat_started = self._clock()
                 if self._last_pvat_started_ns is not None:
                     previous_pvat_gap_ms = (
@@ -1601,10 +1656,22 @@ class RealLebaiAdapter:
         return min(1.0, max(0.0, normalized))
 
     def _require_control(self) -> None:
+        if self._disconnecting:
+            raise BackendCommandError("disconnect_in_progress")
         if self.settings.mode != "control":
             raise BackendCommandError("real_robot_readonly")
         if self._client is None:
             raise BackendCommandError("robot_disconnected")
+
+    def _begin_motion_epoch(self) -> None:
+        if self._disconnecting:
+            raise BackendCommandError("disconnect_in_progress")
+        if self._stop_lock.locked():
+            raise BackendCommandError("stop_in_progress")
+        if self._stop_transaction is not None:
+            if self._stop_transaction.unresolved or self._latched_fault is not None:
+                raise BackendCommandError(self._latched_fault or "stop_unverified")
+            self._stop_transaction = None
 
 
 def _pose_field(payload: Mapping[str, object], field: str) -> Pose:

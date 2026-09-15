@@ -105,3 +105,42 @@ async def test_unresolved_request_remains_unknown_without_cleanup_retry():
         # Test-only cleanup: release the local coroutine, not a robot request.
         request.release.set()
         await owner.wait('test_teardown', 1)
+
+
+async def test_shutdown_cannot_renew_an_expired_shared_wait_budget():
+    request = ControlledRequest()
+    now = [100.0]
+    owner = StopRequestOwner(request.send, wait_budget_s=.2, clock=lambda: now[0])
+    try:
+        assert await owner.wait('grip', .01) == 'UNKNOWN'
+        assert owner.deadline == 100.2
+        now[0] = 100.2
+        # A renewed 1-second wait would hit this independent watchdog.
+        assert await asyncio.wait_for(owner.wait('shutdown', 1), .1) == 'UNKNOWN'
+        assert owner.deadline == 100.2
+        assert request.calls == 1
+        assert not request.cancelled
+        assert owner.fault_latched
+    finally:
+        request.release.set()
+        if owner.task:
+            await asyncio.wait_for(asyncio.shield(owner.task), 1)
+
+
+async def test_reply_after_shared_deadline_is_still_recorded_without_reset():
+    request = ControlledRequest()
+    now = [200.0]
+    owner = StopRequestOwner(request.send, wait_budget_s=.2, clock=lambda: now[0])
+    try:
+        assert await owner.wait('grip', .01) == 'UNKNOWN'
+        now[0] = 201.0
+        request.release.set()
+        await asyncio.wait_for(asyncio.shield(owner.task), 1)
+        assert await owner.wait('shutdown', 1) == 'RETURNED_LATE'
+        assert owner.deadline == 200.2
+        assert request.calls == 1
+        assert owner.fault_latched
+        assert not owner.stop_confirmed
+        assert not owner.motion_allowed
+    finally:
+        request.release.set()

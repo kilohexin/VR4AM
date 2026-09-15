@@ -167,6 +167,7 @@ class RobotControl:
         self._running = False
         self._loop_failed = False
         self._task: asyncio.Task[None] | None = None
+        self._backend_stop_owners: set[asyncio.Task] = set()
         self._lifecycle_lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
         self._shutdown_started = False
@@ -579,6 +580,11 @@ class RobotControl:
             self._running = False
             task = self._task
             if task is not None and task is not asyncio.current_task():
+                if task in self._backend_stop_owners:
+                    # The loop is already stopping the robot. Give that bounded
+                    # operation a chance to finish instead of manufacturing a
+                    # cancelled-stop fault during ordinary application shutdown.
+                    await asyncio.wait({task}, timeout=1.0)
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
@@ -913,7 +919,7 @@ class RobotControl:
             {"reason": reason.value},
         )
         try:
-            await self.backend.stop(reason)
+            await self._await_backend_stop(reason)
         except BaseException as error:
             fault = (
                 "stop_incomplete"
@@ -946,6 +952,15 @@ class RobotControl:
             self._latch_recording_fault()
             return False
         return True
+
+    async def _await_backend_stop(self, reason: StopReason) -> None:
+        owner = asyncio.current_task()
+        assert owner is not None
+        self._backend_stop_owners.add(owner)
+        try:
+            await self.backend.stop(reason)
+        finally:
+            self._backend_stop_owners.discard(owner)
 
     async def _handle_recording_unavailable(self) -> None:
         self._fault = "recording_unavailable"

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import anyio
 try:
     from starlette.exceptions import StarletteDeprecationWarning
 except ImportError:
@@ -41,6 +42,30 @@ from app.rehearsal.report import (
 from app.schemas.messages import BackendState, Pose, RobotStateMessage, TeleopMode
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+async def test_websocket_cancellation_finishes_disconnect_cleanup(monkeypatch):
+    from app.api import teleop_ws
+
+    stopping = anyio.Event()
+    completed = []
+
+    async def disconnect():
+        stopping.set()
+        await anyio.sleep(0.01)
+        completed.append("stopped")
+
+    control = SimpleNamespace(mode=TeleopMode.DISARMED, on_disconnect=disconnect)
+    state = SimpleNamespace(control=control, teleop_owner_lock=asyncio.Lock(),
+                            teleop_owner=None, teleop_sender_tasks=set())
+    websocket = SimpleNamespace(accept=AsyncMock(), app=SimpleNamespace(state=state))
+    monkeypatch.setattr(teleop_ws, "_run_coupled_session", AsyncMock())
+    async with anyio.create_task_group() as group:
+        group.start_soon(teleop_ws.teleop_websocket, websocket)
+        await stopping.wait()
+        group.cancel_scope.cancel()
+    assert completed == ["stopped"]
+    assert state.teleop_owner is None
 
 
 def _valid_frame(**updates: object) -> dict[str, object]:

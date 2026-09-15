@@ -642,8 +642,9 @@ async def teleop_websocket(websocket: WebSocket) -> None:
     except BaseException as error:
         session_error = error
     finally:
-        async with app.state.teleop_owner_lock:
-            owns_connection = app.state.teleop_owner is owner_token
+        with anyio.CancelScope(shield=True):
+            async with app.state.teleop_owner_lock:
+                owns_connection = app.state.teleop_owner is owner_token
         if owns_connection:
             try:
                 try:
@@ -671,7 +672,11 @@ async def teleop_websocket(websocket: WebSocket) -> None:
                     cleanup_error = error
                 finally:
                     try:
-                        await control.on_disconnect()
+                        # A closed WebSocket cancels its ASGI scope. The bounded
+                        # backend stop must finish independently of that scope;
+                        # cancellation is not evidence that the robot stopped.
+                        with anyio.CancelScope(shield=True):
+                            await control.on_disconnect()
                     except BaseException as error:
                         if cleanup_error is None:
                             cleanup_error = error
@@ -680,9 +685,10 @@ async def teleop_websocket(websocket: WebSocket) -> None:
                         control.latest = latest
                         app.state.latest = latest
             finally:
-                async with app.state.teleop_owner_lock:
-                    if app.state.teleop_owner is owner_token:
-                        app.state.teleop_owner = None
+                with anyio.CancelScope(shield=True):
+                    async with app.state.teleop_owner_lock:
+                        if app.state.teleop_owner is owner_token:
+                            app.state.teleop_owner = None
     if session_error is not None:
         raise session_error
     if cleanup_error is not None:

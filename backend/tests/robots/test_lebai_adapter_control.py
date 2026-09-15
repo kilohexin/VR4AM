@@ -1636,7 +1636,7 @@ async def test_stop_move_cancellation_escalates_and_latches_unverified_stop() ->
 
 
 @pytest.mark.asyncio
-async def test_verified_disconnect_clears_only_a_cancelled_stop_fault() -> None:
+async def test_disconnect_does_not_clear_cancelled_stop_or_resend_pending_request() -> None:
     adapter, client, _ = await _connected_control_adapter()
     original_stop_move = client.stop_move
     stop_started = asyncio.Event()
@@ -1654,11 +1654,13 @@ async def test_verified_disconnect_clears_only_a_cancelled_stop_fault() -> None:
         await stop_task
 
     client.stop_move = original_stop_move  # type: ignore[method-assign]
-    await adapter.stop(StopReason.DISCONNECT)
+    with pytest.raises(BackendCommandError, match="sdk_timeout:stop_move"):
+        await adapter.stop(StopReason.DISCONNECT)
     state = await adapter.get_state()
 
-    assert state.robot_state.value == "IDLE"
-    assert state.fault is None
+    assert state.robot_state.value == "FAULT"
+    assert state.fault == "stop_unverified"
+    assert client.write_calls == [("stop_move",), ("stop_sys",)]
     await adapter.disconnect()
 
 
@@ -1676,7 +1678,8 @@ async def test_verified_disconnect_keeps_a_real_stop_failure_latched() -> None:
         await adapter.stop(StopReason.GRIP_RELEASED)
 
     client.stop_move = original_stop_move  # type: ignore[method-assign]
-    await adapter.stop(StopReason.DISCONNECT)
+    with pytest.raises(BackendCommandError, match="sdk_call_failed:stop_move"):
+        await adapter.stop(StopReason.DISCONNECT)
     state = await adapter.get_state()
 
     assert state.robot_state.value == "FAULT"

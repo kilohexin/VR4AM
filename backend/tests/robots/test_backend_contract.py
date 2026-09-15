@@ -110,7 +110,7 @@ async def make_harness(name: str) -> BackendHarness:
 
         def assert_stopped() -> None:
             methods = [call[0] for call in client.write_calls]
-            assert methods.count("stop_move") == 2
+            assert methods.count("stop_move") == 1
             last_stop = max(
                 index
                 for index, method in enumerate(methods)

@@ -58,7 +58,7 @@ class PendingStopClient(FakeLebaiClient):
         await self._request_stop('stop_sys')
 
     async def get_kin_data(self):
-        if self.stops >= 4:
+        if self.stops >= 2:
             self.tail_reads += 1
             if self.tail_reads > 1:
                 self.robot_state = 'STOP'
@@ -103,13 +103,22 @@ async def test_translation_stop_timeouts_keep_fault_and_finish_observation(
         assert 'smoke_final_state' not in kinds
         diagnostics = [e for e in events if e['kind'] == 'stop_diagnostics']
         assert len(diagnostics) == 2
-        assert client.overlap_seen  # Characterization, NOT desired safety behavior.
+        assert client.overlap_seen  # First stop_move/stop_sys may still overlap.
+        assert client.stops == 2  # Shutdown must not send either method again.
         assert [e['reason'] for e in diagnostics] == ['grip_released', 'shutdown']
-        for event in diagnostics:
+        for index, event in enumerate(diagnostics):
             assert event['outcome'] == 'failed'
-            assert [(c['method'], c['outcome']) for c in event['rpc_calls']] == [
+            expected_calls = [
                 ('stop_move', 'timeout'), ('is_connected', 'returned'), ('stop_sys', 'timeout'),
             ]
+            if index == 1:
+                expected_calls = [('stop_move', 'timeout'), ('stop_sys', 'timeout')]
+            assert [(c['method'], c['outcome']) for c in event['rpc_calls']] == expected_calls
+        for method in ('stop_move', 'stop_sys'):
+            first = next(c for c in diagnostics[0]['rpc_calls'] if c['method'] == method)
+            second = next(c for c in diagnostics[1]['rpc_calls'] if c['method'] == method)
+            assert first['request_id'] == second['request_id']
+            assert first['reused'] is False and second['reused'] is True
         samples = [e['state'] for e in events if e['kind'] == 'stop_observation_sample']
         assert len(samples) >= 2
         assert all(s['latched_fault'] == 'stop_unverified' for s in samples)

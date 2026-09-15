@@ -591,7 +591,10 @@ async def _run_repeated_stop_action() -> tuple[int, bool]:
         before_final = len(_writes(harness))
         await harness.control.stop()
         final_writes = _writes(harness)[before_final:]
-        assert final_writes and final_writes[0][0] == "stop_move"
+        # Disarm already completed the stop for this motion epoch. A later
+        # shutdown must revalidate it without sending a second stop request.
+        assert _methods(harness).count("stop_move") == 1
+        assert final_writes == []
         assert not any(call[0] in {"move_pvat", "movej"} for call in final_writes)
         assert harness.control.mode is TeleopMode.DISARMED
         final_log = tuple(_writes(harness))
