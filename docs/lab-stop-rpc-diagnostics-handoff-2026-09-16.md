@@ -51,7 +51,7 @@ try {
 }
 ```
 
-预期 **23 passed、0 failed**，观察器与子进程退出码均0，process.json为EXITED、observer_errors=[]。计数或结果不一致就保存原件回传，不反复重跑到通过。warn-after仅告警，不是自动终止或停止机械臂。
+预期 **24 passed、0 failed**，观察器与子进程退出码均0，process.json为EXITED、observer_errors=[]。第21轮后新增一个确定性的同刻度读取用例，原生时钟用例保留。计数或结果不一致就保存原件回传，不反复重跑到通过。warn-after仅告警，不是自动终止或停止机械臂。
 
 ## 回传最小清单
 
@@ -64,6 +64,8 @@ try {
 
 ## 主机端验证记录
 
+以下23项/820项记录属于原始1610453版本；第21轮修正的验证记录见 `lab-round21-clock-response-2026-09-16.md`，不要混用计数。
+
 - 全量后端：820 passed，101.33秒，退出码0。
 - 独立只读代码审查通过；审查方运行本轮23项测试全部通过。
 - 实际进程观察器包装本轮23项：23 passed，ObserverExit=0，child_exit_code=0，EXITED，observer_errors=[]；本地原件 `artifacts/acceptance/host-stop-rpc-diagnostics-20260916-001/`。
@@ -73,6 +75,6 @@ try {
 
 ## 下一次真机方案的放行条件
 
-先由主机端核对这23项离线结果，再单独明确：是否只做静止stop诊断基线，以及是否需要后续一次受控运动。不得自动串联stop→prepare→translate。
+先由主机端核对这24项离线结果，再单独明确：是否只做静止stop诊断基线，以及是否需要后续一次受控运动。不得自动串联stop→prepare→translate。
 
 日志中的 `outcome=sample` 只说明三项读取完成；它们有各自时间戳，不是原子快照，更不代表已安全停止。`timeout/error/cancelled`不能补齐为正常读数。若出现stop_unverified、未解决读取、非预期位移或现场异常，停止后续测试并按现场安全流程处置，不能靠切readonly或退出程序代替物理安全处置。

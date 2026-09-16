@@ -7,6 +7,7 @@ import pytest
 from app.commissioning.actions import PrepareAction, SmokeOptions, StopAction, TranslationAction
 from app.commissioning.smoke import parse_smoke_args, run_smoke
 from app.config import REAL_ROBOT_CONFIRMATION
+from app.robots.lebai_stop_diagnostics import StopDiagnosticSampler
 from tests.commissioning.test_actions import _control_config
 from tests.robots.fake_lebai import FakeLebaiClient
 from tests.commissioning.test_stop_timeout_lifecycle import PendingStopClient
@@ -64,8 +65,33 @@ async def test_non_boolean_programmatic_option_rejected_before_connection(tmp_pa
     factory.assert_not_awaited()
 
 
-async def test_cli_enabled_translation_records_early_reads_but_preserves_stop_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize("same_tick_read", [False, True], ids=["native-clock", "same-tick-read"])
+async def test_cli_enabled_translation_records_early_reads_but_preserves_stop_failure(tmp_path, monkeypatch, same_tick_read):
     client = PendingStopClient("never")
+    if same_tick_read:
+        def sampler_with_same_tick(client, episode_id, clock, emit):
+            # Deterministically model a first read completed within one clock tick.
+            # Only diagnostic timestamps are injected; timeout scheduling stays real.
+            first_tick = None
+            first_sample_pending = True
+
+            def diagnostic_clock():
+                nonlocal first_tick
+                if first_sample_pending:
+                    if first_tick is None:
+                        first_tick = clock()
+                    return first_tick
+                return clock()
+
+            def record(event):
+                nonlocal first_sample_pending
+                emit(event)
+                if event.get("outcome") == "sample":
+                    first_sample_pending = False
+
+            return StopDiagnosticSampler(client, episode_id, diagnostic_clock, record)
+
+        monkeypatch.setattr("app.robots.lebai_adapter.StopDiagnosticSampler", sampler_with_same_tick)
     monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
     options = parse_smoke_args(["translate", "--config", str(_control_config(tmp_path)),
         "--axis", "x", "--distance-m", "0.002", "--confirm", REAL_ROBOT_CONFIRMATION,
@@ -78,7 +104,11 @@ async def test_cli_enabled_translation_records_early_reads_but_preserves_stop_fa
         first_stop = next(e for e in events if e["kind"] == "stop_diagnostics")
         first_read = next(e for e in events if e["kind"] == "stop_diagnostic_read" and e["outcome"] == "sample")
         call = first_stop["rpc_calls"][0]
-        assert call["started_ns"] <= first_read["started_ns"] < first_read["completed_ns"] < call["completed_ns"]
+        if same_tick_read:
+            assert first_read["started_ns"] == first_read["completed_ns"]
+        # A monotonic clock may return equal ticks for a fast read. Still require
+        # completion strictly before the stop wait ends (the concurrency contract).
+        assert call["started_ns"] <= first_read["started_ns"] <= first_read["completed_ns"] < call["completed_ns"]
         assert first_stop["latched_fault"] == "stop_unverified"
         assert client.stops == 2
         assert not any(e["kind"] == "stop_confirmed" for e in events)
