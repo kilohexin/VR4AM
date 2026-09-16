@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import math
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -86,6 +87,7 @@ class LebaiSnapshot:
     sdk_latencies_ms: dict[str, float]
     raw_robot_state: str | int | None = None
     sdk_lock_wait_ms: float = 0.0
+    raw_kinematics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1403,8 +1405,10 @@ class RealLebaiAdapter:
         The commissioning caller uses this only after stopping, not as another
         concurrent SDK poller during motion. This is not a motion preflight.
         """
-        snapshot = await self._read_snapshot(emit_kinematics=False)
-        return {
+        snapshot = await self._read_snapshot(
+            emit_kinematics=False, include_raw_kinematics=self._stop_diagnostic_sampling,
+        )
+        observation = {
             "captured_ns": snapshot.captured_ns,
             "observed_ns": self._clock(),
             "raw_robot_state": snapshot.raw_robot_state,
@@ -1422,8 +1426,13 @@ class RealLebaiAdapter:
             "sdk_latencies_ms": dict(snapshot.sdk_latencies_ms),
             "snapshot_lock_wait_ms": snapshot.sdk_lock_wait_ms,
         }
+        if snapshot.raw_kinematics is not None:
+            observation["raw_kinematics"] = copy.deepcopy(snapshot.raw_kinematics)
+        return observation
 
-    async def _read_snapshot(self, *, emit_kinematics: bool = True) -> LebaiSnapshot:
+    async def _read_snapshot(
+        self, *, emit_kinematics: bool = True, include_raw_kinematics: bool = False,
+    ) -> LebaiSnapshot:
         client = self._client
         if client is None:
             raise BackendCommandError("robot_disconnected")
@@ -1459,6 +1468,11 @@ class RealLebaiAdapter:
                 latencies,
                 deadline_ns=deadline_ns,
             )
+            # Capture the already-returned payload before another SDK await.
+            # Diagnostic tail only: no extra RPC and no inferred missing fields.
+            raw_kinematics = (copy.deepcopy(dict(raw_kin))
+                              if include_raw_kinematics and isinstance(raw_kin, Mapping)
+                              else None)
             raw_tcp = await self._timed(
                 "get_tcp",
                 client.get_tcp,
@@ -1535,6 +1549,7 @@ class RealLebaiAdapter:
             sdk_latencies_ms=latencies,
             raw_robot_state=raw_state,
             sdk_lock_wait_ms=sdk_lock_wait_ms,
+            raw_kinematics=raw_kinematics,
         )
         self._snapshot = snapshot
         if emit_kinematics:

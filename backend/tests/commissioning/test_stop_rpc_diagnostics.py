@@ -114,5 +114,9 @@ async def test_cli_enabled_translation_records_early_reads_but_preserves_stop_fa
         assert not any(e["kind"] == "stop_confirmed" for e in events)
         tail = next(e for e in events if e["kind"] == "stop_observation_summary")
         assert tail["complete"]
+        tail_samples = [e for e in events if e["kind"] == "stop_observation_sample"]
+        assert tail_samples
+        assert all("actual_joint_torque" in e["state"]["raw_kinematics"] for e in tail_samples)
+        assert all(e["state"]["latched_fault"] == "stop_unverified" for e in tail_samples)
     finally:
         await client.cleanup()
