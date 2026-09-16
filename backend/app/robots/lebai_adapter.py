@@ -38,6 +38,7 @@ from app.robots.lebai_sdk_bridge import (
 from app.robots.lebai_pump import PvatPump, PvatRequest
 from app.robots.lebai_pvat import PvatLimits, PvatPoint, build_pvat_point
 from app.robots.lebai_stop_transaction import StopTransaction
+from app.robots.lebai_stop_diagnostics import StopDiagnosticSampler
 from app.robots.lebai_recovery import interpolate_pose, recovery_candidates
 from app.schemas.messages import (
     BackendState,
@@ -115,9 +116,12 @@ class RealLebaiAdapter:
         backend_label: Literal["LEBAI", "LEBAI_FAKE"] = "LEBAI",
         pump_clock: Callable[[], float] | None = None,
         pump_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        stop_diagnostic_sampling: bool = False,
     ) -> None:
         self.settings = settings
         self._client_factory = client_factory
+        self._stop_diagnostic_sampling = stop_diagnostic_sampling
+        self._stop_diagnostic_sampler: StopDiagnosticSampler | None = None
         self._clock = clock
         self._sleep = sleep
         self._event_callback = event_callback
@@ -183,6 +187,8 @@ class RealLebaiAdapter:
             raise BackendCommandError("disconnect_in_progress")
         if self._client is not None:
             return
+        if self._stop_diagnostic_sampler is not None and self._stop_diagnostic_sampler.unresolved:
+            raise BackendCommandError("stop_diagnostic_read_pending")
         if self._stop_transaction is not None:
             if any(not r.task.done() for r in self._stop_transaction.requests.values()):
                 raise BackendCommandError("stop_request_pending")
@@ -231,6 +237,8 @@ class RealLebaiAdapter:
 
     async def _disconnect_local_resources(self) -> None:
         await self._pump.stop()
+        if self._stop_diagnostic_sampler is not None:
+            await self._stop_diagnostic_sampler.close()
         if self._stop_transaction is not None:
             await self._stop_transaction.close()
         if self._sdk_diagnostic_tasks:
@@ -316,7 +324,28 @@ class RealLebaiAdapter:
             self._stop_episode_id += 1
             self._stop_transaction = StopTransaction(
                 self._stop_episode_id, self._clock, self._schedule_sdk_diagnostic,
+                on_request_started=self._start_stop_diagnostic_sampling,
             )
+
+    def _start_stop_diagnostic_sampling(self, method: str) -> None:
+        if (not self._stop_diagnostic_sampling or self._event_callback is None
+                or method != "stop_move" or self._client is None):
+            return
+        old = self._stop_diagnostic_sampler
+        if old is not None:
+            if old.episode_id == self._stop_episode_id:
+                return
+            if old.unresolved:
+                self._schedule_sdk_diagnostic({
+                    "kind": "stop_diagnostic_reader_skipped",
+                    "episode_id": self._stop_episode_id,
+                    "reason": "previous_read_pending",
+                })
+                return
+        self._stop_diagnostic_sampler = StopDiagnosticSampler(
+            self._client, self._stop_episode_id, self._clock, self._schedule_sdk_diagnostic,
+        )
+        self._stop_diagnostic_sampler.start()
 
     async def _stop_in_transaction(self, reason: StopReason) -> None:
         assert self._stop_transaction is not None
@@ -340,6 +369,8 @@ class RealLebaiAdapter:
         finally:
             diagnostics["completed_ns"] = self._clock()
             diagnostics["latched_fault"] = self._latched_fault
+            if self._stop_diagnostic_sampler is not None:
+                await self._stop_diagnostic_sampler.close()
             # Never delay the stop or its escalation on the recorder. Flush only
             # after the safety work, outside the SDK lock, with a bounded wait.
             try:

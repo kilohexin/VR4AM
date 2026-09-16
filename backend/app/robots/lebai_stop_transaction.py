@@ -74,10 +74,12 @@ class StopRpc:
 
 class StopTransaction:
     def __init__(self, episode_id: int, clock: Callable[[], int],
-                 emit: Callable[[dict[str, object]], None]) -> None:
+                 emit: Callable[[dict[str, object]], None],
+                 on_request_started: Callable[[str], None] | None = None) -> None:
         self.episode_id = episode_id
         self.clock = clock
         self.emit = emit
+        self.on_request_started = on_request_started
         self.requests: dict[str, StopRpc] = {}
         self.verification_started_ns: int | None = None
         self.stable_since_ns: int | None = None
@@ -98,6 +100,13 @@ class StopTransaction:
         if not reused:
             self.requests[method] = StopRpc(self.episode_id, len(self.requests) + 1,
                                             method, send, self.clock, self.emit)
+            if self.on_request_started is not None:
+                # StopRpc's task is queued first. This observer cannot change
+                # the request deadline or turn a stop into a diagnostic error.
+                try:
+                    self.on_request_started(method)
+                except Exception:
+                    pass
         request = self.requests[method]
         call.update(episode_id=self.episode_id, request_id=request.request_id,
                     reused=reused, request_started_ns=request.started_ns,
