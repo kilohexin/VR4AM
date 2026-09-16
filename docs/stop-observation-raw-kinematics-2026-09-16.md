@@ -37,4 +37,4 @@ python -m pytest -c backend/pyproject.toml backend/tests/commissioning/test_stop
 
 ## 发布状态
 
-用户要求暂不推送，本补丁仅在主机本地。此前d35d59a推送过程被用户中断，远端是否更新本轮未核验。不得让实验室假定本地补丁已可下载。
+历史说明：编写初版时尚未推送。随后用户明确授权，d35d59a与本补丁已推送至 `kilohexin/VR4AM` 的 `codex/offline-rehearsal`；远端完整提交已核验为 `ddfe894fc8885076409df0806f55e9005796a634`，实验室亦已完成该版本隔离准备。这不表示之后本地新增的运动ID核验修正也已发布；后续版本以主机另行通知的完整提交号为准。

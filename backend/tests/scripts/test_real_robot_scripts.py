@@ -46,6 +46,33 @@ async def test_preflight_script_never_arms_or_writes(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("motion_state", ["FINISHED", "RUNNING", "WAIT", "UNKNOWN"])
+async def test_readonly_hold_report_preserves_motion_id_and_resolution(tmp_path, motion_state):
+    client = FakeLebaiClient.idle()
+    client.robot_state = "STOP"
+    client.running_motion = 111
+    client.motion_state = motion_state
+    output = tmp_path / "hold-motion.json"
+    result = await run_preflight(
+        _config(tmp_path, "readonly"), output, AsyncMock(return_value=client),
+    )
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert result == 2
+    assert report["complete"] is False
+    assert report["preflight_ready"] is False
+    assert report["preflight_reason"] == "robot_not_idle"
+    for key in ("preflight_observation", "state_observation"):
+        observation = report[key]
+        assert observation["raw_robot_state"] == "STOP"
+        assert observation["robot_state"] == "HOLD"
+        assert observation["raw_running_motion"] == 111
+        assert observation["motion_state"] == motion_state
+        assert observation["running_motion"] == (None if motion_state == "FINISHED" else 111)
+        assert "get_motion_state" in observation["sdk_latencies_ms"]
+    assert client.write_calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(('raw_state', 'estop', 'tcp_x', 'reason', 'fault'), [
     ('IDLE', 0, .3, 'real_robot_readonly', None),
     ('IDLE', 'HardEstop', .3, 'estop:hard_estop', 'estop:hard_estop'),

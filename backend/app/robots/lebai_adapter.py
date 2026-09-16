@@ -88,6 +88,8 @@ class LebaiSnapshot:
     raw_robot_state: str | int | None = None
     sdk_lock_wait_ms: float = 0.0
     raw_kinematics: dict[str, Any] | None = None
+    raw_running_motion: object | None = None
+    motion_state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -480,6 +482,8 @@ class RealLebaiAdapter:
                     "raw_robot_state": snapshot.raw_robot_state,
                     "estop": snapshot.estop,
                     "running_motion": snapshot.running_motion,
+                    "raw_running_motion": snapshot.raw_running_motion,
+                    "motion_state": snapshot.motion_state,
                     "actual_q": list(snapshot.actual_q),
                     "actual_qd": list(snapshot.actual_qd),
                     "actual_tcp": snapshot.actual_tcp.model_dump(mode="json"),
@@ -1416,6 +1420,8 @@ class RealLebaiAdapter:
             "estop": snapshot.estop,
             "latched_fault": self._latched_fault,
             "running_motion": snapshot.running_motion,
+            "raw_running_motion": snapshot.raw_running_motion,
+            "motion_state": snapshot.motion_state,
             "actual_q": list(snapshot.actual_q),
             "actual_qd": list(snapshot.actual_qd),
             "actual_qdd": list(snapshot.actual_qdd),
@@ -1493,8 +1499,13 @@ class RealLebaiAdapter:
             )
             robot_state = map_robot_state(raw_state)
             running_motion = _running_motion(raw_running)
+            motion_state = None
+            # STOP/PAUSED may retain a motion ID. Resolve it explicitly, just
+            # as in IDLE; never infer FINISHED from zero speed or a constant ID.
+            # This does not change the raw/mapped robot state or motion gates.
+            settled_state = raw_state.strip().upper() if isinstance(raw_state, str) else raw_state
             if (
-                robot_state is BackendState.IDLE
+                settled_state in _STOP_SETTLED_STATES
                 and running_motion is not None
             ):
                 raw_motion_state = await self._timed(
@@ -1504,7 +1515,9 @@ class RealLebaiAdapter:
                     deadline_ns=deadline_ns,
                     timeout_error="sdk_timeout:get_motion_state",
                 )
-                if str(raw_motion_state).strip().upper() == "FINISHED":
+                if isinstance(raw_motion_state, str):
+                    motion_state = raw_motion_state.strip().upper()
+                if motion_state == "FINISHED":
                     running_motion = None
         if not isinstance(raw_kin, Mapping):
             raise BackendCommandError("invalid_sdk_kin_data")
@@ -1550,6 +1563,8 @@ class RealLebaiAdapter:
             raw_robot_state=raw_state,
             sdk_lock_wait_ms=sdk_lock_wait_ms,
             raw_kinematics=raw_kinematics,
+            raw_running_motion=raw_running,
+            motion_state=motion_state,
         )
         self._snapshot = snapshot
         if emit_kinematics:
@@ -1630,6 +1645,8 @@ class RealLebaiAdapter:
             "robot_state": snapshot.robot_state.value,
             "estop": snapshot.estop,
             "running_motion": snapshot.running_motion,
+            "raw_running_motion": snapshot.raw_running_motion,
+            "motion_state": snapshot.motion_state,
             "actual_q": list(snapshot.actual_q),
             "actual_qd": list(snapshot.actual_qd),
             "actual_qdd": list(snapshot.actual_qdd),
