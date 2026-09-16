@@ -33,6 +33,7 @@ from app.recording.commissioning import CommissioningRecorder
 from app.robots.base import HomeOptions, RobotBackend
 from app.robots.lebai_adapter import ClientFactory, RealLebaiAdapter
 from app.robots.lebai_sdk_bridge import connect_real_client
+from app.robots.lebai_stop_diagnostics import diagnostic_sampling_metadata
 from app.schemas.messages import (
     BackendState,
     ControllerState,
@@ -149,7 +150,9 @@ def parse_smoke_args(argv: Sequence[str] | None = None) -> SmokeOptions:
     else:
         action = StopAction()
     validate_observation_seconds(args.observe_stop_seconds)
-    return SmokeOptions(Path(args.config), action, confirmation, args.observe_stop_seconds)
+    _validate_stop_rpc_diagnostics(args.stop_rpc_diagnostics, action)
+    return SmokeOptions(Path(args.config), action, confirmation, args.observe_stop_seconds,
+                        stop_rpc_diagnostics=args.stop_rpc_diagnostics)
 
 
 def _add_safety_inputs(parser: argparse.ArgumentParser) -> None:
@@ -157,6 +160,15 @@ def _add_safety_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--confirm", required=True)
     parser.add_argument("--observe-stop-seconds", type=float, default=0.0,
                         help="Read-only observation after stop (0 disables; max 120 seconds).")
+    parser.add_argument("--stop-rpc-diagnostics", action="store_true",
+                        help="Opt-in concurrent read-only stop diagnostics (stop/translate only); not a stop fix.")
+
+
+def _validate_stop_rpc_diagnostics(enabled: bool, action: SmokeAction) -> None:
+    if type(enabled) is not bool:
+        raise ValueError("smoke_stop_rpc_diagnostics_invalid")
+    if enabled and not isinstance(action, (StopAction, TranslationAction)):
+        raise ValueError("smoke_stop_rpc_diagnostics_action_not_supported")
 
 
 def _configured_mode(config_path: Path) -> object:
@@ -492,6 +504,7 @@ async def run_smoke(
     options: SmokeOptions,
     client_factory: ClientFactory = connect_real_client,
 ) -> SmokeResult:
+    _validate_stop_rpc_diagnostics(options.stop_rpc_diagnostics, options.action)
     validate_observation_seconds(options.observe_stop_seconds)
     if options.observe_stop_seconds > 0 and isinstance(options.action, PrepareAction):
         # prepare has its own cleanup/disconnect path; do not delay that stop
@@ -531,9 +544,13 @@ async def run_smoke(
             "action": action_name,
             "python_version": platform.python_version(),
             "observe_stop_seconds": options.observe_stop_seconds,
+            "stop_rpc_diagnostics": diagnostic_sampling_metadata(options.stop_rpc_diagnostics),
         },
     )
-    backend = build_backend(settings, recorder, client_factory)
+    if options.stop_rpc_diagnostics:
+        backend = build_backend(settings, recorder, client_factory, stop_diagnostic_sampling=True)
+    else:
+        backend = build_backend(settings, recorder, client_factory)
     latest = LatestVRFrame()
     clock = MonotonicClock()
     control: RobotControl | None = None

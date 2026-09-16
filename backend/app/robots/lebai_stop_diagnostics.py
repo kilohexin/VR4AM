@@ -9,13 +9,30 @@ from typing import Any
 
 from app.robots.lebai_sdk_bridge import LebaiClientProtocol
 
+READ_TIMEOUT_S = .1
+DURATION_S = 2.
+INTERVAL_S = .1
+CLEANUP_TIMEOUT_S = .05
+
+
+def diagnostic_sampling_metadata(enabled: bool) -> dict[str, object]:
+    return {
+        "enabled": enabled,
+        "schema_version": 1,
+        "read_timeout_ms": round(READ_TIMEOUT_S * 1000),
+        "duration_ms": round(DURATION_S * 1000),
+        "interval_ms": round(INTERVAL_S * 1000),
+        "cleanup_timeout_ms": round(CLEANUP_TIMEOUT_S * 1000),
+        "assessment": "diagnostic_only",
+    }
+
 
 class StopDiagnosticSampler:
     def __init__(
         self, client: LebaiClientProtocol, episode_id: int,
         clock: Callable[[], int], emit: Callable[[dict[str, Any]], None], *,
-        read_timeout: float = .1, duration: float = 2.,
-        interval: float = .1, cleanup_timeout: float = .05,
+        read_timeout: float = READ_TIMEOUT_S, duration: float = DURATION_S,
+        interval: float = INTERVAL_S, cleanup_timeout: float = CLEANUP_TIMEOUT_S,
     ) -> None:
         if any(not math.isfinite(v) or v <= 0 for v in
                (read_timeout, duration, interval, cleanup_timeout)):

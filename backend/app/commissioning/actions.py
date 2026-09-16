@@ -59,6 +59,7 @@ class SmokeOptions:
     action: SmokeAction
     confirmation: str
     observe_stop_seconds: float = 0.0
+    stop_rpc_diagnostics: bool = False
 
 
 @dataclass(frozen=True)

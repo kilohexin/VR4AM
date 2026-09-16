@@ -4,7 +4,7 @@
 
 本改动不是22mm位移修复，不放行真机测试。不更改200ms停止RPC等待期限、stop_sys升级条件、运动限位或停止确认判据。
 
-RealLebaiAdapter新增构造参数 `stop_diagnostic_sampling=False`。仅显式开启且有事件记录器时，首次stop_move请求建立后启动独立读取任务。当前没有CLI、网页或配置YAML启用入口；所有既有启动路径默认不启用。不要求实验室改代码启用。
+RealLebaiAdapter新增构造参数 `stop_diagnostic_sampling=False`。仅显式开启且有事件记录器时，首次stop_move请求建立后启动独立读取任务。9bd1bcd初版没有CLI入口；后续已补充smoke的显式 `--stop-rpc-diagnostics` 参数，仅支持stop/translate，见 `lab-stop-rpc-diagnostics-handoff-2026-09-16.md`。网页和配置YAML不新增启用入口；所有既有启动路径默认不启用。不要求实验室改代码启用。
 
 ## 读取与记录
 

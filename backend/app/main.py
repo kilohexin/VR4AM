@@ -64,8 +64,12 @@ def build_backend(
     recorder: RecorderSink,
     client_factory: ClientFactory = connect_real_client,
     backend_label: RuntimeBackend = "LEBAI",
+    *,
+    stop_diagnostic_sampling: bool = False,
 ) -> RobotBackend:
     if settings.backend == "simulator":
+        if stop_diagnostic_sampling:
+            raise ValueError("stop_rpc_diagnostics_requires_lebai")
         return SimRobotAdapter()
     if settings.lebai is None:
         raise RuntimeError("missing_lebai_settings")
@@ -76,6 +80,7 @@ def build_backend(
         client_factory=client_factory,
         event_callback=recorder.write_event,
         backend_label=backend_label,
+        stop_diagnostic_sampling=stop_diagnostic_sampling,
     )
 
 
