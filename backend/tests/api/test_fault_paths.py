@@ -296,6 +296,7 @@ async def test_absolute_deadline_lateness_faults_real_simulator_chain(
         clock=clock,
         recorder=NoopRecorder(),
     )
+    await control.connect()
     tick_count = 0
     real_tick = control.tick
 

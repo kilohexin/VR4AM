@@ -607,6 +607,19 @@ class RobotControl:
                     self._consecutive_overruns = 0
                     self._deadline_rebase_requested = False
                 lateness_ns = now_ns - next_deadline_ns
+                if (
+                    lateness_ns > OVERRUN_NS
+                    and self.machine.mode is TeleopMode.DISCONNECTED
+                    and self.latest.snapshot() is None
+                    and self._fault is None
+                    and not self._pending_stop_completion
+                    and not self._stop_unverified
+                ):
+                    # No session or unresolved stop owns this deadline. An idle
+                    # scheduler delay must not manufacture a robot fault/stop.
+                    next_deadline_ns = now_ns
+                    lateness_ns = 0
+                    self._consecutive_overruns = 0
                 if lateness_ns > OVERRUN_NS:
                     self._consecutive_overruns += 1
                 else:

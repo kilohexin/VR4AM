@@ -2045,6 +2045,7 @@ async def test_two_consecutive_absolute_deadline_lateness_over_40ms_fault_and_st
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     control, latest, backend, clock = make_control()
+    await control.connect()
     latest.publish(frame(1, False), clock.now_ns())
     control_tick = control.tick
     tick_count = 0
@@ -2065,6 +2066,39 @@ async def test_two_consecutive_absolute_deadline_lateness_over_40ms_fault_and_st
     fault_state = await control.state_message()
     assert fault_state.mode == TeleopMode.FAULT
     assert control.mode == TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_disconnected_idle_wakeup_delay_does_not_fault_or_repeat_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingRecorder()
+    control, _latest, backend, clock = make_control(recorder=recorder)
+    await control.connect()
+    await control.on_disconnect()
+    assert control.mode is TeleopMode.DISCONNECTED
+    assert backend.stops == [StopReason.DISCONNECT]
+    tick_count = 0
+
+    async def idle_tick() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        if tick_count == 4:
+            control._running = False
+
+    async def delayed_wakeup(_delay: float) -> None:
+        clock.advance_ms(70)
+
+    monkeypatch.setattr("app.control.robot_control.asyncio.sleep", delayed_wakeup)
+    control.tick = idle_tick  # type: ignore[method-assign]
+    control._running = True
+    await control.run()
+
+    assert [event for event in recorder.events if event["kind"] == "robot_fault"] == []
+    assert backend.stops == [StopReason.DISCONNECT]
+    assert control.mode is TeleopMode.DISCONNECTED
+    await control.connect()
+    assert control.mode is TeleopMode.READY
 
 
 @pytest.mark.asyncio
