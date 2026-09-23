@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from math import dist
 
 import pytest
 import yaml
+from scipy.spatial.transform import Rotation
 
 from app.commissioning.low_speed_profile import create_low_speed_profile
 from app.config import Settings
+from app.digital_twin.runtime import load_digital_twin_settings
+from app.main import _build_limiter
+from app.schemas.messages import Pose
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -87,3 +92,29 @@ def test_existing_output_is_never_overwritten(tmp_path: Path) -> None:
         create_low_speed_profile(source, output)
 
     assert output.read_bytes() == b"existing"
+
+
+def test_generated_profile_reaches_fake_runtime_motion_limiter(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    output = tmp_path / "slow.yaml"
+    create_low_speed_profile(source, output)
+    settings = load_digital_twin_settings(output)
+    limiter = _build_limiter(settings, "LEBAI_FAKE")
+    current = Pose(p=(0.0, 0.0, 0.0), q=(0.0, 0.0, 0.0, 1.0))
+    requested = Pose(
+        p=(0.02, 0.0, 0.0),
+        q=tuple(Rotation.from_euler("z", 5.0, degrees=True).as_quat()),
+    )
+
+    for _ in range(50):
+        next_pose = limiter.limit_motion(current, requested, 0.02)
+        assert dist(current.p, next_pose.p) <= 0.0001 + 1e-12
+        angular_step = (
+            Rotation.from_quat(next_pose.q)
+            * Rotation.from_quat(current.q).inv()
+        ).magnitude()
+        assert angular_step <= 0.001 + 1e-12
+        current = next_pose
+
+    assert 0 < current.p[0] <= 0.005 + 1e-12
+    assert Rotation.from_quat(current.q).magnitude() <= 0.05 + 1e-12
