@@ -240,7 +240,8 @@ def create_app(
             app.state.preflight_ready = preflight.ready
             app.state.preflight_reason = preflight.reason
             app.state.real_robot_enabled = bool(
-                runtime_settings.lebai is not None
+                runtime_backend == "LEBAI"
+                and runtime_settings.lebai is not None
                 and runtime_settings.lebai.mode == "control"
                 and preflight.ready
             )

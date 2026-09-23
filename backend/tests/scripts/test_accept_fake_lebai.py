@@ -105,6 +105,34 @@ def test_run_gate_reports_the_fake_runtime_and_software_provenance(
     assert not output.with_suffix(".json.tmp").exists()
 
 
+def test_backend_suite_collects_root_script_tests(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "run_fake_lebai_scenarios",
+        lambda: _passing_scenarios(module),
+    )
+
+    def command_runner(name, argv, cwd):
+        if name == "backend_tests":
+            assert cwd == ROOT
+            assert tuple(argv[1:]) == (
+                "-m", "pytest", "-c", "backend/pyproject.toml", "backend/tests", "-q",
+            )
+        return module.CommandResult(
+            name=name,
+            argv=tuple(argv),
+            cwd=str(cwd),
+            returncode=0,
+            duration_s=0.1,
+            passed_count=1,
+            failed_count=0,
+            output_tail="1 passed",
+        )
+
+    module.run_gate(ROOT, command_runner=command_runner)
+
+
 def test_command_failure_marks_report_failed_and_cli_returns_one(
     monkeypatch,
     tmp_path: Path,

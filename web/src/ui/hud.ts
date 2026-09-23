@@ -33,6 +33,7 @@ export class Hud {
 
   private readonly modeValue: HTMLElement;
   private readonly runtimeIdentityValue: HTMLElement;
+  private readonly brandHeading: HTMLElement;
   private readonly backendStateValue: HTMLElement;
   private readonly connectionValue: HTMLElement;
   private readonly trackingValue: HTMLElement;
@@ -55,12 +56,12 @@ export class Hud {
     root.innerHTML = `
       <header class="top-bar">
         <div class="brand-lockup">
-          <h1>LM3 遥操作仿真</h1>
-          <div class="simulator-label">仅仿真 · SIMULATOR</div>
+          <h1>LM3 遥操作</h1>
+          <div class="simulator-label">运行环境未确认</div>
         </div>
         <div class="command-actions-host"></div>
       </header>
-      <div class="offline-rehearsal-banner" role="note" style="position: fixed; top: 0; left: 0; right: 0; z-index: 20;">仿真模式，不是真机</div>
+      <div class="offline-rehearsal-banner" role="note" style="position: fixed; top: 0; left: 0; right: 0; z-index: 20;">运行环境未确认，禁止控制</div>
       <main class="console-main">
         <section class="simulation-viewport" aria-label="LM3 三维仿真场景">
           <div class="scene-canvas"></div>
@@ -121,6 +122,7 @@ export class Hud {
     this.diagnosticsContainer = requireElement(root, '.diagnostics-rail');
     this.modeValue = requireElement(root, '[data-field="mode"]');
     this.runtimeIdentityValue = requireElement(root, '.simulator-label');
+    this.brandHeading = requireElement(root, '.brand-lockup h1');
     this.backendStateValue = requireElement(root, '[data-field="backend-state"]');
     this.connectionValue = requireElement(root, '[data-field="connection"]');
     this.trackingValue = requireElement(root, '[data-field="tracking"]');
@@ -169,7 +171,19 @@ export class Hud {
     realMode: RealRobotMode | null,
   ): void {
     this.runtimeIdentityValue.textContent = runtimeIdentityLabel(backend, realMode);
-    this.runtimeIdentityValue.dataset.backend = backend ?? 'SIMULATOR';
+    this.runtimeIdentityValue.dataset.backend = backend ?? 'UNKNOWN';
+    this.brandHeading.textContent = backend === 'LEBAI_FAKE' || backend === 'SIMULATOR'
+      ? 'LM3 遥操作仿真'
+      : 'LM3 遥操作';
+    this.rehearsalBanner.textContent = backend === 'LEBAI'
+      ? realMode === 'control'
+        ? '真机控制模式，请确认现场安全'
+        : realMode === 'readonly'
+          ? '真机只读模式，运动指令已禁用'
+          : '真机运行模式未确认，禁止控制'
+      : backend === null
+        ? '运行环境未确认，禁止控制'
+        : '仿真模式，不是真机';
   }
 
   setController(state: ControllerHudState): void {
@@ -279,9 +293,12 @@ export function readableFault(fault: string | null): string {
 }
 
 function runtimeIdentityLabel(backend: RuntimeBackend | null, realMode: RealRobotMode | null): string {
+  if (backend === null) return '运行环境未确认';
   if (backend === 'LEBAI_FAKE') return '仿真 · LEBAI_FAKE';
   if (backend === 'LEBAI') {
-    return realMode === 'control' ? '真机控制 · LEBAI' : '真机只读 · LEBAI';
+    if (realMode === 'control') return '真机控制 · LEBAI';
+    if (realMode === 'readonly') return '真机只读 · LEBAI';
+    return '真机模式未确认 · LEBAI';
   }
   return '仅仿真 · SIMULATOR';
 }

@@ -30,7 +30,7 @@ describe('Chinese simulator HUD', () => {
 
     expect(hud.sceneContainer).toBeInstanceOf(HTMLElement);
     expect(hud.rehearsalBanner).toBeInstanceOf(HTMLElement);
-    expect(hud.rehearsalBanner.textContent).toBe('仿真模式，不是真机');
+    expect(hud.rehearsalBanner.textContent).toBe('运行环境未确认，禁止控制');
     expect(hud.rehearsalBanner.parentElement).toBe(document.querySelector('.operator-console'));
     expect(hud.rehearsalBanner.closest('.status-rail')).toBeNull();
     expect(hud.rehearsalBanner.nextElementSibling).toBe(document.querySelector('.console-main'));
@@ -42,9 +42,11 @@ describe('Chinese simulator HUD', () => {
     expect(hud.rehearsalContainer).toBeInstanceOf(HTMLElement);
     expect(hud.rehearsalContainer.nextElementSibling).toBe(hud.settingsContainer);
     expect(hud.settingsContainer.nextElementSibling).toBe(hud.diagnosticsContainer);
-    expect(document.body.textContent).toContain('LM3 遥操作仿真');
-    expect(document.body.textContent).toContain('仅仿真 · SIMULATOR');
+    expect(document.body.textContent).not.toContain('LM3 遥操作仿真');
+    expect(document.body.textContent).not.toContain('仅仿真 · SIMULATOR');
     expect(document.body.textContent).toContain('右 Grip 建立末端零位');
+    expect(document.querySelector('.brand-lockup h1')?.textContent).toBe('LM3 遥操作');
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('运行环境未确认');
     expect(document.body.textContent).not.toContain('LEBAI');
   });
 
@@ -144,13 +146,22 @@ describe('Chinese simulator HUD', () => {
 
     hud.setRuntimeIdentity('SIMULATOR', null);
     expect(document.querySelector('.simulator-label')?.textContent).toBe('仅仿真 · SIMULATOR');
+    expect(document.querySelector('.brand-lockup h1')?.textContent).toBe('LM3 遥操作仿真');
+    expect(hud.rehearsalBanner.textContent).toBe('仿真模式，不是真机');
     hud.setRuntimeIdentity('LEBAI_FAKE', null);
     expect(document.querySelector('.simulator-label')?.textContent).toBe('仿真 · LEBAI_FAKE');
     expect(document.querySelector('.simulator-label')?.getAttribute('data-backend')).toBe('LEBAI_FAKE');
+    expect(hud.rehearsalBanner.textContent).toBe('仿真模式，不是真机');
+    hud.setRuntimeIdentity('LEBAI', null);
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('真机模式未确认 · LEBAI');
+    expect(hud.rehearsalBanner.textContent).toBe('真机运行模式未确认，禁止控制');
     hud.setRuntimeIdentity('LEBAI', 'readonly');
     expect(document.querySelector('.simulator-label')?.textContent).toBe('真机只读 · LEBAI');
+    expect(document.querySelector('.brand-lockup h1')?.textContent).toBe('LM3 遥操作');
+    expect(hud.rehearsalBanner.textContent).toBe('真机只读模式，运动指令已禁用');
     hud.setRuntimeIdentity('LEBAI', 'control');
     expect(document.querySelector('.simulator-label')?.textContent).toBe('真机控制 · LEBAI');
+    expect(hud.rehearsalBanner.textContent).toBe('真机控制模式，请确认现场安全');
   });
 
   it('resets a real control identity to a null-safe copy on disconnect', () => {
@@ -160,8 +171,10 @@ describe('Chinese simulator HUD', () => {
 
     hud.setConnectionStatus({state: 'disconnected'});
 
-    expect(document.querySelector('.simulator-label')?.textContent).toBe('仅仿真 · SIMULATOR');
-    expect(document.querySelector('.simulator-label')?.getAttribute('data-backend')).toBe('SIMULATOR');
+    expect(document.querySelector('.simulator-label')?.textContent).toBe('运行环境未确认');
+    expect(document.querySelector('.simulator-label')?.getAttribute('data-backend')).toBe('UNKNOWN');
+    expect(document.querySelector('.brand-lockup h1')?.textContent).toBe('LM3 遥操作');
+    expect(hud.rehearsalBanner.textContent).toBe('运行环境未确认，禁止控制');
   });
 
   it('clears stale backend, age, fault, and latency values on disconnect', () => {

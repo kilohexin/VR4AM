@@ -158,6 +158,7 @@ class RobotControl:
         self._deadline_rebase_requested = False
         self._pending_stop_completion = False
         self._hard_stop_completion = False
+        self._completed_stale_stop = False
         self._stop_unverified = False
         self._stop_unverified_from_cancelled_stop = False
         self._fault: str | None = None
@@ -187,6 +188,7 @@ class RobotControl:
     async def connect(self) -> None:
         state = await self.backend.get_state()
         self.machine.connect()
+        self._completed_stale_stop = False
         self._last_gripper_sent = state.gripper
         self._last_gripper_sent_ns = self.clock.now_ns()
         if self._fault is not None:
@@ -306,6 +308,7 @@ class RobotControl:
             self._latch_recording_fault()
             raise RuntimeError("arm_blocked_by_preflight:recording_unavailable")
         self.machine.arm()
+        self._completed_stale_stop = False
         # Connecting only observes the gripper; it does not issue a command.
         # Make the first authorized delta eligible immediately after Arm.
         self._last_gripper_sent_ns = None
@@ -594,6 +597,8 @@ class RobotControl:
 
     async def run(self) -> None:
         next_deadline_ns = self.clock.now_ns()
+        next_wakeup_ns: int | None = None
+        previous_tick_duration_ns: int | None = None
         try:
             while self._running:
                 now_ns = self.clock.now_ns()
@@ -607,18 +612,37 @@ class RobotControl:
                 else:
                     self._consecutive_overruns = 0
                 if self._consecutive_overruns >= 2:
-                    await self._enter_fault("control_overrun")
+                    latest = self.latest.snapshot()
+                    await self._enter_fault(
+                        "control_overrun",
+                        diagnostics={
+                            "mode_before_fault": self.machine.mode.value,
+                            "deadline_lateness_ns": lateness_ns,
+                            "previous_tick_duration_ns": previous_tick_duration_ns,
+                            "wakeup_lateness_ns": (
+                                max(0, now_ns - next_wakeup_ns)
+                                if next_wakeup_ns is not None
+                                else None
+                            ),
+                            "frame_age_ms": (
+                                max(0.0, (now_ns - latest.received_ns) / 1_000_000)
+                                if latest is not None
+                                else None
+                            ),
+                        },
+                    )
+                tick_started_ns = self.clock.now_ns()
                 await self.tick()
+                previous_tick_duration_ns = self.clock.now_ns() - tick_started_ns
                 if self._deadline_rebase_requested:
                     next_deadline_ns = self.clock.now_ns()
                     self._consecutive_overruns = 0
                     self._deadline_rebase_requested = False
                 next_deadline_ns += CONTROL_PERIOD_NS
-                delay_seconds = max(
-                    0.0,
-                    (next_deadline_ns - self.clock.now_ns()) / 1_000_000_000,
-                )
-                await asyncio.sleep(delay_seconds)
+                before_sleep_ns = self.clock.now_ns()
+                delay_ns = max(0, next_deadline_ns - before_sleep_ns)
+                next_wakeup_ns = before_sleep_ns + delay_ns
+                await asyncio.sleep(delay_ns / 1_000_000_000)
         except asyncio.CancelledError:
             self._running = False
             raise
@@ -648,6 +672,12 @@ class RobotControl:
         now_ns = self.clock.now_ns()
         age_ms = max(0.0, (now_ns - received.received_ns) / 1_000_000)
         self._last_sample_age_ms = age_ms
+        if self._completed_stale_stop and self.machine.mode == TeleopMode.DISARMED and (
+            age_ms >= VR_FRAME_STALE_MS
+            or not received.frame.tracking_valid
+            or received.frame.visibility != "visible"
+        ):
+            return
         if age_ms >= 250:
             await self._safe_stop(StopReason.STALE)
             if not self._hard_stop_completion:
@@ -841,6 +871,8 @@ class RobotControl:
                 or state.robot_state is BackendState.IDLE
             )
         ):
+            if self.machine.mode == TeleopMode.STALE:
+                self._completed_stale_stop = True
             self._pending_stop_completion = False
             self._hard_stop_completion = False
             self.machine.stop_complete()
@@ -1059,16 +1091,24 @@ class RobotControl:
             return
         await self._stop_backend(reason)
 
-    async def _enter_fault(self, fault: str) -> None:
+    async def _enter_fault(
+        self,
+        fault: str,
+        *,
+        diagnostics: dict[str, object] | None = None,
+    ) -> None:
         self._clear_constraint()
         self._recovery_phase = None
         if self.machine.mode != TeleopMode.FAULT:
             self.machine.fault()
             self._fault = fault
             self._advance_control_generation()
+            payload: dict[str, object] = {"reason": fault}
+            if diagnostics is not None:
+                payload.update(diagnostics)
             await self._record_critical(
                 "robot_fault",
-                {"reason": fault},
+                payload,
             )
             try:
                 await self._stop_backend(StopReason.FAULT)

@@ -243,8 +243,11 @@ def run_gate(
     command_specs = (
         (
             "backend_tests",
-            (sys.executable, "-m", "pytest", "-q"),
-            repo_root / "backend",
+            (
+                sys.executable, "-m", "pytest", "-c",
+                "backend/pyproject.toml", "backend/tests", "-q",
+            ),
+            repo_root,
         ),
         (
             "frontend_tests",

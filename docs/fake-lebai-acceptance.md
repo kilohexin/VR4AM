@@ -6,6 +6,11 @@ real-robot confirmation, or verify a physical safety property. The generated
 report always identifies the runtime as `LEBAI_FAKE`, sets `digital_twin` to
 `true`, and sets `hardware_verified` to `false`.
 
+The Fake backend uses an in-memory `control` mode so simulated hand-controller
+commands work. Its `/health` response therefore reports
+`real_robot_mode: "control"`, but `real_robot_enabled: false`: that field
+refers to physical hardware, not to the digital twin's simulated control.
+
 ## Start the offline stack
 
 From the repository root, start the Fake Lebai backend in one terminal:

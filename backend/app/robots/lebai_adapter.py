@@ -760,6 +760,7 @@ class RealLebaiAdapter:
             sample_age_ms=0.0,
             fault=self._latched_fault or snapshot.estop,
             backend=self._backend_label,
+            real_robot_mode=self.settings.mode,
         )
 
     async def preflight(self) -> BackendPreflight:

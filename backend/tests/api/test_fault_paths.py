@@ -170,6 +170,13 @@ async def test_tracking_and_visibility_loss_publish_stale_before_disarming(
     assert published.mode is TeleopMode.STALE
     assert control.mode is TeleopMode.DISARMED
 
+    for _ in range(50):
+        clock.advance_ms(20)
+        await control.tick()
+        await control.state_message()
+
+    assert adapter.stop_reasons.count(StopReason.STALE) == 1
+
 
 @pytest.mark.asyncio
 async def test_same_session_rollback_never_reaches_real_simulator_control() -> None:

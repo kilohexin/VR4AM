@@ -8,6 +8,8 @@
 
 当前 Task 9 冻结点的完整 PC 浏览器演练仍为 **pending/failed**：Fake 准备位姿已在 `11.488 s` 内通过，但平移阶段的一次 `399.063 ms` 帧空洞触发了预期的 stale 停止，后续阶段未完成。该状态不改变现场流程；即使未来离线浏览器演练通过，也仍必须从 `readonly` 开始并完成全部八项真机检查。
 
+2026-09-23 更新：`virtual-lm3`、`LEBAI_FAKE` 与离线聚合验收门已在主机端运行通过；三份报告的 `hardware_verified` 均为 `false`，聚合报告 `browser_smoke=pending`。实验室 R44 Quest + Fake 演练确认 XR 控制链，但以 `singular_configuration` 和 `control_overrun` 故障收尾；R45 真机只读链路阻止了运动、夹爪指令，也再次记录 `control_overrun`。两轮均不覆盖运动后的停止异常，不得填作 VR 真机运动通过。
+
 ## 0. 必须遵守的边界
 
 - 不在无人值守、急停不可达或工作区不清空时运行真机。
@@ -234,8 +236,7 @@ effort 的 `ik_tracking_backpressure` 诊断，并在 HUD 复用“运动连续�
 
 ## 6. Quest 真机遥操作
 
-本节是后续阶段说明。当前 `+roll 1°` smoke 未经新会话复核前，不得进入
-Quest 真机连续遥操作；可继续使用 Quest 控制仿真机械臂。
+本节是后续阶段说明，**不是当前的真机运动授权**。截至 2026-09-23，现场已在运动后 Grip 松开停止和静止 `IDLE` 下单次 `stop_sys` 两种场景分别记录到毫米级非预期位移；随后恢复 `IDLE` 的只读预检通过，也没有消除历史物理偏移。连续 Quest 真机遥操作会反复经过 Grip 松开停止路径，因此不能用只读预检通过或 Fake 演练通过代替该路径的受控验证。此时可继续使用 Quest 控制仿真机械臂。
 
 后端仍只监听服务器回环地址：
 
@@ -286,7 +287,7 @@ sudo ufw allow from <QUEST-SUBNET-CIDR> to any port 5173 proto tcp
 4. 在后端终端按 `Ctrl+C`；
 5. 等待后端完成 stop、disconnect 和日志关闭后再断电。
 
-若 stop 确认失败，后端会尝试 `stop_sys` 升级并保持故障锁定。不得通过刷新页面绕过故障。
+若 stop 确认失败，当前后端可能尝试 `stop_sys` 升级并保持故障锁定；现场已有 `stop_sys` 后非预期位移证据。不得通过刷新页面绕过故障，也不得把 `STOP` 状态字或 `target−actual` 归零单独当作物理静止的证明。
 
 ## 8. 日志与反馈材料
 

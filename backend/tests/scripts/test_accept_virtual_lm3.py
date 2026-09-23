@@ -127,6 +127,39 @@ def test_run_gate_emits_complete_hardware_separated_report(
     assert not output.with_suffix(".json.tmp").exists()
 
 
+def test_backend_suite_collects_root_script_tests(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "run_full_soak_process",
+        lambda repo_root, timeout_s=60.0: _passing_soak_measurement(module),
+    )
+    monkeypatch.setattr(module, "benchmark_soak", _passing_benchmark)
+
+    def command_runner(name, argv, cwd):
+        if name == "backend_tests":
+            assert cwd == ROOT
+            assert tuple(argv[1:]) == (
+                "-m", "pytest", "-c", "backend/pyproject.toml", "backend/tests", "-q",
+            )
+        return module.CommandResult(
+            name=name,
+            argv=tuple(argv),
+            cwd=str(cwd),
+            returncode=0,
+            duration_s=0.1,
+            passed_count=1,
+            failed_count=0,
+            output_tail="1 passed",
+        )
+
+    module.run_gate(
+        ROOT,
+        command_runner=command_runner,
+        scenario_runner=_passing_scenarios,
+    )
+
+
 def test_command_failure_fails_gate_and_exit_code(monkeypatch) -> None:
     module = _load_module()
     monkeypatch.setattr(

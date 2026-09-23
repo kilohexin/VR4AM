@@ -26,7 +26,7 @@ from app.schemas.messages import (
     VRFrame,
 )
 from tests.robots.fake_lebai import FakeLebaiClient, IDLE_Q
-from tests.robots.real_settings import control_settings
+from tests.robots.real_settings import control_settings, readonly_settings
 
 
 @pytest.mark.asyncio
@@ -201,6 +201,23 @@ async def _connected_control_adapter(
     )
     await adapter.connect()
     return adapter, fake, test_clock
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["readonly", "control"])
+async def test_state_reports_configured_real_robot_mode(mode: str) -> None:
+    settings = readonly_settings() if mode == "readonly" else control_settings()
+    adapter = RealLebaiAdapter(
+        settings,
+        client_factory=AsyncMock(return_value=FakeLebaiClient.idle()),
+    )
+    await adapter.connect()
+    try:
+        state = await adapter.get_state()
+        assert state.backend == "LEBAI"
+        assert state.real_robot_mode == mode
+    finally:
+        await adapter.disconnect()
 
 
 @pytest.mark.asyncio

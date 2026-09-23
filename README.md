@@ -104,6 +104,8 @@ Fake 准备位姿单独限时 `15 s`；每一个平移/返回和旋转/返回子
 
 当前 Task 9 冻结点的完整浏览器 smoke 尚未通过：应用内 Browser 被本地证书错误安全阻止，获准的 Edge fallback 虽确认首屏并在 `11.488 s` 内完成 Fake 准备位姿，但随后因一次 `399.063 ms` 帧空洞正确触发 `unexpected_stale` 停止。聚合结果必须保持 `browser_smoke=pending`；详见演练文档中的当前验收状态，且不得据此声称真机已验证。
 
+2026-09-23 主机端复核：Virtual LM3、`LEBAI_FAKE` 与离线聚合自动验收已通过，报告仍为 `hardware_verified=false`，聚合报告为 `browser_smoke=pending`。实验室后续完成 R44 Quest + Fake 演练和 R45 真机只读链路核验；R44 记录了 `singular_configuration` 与 `control_overrun`，R45 的只读门阻止了运动指令，但也记录了 `control_overrun`。这些结果不代表真机运动通过，停止后的非预期位移仍未解决。
+
 ## Quest 控制摘要
 
 Milestone 1 使用原厂 Touch Plus 双手柄。右手控制机械臂末端和夹爪：

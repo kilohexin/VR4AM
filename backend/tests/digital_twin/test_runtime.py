@@ -108,6 +108,7 @@ def test_digital_twin_app_reports_exact_fake_identity(
         health = client.get("/health").json()
     assert health["backend"] == "LEBAI_FAKE"
     assert health["real_robot_mode"] == "control"
+    assert health["real_robot_enabled"] is False
     assert health["hardware_verified"] is False
     assert recorder_runtime == ["LEBAI_FAKE"]
     real_connect.assert_not_called()
