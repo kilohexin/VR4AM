@@ -229,7 +229,22 @@ describe('VR safety presentation', () => {
     };
 
     expect(describeVrSafety(state('locked'), true, summary)).toMatchObject({
-      statusLine: '真机已连接 · CONTROL · TCP 0.312/−0.041/0.428 · 18 ms',
+      statusLine: '真机已连接 · CONTROL · TCP 0.312/−0.041/0.428 · 夹爪40% · 18 ms',
+    });
+  });
+
+  it('does not mislabel an unknown real-arm mode as readonly', () => {
+    const summary: RobotRuntimeSummary = {
+      backend: 'LEBAI',
+      realRobotMode: null,
+      actualTcp: null,
+      gripper: null,
+      latencyMs: null,
+      hardwareVerified: false,
+    };
+
+    expect(describeVrSafety(state('locked'), true, summary)).toMatchObject({
+      statusLine: '真机已连接 · 模式未确认 · TCP — · 夹爪— · —',
     });
   });
 

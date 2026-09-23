@@ -137,8 +137,15 @@ function formatRuntimeSummary(summary: RobotRuntimeSummary): string {
     : '—';
   const latency = summary.latencyMs === null ? '—' : `${Math.round(summary.latencyMs)} ms`;
   if (summary.backend === 'LEBAI') {
-    const mode = summary.realRobotMode === 'control' ? 'CONTROL' : 'READONLY';
-    return `真机已连接 · ${mode} · TCP ${tcp} · ${latency}`;
+    const mode = summary.realRobotMode === 'control'
+      ? 'CONTROL'
+      : summary.realRobotMode === 'readonly'
+        ? 'READONLY'
+        : '模式未确认';
+    const gripper = summary.gripper === null || !Number.isFinite(summary.gripper)
+      ? '—'
+      : `${Math.round(summary.gripper * 100)}%`;
+    return `真机已连接 · ${mode} · TCP ${tcp} · 夹爪${gripper} · ${latency}`;
   }
   if (summary.backend === 'LEBAI_FAKE') return `仿真已连接 · TCP ${tcp} · ${latency}`;
   return `SIMULATOR · TCP ${tcp} · ${latency}`;
