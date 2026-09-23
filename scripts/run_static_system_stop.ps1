@@ -24,6 +24,7 @@ $script = Join-Path $Source 'scripts\real_robot_static_system_stop.py'
 if (-not (Test-Path -LiteralPath $script)) { throw 'DIAGNOSTIC_SCRIPT_MISSING' }
 $configBuilder = Join-Path $Source 'scripts\build_static_stop_control_config.py'
 if (-not (Test-Path -LiteralPath $configBuilder)) { throw 'CONFIG_BUILDER_MISSING' }
+New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($Output)) -Force | Out-Null
 New-Item -ItemType Directory -Path $Output | Out-Null
 $backupPath = Join-Path $Output 'config-before.yaml'
 $candidatePath = Join-Path $Output 'config-control.yaml'

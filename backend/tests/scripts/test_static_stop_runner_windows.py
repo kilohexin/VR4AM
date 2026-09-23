@@ -32,7 +32,8 @@ def test_wrapper_restores_bytes_and_checks_semantic_mode(tmp_path, mode, expecte
     original = (f'backend: lebai\r\nreal_robot:\r\n  mode: {mode}\r\n'
                 f'  ip: 192.0.2.1\r\nother:\r\n  mode: {other_mode}\r\n').encode()
     config.write_bytes(original)
-    output = tmp_path / 'once'
+    output = tmp_path / 'artifacts' / 'acceptance' / 'once'
+    assert not output.parent.exists()
     completed = subprocess.run(
         [POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
          str(ROOT / 'scripts' / 'run_static_system_stop.ps1'),
