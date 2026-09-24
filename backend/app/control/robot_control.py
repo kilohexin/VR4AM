@@ -159,6 +159,7 @@ class RobotControl:
         self._trigger_changed_since_arm = False
         self._consecutive_overruns = 0
         self._deadline_rebase_requested = False
+        self._deadline_compensation_ns = 0
         self._pending_stop_completion = False
         self._hard_stop_completion = False
         self._completed_stale_stop = False
@@ -606,6 +607,7 @@ class RobotControl:
         next_deadline_ns = self.clock.now_ns()
         next_wakeup_ns: int | None = None
         previous_tick_duration_ns: int | None = None
+        self._deadline_compensation_ns = 0
         try:
             while self._running:
                 now_ns = self.clock.now_ns()
@@ -613,6 +615,7 @@ class RobotControl:
                     next_deadline_ns = now_ns
                     self._consecutive_overruns = 0
                     self._deadline_rebase_requested = False
+                    self._deadline_compensation_ns = 0
                 lateness_ns = now_ns - next_deadline_ns
                 latest = self.latest.snapshot()
                 no_client_frame = (
@@ -667,6 +670,12 @@ class RobotControl:
                     next_deadline_ns = self.clock.now_ns()
                     self._consecutive_overruns = 0
                     self._deadline_rebase_requested = False
+                    self._deadline_compensation_ns = 0
+                else:
+                    # A successful claw RPC can occupy an ARMED tick without
+                    # arm motion; account for only that wait, not other work.
+                    next_deadline_ns += self._deadline_compensation_ns
+                    self._deadline_compensation_ns = 0
                 next_deadline_ns += CONTROL_PERIOD_NS
                 before_sleep_ns = self.clock.now_ns()
                 delay_ns = max(0, next_deadline_ns - before_sleep_ns)
@@ -745,7 +754,11 @@ class RobotControl:
                 and not self._shutdown_started
                 and self.machine.mode in {TeleopMode.ARMED, TeleopMode.ACTIVE}
             ):
-                await self._send_latest_gripper(received.frame.right.trigger, now_ns)
+                gripper_wait_ns = await self._send_latest_gripper(
+                    received.frame.right.trigger, now_ns
+                )
+                if gripper_wait_ns is not None and self.machine.mode == TeleopMode.ARMED:
+                    self._deadline_compensation_ns += gripper_wait_ns
             previous_mode = self.machine.mode
             if (
                 is_new_frame
@@ -940,21 +953,23 @@ class RobotControl:
         self._last_gripper_sent = value
         self._last_gripper_sent_ns = self.clock.now_ns()
 
-    async def _send_latest_gripper(self, value: float, now_ns: int) -> None:
+    async def _send_latest_gripper(self, value: float, now_ns: int) -> int | None:
         if self._armed_trigger_baseline is None:
             self._armed_trigger_baseline = value
-            return
+            return None
         if not self._trigger_changed_since_arm:
             # Require a deliberate press before mapping Trigger to the claw.
             # Small analog jitter or releasing a held Trigger is not intent.
             if value - self._armed_trigger_baseline < GRIPPER_ACTIVATION_DELTA:
-                return
+                return None
             self._trigger_changed_since_arm = True
         if self._last_gripper_sent is None:
+            started_ns = self.clock.now_ns()
             await self.backend.set_gripper(value)
+            wait_ns = max(0, self.clock.now_ns() - started_ns)
             self._last_gripper_sent = value
             self._last_gripper_sent_ns = now_ns
-            return
+            return wait_ns
         delta = abs(value - self._last_gripper_sent)
         if delta < GRIPPER_MIN_DELTA or math.isclose(
             delta,
@@ -962,15 +977,18 @@ class RobotControl:
             rel_tol=0.0,
             abs_tol=1e-12,
         ):
-            return
+            return None
         if (
             self._last_gripper_sent_ns is not None
             and now_ns - self._last_gripper_sent_ns < GRIPPER_PERIOD_NS
         ):
-            return
+            return None
+        started_ns = self.clock.now_ns()
         await self.backend.set_gripper(value)
+        wait_ns = max(0, self.clock.now_ns() - started_ns)
         self._last_gripper_sent = value
         self._last_gripper_sent_ns = now_ns
+        return wait_ns
 
     async def _record_critical(self, kind: str, payload: object) -> bool:
         try:

@@ -2444,6 +2444,132 @@ async def test_slow_hold_resume_does_not_count_one_preflight_as_two_active_overr
 
 
 @pytest.mark.asyncio
+async def test_successful_slow_gripper_write_while_armed_does_not_fault_on_catch_up_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control, latest, backend, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+
+    async def slow_successful_gripper(value: float) -> None:
+        backend.gripper_commands.append(value)
+        clock.advance_ms(180)
+
+    backend.set_gripper = slow_successful_gripper  # type: ignore[method-assign]
+    real_tick = control.tick
+    tick_count = 0
+
+    async def trigger_then_regular_ticks() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        latest.publish(
+            frame(tick_count + 1, False, trigger=0.0 if tick_count == 1 else 0.5),
+            clock.now_ns(),
+        )
+        await real_tick()
+        if tick_count == 5:
+            control._running = False
+
+    await run_with_fake_sleep(monkeypatch, control, clock, trigger_then_regular_ticks)
+
+    assert backend.gripper_commands == pytest.approx([0.5])
+    assert control.mode is TeleopMode.ARMED
+    assert StopReason.FAULT not in backend.stops
+
+
+@pytest.mark.asyncio
+async def test_fast_gripper_write_does_not_hide_slow_active_state_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control, latest, backend, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+    real_get_state = backend.get_state
+
+    async def slow_state_read() -> RobotStateMessage:
+        clock.advance_ms(90)
+        return await real_get_state()
+
+    backend.get_state = slow_state_read  # type: ignore[method-assign]
+    real_tick = control.tick
+    tick_count = 0
+
+    async def trigger_and_grip_then_regular_ticks() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        latest.publish(
+            frame(
+                tick_count + 1,
+                tick_count >= 2,
+                trigger=0.0 if tick_count == 1 else 0.5,
+            ),
+            clock.now_ns(),
+        )
+        await real_tick()
+        if tick_count == 5:
+            control._running = False
+
+    await run_with_fake_sleep(
+        monkeypatch, control, clock, trigger_and_grip_then_regular_ticks
+    )
+
+    assert backend.gripper_commands == pytest.approx([0.5])
+    assert control.mode is TeleopMode.FAULT
+    assert backend.stops[-1] is StopReason.FAULT
+
+
+@pytest.mark.asyncio
+async def test_failed_gripper_write_while_armed_still_latches_fault() -> None:
+    control, latest, backend, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+
+    async def timed_out_gripper(_value: float) -> None:
+        clock.advance_ms(200)
+        raise BackendCommandError("sdk_timeout:set_claw")
+
+    backend.set_gripper = timed_out_gripper  # type: ignore[method-assign]
+    latest.publish(frame(2, False, trigger=0.0), clock.now_ns())
+    await control.tick()
+    latest.publish(frame(3, False, trigger=0.5), clock.now_ns())
+    await control.tick()
+
+    assert control.mode is TeleopMode.FAULT
+    assert backend.stops[-1] is StopReason.FAULT
+    assert control._fault == "sdk_timeout:set_claw"
+
+
+@pytest.mark.asyncio
+async def test_slow_gripper_write_during_active_motion_does_not_rebase_overrun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control, latest, backend, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True, trigger=0.0), clock.now_ns())
+    await control.tick()
+    assert control.mode is TeleopMode.ACTIVE
+
+    async def slow_successful_gripper(value: float) -> None:
+        backend.gripper_commands.append(value)
+        clock.advance_ms(180)
+
+    backend.set_gripper = slow_successful_gripper  # type: ignore[method-assign]
+    real_tick = control.tick
+    tick_count = 0
+
+    async def trigger_during_active_motion() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        latest.publish(frame(tick_count + 2, True, trigger=0.5), clock.now_ns())
+        await real_tick()
+        if tick_count == 4:
+            control._running = False
+
+    await run_with_fake_sleep(monkeypatch, control, clock, trigger_during_active_motion)
+
+    assert backend.gripper_commands == pytest.approx([0.5])
+    assert control.mode is TeleopMode.FAULT
+    assert backend.stops[-1] is StopReason.FAULT
+
+
+@pytest.mark.asyncio
 async def test_active_control_still_faults_on_repeated_deadline_lateness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
