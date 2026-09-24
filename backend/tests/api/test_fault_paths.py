@@ -304,6 +304,7 @@ async def test_absolute_deadline_lateness_faults_real_simulator_chain(
         nonlocal tick_count
         tick_count += 1
         clock.advance_ms(70)
+        latest.publish(_frame(tick_count, False), clock.now_ns())
         await real_tick()
         if tick_count == 3:
             control._running = False

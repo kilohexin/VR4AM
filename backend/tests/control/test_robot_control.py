@@ -2128,12 +2128,73 @@ async def test_disconnected_idle_wakeup_delay_does_not_fault_or_repeat_stop(
 
 
 @pytest.mark.asyncio
+async def test_ready_without_client_frame_ignores_idle_wakeup_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await control.connect()
+    assert control.mode is TeleopMode.READY
+    assert latest.snapshot() is None
+    tick_count = 0
+
+    async def idle_tick() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        if tick_count == 4:
+            control._running = False
+
+    async def delayed_wakeup(_delay: float) -> None:
+        clock.advance_ms(70)
+
+    monkeypatch.setattr("app.control.robot_control.asyncio.sleep", delayed_wakeup)
+    control.tick = idle_tick  # type: ignore[method-assign]
+    control._running = True
+    await control.run()
+
+    assert [event for event in recorder.events if event["kind"] == "robot_fault"] == []
+    assert backend.stops == []
+    assert control.mode is TeleopMode.READY
+
+
+@pytest.mark.asyncio
+async def test_armed_without_new_frame_still_faults_on_repeated_overrun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control, latest, backend, clock = make_control()
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.tick()
+    await control.arm()
+    assert control.mode is TeleopMode.ARMED
+    tick_count = 0
+
+    async def idle_tick() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        if tick_count == 3:
+            control._running = False
+
+    async def delayed_wakeup(_delay: float) -> None:
+        clock.advance_ms(70)
+
+    monkeypatch.setattr("app.control.robot_control.asyncio.sleep", delayed_wakeup)
+    control.tick = idle_tick  # type: ignore[method-assign]
+    control._running = True
+    await control.run()
+
+    assert backend.stops == [StopReason.FAULT]
+    assert control.mode is TeleopMode.FAULT
+
+
+@pytest.mark.asyncio
 async def test_overrun_fault_records_idle_deadline_and_previous_tick_timing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorder = RecordingRecorder()
-    control, _latest, backend, clock = make_control(recorder=recorder)
+    control, latest, backend, clock = make_control(recorder=recorder)
     await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
     tick_count = 0
 
     async def slow_idle_tick() -> None:
@@ -2153,7 +2214,7 @@ async def test_overrun_fault_records_idle_deadline_and_previous_tick_timing(
         "deadline_lateness_ns": 100_000_000,
         "previous_tick_duration_ns": 70_000_000,
         "wakeup_lateness_ns": 0,
-        "frame_age_ms": None,
+        "frame_age_ms": 140.0,
     }
     assert backend.stops == [StopReason.FAULT]
 
@@ -2163,8 +2224,9 @@ async def test_overrun_fault_distinguishes_scheduler_wakeup_from_tick_duration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorder = RecordingRecorder()
-    control, _latest, backend, clock = make_control(recorder=recorder)
+    control, latest, backend, clock = make_control(recorder=recorder)
     await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
     tick_count = 0
 
     async def instant_tick() -> None:
@@ -2189,7 +2251,7 @@ async def test_overrun_fault_distinguishes_scheduler_wakeup_from_tick_duration(
         "deadline_lateness_ns": 100_000_000,
         "previous_tick_duration_ns": 0,
         "wakeup_lateness_ns": 70_000_000,
-        "frame_age_ms": None,
+        "frame_age_ms": 140.0,
     }
     assert backend.stops == [StopReason.FAULT]
 
