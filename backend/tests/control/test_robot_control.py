@@ -1862,6 +1862,55 @@ async def test_arm_does_not_open_closed_gripper_until_trigger_changes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_arm_ignores_small_trigger_noise_before_deliberate_press() -> None:
+    control, latest, backend, clock = make_control()
+    backend.gripper = 0.01
+    await connect_release_arm(control, latest, clock)
+
+    latest.publish(frame(2, False, trigger=0.0), clock.now_ns())
+    await control.tick()
+    for seq, trigger in ((3, 0.0388), (4, 0.0), (5, 0.08)):
+        clock.advance_ms(100)
+        latest.publish(frame(seq, False, trigger=trigger), clock.now_ns())
+        await control.tick()
+
+    assert backend.gripper_commands == []
+    assert backend.gripper == pytest.approx(0.01)
+
+    clock.advance_ms(100)
+    latest.publish(frame(6, False, trigger=0.15), clock.now_ns())
+    await control.tick()
+    assert backend.gripper_commands == pytest.approx([0.15])
+
+    clock.advance_ms(100)
+    latest.publish(frame(7, False, trigger=0.0), clock.now_ns())
+    await control.tick()
+    assert backend.gripper_commands == pytest.approx([0.15, 0.0])
+
+
+@pytest.mark.asyncio
+async def test_releasing_trigger_held_at_arm_does_not_activate_gripper() -> None:
+    control, latest, backend, clock = make_control()
+    backend.gripper = 0.6
+    await control.connect()
+    latest.publish(frame(1, False, trigger=0.35), clock.now_ns())
+    await control.tick()
+    await control.arm()
+
+    latest.publish(frame(2, False, trigger=0.35), clock.now_ns())
+    await control.tick()
+    clock.advance_ms(100)
+    latest.publish(frame(3, False, trigger=0.0), clock.now_ns())
+    await control.tick()
+    assert backend.gripper_commands == []
+
+    clock.advance_ms(100)
+    latest.publish(frame(4, False, trigger=0.5), clock.now_ns())
+    await control.tick()
+    assert backend.gripper_commands == pytest.approx([0.5])
+
+
+@pytest.mark.asyncio
 async def test_unarmed_frames_never_write_gripper_even_when_trigger_changes() -> None:
     control, latest, backend, clock = make_control()
     backend.gripper = 0.25

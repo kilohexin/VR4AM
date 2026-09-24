@@ -34,6 +34,7 @@ CONTROL_PERIOD_NS = 20_000_000
 OVERRUN_NS = 40_000_000
 GRIPPER_PERIOD_NS = 100_000_000
 GRIPPER_MIN_DELTA = 0.02
+GRIPPER_ACTIVATION_DELTA = 0.1
 VR_FRAME_STALE_MS = 100.0
 RECOVERABLE_FAULTS = frozenset(
     {
@@ -942,7 +943,9 @@ class RobotControl:
             self._armed_trigger_baseline = value
             return
         if not self._trigger_changed_since_arm:
-            if abs(value - self._armed_trigger_baseline) <= GRIPPER_MIN_DELTA:
+            # Require a deliberate press before mapping Trigger to the claw.
+            # Small analog jitter or releasing a held Trigger is not intent.
+            if value - self._armed_trigger_baseline < GRIPPER_ACTIVATION_DELTA:
                 return
             self._trigger_changed_since_arm = True
         if self._last_gripper_sent is None:
