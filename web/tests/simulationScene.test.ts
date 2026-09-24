@@ -738,6 +738,7 @@ describe('XR render-loop handoff', () => {
         stateBuffer: {
           sample: vi.fn().mockReturnValue({
             state: {
+              backend: 'LEBAI',
               actual_q: actualQ,
               actual_tcp: {p: [0.2, 0.3, 0.4], q: [0, 0, 0, 1]},
               gripper: 0.4,
@@ -766,7 +767,7 @@ describe('XR render-loop handoff', () => {
     (SimulationScene.prototype as unknown as {updateScene(this: typeof scene, nowMs: number): void})
       .updateScene.call(scene, 10);
 
-    expect(setJointAngles).toHaveBeenCalledWith(actualQ);
+    expect(setJointAngles).toHaveBeenCalledWith(actualQ, 'LEBAI');
   });
 
   it('disposes owned XR visuals before generic scene traversal', () => {

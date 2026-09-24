@@ -60,6 +60,47 @@ describe('RobotModel', () => {
     });
   });
 
+  it('renders the captured real LM3 pose with its upper arm rising above the shoulder', () => {
+    const root = new THREE.Group();
+    const joint1 = new THREE.Group();
+    joint1.name = 'Joint1';
+    joint1.position.set(0, 0.20333, 0);
+    root.add(joint1);
+    const joint2 = new THREE.Group();
+    joint2.name = 'Joint2';
+    joint2.position.set(0, 0.0125, -0.08833);
+    joint1.add(joint2);
+    const joint3 = new THREE.Group();
+    joint3.name = 'Joint3';
+    joint3.position.set(0, 0.28, 0.04603);
+    joint2.add(joint3);
+    let parent = joint3;
+    for (let index = 4; index <= 6; index += 1) {
+      const joint = new THREE.Group();
+      joint.name = `Joint${index}`;
+      parent.add(joint);
+      parent = joint;
+    }
+    const tool = new THREE.Group();
+    tool.name = 'robotgrabber';
+    parent.add(tool);
+
+    const model = createRobotModelForTest(root);
+    model.setJointAngles([
+      0.003930825768956955,
+      -1.5572781211016544,
+      0.31437018771731357,
+      -1.5768363761471962,
+      0.3939454410888813,
+      -0.004026699568199808,
+    ], 'LEBAI');
+    root.updateMatrixWorld(true);
+
+    const shoulderY = joint2.getWorldPosition(new THREE.Vector3()).y;
+    const elbowY = joint3.getWorldPosition(new THREE.Vector3()).y;
+    expect(elbowY - shoulderY).toBeGreaterThan(0.25);
+  });
+
   it('adds angles to the original model rotations without accumulating updates', () => {
     const root = createScene();
     const joint1 = root.getObjectByName('Joint1');

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import {GLTFLoader} from 'three/examples/jsm/loaders/GLTFLoader.js';
 import visualKinematics from '../../../config/lm3_visual_kinematics_v1.json';
+import type {RuntimeBackend} from '../protocol/messages';
 
 type Axis = 'x' | 'y' | 'z';
 
@@ -10,6 +11,10 @@ const JOINTS = visualKinematics.joints.map(({name, axis}) => {
   }
   return {name, axis: axis as Axis};
 });
+
+// The visual GLB's upright shoulder zero differs from the real LM3 encoder zero.
+// This is presentation-only: simulator FK/IK and commands retain their own joint conventions.
+const REAL_VISUAL_JOINT_OFFSETS = [0, Math.PI / 2, 0, 0, 0, 0] as const;
 
 export const LM3_HOME_Q = visualKinematics.home_q as readonly number[];
 export const LM3_TCP_OFFSET: readonly [number, number, number] = [
@@ -22,7 +27,7 @@ export interface RobotModel {
   group: THREE.Group;
   robot: THREE.Object3D;
   tool: THREE.Object3D;
-  setJointAngles(q: readonly number[]): void;
+  setJointAngles(q: readonly number[], backend?: RuntimeBackend | null): void;
   setGripper(value: number): void;
 }
 
@@ -62,7 +67,7 @@ function createRobotModel(
     group,
     robot: scene,
     tool,
-    setJointAngles(q: readonly number[]): void {
+    setJointAngles(q: readonly number[], backend?: RuntimeBackend | null): void {
       if (q.length !== JOINTS.length) {
         throw new Error('需要 6 个关节角');
       }
@@ -76,7 +81,8 @@ function createRobotModel(
       JOINTS.forEach(({axis}, index) => {
         const joint = jointNodes[index];
         joint.rotation.copy(originalRotations[index]);
-        joint.rotation[axis] += q[index];
+        joint.rotation[axis] += q[index]
+          + (backend === 'LEBAI' ? REAL_VISUAL_JOINT_OFFSETS[index] : 0);
       });
     },
     setGripper(value: number): void {

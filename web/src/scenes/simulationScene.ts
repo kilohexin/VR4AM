@@ -530,7 +530,7 @@ export class SimulationScene {
     if (this.robotModel && nowNs !== null) {
       const sample = this.options.stateBuffer.sample(nowNs);
       if (sample) {
-        this.robotModel.setJointAngles(sample.state.actual_q);
+        this.robotModel.setJointAngles(sample.state.actual_q, sample.state.backend);
         this.robotModel.setGripper(sample.state.gripper);
         this.robotVisualRoot.updateMatrixWorld(true);
         this.graspController?.update(
