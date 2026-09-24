@@ -23,8 +23,6 @@ LOW_SPEED_CAPS: dict[str, float] = {
     "max_joint_acceleration_radps2": 0.2,
     "max_tcp_step_m": 0.0005,
     "max_tcp_rotation_step_deg": 0.2,
-    "max_relative_translation_m": 0.02,
-    "max_relative_rotation_deg": 5.0,
     "translation_scale": 0.2,
 }
 

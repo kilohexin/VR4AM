@@ -807,6 +807,8 @@ class RobotControl:
                 self.limiter.set_pose_anchor(state.actual_tcp)
                 self.filter.reset(state.actual_tcp)
                 self.last_target = state.actual_tcp
+                if previous_mode == TeleopMode.HOLD:
+                    self._deadline_rebase_requested = True
             elif previous_mode == TeleopMode.ACTIVE and self.machine.mode == TeleopMode.HOLD:
                 self.mapper.clear()
                 self._clear_constraint()

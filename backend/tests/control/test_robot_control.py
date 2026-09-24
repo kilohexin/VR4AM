@@ -2408,6 +2408,69 @@ async def test_completed_slow_safety_stop_rebases_the_next_control_deadline(
 
 
 @pytest.mark.asyncio
+async def test_slow_hold_resume_does_not_count_one_preflight_as_two_active_overruns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    latest.publish(frame(3, False), clock.now_ns())
+    await control.tick()
+    assert control.mode is TeleopMode.HOLD
+
+    async def slow_resume_preflight() -> BackendPreflight:
+        clock.advance_ms(90)
+        return backend.preflight_result
+
+    backend.preflight = slow_resume_preflight  # type: ignore[method-assign]
+    real_tick = control.tick
+    tick_count = 0
+
+    async def resume_then_regular_ticks() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        latest.publish(frame(3 + tick_count, True), clock.now_ns())
+        await real_tick()
+        if tick_count == 4:
+            control._running = False
+
+    await run_with_fake_sleep(monkeypatch, control, clock, resume_then_regular_ticks)
+
+    assert control.mode is TeleopMode.ACTIVE
+    assert StopReason.FAULT not in backend.stops
+    assert not [event for event in recorder.events if event["kind"] == "robot_fault"]
+
+
+@pytest.mark.asyncio
+async def test_active_control_still_faults_on_repeated_deadline_lateness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control, latest, backend, clock = make_control()
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    assert control.mode is TeleopMode.ACTIVE
+    real_tick = control.tick
+    tick_count = 0
+
+    async def repeated_slow_active_ticks() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        clock.advance_ms(70)
+        latest.publish(frame(2 + tick_count, True), clock.now_ns())
+        await real_tick()
+        if tick_count == 3:
+            control._running = False
+
+    await run_with_fake_sleep(monkeypatch, control, clock, repeated_slow_active_ticks)
+
+    assert control.mode is TeleopMode.FAULT
+    assert backend.stops[-1] is StopReason.FAULT
+
+
+@pytest.mark.asyncio
 async def test_two_long_executions_do_not_pretend_both_started_late(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

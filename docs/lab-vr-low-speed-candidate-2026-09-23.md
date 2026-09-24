@@ -18,7 +18,9 @@ $after = (Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash
 if ($before -ne $after) { throw 'SOURCE_CONFIG_CHANGED' }
 ```
 
-候选上限：TCP 平移 `0.005 m/s`、旋转 `0.05 rad/s`、关节 `0.05 rad/s`；平移/旋转加速度 `0.02 m/s²` / `0.1 rad/s²`、关节加速度 `0.2 rad/s²`；单步 TCP 平移 `0.5 mm`、旋转 `0.2°`；相对起始位移 `20 mm`、旋转 `5°`，映射比例 `0.2`。这些是软件配置上限，**不是实测速度或运动安全保证**。
+候选上限（9 项）：TCP 平移 `0.005 m/s`、旋转 `0.05 rad/s`、关节 `0.05 rad/s`；平移/旋转加速度 `0.02 m/s²` / `0.1 rad/s²`、关节加速度 `0.2 rad/s²`；单步 TCP 平移 `0.5 mm`、旋转 `0.2°`；映射比例 `0.2`。候选保留来源文件的 `max_relative_translation_m` 与 `max_relative_rotation_deg` 原值，但新版真机 `LEBAI` 运行路径不再使用 Grip 锚点相对位移／旋转边界；假 SDK 路径仍使用这两个字段。**这不取消速度、单步、关节、IK 等检查，也不是实测速度或运动安全保证。**
+
+旧版候选／control 副本含额外收紧的 `20 mm`／`5°` 字段，不能沿用为新版候选；必须在新隔离源码中从现场原始 `readonly` 配置重新生成并核验，且不能接续此前已闩锁故障的会话。
 
 生成后回传原/新 SHA-256、配置差异、测试退出码，并核对候选仍为 `readonly`。真机启动与动作须另行明确安排；此工具不执行任何现场步骤。
 

@@ -108,14 +108,21 @@ def _build_limiter(
         if settings.lebai is None:
             raise RuntimeError("missing_lebai_settings")
         control = settings.lebai.control
+        # Keep rate/step and downstream IK checks, but do not add a
+        # Grip-anchor workspace envelope to the real teleoperation path.
+        real_robot = runtime_backend == "LEBAI"
         return SafetyLimiter(
             max_linear_speed=control.max_tcp_speed_mps,
             max_angular_speed=control.max_tcp_rotation_radps,
             max_linear_accel=control.max_tcp_acceleration_mps2,
             max_angular_accel=control.max_tcp_angular_acceleration_radps2,
-            workspace_half_extent_m=control.max_relative_translation_m,
-            max_rotation_from_anchor_rad=math.radians(
-                control.max_relative_rotation_deg
+            workspace_radius=math.inf if real_robot else 0.45,
+            workspace_half_extent_m=(
+                None if real_robot else control.max_relative_translation_m
+            ),
+            max_rotation_from_anchor_rad=(
+                None if real_robot
+                else math.radians(control.max_relative_rotation_deg)
             ),
             max_linear_step_m=control.max_tcp_step_m,
             max_angular_step_rad=math.radians(

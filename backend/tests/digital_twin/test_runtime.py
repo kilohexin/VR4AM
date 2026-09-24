@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
+from scipy.spatial.transform import Rotation
 
 import app.main as app_main
 from app.config import Settings
@@ -17,6 +18,7 @@ from app.digital_twin.runtime import (
 )
 from app.recording.noop import NoopRecorder
 from app.recording.commissioning import CommissioningRecorder
+from app.schemas.messages import Pose
 
 
 def test_digital_twin_runtime_promotes_only_the_in_memory_copy() -> None:
@@ -37,6 +39,26 @@ def test_runtime_selects_axis_clamp_only_for_fake_backend() -> None:
 
     assert fake.workspace_boundary_mode == "axis_clamp"
     assert real.workspace_boundary_mode == "hold"
+
+
+def test_real_runtime_does_not_hold_grip_relative_translation_or_rotation() -> None:
+    settings = load_digital_twin_settings()
+    real = app_main._build_limiter(settings, "LEBAI")
+    fake = app_main._build_limiter(settings, "LEBAI_FAKE")
+    anchor = Pose(p=(0.0, 0.0, 0.0), q=(0.0, 0.0, 0.0, 1.0))
+    requested = Pose(
+        p=(0.5, 0.0, 0.0),
+        q=tuple(Rotation.from_euler("z", 60, degrees=True).as_quat()),
+    )
+    real.set_pose_anchor(anchor)
+    fake.set_pose_anchor(anchor)
+
+    real_projection = real.project_workspace(requested)
+    fake_projection = fake.project_workspace(requested)
+
+    assert real_projection.constrained is False
+    assert real_projection.pose == requested
+    assert fake_projection.constrained is True
 
 
 def test_fake_profile_uses_responsive_but_bounded_motion_values() -> None:

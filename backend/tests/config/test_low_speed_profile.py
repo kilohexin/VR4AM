@@ -50,8 +50,10 @@ def test_generates_readonly_profile_without_changing_source(tmp_path: Path) -> N
     assert payload["real_robot"]["control"]["max_joint_acceleration_radps2"] == 0.2
     assert payload["real_robot"]["control"]["max_tcp_step_m"] == 0.0005
     assert payload["real_robot"]["control"]["max_tcp_rotation_step_deg"] == 0.2
-    assert payload["real_robot"]["control"]["max_relative_translation_m"] == 0.02
-    assert payload["real_robot"]["control"]["max_relative_rotation_deg"] == 5
+    assert (payload["real_robot"]["control"]["max_relative_translation_m"]
+            == original["real_robot"]["control"]["max_relative_translation_m"])
+    assert (payload["real_robot"]["control"]["max_relative_rotation_deg"]
+            == original["real_robot"]["control"]["max_relative_rotation_deg"])
     assert payload["real_robot"]["control"]["translation_scale"] == 0.2
     assert Settings.load(output).lebai is not None
 
@@ -72,6 +74,24 @@ def test_profile_never_raises_existing_tighter_limits(tmp_path: Path) -> None:
     assert limited["max_tcp_speed_mps"] == 0.003
     assert limited["max_joint_speed_radps"] == 0.03
     assert limited["max_relative_translation_m"] == 0.01
+
+
+def test_profile_keeps_source_relative_envelope_unchanged(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    source_control = yaml.safe_load(source.read_text(encoding="utf-8"))[
+        "real_robot"
+    ]["control"]
+    output = tmp_path / "slow.yaml"
+
+    create_low_speed_profile(source, output)
+
+    candidate_control = yaml.safe_load(output.read_text(encoding="utf-8"))[
+        "real_robot"
+    ]["control"]
+    assert (candidate_control["max_relative_translation_m"]
+            == source_control["max_relative_translation_m"])
+    assert (candidate_control["max_relative_rotation_deg"]
+            == source_control["max_relative_rotation_deg"])
 
 
 def test_rejects_control_source_and_does_not_create_output(tmp_path: Path) -> None:
