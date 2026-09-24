@@ -2128,6 +2128,72 @@ async def test_disconnected_idle_wakeup_delay_does_not_fault_or_repeat_stop(
 
 
 @pytest.mark.asyncio
+async def test_disarmed_with_stale_frame_ignores_idle_wakeup_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.disarm()
+    assert control.mode is TeleopMode.DISARMED
+    assert backend.stops == [StopReason.GRIP_RELEASED]
+    clock.advance_ms(1_000)
+    tick_count = 0
+
+    async def idle_tick() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        if tick_count == 4:
+            control._running = False
+
+    async def delayed_wakeup(_delay: float) -> None:
+        clock.advance_ms(70)
+
+    monkeypatch.setattr("app.control.robot_control.asyncio.sleep", delayed_wakeup)
+    control.tick = idle_tick  # type: ignore[method-assign]
+    control._running = True
+    await control.run()
+
+    assert [event for event in recorder.events if event["kind"] == "robot_fault"] == []
+    assert backend.stops == [StopReason.GRIP_RELEASED]
+    assert control.mode is TeleopMode.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_disconnected_with_stale_frame_ignores_idle_wakeup_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await control.connect()
+    latest.publish(frame(1, False), clock.now_ns())
+    await control.on_disconnect()
+    assert control.mode is TeleopMode.DISCONNECTED
+    assert backend.stops == [StopReason.DISCONNECT]
+    clock.advance_ms(1_000)
+    tick_count = 0
+
+    async def idle_tick() -> None:
+        nonlocal tick_count
+        tick_count += 1
+        if tick_count == 4:
+            control._running = False
+
+    async def delayed_wakeup(_delay: float) -> None:
+        clock.advance_ms(70)
+
+    monkeypatch.setattr("app.control.robot_control.asyncio.sleep", delayed_wakeup)
+    control.tick = idle_tick  # type: ignore[method-assign]
+    control._running = True
+    await control.run()
+
+    assert [event for event in recorder.events if event["kind"] == "robot_fault"] == []
+    assert backend.stops == [StopReason.DISCONNECT]
+    assert control.mode is TeleopMode.DISCONNECTED
+
+
+@pytest.mark.asyncio
 async def test_ready_without_client_frame_ignores_idle_wakeup_delay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
