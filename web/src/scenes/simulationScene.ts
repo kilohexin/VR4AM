@@ -304,6 +304,10 @@ export class SimulationScene {
     this.robotVisualRoot.add(this.graspPlatform);
     this.robotVisualRoot.add(this.rehearsalSupport);
     this.robotVisualRoot.add(this.rehearsalPlacementMarker);
+    setGraspPropVisibility(
+      this.graspBlocks, this.graspPlatform, this.rehearsalSupport,
+      this.rehearsalPlacementMarker, null, this.offlineWorkspace,
+    );
     this.graspController = new KinematicGraspController({
       visualRoot: this.robotVisualRoot,
       blocks: this.graspBlocks,
@@ -333,12 +337,20 @@ export class SimulationScene {
   applyRobotState(state: RobotStateMessage): void {
     this.options.stateBuffer.push(state);
     this.clockAnchor.update(state.server_mono_ns, performance.now());
+    setGraspPropVisibility(
+      this.graspBlocks, this.graspPlatform, this.rehearsalSupport,
+      this.rehearsalPlacementMarker, state.backend, this.offlineWorkspace,
+    );
   }
 
   resetConnection(): void {
     this.options.stateBuffer.reset();
     this.clockAnchor.reset();
     this.inputSafety.reset();
+    setGraspPropVisibility(
+      this.graspBlocks, this.graspPlatform, this.rehearsalSupport,
+      this.rehearsalPlacementMarker, null, this.offlineWorkspace,
+    );
   }
 
   setOfflineController(sample: OfflineControllerSample | null): void {
@@ -533,10 +545,12 @@ export class SimulationScene {
         this.robotModel.setJointAngles(sample.state.actual_q, sample.state.backend);
         this.robotModel.setGripper(sample.state.gripper);
         this.robotVisualRoot.updateMatrixWorld(true);
-        this.graspController?.update(
-          sample.state.actual_tcp,
-          sample.state.gripper,
-        );
+        if (sample.state.backend !== 'LEBAI') {
+          this.graspController?.update(
+            sample.state.actual_tcp,
+            sample.state.gripper,
+          );
+        }
       }
     }
 
@@ -686,6 +700,21 @@ export class SimulationScene {
 function createSessionId(): string {
   const token = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}`;
   return `desktop-${token}`;
+}
+
+function setGraspPropVisibility(
+  blocks: readonly GraspBlock[],
+  platform: THREE.Object3D,
+  rehearsalSupport: THREE.Object3D,
+  rehearsalPlacementMarker: THREE.Object3D,
+  backend: RobotStateMessage['backend'] | null,
+  offlineWorkspace: OfflineSceneSnapshot['workspace'],
+): void {
+  const showSimulationProps = backend !== null && backend !== 'LEBAI';
+  for (const {object} of blocks) object.visible = showSimulationProps;
+  platform.visible = showSimulationProps;
+  rehearsalSupport.visible = showSimulationProps && offlineWorkspace !== null;
+  rehearsalPlacementMarker.visible = showSimulationProps && offlineWorkspace !== null;
 }
 
 export function createGraspBlocks(): GraspBlock[] {

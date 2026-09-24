@@ -12,7 +12,7 @@ import {
   fakeRehearsalWorkspaceLayout,
 } from '../src/scenes/simulationScene';
 import type {ArmSafetySnapshot} from '../src/ui/armPanel';
-import type {Pose} from '../src/protocol/messages';
+import type {Pose, RobotStateMessage} from '../src/protocol/messages';
 import type {XRPresentationSample} from '../src/xr/session';
 import type {OfflineControllerSample} from '../src/rehearsal/types';
 
@@ -361,6 +361,36 @@ describe('desktop input release safety', () => {
 });
 
 describe('scene connection and model lifetime helpers', () => {
+  it('hides simulated grasp props for real robot state and restores them for Fake', () => {
+    const blocks = createGraspBlocks();
+    const platform = new THREE.Group();
+    const rehearsalSupport = new THREE.Group();
+    const rehearsalPlacementMarker = new THREE.Group();
+    const scene = {
+      options: {stateBuffer: {push: vi.fn()}},
+      clockAnchor: {update: vi.fn()},
+      graspBlocks: blocks,
+      graspPlatform: platform,
+      rehearsalSupport,
+      rehearsalPlacementMarker,
+      offlineWorkspace: null,
+    };
+
+    SimulationScene.prototype.applyRobotState.call(scene as never, {
+      backend: 'LEBAI', server_mono_ns: 1,
+    } as RobotStateMessage);
+    expect(blocks.every(({object}) => !object.visible)).toBe(true);
+    expect(platform.visible).toBe(false);
+    expect(rehearsalSupport.visible).toBe(false);
+    expect(rehearsalPlacementMarker.visible).toBe(false);
+
+    SimulationScene.prototype.applyRobotState.call(scene as never, {
+      backend: 'LEBAI_FAKE', server_mono_ns: 2,
+    } as RobotStateMessage);
+    expect(blocks.every(({object}) => object.visible)).toBe(true);
+    expect(platform.visible).toBe(true);
+  });
+
   it('clears the server clock anchor at connection boundaries', () => {
     const anchor = new ServerClockAnchor();
     anchor.update(5_000_000_000, 100);
@@ -410,6 +440,7 @@ describe('XR render-loop handoff', () => {
         stateBuffer: {
           sample: vi.fn().mockReturnValue({
             state: {
+              backend: 'LEBAI_FAKE',
               actual_q: [0, 0, 0, 0, 0, 0],
               actual_tcp: actualTcp,
               gripper: 0.72,
@@ -768,6 +799,7 @@ describe('XR render-loop handoff', () => {
       .updateScene.call(scene, 10);
 
     expect(setJointAngles).toHaveBeenCalledWith(actualQ, 'LEBAI');
+    expect(scene.graspController.update).not.toHaveBeenCalled();
   });
 
   it('disposes owned XR visuals before generic scene traversal', () => {
