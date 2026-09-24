@@ -154,6 +154,8 @@ class RobotControl:
         self._last_sample_age_ms: float | None = None
         self._last_gripper_sent: float | None = None
         self._last_gripper_sent_ns: int | None = None
+        self._armed_trigger_baseline: float | None = None
+        self._trigger_changed_since_arm = False
         self._consecutive_overruns = 0
         self._deadline_rebase_requested = False
         self._pending_stop_completion = False
@@ -309,6 +311,10 @@ class RobotControl:
             raise RuntimeError("arm_blocked_by_preflight:recording_unavailable")
         self.machine.arm()
         self._completed_stale_stop = False
+        # The physical gripper may not match the released Trigger position.
+        # Observe the first qualified frame before treating Trigger as a command.
+        self._armed_trigger_baseline = None
+        self._trigger_changed_since_arm = False
         # Connecting only observes the gripper; it does not issue a command.
         # Make the first authorized delta eligible immediately after Arm.
         self._last_gripper_sent_ns = None
@@ -923,6 +929,13 @@ class RobotControl:
         self._last_gripper_sent_ns = self.clock.now_ns()
 
     async def _send_latest_gripper(self, value: float, now_ns: int) -> None:
+        if self._armed_trigger_baseline is None:
+            self._armed_trigger_baseline = value
+            return
+        if not self._trigger_changed_since_arm:
+            if abs(value - self._armed_trigger_baseline) <= GRIPPER_MIN_DELTA:
+                return
+            self._trigger_changed_since_arm = True
         if self._last_gripper_sent is None:
             await self.backend.set_gripper(value)
             self._last_gripper_sent = value

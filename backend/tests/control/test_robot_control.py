@@ -1836,6 +1836,32 @@ async def test_control_connect_initializes_observed_gripper_without_a_write() ->
 
 
 @pytest.mark.asyncio
+async def test_arm_does_not_open_closed_gripper_until_trigger_changes() -> None:
+    control, latest, backend, clock = make_control()
+    backend.gripper = 1.0
+    await connect_release_arm(control, latest, clock)
+
+    latest.publish(frame(2, False, trigger=0.0), clock.now_ns())
+    await control.tick()
+    clock.advance_ms(100)
+    latest.publish(frame(3, True, trigger=0.0), clock.now_ns())
+    await control.tick()
+
+    assert backend.gripper == pytest.approx(1.0)
+    assert backend.gripper_commands == []
+
+    clock.advance_ms(100)
+    latest.publish(frame(4, True, trigger=0.5), clock.now_ns())
+    await control.tick()
+    assert backend.gripper_commands == pytest.approx([0.5])
+
+    clock.advance_ms(100)
+    latest.publish(frame(5, True, trigger=0.0), clock.now_ns())
+    await control.tick()
+    assert backend.gripper_commands == pytest.approx([0.5, 0.0])
+
+
+@pytest.mark.asyncio
 async def test_unarmed_frames_never_write_gripper_even_when_trigger_changes() -> None:
     control, latest, backend, clock = make_control()
     backend.gripper = 0.25
