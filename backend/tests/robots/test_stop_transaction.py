@@ -103,17 +103,16 @@ async def test_cancelled_stop_records_interrupted_sdk_lock_wait():
         lock_wait = diagnostic['stop_move_lock']
         assert lock_wait['acquired_ns'] is None
         assert lock_wait['wait_ns'] >= 7_000_000
-        assert [call[0] for call in client.write_calls] == ['stop_sys']
+        assert client.write_calls == []
+        assert diagnostic['stop_policy'] == 'stop_move_only'
         assert (await adapter.get_state()).fault == 'stop_unverified'
     finally:
         await adapter.disconnect()
 
 
-async def test_stop_sys_records_contended_lock_wait_without_extra_writes():
-    adapter, client, clock = await _connected_control_adapter()
+async def test_failed_stop_records_move_only_policy_without_extra_writes():
+    adapter, client, _ = await _connected_control_adapter()
     events = []
-    entered, release = asyncio.Event(), asyncio.Event()
-    original_escalate = adapter._safety_escalate_stop_sys
 
     async def record(event, _timestamp):
         events.append(event)
@@ -122,34 +121,17 @@ async def test_stop_sys_records_contended_lock_wait_without_extra_writes():
         client.write_calls.append(('stop_move',))
         raise RuntimeError('stop_move_failed')
 
-    async def contended_escalate(client_arg, diagnostics):
-        await adapter._sdk_lock.acquire()
-        waiter = asyncio.create_task(original_escalate(client_arg, diagnostics))
-        try:
-            await _wait_until(lambda: 'stop_sys_lock' in diagnostics)
-            entered.set()
-            await release.wait()
-        finally:
-            adapter._sdk_lock.release()
-        await waiter
-
     adapter._event_callback = record
-    adapter._safety_escalate_stop_sys = contended_escalate
     client.stop_move = failed_stop_move
     try:
-        stop = asyncio.create_task(adapter.stop(StopReason.GRIP_RELEASED))
-        await asyncio.wait_for(entered.wait(), 1)
-        clock.advance_ms(7)
-        release.set()
         with pytest.raises(BackendCommandError, match='sdk_call_failed:stop_move'):
-            await asyncio.wait_for(stop, 1)
+            await adapter.stop(StopReason.GRIP_RELEASED)
         diagnostic = next(e for e in events if e['kind'] == 'stop_diagnostics')
-        lock_wait = diagnostic['stop_sys_lock']
-        assert lock_wait['wait_ns'] >= 7_000_000
-        assert lock_wait['acquired_ns'] >= lock_wait['requested_ns']
-        assert [call[0] for call in client.write_calls] == ['stop_move', 'stop_sys']
+        assert diagnostic['stop_policy'] == 'stop_move_only'
+        assert [call['method'] for call in diagnostic['rpc_calls']] == ['stop_move']
+        assert client.write_calls == [('stop_move',)]
+        assert (await adapter.get_state()).fault == 'stop_unverified'
     finally:
-        release.set()
         await adapter.disconnect()
 
 
@@ -179,22 +161,18 @@ async def test_production_stop_reuses_pending_requests_and_preserves_late_eviden
         assert not cancelled
         with pytest.raises(BackendCommandError, match='sdk_timeout:stop_move'):
             await asyncio.wait_for(adapter.stop(StopReason.SHUTDOWN), .1)
-        assert client.write_calls == [('stop_move',), ('stop_sys',)]
+        assert client.write_calls == [('stop_move',)]
         release.set()
         for _ in range(20):
             await asyncio.sleep(0)
         lifecycle = [e for e in events if e['kind'] == 'stop_rpc_lifecycle']
-        assert {e['method'] for e in lifecycle} == {'stop_move', 'stop_sys'}
+        assert {e['method'] for e in lifecycle} == {'stop_move'}
         assert all(e['outcome'] == 'returned_late' for e in lifecycle)
         assert (await adapter.get_state()).fault == 'stop_unverified'
         diagnostics = [e for e in events if e['kind'] == 'stop_diagnostics']
         assert diagnostics[0]['episode_id'] == diagnostics[1]['episode_id']
-        for diagnostic in diagnostics:
-            stop_sys_lock = diagnostic['stop_sys_lock']
-            assert stop_sys_lock['requested_ns'] <= stop_sys_lock['acquired_ns']
-            assert stop_sys_lock['wait_ns'] == (
-                stop_sys_lock['acquired_ns'] - stop_sys_lock['requested_ns']
-            )
+        assert all(d['stop_policy'] == 'stop_move_only' for d in diagnostics)
+        assert all('stop_sys_lock' not in d for d in diagnostics)
         calls = [[c for c in d['rpc_calls'] if c['method'] == 'stop_move'][0] for d in diagnostics]
         assert calls[0]['request_id'] == calls[1]['request_id']
         assert calls[0]['reused'] is False and calls[1]['reused'] is True
@@ -242,7 +220,7 @@ async def test_drift_after_confirmed_stop_is_not_hidden_by_reuse():
         client.kin_data['actual_tcp_pose']['x'] += .01
         with pytest.raises(BackendCommandError, match='stop_incomplete'):
             await adapter.stop(StopReason.SHUTDOWN)
-        assert client.write_calls == [('stop_move',), ('stop_sys',)]
+        assert client.write_calls == [('stop_move',)]
         assert (await adapter.get_state()).fault == 'stop_incomplete'
     finally:
         await adapter.disconnect()
@@ -280,32 +258,26 @@ async def test_slow_verification_cannot_confirm_after_its_fixed_deadline():
     try:
         with pytest.raises(BackendCommandError, match='stop_incomplete'):
             await adapter.stop(StopReason.GRIP_RELEASED)
-        assert client.write_calls == [('stop_move',), ('stop_sys',)]
+        assert client.write_calls == [('stop_move',)]
     finally:
         await adapter.disconnect()
 
 
-async def test_disconnect_waits_for_in_progress_escalation_before_closing():
+async def test_disconnect_waits_for_in_progress_stop_before_closing():
     adapter, client, _ = await _connected_control_adapter()
-    checking = asyncio.Event()
-    release = asyncio.Event()
-    original_connected = client.is_connected
+    entered, release = asyncio.Event(), asyncio.Event()
 
     async def failed_stop():
         client.write_calls.append(('stop_move',))
+        entered.set()
+        await release.wait()
         raise RuntimeError('failed')
 
-    async def connected_during_escalation():
-        checking.set()
-        await release.wait()
-        return await original_connected()
-
     client.stop_move = failed_stop
-    client.is_connected = connected_during_escalation
     stopping = asyncio.create_task(adapter.stop(StopReason.GRIP_RELEASED))
     closing = None
     try:
-        await asyncio.wait_for(checking.wait(), 1)
+        await asyncio.wait_for(entered.wait(), 1)
         closing = asyncio.create_task(adapter.disconnect())
         # Give disconnect sufficient scheduling turns to expose the race.
         for _ in range(10):
@@ -319,7 +291,7 @@ async def test_disconnect_waits_for_in_progress_escalation_before_closing():
         with pytest.raises(BackendCommandError, match='sdk_call_failed:stop_move'):
             await stopping
         await closing
-        assert client.write_calls == [('stop_move',), ('stop_sys',)]
+        assert client.write_calls == [('stop_move',)]
         assert adapter._client is None
         assert all(r.task.done() for r in adapter._stop_transaction.requests.values())
     finally:

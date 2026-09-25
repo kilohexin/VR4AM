@@ -73,7 +73,7 @@ async def test_smoke_observes_after_stop_even_when_stop_failed(tmp_path, monkeyp
     assert all(e["server_mono_ns"] >= start["server_mono_ns"] for e in samples)
     assert not any(e["kind"] == "stop_requested" and e["server_mono_ns"] > start["server_mono_ns"]
                    for e in events)
-    assert {call[0] for call in client.write_calls} <= {"stop_move", "stop_sys"}
+    assert {call[0] for call in client.write_calls} <= {"stop_move"}
     if failed_stop:
         assert samples[0]["state"]["latched_fault"] == "stop_unverified"
         assert "失败" in capsys.readouterr().out

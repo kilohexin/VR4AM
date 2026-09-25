@@ -356,6 +356,7 @@ class RealLebaiAdapter:
         assert self._stop_transaction is not None
         diagnostics: dict[str, Any] = {
             "kind": "stop_diagnostics",
+            "stop_policy": "stop_move_only",
             "episode_id": self._stop_transaction.episode_id,
             "reason": reason.value,
             "initial_fault": self._latched_fault,
@@ -448,17 +449,16 @@ class RealLebaiAdapter:
         except asyncio.CancelledError:
             await asyncio.shield(
                 self._fail_unverified_stop(
-                    client,
                     diagnostics=diagnostics,
                     from_cancelled_stop=True,
                 )
             )
             raise
         except TimeoutError:
-            await self._fail_unverified_stop(client, diagnostics=diagnostics)
+            await self._fail_unverified_stop(diagnostics=diagnostics)
             raise BackendCommandError("sdk_timeout:stop_move") from None
         except Exception:
-            await self._fail_unverified_stop(client, diagnostics=diagnostics)
+            await self._fail_unverified_stop(diagnostics=diagnostics)
             raise BackendCommandError("sdk_call_failed:stop_move") from None
         transaction = self._stop_transaction
         assert transaction is not None
@@ -530,7 +530,6 @@ class RealLebaiAdapter:
                 if now_ns - started_ns >= 500_000_000:
                     self._latched_fault = "stop_incomplete"
                     await self._fail_unverified_stop(
-                        client,
                         diagnostics=diagnostics,
                         preserve_fault=True,
                     )
@@ -539,7 +538,6 @@ class RealLebaiAdapter:
         except asyncio.CancelledError:
             await asyncio.shield(
                 self._fail_unverified_stop(
-                    client,
                     diagnostics=diagnostics,
                     from_cancelled_stop=True,
                 )
@@ -548,14 +546,14 @@ class RealLebaiAdapter:
         except BackendCommandError as error:
             if str(error) == "stop_incomplete":
                 raise
-            await self._fail_unverified_stop(client, diagnostics=diagnostics)
+            await self._fail_unverified_stop(diagnostics=diagnostics)
             if str(error) == "robot_disconnected":
                 raise BackendCommandError(
                     "stop_unverified_disconnected"
                 ) from None
             raise
         except Exception:
-            await self._fail_unverified_stop(client, diagnostics=diagnostics)
+            await self._fail_unverified_stop(diagnostics=diagnostics)
             raise BackendCommandError("stop_unverified") from None
 
     def _latch_unverified_stop(
@@ -573,7 +571,6 @@ class RealLebaiAdapter:
 
     async def _fail_unverified_stop(
         self,
-        client: LebaiClientProtocol,
         *,
         diagnostics: dict[str, Any],
         preserve_fault: bool = False,
@@ -588,44 +585,6 @@ class RealLebaiAdapter:
             self._preflight_ready = False
             self._pump.invalidate()
             self._reset_pvat_history()
-        await self._safety_escalate_stop_sys(client, diagnostics)
-
-    async def _safety_escalate_stop_sys(
-        self,
-        client: LebaiClientProtocol,
-        diagnostics: dict[str, Any],
-    ) -> None:
-        lock_requested_ns = self._clock()
-        lock_timing = diagnostics["stop_sys_lock"] = {
-            "requested_ns": lock_requested_ns,
-            "acquired_ns": None,
-            "wait_ns": None,
-        }
-        try:
-            async with self._sdk_lock:
-                lock_acquired_ns = self._clock()
-                lock_timing["acquired_ns"] = lock_acquired_ns
-                lock_timing["wait_ns"] = lock_acquired_ns - lock_requested_ns
-                if (self._stop_transaction is not None
-                        and "stop_sys" in self._stop_transaction.requests):
-                    try:
-                        await self._call_stop_rpc(client, "stop_sys", diagnostics)
-                    except Exception:
-                        pass
-                    return
-                try:
-                    connected = await self._call_stop_rpc(client, "is_connected", diagnostics)
-                except Exception:
-                    connected = False
-                if not connected:
-                    return
-                try:
-                    await self._call_stop_rpc(client, "stop_sys", diagnostics)
-                except Exception:
-                    return
-        finally:
-            if lock_timing["acquired_ns"] is None:
-                lock_timing["wait_ns"] = self._clock() - lock_requested_ns
 
     async def home(
         self,

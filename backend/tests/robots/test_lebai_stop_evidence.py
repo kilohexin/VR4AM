@@ -14,7 +14,7 @@ async def test_zero_speed_during_nonterminal_state_does_not_confirm_stop(raw_sta
     try:
         with pytest.raises(BackendCommandError, match="^stop_incomplete$"):
             await adapter.stop(StopReason.GRIP_RELEASED)
-        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+        assert client.write_calls == [("stop_move",)]
     finally:
         await adapter.disconnect()
 
@@ -51,7 +51,7 @@ async def test_stopping_to_idle_requires_new_stability_window():
 
 
 @pytest.mark.asyncio
-async def test_hung_diagnostic_recorder_cannot_delay_safety_escalation():
+async def test_hung_diagnostic_recorder_cannot_delay_failed_stop():
     adapter, client, _ = await _connected_control_adapter()
 
     async def failed_stop():
@@ -60,7 +60,7 @@ async def test_hung_diagnostic_recorder_cannot_delay_safety_escalation():
 
     async def blocked_recorder(event, timestamp):
         if event.get("kind") == "stop_diagnostics":
-            assert client.write_calls == [("stop_move",), ("stop_sys",)]
+            assert client.write_calls == [("stop_move",)]
             assert not adapter._sdk_lock.locked()
             await asyncio.Event().wait()
 
@@ -74,7 +74,7 @@ async def test_hung_diagnostic_recorder_cannot_delay_safety_escalation():
 
 
 @pytest.mark.asyncio
-async def test_blocked_kinematics_recorder_cannot_prevent_stop_escalation():
+async def test_blocked_kinematics_recorder_cannot_prevent_stop_failure():
     adapter, client, _ = await _connected_control_adapter()
     client.kin_data["actual_joint_speed"] = [0.1] * 6
 
@@ -84,9 +84,9 @@ async def test_blocked_kinematics_recorder_cannot_prevent_stop_escalation():
     adapter._event_callback = blocked_recorder
     task = asyncio.create_task(adapter.stop(StopReason.GRIP_RELEASED))
     try:
-        await client.wait_for_write("stop_sys", timeout=0.15)
         with pytest.raises(BackendCommandError, match="^stop_incomplete$"):
-            await task
+            await asyncio.wait_for(task, 0.5)
+        assert client.write_calls == [("stop_move",)]
     finally:
         if not task.done():
             task.cancel()
@@ -141,7 +141,7 @@ async def test_zero_reported_speed_cannot_hide_position_drift(component):
 
 
 @pytest.mark.asyncio
-async def test_timeout_records_both_stop_rpcs_without_hiding_primary_failure():
+async def test_timeout_records_only_motion_stop_without_hiding_primary_failure():
     adapter, client, _ = await _connected_control_adapter()
     events = []
 
@@ -164,9 +164,9 @@ async def test_timeout_records_both_stop_rpcs_without_hiding_primary_failure():
         assert event["error"] == "sdk_timeout:stop_move"
         calls = event["rpc_calls"]
         assert [(c["method"], c["outcome"]) for c in calls] == [
-            ("stop_move", "timeout"), ("is_connected", "returned"),
-            ("stop_sys", "returned"),
+            ("stop_move", "timeout"),
         ]
+        assert event["stop_policy"] == "stop_move_only"
         assert all(c["completed_ns"] >= c["started_ns"] for c in calls)
         assert (await adapter.get_state()).fault == "stop_unverified"
     finally:

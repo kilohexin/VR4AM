@@ -1,7 +1,7 @@
 """Real smoke/adapter/recorder with production request ownership.
 
 No SDK import, sockets, site config, or real robot. Does not validate physics
-or approve removing stop_sys. Production app modules are not monkeypatched.
+or prove stop_move latency is repaired. Production app modules are not monkeypatched.
 """
 
 import asyncio
@@ -17,7 +17,7 @@ from tests.commissioning.test_stop_timeout_lifecycle import PendingStopClient
 from tests.robots.fake_lebai import FakeLebaiClient
 
 
-class DriftAfterEscalationClient(PendingStopClient):
+class DriftAfterFailedStopClient(PendingStopClient):
     def __init__(self, reply):
         super().__init__('late' if reply in {'late_error', 'read_disconnect'} else reply)
         self.late_error = reply == 'late_error'
@@ -29,8 +29,8 @@ class DriftAfterEscalationClient(PendingStopClient):
             raise RuntimeError('remote_stop_failed')
 
     async def get_kin_data(self):
-        # Scripted fault injection, NOT a claim that stop_sys causes real drift.
-        if self.stops >= 2:
+        # Scripted fault injection, NOT a model of physical stop behavior.
+        if self.stops >= 1:
             self.tail_reads += 1
             # First read belongs to smoke's stop-failure check; inject the
             # connection error into the subsequent observation instead.
@@ -47,8 +47,8 @@ class DriftAfterEscalationClient(PendingStopClient):
 async def test_owned_stop_deduplicates_shutdown_without_hiding_fault_or_tail(
     tmp_path, monkeypatch, reply,
 ):
-    # Production ownership must still escalate, but send each method once.
-    remote = DriftAfterEscalationClient(reply)
+    # Production ownership retains the one stop_move request across shutdown.
+    remote = DriftAfterFailedStopClient(reply)
     client = remote
 
     async def factory(ip):
@@ -67,13 +67,14 @@ async def test_owned_stop_deduplicates_shutdown_without_hiding_fault_or_tail(
         kinds = [e['kind'] for e in events]
         assert 'pvat_sent' in kinds
         first_stop = next(i for i, c in enumerate(remote.write_calls) if c[0] == 'stop_move')
-        assert remote.write_calls[first_stop:] == [('stop_move',), ('stop_sys',)]
+        assert remote.write_calls[first_stop:] == [('stop_move',)]
         assert 'stop_confirmed' not in kinds
         assert 'smoke_result' not in kinds
         assert 'session_ended' in kinds
         diagnostics = [e for e in events if e['kind'] == 'stop_diagnostics']
         assert len(diagnostics) == 2  # Both callers remain visible in app logs.
         assert all(e['outcome'] == 'failed' for e in diagnostics)
+        assert all(e['stop_policy'] == 'stop_move_only' for e in diagnostics)
         samples = [e['state'] for e in events if e['kind'] == 'stop_observation_sample']
         assert len(samples) >= 2
         assert all(s['latched_fault'] == 'stop_unverified' for s in samples)
@@ -89,7 +90,7 @@ async def test_owned_stop_deduplicates_shutdown_without_hiding_fault_or_tail(
         expected = {'late': 'returned_late', 'never': 'unknown_on_local_cancel',
                     'late_error': 'error', 'read_disconnect': 'returned_late'}[reply]
         lifecycle = [e for e in events if e['kind'] == 'stop_rpc_lifecycle']
-        assert len(lifecycle) == 2
+        assert len(lifecycle) == 1
         assert {e['outcome'] for e in lifecycle} == {expected}
         assert all(
             e['started_ns'] <= e['sdk_await_started_ns']
@@ -99,7 +100,6 @@ async def test_owned_stop_deduplicates_shutdown_without_hiding_fault_or_tail(
         if reply == 'late_error':
             assert {e['error_type'] for e in lifecycle} == {'RuntimeError'}
         assert all(e['wait_failed'] for e in lifecycle)
-        # Deduplication has NOT resolved motion-stop/system-disable overlap.
-        assert remote.overlap_seen
+        assert remote.overlap_seen is False
     finally:
         await remote.cleanup()

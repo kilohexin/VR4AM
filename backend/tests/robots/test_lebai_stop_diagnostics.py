@@ -143,7 +143,7 @@ async def test_read_error_stops_sampling_without_device_writes():
     assert client.write_calls == []
 
 
-async def test_diagnostic_timeout_does_not_change_stop_escalation_or_resend():
+async def test_diagnostic_timeout_does_not_change_stop_failure_or_resend():
     client = FakeLebaiClient.idle()
     events = []
     release = asyncio.Event()
@@ -173,7 +173,7 @@ async def test_diagnostic_timeout_does_not_change_stop_escalation_or_resend():
             await asyncio.wait_for(adapter.stop(StopReason.GRIP_RELEASED), 1)
         with pytest.raises(BackendCommandError, match="sdk_timeout:stop_move"):
             await asyncio.wait_for(adapter.stop(StopReason.SHUTDOWN), 1)
-        assert [w[0] for w in client.write_calls] == ["stop_move", "stop_sys"]
+        assert [w[0] for w in client.write_calls] == ["stop_move"]
         assert adapter._latched_fault == "stop_unverified"
         assert not adapter._preflight_ready
         assert not adapter._stop_transaction.confirmed

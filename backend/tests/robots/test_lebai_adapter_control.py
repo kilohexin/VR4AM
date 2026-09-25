@@ -1303,7 +1303,7 @@ async def test_runtime_error_or_estop_closes_production_pump_before_ik_or_pvat(
     assert client.ik_calls == []
     assert "move_pvat" not in [call[0] for call in client.write_calls]
     assert "stop_move" in [call[0] for call in client.write_calls]
-    assert "stop_sys" in [call[0] for call in client.write_calls]
+    assert "stop_sys" not in [call[0] for call in client.write_calls]
 
     client.robot_state = "IDLE"
     client.estop_reason = 0
@@ -1587,15 +1587,14 @@ async def test_stop_move_requires_three_hundred_ms_stationary_confirmation() -> 
 
 
 @pytest.mark.asyncio
-async def test_stop_escalates_once_when_joint_speed_never_settles() -> None:
+async def test_stop_latches_incomplete_without_system_stop_when_speed_never_settles() -> None:
     adapter, client, _ = await _connected_control_adapter()
     client.kin_data["actual_joint_speed"] = [0.1] * 6
 
     with pytest.raises(BackendCommandError, match="^stop_incomplete$"):
         await adapter.stop(StopReason.STALE)
 
-    assert client.write_calls[0] == ("stop_move",)
-    assert [call[0] for call in client.write_calls].count("stop_sys") == 1
+    assert client.write_calls == [("stop_move",)]
     state = await adapter.get_state()
     assert state.robot_state.value == "FAULT"
     assert state.fault == "stop_incomplete"
@@ -1603,7 +1602,7 @@ async def test_stop_escalates_once_when_joint_speed_never_settles() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_move_failure_escalates_after_the_failed_stop_move() -> None:
+async def test_stop_move_failure_latches_without_system_stop() -> None:
     adapter, client, _ = await _connected_control_adapter()
 
     async def failed_stop_move() -> None:
@@ -1619,7 +1618,7 @@ async def test_stop_move_failure_escalates_after_the_failed_stop_move() -> None:
         ):
             await adapter.stop(StopReason.STALE)
 
-        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+        assert client.write_calls == [("stop_move",)]
         state = await adapter.get_state()
         assert state.robot_state.value == "FAULT"
         assert state.fault == "stop_unverified"
@@ -1628,7 +1627,7 @@ async def test_stop_move_failure_escalates_after_the_failed_stop_move() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_move_cancellation_escalates_and_latches_unverified_stop() -> None:
+async def test_stop_move_cancellation_latches_without_system_stop() -> None:
     adapter, client, _ = await _connected_control_adapter()
     stop_started = asyncio.Event()
 
@@ -1645,7 +1644,7 @@ async def test_stop_move_cancellation_escalates_and_latches_unverified_stop() ->
     with pytest.raises(asyncio.CancelledError):
         await stop_task
 
-    assert client.write_calls == [("stop_move",), ("stop_sys",)]
+    assert client.write_calls == [("stop_move",)]
     state = await adapter.get_state()
     assert state.robot_state.value == "FAULT"
     assert state.fault == "stop_unverified"
@@ -1677,7 +1676,7 @@ async def test_disconnect_does_not_clear_cancelled_stop_or_resend_pending_reques
 
     assert state.robot_state.value == "FAULT"
     assert state.fault == "stop_unverified"
-    assert client.write_calls == [("stop_move",), ("stop_sys",)]
+    assert client.write_calls == [("stop_move",)]
     await adapter.disconnect()
 
 
@@ -1705,22 +1704,14 @@ async def test_verified_disconnect_keeps_a_real_stop_failure_latched() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop_sys_error", [RuntimeError("failed"), TimeoutError()])
-async def test_stop_move_failure_retains_primary_error_when_escalation_fails(
-    stop_sys_error: Exception,
-) -> None:
+async def test_stop_move_failure_retains_primary_error_without_system_stop() -> None:
     adapter, client, _ = await _connected_control_adapter()
 
     async def failed_stop_move() -> None:
         client.write_calls.append(("stop_move",))
         raise RuntimeError("simulated_stop_move_failure")
 
-    async def failed_stop_sys() -> None:
-        client.write_calls.append(("stop_sys",))
-        raise stop_sys_error
-
     client.stop_move = failed_stop_move  # type: ignore[method-assign]
-    client.stop_sys = failed_stop_sys  # type: ignore[method-assign]
 
     try:
         with pytest.raises(
@@ -1729,7 +1720,7 @@ async def test_stop_move_failure_retains_primary_error_when_escalation_fails(
         ):
             await adapter.stop(StopReason.STALE)
 
-        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+        assert client.write_calls == [("stop_move",)]
         state = await adapter.get_state()
         assert state.robot_state.value == "FAULT"
         assert state.fault == "stop_unverified"
@@ -1739,7 +1730,7 @@ async def test_stop_move_failure_retains_primary_error_when_escalation_fails(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verification_failure", ["state", "recorder"])
-async def test_stop_state_read_failure_escalates_but_recorder_failure_is_isolated(
+async def test_stop_state_read_failure_latches_but_recorder_failure_is_isolated(
     verification_failure: str,
 ) -> None:
     fail_recorder = False
@@ -1769,7 +1760,7 @@ async def test_stop_state_read_failure_escalates_but_recorder_failure_is_isolate
         if verification_failure == "state":
             with pytest.raises(BackendCommandError):
                 await adapter.stop(StopReason.STALE)
-            assert client.write_calls[:2] == [("stop_move",), ("stop_sys",)]
+            assert client.write_calls == [("stop_move",)]
             client.get_kin_data = AsyncMock(  # type: ignore[method-assign]
                 return_value=dict(client.kin_data)
             )

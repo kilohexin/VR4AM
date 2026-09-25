@@ -110,7 +110,10 @@ async def test_cli_enabled_translation_records_early_reads_but_preserves_stop_fa
         # completion strictly before the stop wait ends (the concurrency contract).
         assert call["started_ns"] <= first_read["started_ns"] <= first_read["completed_ns"] < call["completed_ns"]
         assert first_stop["latched_fault"] == "stop_unverified"
-        assert client.stops == 2
+        assert client.stops == 1
+        assert first_stop["stop_policy"] == "stop_move_only"
+        assert client.write_calls.count(("stop_move",)) == 1
+        assert ("stop_sys",) not in client.write_calls
         assert not any(e["kind"] == "stop_confirmed" for e in events)
         tail = next(e for e in events if e["kind"] == "stop_observation_summary")
         assert tail["complete"]

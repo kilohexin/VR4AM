@@ -66,7 +66,7 @@ async def test_unfinished_or_unknown_motion_id_cannot_confirm_stop(motion_state)
         with pytest.raises(BackendCommandError, match="^stop_incomplete$"):
             await adapter.stop(StopReason.GRIP_RELEASED)
         assert "get_motion_state" in client.read_calls
-        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+        assert client.write_calls == [("stop_move",)]
         assert (await adapter.read_stop_observation())["running_motion"] == 111
         assert (await adapter.get_state()).fault == "stop_incomplete"
     finally:
@@ -83,7 +83,7 @@ async def test_finished_id_cannot_override_nonsettled_robot_state(raw_state):
         with pytest.raises(BackendCommandError, match="^stop_incomplete$"):
             await adapter.stop(StopReason.GRIP_RELEASED)
         assert "get_motion_state" not in client.read_calls
-        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+        assert client.write_calls == [("stop_move",)]
     finally:
         await adapter.disconnect()
 
@@ -110,7 +110,7 @@ async def test_finished_id_cannot_hide_drift_or_nonzero_speed(component):
         with pytest.raises(BackendCommandError, match="^stop_incomplete$"):
             await adapter.stop(StopReason.GRIP_RELEASED)
         assert "get_motion_state" in client.read_calls
-        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+        assert client.write_calls == [("stop_move",)]
     finally:
         await adapter.disconnect()
 
@@ -137,7 +137,7 @@ async def test_motion_state_read_failure_never_confirms_stop(failure):
     try:
         with pytest.raises(BackendCommandError, match=f"^{expected[failure]}$"):
             await adapter.stop(StopReason.GRIP_RELEASED)
-        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+        assert client.write_calls == [("stop_move",)]
         assert adapter._latched_fault == "stop_unverified"
     finally:
         await adapter.disconnect()
@@ -177,7 +177,7 @@ async def test_finished_state_is_not_cached_across_reads_or_motion_ids():
         with pytest.raises(BackendCommandError, match="^stop_incomplete$"):
             await adapter.stop(StopReason.GRIP_RELEASED)
         assert set(queried_ids) == {111, 112}
-        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+        assert client.write_calls == [("stop_move",)]
     finally:
         await adapter.disconnect()
 
@@ -209,7 +209,7 @@ async def test_finished_id_never_overrides_estop():
     try:
         with pytest.raises(BackendCommandError, match="^stop_incomplete$"):
             await adapter.stop(StopReason.GRIP_RELEASED)
-        assert client.write_calls == [("stop_move",), ("stop_sys",)]
+        assert client.write_calls == [("stop_move",)]
     finally:
         await adapter.disconnect()
 
