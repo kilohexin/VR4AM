@@ -137,6 +137,7 @@ class RealLebaiAdapter:
         self._stop_transaction: StopTransaction | None = None
         self._stop_episode_id = 0
         self._sdk_request_id = 0
+        self._pvat_request_id_in_flight: int | None = None
         self._sdk_diagnostic_tasks: set[asyncio.Task[None]] = set()
         self._sdk_diagnostics_dropped = 0
         self._snapshot: LebaiSnapshot | None = None
@@ -359,6 +360,11 @@ class RealLebaiAdapter:
             "reason": reason.value,
             "initial_fault": self._latched_fault,
             "started_ns": self._clock(),
+            "stop_entry": {
+                "pvat_request_id_in_flight": self._pvat_request_id_in_flight,
+                "pvat_pending": self._pump.has_pending,
+                "sdk_lock_held": self._sdk_lock.locked(),
+            },
             "rpc_calls": [],
             "samples": [],
             "outcome": "failed",
@@ -424,8 +430,21 @@ class RealLebaiAdapter:
             self._latch_unverified_stop()
             raise BackendCommandError("robot_disconnected")
         try:
-            async with self._sdk_lock:
-                await self._call_stop_rpc(client, "stop_move", diagnostics)
+            lock_requested_ns = self._clock()
+            lock_timing = diagnostics["stop_move_lock"] = {
+                "requested_ns": lock_requested_ns,
+                "acquired_ns": None,
+                "wait_ns": None,
+            }
+            try:
+                async with self._sdk_lock:
+                    lock_acquired_ns = self._clock()
+                    lock_timing["acquired_ns"] = lock_acquired_ns
+                    lock_timing["wait_ns"] = lock_acquired_ns - lock_requested_ns
+                    await self._call_stop_rpc(client, "stop_move", diagnostics)
+            finally:
+                if lock_timing["acquired_ns"] is None:
+                    lock_timing["wait_ns"] = self._clock() - lock_requested_ns
         except asyncio.CancelledError:
             await asyncio.shield(
                 self._fail_unverified_stop(
@@ -576,24 +595,37 @@ class RealLebaiAdapter:
         client: LebaiClientProtocol,
         diagnostics: dict[str, Any],
     ) -> None:
-        async with self._sdk_lock:
-            if (self._stop_transaction is not None
-                    and "stop_sys" in self._stop_transaction.requests):
+        lock_requested_ns = self._clock()
+        lock_timing = diagnostics["stop_sys_lock"] = {
+            "requested_ns": lock_requested_ns,
+            "acquired_ns": None,
+            "wait_ns": None,
+        }
+        try:
+            async with self._sdk_lock:
+                lock_acquired_ns = self._clock()
+                lock_timing["acquired_ns"] = lock_acquired_ns
+                lock_timing["wait_ns"] = lock_acquired_ns - lock_requested_ns
+                if (self._stop_transaction is not None
+                        and "stop_sys" in self._stop_transaction.requests):
+                    try:
+                        await self._call_stop_rpc(client, "stop_sys", diagnostics)
+                    except Exception:
+                        pass
+                    return
+                try:
+                    connected = await self._call_stop_rpc(client, "is_connected", diagnostics)
+                except Exception:
+                    connected = False
+                if not connected:
+                    return
                 try:
                     await self._call_stop_rpc(client, "stop_sys", diagnostics)
                 except Exception:
-                    pass
-                return
-            try:
-                connected = await self._call_stop_rpc(client, "is_connected", diagnostics)
-            except Exception:
-                connected = False
-            if not connected:
-                return
-            try:
-                await self._call_stop_rpc(client, "stop_sys", diagnostics)
-            except Exception:
-                return
+                    return
+        finally:
+            if lock_timing["acquired_ns"] is None:
+                lock_timing["wait_ns"] = self._clock() - lock_requested_ns
 
     async def home(
         self,
@@ -969,6 +1001,7 @@ class RealLebaiAdapter:
                     "a": list(selected.point.qdd),
                     "horizon_s": selected.point.horizon_s,
                 })
+                self._pvat_request_id_in_flight = self._sdk_request_id
                 try:
                     await asyncio.wait_for(
                         client.move_pvat(
@@ -997,6 +1030,7 @@ class RealLebaiAdapter:
                         "sdk_call_failed:move_pvat"
                     ) from None
                 finally:
+                    self._pvat_request_id_in_flight = None
                     lifecycle["completed_ns"] = self._clock()
                     lifecycle["invalidated"] = not self._pump.is_current(
                         request.generation

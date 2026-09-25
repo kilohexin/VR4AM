@@ -6,8 +6,122 @@ from app.robots.base import BackendCommandError, StopReason
 from app.control.robot_control import RobotControl, LatestVRFrame
 from app.recording.noop import NoopRecorder
 from tests.robots.test_lebai_adapter_control import (
-    _connected_control_adapter, _target, _wait_for_pvat_count,
+    _connected_control_adapter, _target, _wait_for_pvat_count, _wait_until,
 )
+
+
+async def test_stop_records_inflight_pvat_and_sdk_lock_wait_without_extra_writes():
+    adapter, client, clock = await _connected_control_adapter()
+    events = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_move = client.move_pvat
+
+    async def record(event, _timestamp):
+        events.append(event)
+
+    async def delayed_move(*args):
+        entered.set()
+        await release.wait()
+        return await original_move(*args)
+
+    adapter._event_callback = record
+    client.move_pvat = delayed_move
+    try:
+        await adapter.command_tcp(_target(), 17)
+        await asyncio.wait_for(entered.wait(), .5)
+        stop = asyncio.create_task(adapter.stop(StopReason.GRIP_RELEASED))
+        await _wait_until(lambda: adapter._stop_transaction is not None)
+        await asyncio.sleep(0)
+        assert not stop.done()
+        clock.advance_ms(7)
+        release.set()
+        await asyncio.wait_for(stop, 1)
+
+        diagnostic = next(e for e in events if e['kind'] == 'stop_diagnostics')
+        entry = diagnostic['stop_entry']
+        assert entry['pvat_request_id_in_flight'] == 1
+        assert entry['sdk_lock_held'] is True
+        assert diagnostic['stop_move_lock']['wait_ns'] >= 7_000_000
+        assert diagnostic['stop_move_lock']['acquired_ns'] >= diagnostic['stop_move_lock']['requested_ns']
+        assert [call[0] for call in client.write_calls] == ['move_pvat', 'stop_move']
+        assert diagnostic['outcome'] == 'confirmed'
+    finally:
+        release.set()
+        await adapter.disconnect()
+
+
+async def test_cancelled_stop_records_interrupted_sdk_lock_wait():
+    adapter, client, clock = await _connected_control_adapter()
+    events = []
+
+    async def record(event, _timestamp):
+        events.append(event)
+
+    adapter._event_callback = record
+    await adapter._sdk_lock.acquire()
+    stop = asyncio.create_task(adapter.stop(StopReason.GRIP_RELEASED))
+    try:
+        await _wait_until(lambda: adapter._stop_transaction is not None)
+        await asyncio.sleep(0)
+        clock.advance_ms(7)
+        stop.cancel()
+    finally:
+        adapter._sdk_lock.release()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(stop, 1)
+        diagnostic = next(e for e in events if e['kind'] == 'stop_diagnostics')
+        lock_wait = diagnostic['stop_move_lock']
+        assert lock_wait['acquired_ns'] is None
+        assert lock_wait['wait_ns'] >= 7_000_000
+        assert [call[0] for call in client.write_calls] == ['stop_sys']
+        assert (await adapter.get_state()).fault == 'stop_unverified'
+    finally:
+        await adapter.disconnect()
+
+
+async def test_stop_sys_records_contended_lock_wait_without_extra_writes():
+    adapter, client, clock = await _connected_control_adapter()
+    events = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_escalate = adapter._safety_escalate_stop_sys
+
+    async def record(event, _timestamp):
+        events.append(event)
+
+    async def failed_stop_move():
+        client.write_calls.append(('stop_move',))
+        raise RuntimeError('stop_move_failed')
+
+    async def contended_escalate(client_arg, diagnostics):
+        await adapter._sdk_lock.acquire()
+        waiter = asyncio.create_task(original_escalate(client_arg, diagnostics))
+        try:
+            await _wait_until(lambda: 'stop_sys_lock' in diagnostics)
+            entered.set()
+            await release.wait()
+        finally:
+            adapter._sdk_lock.release()
+        await waiter
+
+    adapter._event_callback = record
+    adapter._safety_escalate_stop_sys = contended_escalate
+    client.stop_move = failed_stop_move
+    try:
+        stop = asyncio.create_task(adapter.stop(StopReason.GRIP_RELEASED))
+        await asyncio.wait_for(entered.wait(), 1)
+        clock.advance_ms(7)
+        release.set()
+        with pytest.raises(BackendCommandError, match='sdk_call_failed:stop_move'):
+            await asyncio.wait_for(stop, 1)
+        diagnostic = next(e for e in events if e['kind'] == 'stop_diagnostics')
+        lock_wait = diagnostic['stop_sys_lock']
+        assert lock_wait['wait_ns'] >= 7_000_000
+        assert lock_wait['acquired_ns'] >= lock_wait['requested_ns']
+        assert [call[0] for call in client.write_calls] == ['stop_move', 'stop_sys']
+    finally:
+        release.set()
+        await adapter.disconnect()
 
 
 async def test_production_stop_reuses_pending_requests_and_preserves_late_evidence():
@@ -46,6 +160,12 @@ async def test_production_stop_reuses_pending_requests_and_preserves_late_eviden
         assert (await adapter.get_state()).fault == 'stop_unverified'
         diagnostics = [e for e in events if e['kind'] == 'stop_diagnostics']
         assert diagnostics[0]['episode_id'] == diagnostics[1]['episode_id']
+        for diagnostic in diagnostics:
+            stop_sys_lock = diagnostic['stop_sys_lock']
+            assert stop_sys_lock['requested_ns'] <= stop_sys_lock['acquired_ns']
+            assert stop_sys_lock['wait_ns'] == (
+                stop_sys_lock['acquired_ns'] - stop_sys_lock['requested_ns']
+            )
         calls = [[c for c in d['rpc_calls'] if c['method'] == 'stop_move'][0] for d in diagnostics]
         assert calls[0]['request_id'] == calls[1]['request_id']
         assert calls[0]['reused'] is False and calls[1]['reused'] is True
