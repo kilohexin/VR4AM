@@ -5,9 +5,38 @@ import pytest
 from app.robots.base import BackendCommandError, StopReason
 from app.control.robot_control import RobotControl, LatestVRFrame
 from app.recording.noop import NoopRecorder
+from app.robots.lebai_stop_transaction import StopRpc
 from tests.robots.test_lebai_adapter_control import (
     _connected_control_adapter, _target, _wait_for_pvat_count, _wait_until,
 )
+
+
+async def test_stop_rpc_records_sdk_await_entry_and_exit_separately_from_request_creation():
+    now = [1_000_000_000]
+    events = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def send():
+        entered.set()
+        await release.wait()
+        now[0] += 13_000_000
+        return None
+
+    request = StopRpc(4, 2, 'stop_move', send, lambda: now[0], events.append)
+    now[0] += 7_000_000
+    await asyncio.wait_for(entered.wait(), .5)
+    now[0] += 11_000_000
+    release.set()
+    await request.wait()
+
+    assert len(events) == 1
+    event = events[0]
+    assert event['started_ns'] == 1_000_000_000
+    assert event['sdk_await_started_ns'] == 1_007_000_000
+    assert event['sdk_await_completed_ns'] == 1_031_000_000
+    assert event['completed_ns'] == 1_031_000_000
+    assert event['outcome'] == 'returned'
 
 
 async def test_stop_records_inflight_pvat_and_sdk_lock_wait_without_extra_writes():

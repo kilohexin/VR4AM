@@ -22,11 +22,17 @@ class StopRpc:
         self.outcome = 'pending'
         self.result: object = None
         self.error: Exception | None = None
+        self.sdk_await_started_ns: int | None = None
+        self.sdk_await_completed_ns: int | None = None
         self.task = asyncio.create_task(self._run(send))
 
     async def _run(self, send: Callable[[], Awaitable[object]]) -> None:
         try:
-            self.result = await send()
+            self.sdk_await_started_ns = self.clock()
+            try:
+                self.result = await send()
+            finally:
+                self.sdk_await_completed_ns = self.clock()
         except asyncio.CancelledError:
             self.wait_failed = True
             self.outcome = 'unknown_on_local_cancel'
@@ -45,6 +51,8 @@ class StopRpc:
                 'kind': 'stop_rpc_lifecycle', 'episode_id': self.episode_id,
                 'request_id': self.request_id, 'method': self.method,
                 'started_ns': self.started_ns, 'completed_ns': self.clock(),
+                'sdk_await_started_ns': self.sdk_await_started_ns,
+                'sdk_await_completed_ns': self.sdk_await_completed_ns,
                 'deadline_ns': self.deadline_ns, 'outcome': self.outcome,
                 'error_type': type(self.error).__name__ if self.error else None,
                 'wait_failed': self.wait_failed,

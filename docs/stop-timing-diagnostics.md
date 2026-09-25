@@ -20,7 +20,15 @@ robot has physically stopped.
 - Each `rpc_calls` item records the caller's bounded wait. Its `reused`,
   `episode_id`, and `request_id` distinguish a later attempt from a new SDK
   request. `stop_rpc_lifecycle` records eventual RPC completion, including
-  `returned_late`. A late return is not proof of physical stationarity.
+  `returned_late`. Its `started_ns` is request-object creation;
+  `sdk_await_started_ns` is the local timestamp immediately before awaiting
+  the SDK coroutine, and `sdk_await_completed_ns` is when that await exits
+  locally (return, error, or cancellation). A `null` value does not establish
+  whether the SDK ran; an unstarted task may emit no lifecycle event at all.
+  The timestamps distinguish local scheduling delay
+  from time spent awaiting the SDK, but do **not** timestamp network send,
+  controller receipt, or physical stop. A late return is not proof of
+  physical stationarity.
 - Use the stop verification samples (velocity, raw state, running motion,
   joint and TCP drift) to assess the configured stationary criterion. A
   `STOP` / `FINISHED` status word alone is insufficient.

@@ -91,6 +91,11 @@ async def test_owned_stop_deduplicates_shutdown_without_hiding_fault_or_tail(
         lifecycle = [e for e in events if e['kind'] == 'stop_rpc_lifecycle']
         assert len(lifecycle) == 2
         assert {e['outcome'] for e in lifecycle} == {expected}
+        assert all(
+            e['started_ns'] <= e['sdk_await_started_ns']
+            <= e['sdk_await_completed_ns'] <= e['completed_ns']
+            for e in lifecycle
+        )
         if reply == 'late_error':
             assert {e['error_type'] for e in lifecycle} == {'RuntimeError'}
         assert all(e['wait_failed'] for e in lifecycle)
