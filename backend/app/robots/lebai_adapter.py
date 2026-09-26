@@ -382,8 +382,8 @@ class RealLebaiAdapter:
             diagnostics["latched_fault"] = self._latched_fault
             if self._stop_diagnostic_sampler is not None:
                 await self._stop_diagnostic_sampler.close()
-            # Never delay the stop or its escalation on the recorder. Flush only
-            # after the safety work, outside the SDK lock, with a bounded wait.
+            # Never delay the stop on the recorder. Flush only after the
+            # safety work, outside the SDK lock, with a bounded wait.
             try:
                 await asyncio.wait_for(
                     self._emit_diagnostic_event(diagnostics), timeout=0.05,

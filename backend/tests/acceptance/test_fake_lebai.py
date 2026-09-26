@@ -54,6 +54,13 @@ def test_fake_lebai_scenarios_cover_every_required_axis_and_action() -> None:
     assert all(result.passed for result in results)
 
 
+def test_fault_scenario_keeps_failure_without_automatic_system_stop() -> None:
+    result = asyncio.run(run_fault_scenario())
+
+    assert result.metrics["verified"] == result.metrics["injected"]
+    assert result.metrics["stop_sys_calls"] == 0
+
+
 def test_translation_result_reports_motion_verification_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

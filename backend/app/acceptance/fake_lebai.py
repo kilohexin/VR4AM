@@ -763,7 +763,7 @@ async def _run_stop_failure_case() -> tuple[int, int]:
             await harness.control.tick()
         methods = _methods(harness)
         assert "stop_move" in methods
-        assert "stop_sys" in methods
+        assert "stop_sys" not in methods
         assert harness.control.mode is TeleopMode.FAULT
         kin_data = await harness.client.get_kin_data()
         actual_qd = np.asarray(kin_data["actual_joint_speed"], dtype=float)
