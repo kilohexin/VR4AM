@@ -58,6 +58,7 @@ class _MotionActionResult:
     reached_state: RobotStateMessage | None
     measurement_initial: RobotStateMessage | None
     max_cross_axis_drift_m: float | None
+    early_stop_triggered: bool = False
 
 
 class _SmokeRecorder(CommissioningRecorder):
@@ -102,6 +103,10 @@ def parse_smoke_args(argv: Sequence[str] | None = None) -> SmokeOptions:
     translate = commands.choices["translate"]
     translate.add_argument("--axis", choices=("x", "y", "z"), required=True)
     translate.add_argument("--distance-m", type=float, required=True)
+    translate.add_argument(
+        "--early-stop-on-motion", action="store_true",
+        help="Opt-in diagnostic: release Grip once while joint motion is observed before target arrival.",
+    )
 
     _add_safety_inputs(commands.add_parser("rotate"))
     rotate = commands.choices["rotate"]
@@ -152,7 +157,8 @@ def parse_smoke_args(argv: Sequence[str] | None = None) -> SmokeOptions:
     validate_observation_seconds(args.observe_stop_seconds)
     _validate_stop_rpc_diagnostics(args.stop_rpc_diagnostics, action)
     return SmokeOptions(Path(args.config), action, confirmation, args.observe_stop_seconds,
-                        stop_rpc_diagnostics=args.stop_rpc_diagnostics)
+                        stop_rpc_diagnostics=args.stop_rpc_diagnostics,
+                        early_stop_on_motion=getattr(args, "early_stop_on_motion", False))
 
 
 def _add_safety_inputs(parser: argparse.ArgumentParser) -> None:
@@ -169,6 +175,13 @@ def _validate_stop_rpc_diagnostics(enabled: bool, action: SmokeAction) -> None:
         raise ValueError("smoke_stop_rpc_diagnostics_invalid")
     if enabled and not isinstance(action, (StopAction, TranslationAction)):
         raise ValueError("smoke_stop_rpc_diagnostics_action_not_supported")
+
+
+def _validate_early_stop_on_motion(enabled: bool, action: SmokeAction) -> None:
+    if type(enabled) is not bool:
+        raise ValueError("smoke_early_stop_invalid")
+    if enabled and not isinstance(action, TranslationAction):
+        raise ValueError("smoke_early_stop_action_not_supported")
 
 
 def _configured_mode(config_path: Path) -> object:
@@ -277,6 +290,8 @@ async def _run_motion_action(
     recorder: _SmokeRecorder,
     settings: Settings,
     action: TranslationAction | RotationAction | GripperAction,
+    *,
+    early_stop_on_motion: bool = False,
 ) -> _MotionActionResult:
     # The released sample is deliberately ticked before arming so the
     # RobotControl session guards remain the sole authority for motion.
@@ -300,6 +315,7 @@ async def _run_motion_action(
     reached_state: RobotStateMessage | None = None
     measurement_initial: RobotStateMessage | None = None
     max_cross_axis_drift_m: float | None = None
+    early_stop_triggered = False
     try:
         if isinstance(action, (TranslationAction, RotationAction)):
             initial = await control.backend.get_state()
@@ -396,6 +412,27 @@ async def _run_motion_action(
                     release_pose_reached or release_pose_reached_now
                 )
                 maximum_joint_speed = recorder.maximum_joint_speed_for(current)
+                if (
+                    early_stop_on_motion
+                    and isinstance(action, TranslationAction)
+                    and not target_axis_reached
+                    and maximum_joint_speed is not None
+                    and maximum_joint_speed > settings.home_velocity_tolerance_radps
+                    and signed_progress < abs(requested) - tolerance
+                ):
+                    early_stop_triggered = True
+                    await recorder.write_critical_event(
+                        "smoke_early_stop_triggered",
+                        {
+                            "maximum_joint_speed_radps": maximum_joint_speed,
+                            "signed_progress_m": signed_progress,
+                            "requested_distance_m": requested,
+                            "target_tolerance_m": tolerance,
+                            "state_server_mono_ns": current.server_mono_ns,
+                        },
+                        clock.now_ns(),
+                    )
+                    break
                 velocity_converged = (
                     maximum_joint_speed is not None
                     and maximum_joint_speed
@@ -409,7 +446,14 @@ async def _run_motion_action(
                     reached = True
                     reached_state = current
                     break
-            if not reached:
+            if early_stop_on_motion and not early_stop_triggered:
+                await recorder.write_critical_event(
+                    "smoke_early_stop_not_reproduced",
+                    {"reason": "no_authoritative_moving_before_target_window"},
+                    clock.now_ns(),
+                )
+                raise RuntimeError("smoke_early_stop_not_reproduced")
+            if not reached and not early_stop_triggered:
                 if (
                     isinstance(action, TranslationAction)
                     and target_axis_reached
@@ -435,6 +479,7 @@ async def _run_motion_action(
         reached_state=reached_state,
         measurement_initial=measurement_initial,
         max_cross_axis_drift_m=max_cross_axis_drift_m,
+        early_stop_triggered=early_stop_triggered,
     )
 
 
@@ -505,6 +550,7 @@ async def run_smoke(
     client_factory: ClientFactory = connect_real_client,
 ) -> SmokeResult:
     _validate_stop_rpc_diagnostics(options.stop_rpc_diagnostics, options.action)
+    _validate_early_stop_on_motion(options.early_stop_on_motion, options.action)
     validate_observation_seconds(options.observe_stop_seconds)
     if options.observe_stop_seconds > 0 and isinstance(options.action, PrepareAction):
         # prepare has its own cleanup/disconnect path; do not delay that stop
@@ -545,6 +591,7 @@ async def run_smoke(
             "python_version": platform.python_version(),
             "observe_stop_seconds": options.observe_stop_seconds,
             "stop_rpc_diagnostics": diagnostic_sampling_metadata(options.stop_rpc_diagnostics),
+            "early_stop_on_motion": options.early_stop_on_motion,
         },
     )
     if options.stop_rpc_diagnostics:
@@ -558,6 +605,7 @@ async def run_smoke(
     backend_connected = False
     primary_error: BaseException | None = None
     cleanup_error: BaseException | None = None
+    deferred_result: SmokeResult | None = None
     try:
         await recorder.start()
         recorder_started = True
@@ -644,6 +692,7 @@ async def run_smoke(
                 recorder,
                 settings,
                 options.action,
+                early_stop_on_motion=options.early_stop_on_motion,
             )
         elif isinstance(options.action, HomeAction):
             latest.publish(_frame(1, grip=False), clock.now_ns())
@@ -702,13 +751,19 @@ async def run_smoke(
             reached_cross_axis_drift_m=reached_cross_axis_drift_m,
             settled_cross_axis_drift_m=settled_cross_axis_drift_m,
             max_cross_axis_drift_m=motion_result.max_cross_axis_drift_m,
+            early_stop_triggered=motion_result.early_stop_triggered,
         )
-        await recorder.write_critical_event(
-            "smoke_result",
-            result.to_dict(),
-            clock.now_ns(),
-        )
-        print(json.dumps(result.to_dict(), separators=(",", ":")))
+        if options.early_stop_on_motion:
+            # The diagnostic must not announce success until its final stop
+            # verification and observation tail have also completed.
+            deferred_result = result
+        else:
+            await recorder.write_critical_event(
+                "smoke_result",
+                result.to_dict(),
+                clock.now_ns(),
+            )
+            print(json.dumps(result.to_dict(), separators=(",", ":")))
         return result
     except BaseException as error:
         primary_error = error
@@ -763,6 +818,13 @@ async def run_smoke(
             except BaseException as error:
                 if cleanup_error is None:
                     cleanup_error = error
+        if deferred_result is not None and primary_error is None and cleanup_error is None:
+            try:
+                await recorder.write_critical_event(
+                    "smoke_result", deferred_result.to_dict(), clock.now_ns(),
+                )
+            except BaseException as error:
+                cleanup_error = error
         if recorder_started:
             try:
                 await recorder.close()
@@ -771,6 +833,8 @@ async def run_smoke(
                     cleanup_error = error
         if primary_error is None and cleanup_error is not None:
             raise cleanup_error
+        if deferred_result is not None and primary_error is None:
+            print(json.dumps(deferred_result.to_dict(), separators=(",", ":")))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

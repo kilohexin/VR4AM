@@ -114,6 +114,32 @@ def test_translate_accepts_signed_five_millimetres(distance: float) -> None:
         ]
     )
     assert options.action == TranslationAction("x", distance)
+    assert options.early_stop_on_motion is False
+
+
+def test_translate_early_stop_is_explicit_opt_in() -> None:
+    options = parse_smoke_args(
+        [
+            "translate", "--config", str(CONFIG), "--axis", "x",
+            "--distance-m", "0.005", "--confirm", REAL_ROBOT_CONFIRMATION,
+            "--early-stop-on-motion",
+        ]
+    )
+    assert options.early_stop_on_motion is True
+
+
+@pytest.mark.asyncio
+async def test_early_stop_rejects_other_actions_before_connection(tmp_path: Path) -> None:
+    factory = AsyncMock()
+    with pytest.raises(ValueError, match="^smoke_early_stop_action_not_supported$"):
+        await run_smoke(
+            SmokeOptions(
+                _control_config(tmp_path), StopAction(), REAL_ROBOT_CONFIRMATION,
+                early_stop_on_motion=True,
+            ),
+            factory,
+        )
+    factory.assert_not_awaited()
 
 
 @pytest.mark.parametrize("distance", [-0.0051, 0.0, 0.0051, math.nan])
@@ -596,6 +622,148 @@ async def test_translation_waits_for_joint_velocity_to_settle_before_stop(
     assert len(client.ik_calls) >= 30
     assert speed_at_stop
     assert speed_at_stop[0] <= 0.02
+
+
+@pytest.mark.asyncio
+async def test_opt_in_translation_releases_grip_while_authoritatively_moving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    original_move_pvat = client.move_pvat
+    original_stop_move = client.stop_move
+    speed_at_stop: list[float] = []
+
+    async def moving_pvat(
+        p: list[float], v: list[float], a: list[float], t: float,
+    ) -> object:
+        result = await original_move_pvat(p, v, a, t)
+        client.kin_data["actual_joint_speed"] = [0.03, 0, 0, 0, 0, 0]
+        return result
+
+    async def settling_stop() -> None:
+        speed_at_stop.append(max(abs(v) for v in client.kin_data["actual_joint_speed"]))
+        client.kin_data["actual_joint_speed"] = [0.0] * 6
+        await original_stop_move()
+
+    client.move_pvat = moving_pvat  # type: ignore[method-assign]
+    client.stop_move = settling_stop  # type: ignore[method-assign]
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    result = await run_smoke(
+        SmokeOptions(
+            _control_config(tmp_path), TranslationAction("x", 0.005),
+            REAL_ROBOT_CONFIRMATION, early_stop_on_motion=True,
+        ),
+        AsyncMock(return_value=client),
+    )
+    methods = [call[0] for call in client.write_calls]
+    assert result.early_stop_triggered is True
+    assert result.reached_displacement is None
+    assert speed_at_stop[0] > 0.02
+    assert methods.index("move_pvat") < methods.index("stop_move")
+    assert "move_pvat" not in methods[methods.index("stop_move") + 1:]
+    assert "stop_sys" not in methods
+    events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
+              for line in p.read_text(encoding="utf-8").splitlines()]
+    triggers = [event for event in events if event["kind"] == "smoke_early_stop_triggered"]
+    assert len(triggers) == 1
+    assert triggers[0]["maximum_joint_speed_radps"] > 0.02
+    assert triggers[0]["signed_progress_m"] < 0.0045
+
+
+@pytest.mark.asyncio
+async def test_opt_in_translation_without_moving_window_is_not_reproduced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_MOTION_TIMEOUT_S", 0.06)
+    with pytest.raises(RuntimeError, match="^smoke_early_stop_not_reproduced$"):
+        await run_smoke(
+            SmokeOptions(
+                _control_config(tmp_path), TranslationAction("x", 0.005),
+                REAL_ROBOT_CONFIRMATION, early_stop_on_motion=True,
+            ),
+            AsyncMock(return_value=client),
+        )
+    methods = [call[0] for call in client.write_calls]
+    assert "move_pvat" in methods
+    assert "stop_move" in methods
+    assert "stop_sys" not in methods
+    events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
+              for line in p.read_text(encoding="utf-8").splitlines()]
+    assert sum(event["kind"] == "smoke_early_stop_not_reproduced" for event in events) == 1
+    assert not any(event["kind"] == "smoke_result" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_early_stop_does_not_report_success_when_stop_is_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    original_move_pvat = client.move_pvat
+
+    async def moving_pvat(
+        p: list[float], v: list[float], a: list[float], t: float,
+    ) -> object:
+        result = await original_move_pvat(p, v, a, t)
+        client.kin_data["actual_joint_speed"] = [0.03, 0, 0, 0, 0, 0]
+        return result
+
+    client.move_pvat = moving_pvat  # type: ignore[method-assign]
+    client.stop_move = AsyncMock(side_effect=RuntimeError("stop transport failed"))
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    with pytest.raises(RuntimeError, match="^smoke_stop_failed:stop_unverified$"):
+        await run_smoke(
+            SmokeOptions(
+                _control_config(tmp_path), TranslationAction("x", 0.005),
+                REAL_ROBOT_CONFIRMATION, early_stop_on_motion=True,
+            ),
+            AsyncMock(return_value=client),
+        )
+    events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
+              for line in p.read_text(encoding="utf-8").splitlines()]
+    assert not any(event["kind"] == "smoke_result" for event in events)
+    assert not any(call[0] == "stop_sys" for call in client.write_calls)
+
+
+@pytest.mark.asyncio
+async def test_early_stop_defers_success_until_final_stop_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    original_move_pvat = client.move_pvat
+    original_stop_move = client.stop_move
+
+    async def moving_pvat(
+        p: list[float], v: list[float], a: list[float], t: float,
+    ) -> object:
+        result = await original_move_pvat(p, v, a, t)
+        client.kin_data["actual_joint_speed"] = [0.03, 0, 0, 0, 0, 0]
+        return result
+
+    async def settling_stop() -> None:
+        client.kin_data["actual_joint_speed"] = [0.0] * 6
+        await original_stop_move()
+
+    client.move_pvat = moving_pvat  # type: ignore[method-assign]
+    client.stop_move = settling_stop  # type: ignore[method-assign]
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr(
+        "app.commissioning.smoke.RobotControl.stop",
+        AsyncMock(side_effect=RuntimeError("final stop unverified")),
+    )
+    with pytest.raises(RuntimeError, match="^final stop unverified$"):
+        await run_smoke(
+            SmokeOptions(
+                _control_config(tmp_path), TranslationAction("x", 0.005),
+                REAL_ROBOT_CONFIRMATION, early_stop_on_motion=True,
+            ),
+            AsyncMock(return_value=client),
+        )
+    events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
+              for line in p.read_text(encoding="utf-8").splitlines()]
+    assert any(event["kind"] == "smoke_early_stop_triggered" for event in events)
+    assert not any(event["kind"] == "smoke_result" for event in events)
 
 
 @pytest.mark.asyncio

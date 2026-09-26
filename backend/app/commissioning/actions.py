@@ -60,6 +60,7 @@ class SmokeOptions:
     confirmation: str
     observe_stop_seconds: float = 0.0
     stop_rpc_diagnostics: bool = False
+    early_stop_on_motion: bool = False
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,7 @@ class SmokeResult:
     reached_cross_axis_drift_m: float | None = None
     settled_cross_axis_drift_m: float | None = None
     max_cross_axis_drift_m: float | None = None
+    early_stop_triggered: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -89,4 +91,5 @@ class SmokeResult:
             "reached_cross_axis_drift_m": self.reached_cross_axis_drift_m,
             "settled_cross_axis_drift_m": self.settled_cross_axis_drift_m,
             "max_cross_axis_drift_m": self.max_cross_axis_drift_m,
+            "early_stop_triggered": self.early_stop_triggered,
         }
