@@ -666,8 +666,214 @@ async def test_opt_in_translation_releases_grip_while_authoritatively_moving(
               for line in p.read_text(encoding="utf-8").splitlines()]
     triggers = [event for event in events if event["kind"] == "smoke_early_stop_triggered"]
     assert len(triggers) == 1
+    assert triggers[0]["motion_evidence"] == "joint_speed"
     assert triggers[0]["maximum_joint_speed_radps"] > 0.02
     assert triggers[0]["signed_progress_m"] < 0.0045
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_verified", [True, False])
+async def test_early_stop_detects_low_speed_joint_position_motion_before_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_verified: bool,
+) -> None:
+    client = FakeLebaiClient.idle()
+    original_get_kin_data = client.get_kin_data
+    original_move_pvat = client.move_pvat
+    original_stop_move = client.stop_move
+    moving = False
+    joint_step_rad = 2 * math.pi / 65536
+
+    async def reachable_ik(pose: dict[str, float], joints: list[float]) -> object:
+        return list(joints)
+
+    async def moving_pvat(
+        p: list[float], v: list[float], a: list[float], t: float,
+    ) -> object:
+        nonlocal moving
+        result = await original_move_pvat(p, v, a, t)
+        moving = True
+        return result
+
+    async def low_speed_kinematics() -> dict[str, object]:
+        if moving:
+            joints = list(client.kin_data["actual_joint_pose"])
+            joints[2] += joint_step_rad
+            client.kin_data["actual_joint_pose"] = joints
+            tcp = dict(client.kin_data["actual_tcp_pose"])
+            tcp["x"] = min(float(tcp["x"]) + 0.00005, 0.305)
+            client.kin_data["actual_tcp_pose"] = tcp
+            client.kin_data["actual_joint_speed"] = [0.009, 0, 0, 0, 0, 0]
+        return await original_get_kin_data()
+
+    async def settling_stop() -> None:
+        nonlocal moving
+        moving = False
+        client.kin_data["actual_joint_speed"] = [0.0] * 6
+        await original_stop_move()
+        if not stop_verified:
+            raise RuntimeError("stop transport failed")
+
+    client.move_pvat = moving_pvat  # type: ignore[method-assign]
+    client.kinematics_inverse = reachable_ik  # type: ignore[method-assign]
+    client.get_kin_data = low_speed_kinematics  # type: ignore[method-assign]
+    client.stop_move = settling_stop  # type: ignore[method-assign]
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_MOTION_TIMEOUT_S", 0.5)
+    run = run_smoke(
+        SmokeOptions(_control_config(tmp_path), TranslationAction("x", 0.005),
+                     REAL_ROBOT_CONFIRMATION, early_stop_on_motion=True),
+        AsyncMock(return_value=client),
+    )
+    if stop_verified:
+        result = await run
+        assert result.early_stop_triggered is True
+    else:
+        with pytest.raises(RuntimeError, match="^smoke_stop_failed:stop_unverified$"):
+            await run
+    events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
+              for line in p.read_text(encoding="utf-8").splitlines()]
+    triggers = [event for event in events if event["kind"] == "smoke_early_stop_triggered"]
+    assert len(triggers) == 1
+    assert triggers[0]["motion_evidence"] == "joint_position_change"
+    assert triggers[0]["maximum_joint_speed_radps"] < 0.02
+    assert 0.0001 < triggers[0]["signed_progress_m"] < 0.0045
+    assert [call[0] for call in client.write_calls].count("stop_move") == 1
+    assert not any(call[0] == "stop_sys" for call in client.write_calls)
+    assert any(event["kind"] == ("stop_confirmed" if stop_verified else "stop_failed")
+               for event in events)
+    if not stop_verified:
+        assert not any(event["kind"] == "smoke_result" for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("telemetry_case", ["encoder_jitter", "target_reached"])
+async def test_early_stop_position_evidence_requires_real_motion_before_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, telemetry_case: str,
+) -> None:
+    client = FakeLebaiClient.idle()
+    original_get_kin_data = client.get_kin_data
+    original_move_pvat = client.move_pvat
+    original_stop_move = client.stop_move
+    moving = False
+    read_count = 0
+
+    async def reachable_ik(pose: dict[str, float], joints: list[float]) -> object:
+        return list(joints)
+
+    async def moving_pvat(
+        p: list[float], v: list[float], a: list[float], t: float,
+    ) -> object:
+        nonlocal moving
+        result = await original_move_pvat(p, v, a, t)
+        moving = True
+        return result
+
+    async def observed_kinematics() -> dict[str, object]:
+        nonlocal read_count
+        if moving:
+            read_count += 1
+            joints = list(client.kin_data["actual_joint_pose"])
+            if telemetry_case == "encoder_jitter":
+                joints[2] = (1.0 + (read_count % 2) * 2 * math.pi / 65536)
+                client.kin_data["actual_tcp_pose"] = {
+                    **client.kin_data["actual_tcp_pose"],
+                    "x": 0.3 + (read_count % 2) * 0.00002,
+                }
+            else:
+                joints[2] += 2 * math.pi / 65536
+                client.kin_data["actual_tcp_pose"] = {
+                    **client.kin_data["actual_tcp_pose"], "x": 0.305,
+                }
+            client.kin_data["actual_joint_pose"] = joints
+            client.kin_data["actual_joint_speed"] = [0.009, 0, 0, 0, 0, 0]
+        return await original_get_kin_data()
+
+    async def settling_stop() -> None:
+        nonlocal moving
+        moving = False
+        client.kin_data["actual_joint_speed"] = [0.0] * 6
+        await original_stop_move()
+
+    client.kinematics_inverse = reachable_ik  # type: ignore[method-assign]
+    client.move_pvat = moving_pvat  # type: ignore[method-assign]
+    client.get_kin_data = observed_kinematics  # type: ignore[method-assign]
+    client.stop_move = settling_stop  # type: ignore[method-assign]
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_MOTION_TIMEOUT_S", 0.12)
+    with pytest.raises(RuntimeError, match="^smoke_early_stop_not_reproduced$"):
+        await run_smoke(
+            SmokeOptions(
+                _control_config(tmp_path), TranslationAction("x", 0.005),
+                REAL_ROBOT_CONFIRMATION, early_stop_on_motion=True,
+            ),
+            AsyncMock(return_value=client),
+        )
+    events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
+              for line in p.read_text(encoding="utf-8").splitlines()]
+    assert not any(event["kind"] == "smoke_early_stop_triggered" for event in events)
+    assert not any(event["kind"] == "smoke_result" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_early_stop_does_not_reuse_stale_position_motion_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeLebaiClient.idle()
+    original_get_kin_data = client.get_kin_data
+    original_move_pvat = client.move_pvat
+    original_stop_move = client.stop_move
+    moving = False
+    read_count = 0
+
+    async def reachable_ik(pose: dict[str, float], joints: list[float]) -> object:
+        return list(joints)
+
+    async def moving_pvat(
+        p: list[float], v: list[float], a: list[float], t: float,
+    ) -> object:
+        nonlocal moving
+        result = await original_move_pvat(p, v, a, t)
+        moving = True
+        return result
+
+    async def observed_kinematics() -> dict[str, object]:
+        nonlocal read_count
+        if moving:
+            read_count += 1
+            if read_count <= 8:
+                joints = list(client.kin_data["actual_joint_pose"])
+                joints[2] += 2 * math.pi / 65536
+                client.kin_data["actual_joint_pose"] = joints
+            else:
+                client.kin_data["actual_tcp_pose"] = {
+                    **client.kin_data["actual_tcp_pose"], "x": 0.3002,
+                }
+            client.kin_data["actual_joint_speed"] = [0.009, 0, 0, 0, 0, 0]
+        return await original_get_kin_data()
+
+    async def settling_stop() -> None:
+        nonlocal moving
+        moving = False
+        client.kin_data["actual_joint_speed"] = [0.0] * 6
+        await original_stop_move()
+
+    client.kinematics_inverse = reachable_ik  # type: ignore[method-assign]
+    client.move_pvat = moving_pvat  # type: ignore[method-assign]
+    client.get_kin_data = observed_kinematics  # type: ignore[method-assign]
+    client.stop_move = settling_stop  # type: ignore[method-assign]
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_MOTION_TIMEOUT_S", 0.2)
+    with pytest.raises(RuntimeError, match="^smoke_early_stop_not_reproduced$"):
+        await run_smoke(
+            SmokeOptions(
+                _control_config(tmp_path), TranslationAction("x", 0.005),
+                REAL_ROBOT_CONFIRMATION, early_stop_on_motion=True,
+            ),
+            AsyncMock(return_value=client),
+        )
+    events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
+              for line in p.read_text(encoding="utf-8").splitlines()]
+    assert not any(event["kind"] == "smoke_early_stop_triggered" for event in events)
 
 
 @pytest.mark.asyncio

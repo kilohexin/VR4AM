@@ -51,6 +51,12 @@ _ORIGIN = (0.0, 0.0, 0.0)
 COMMISSIONING_MOTION_TIMEOUT_S = 4.0
 TRANSLATION_TOLERANCE_M = 0.0005
 ROTATION_TOLERANCE_DEG = 0.2
+_JOINT_ENCODER_STEP_RAD = 2 * math.pi / 65536
+# Require multiple encoder steps and corroborating TCP progress; one idle LSB
+# or a stale joint pose must not initiate the diagnostic Grip release.
+_POSITION_MOTION_MIN_RAD = 4 * _JOINT_ENCODER_STEP_RAD
+_POSITION_MOTION_PROGRESS_M = 0.0001
+_POSITION_MOTION_MAX_GAP_NS = 200_000_000
 
 
 @dataclass(frozen=True)
@@ -335,6 +341,10 @@ async def _run_motion_action(
             cross_axes_converged_after_target = False
             release_pose_reached = False
             stable_velocity_samples = 0
+            last_position_ns = initial.server_mono_ns
+            position_motion_peak_rad = 0.0
+            position_motion_samples = 0
+            last_position_evidence_ns: int | None = None
             required_stable_samples = (
                 math.ceil(
                     settings.home_stable_ms
@@ -412,12 +422,48 @@ async def _run_motion_action(
                     release_pose_reached or release_pose_reached_now
                 )
                 maximum_joint_speed = recorder.maximum_joint_speed_for(current)
+                joint_displacement_rad = 0.0
+                position_motion_detected = False
+                if (
+                    early_stop_on_motion
+                    and isinstance(action, TranslationAction)
+                    and current.server_mono_ns > last_position_ns
+                ):
+                    joint_displacement_rad = max(
+                        abs(actual - baseline)
+                        for actual, baseline in zip(current.actual_q, initial.actual_q)
+                    )
+                    new_position_evidence = False
+                    if (
+                        joint_displacement_rad >= _POSITION_MOTION_MIN_RAD
+                        and joint_displacement_rad - position_motion_peak_rad
+                        >= 0.75 * _JOINT_ENCODER_STEP_RAD
+                    ):
+                        position_motion_samples = (
+                            position_motion_samples + 1
+                            if last_position_evidence_ns is not None
+                            and current.server_mono_ns - last_position_evidence_ns
+                            <= _POSITION_MOTION_MAX_GAP_NS
+                            else 1
+                        )
+                        last_position_evidence_ns = current.server_mono_ns
+                        position_motion_peak_rad = joint_displacement_rad
+                        new_position_evidence = True
+                    last_position_ns = current.server_mono_ns
+                    position_motion_detected = (
+                        new_position_evidence
+                        and position_motion_samples >= 2
+                        and signed_progress >= _POSITION_MOTION_PROGRESS_M
+                    )
+                speed_motion_detected = (
+                    maximum_joint_speed is not None
+                    and maximum_joint_speed > settings.home_velocity_tolerance_radps
+                )
                 if (
                     early_stop_on_motion
                     and isinstance(action, TranslationAction)
                     and not target_axis_reached
-                    and maximum_joint_speed is not None
-                    and maximum_joint_speed > settings.home_velocity_tolerance_radps
+                    and (speed_motion_detected or position_motion_detected)
                     and signed_progress < abs(requested) - tolerance
                 ):
                     early_stop_triggered = True
@@ -425,6 +471,12 @@ async def _run_motion_action(
                         "smoke_early_stop_triggered",
                         {
                             "maximum_joint_speed_radps": maximum_joint_speed,
+                            "motion_evidence": (
+                                "joint_speed" if speed_motion_detected
+                                else "joint_position_change"
+                            ),
+                            "joint_displacement_rad": joint_displacement_rad,
+                            "position_motion_samples": position_motion_samples,
                             "signed_progress_m": signed_progress,
                             "requested_distance_m": requested,
                             "target_tolerance_m": tolerance,
