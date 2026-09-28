@@ -435,7 +435,8 @@ async def _run_motion_action(
                     )
                     new_position_evidence = False
                     if (
-                        joint_displacement_rad >= _POSITION_MOTION_MIN_RAD
+                        signed_progress >= _POSITION_MOTION_PROGRESS_M
+                        and joint_displacement_rad >= _POSITION_MOTION_MIN_RAD
                         and joint_displacement_rad - position_motion_peak_rad
                         >= 0.75 * _JOINT_ENCODER_STEP_RAD
                     ):

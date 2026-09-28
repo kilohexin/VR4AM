@@ -840,11 +840,15 @@ async def test_early_stop_does_not_reuse_stale_position_motion_evidence(
         nonlocal read_count
         if moving:
             read_count += 1
-            if read_count <= 8:
+            if read_count <= 20:
                 joints = list(client.kin_data["actual_joint_pose"])
                 joints[2] += 2 * math.pi / 65536
                 client.kin_data["actual_joint_pose"] = joints
             else:
+                if read_count == 21:
+                    joints = list(client.kin_data["actual_joint_pose"])
+                    joints[2] += 2 * math.pi / 65536
+                    client.kin_data["actual_joint_pose"] = joints
                 client.kin_data["actual_tcp_pose"] = {
                     **client.kin_data["actual_tcp_pose"], "x": 0.3002,
                 }
@@ -862,7 +866,7 @@ async def test_early_stop_does_not_reuse_stale_position_motion_evidence(
     client.get_kin_data = observed_kinematics  # type: ignore[method-assign]
     client.stop_move = settling_stop  # type: ignore[method-assign]
     monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_LOG_ROOT", tmp_path / "logs")
-    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_MOTION_TIMEOUT_S", 0.2)
+    monkeypatch.setattr("app.commissioning.smoke.COMMISSIONING_MOTION_TIMEOUT_S", 0.5)
     with pytest.raises(RuntimeError, match="^smoke_early_stop_not_reproduced$"):
         await run_smoke(
             SmokeOptions(
@@ -873,6 +877,7 @@ async def test_early_stop_does_not_reuse_stale_position_motion_evidence(
         )
     events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
               for line in p.read_text(encoding="utf-8").splitlines()]
+    assert read_count > 21
     assert not any(event["kind"] == "smoke_early_stop_triggered" for event in events)
 
 
