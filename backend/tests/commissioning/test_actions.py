@@ -1005,7 +1005,9 @@ async def test_translation_reports_velocity_not_settled_before_release(
     ) -> object:
         result = await original_move_pvat(p, v, a, t)
         assert requested_pose is not None
-        client.kin_data["actual_tcp_pose"] = dict(requested_pose)
+        # Exercise velocity settling after arrival, regardless of how many
+        # intermediate IK targets the async PVAT pump emitted first.
+        client.kin_data["actual_tcp_pose"] = {**requested_pose, "y": -0.002}
         client.kin_data["actual_joint_speed"] = [0.03, 0, 0, 0, 0, 0]
         return result
 
