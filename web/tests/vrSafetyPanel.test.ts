@@ -229,7 +229,7 @@ describe('VR safety presentation', () => {
     };
 
     expect(describeVrSafety(state('locked'), true, summary)).toMatchObject({
-      statusLine: '真机已连接 · CONTROL · TCP 0.312/−0.041/0.428 · 夹爪40% · 18 ms',
+      statusLine: '真机已连接 · CONTROL · TCP 0.312/−0.041/0.428 · 夹爪闭合度40% · 18 ms',
     });
   });
 
@@ -244,7 +244,7 @@ describe('VR safety presentation', () => {
     };
 
     expect(describeVrSafety(state('locked'), true, summary)).toMatchObject({
-      statusLine: '真机已连接 · 模式未确认 · TCP — · 夹爪— · —',
+      statusLine: '真机已连接 · 模式未确认 · TCP — · 夹爪闭合度— · —',
     });
   });
 

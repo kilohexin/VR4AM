@@ -2004,6 +2004,105 @@ async def test_gripper_rechecks_current_preflight_before_set_claw() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gripper_waiting_for_sdk_lock_cannot_write_after_stop_starts() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    snapshot = adapter._snapshot
+    assert snapshot is not None
+    snapshot_read = asyncio.Event()
+
+    async def read_snapshot(**_kwargs):
+        snapshot_read.set()
+        return snapshot
+
+    adapter._read_snapshot = read_snapshot  # type: ignore[method-assign]
+    await adapter._sdk_lock.acquire()
+    try:
+        gripper = asyncio.create_task(adapter.set_gripper(0.5))
+        await asyncio.wait_for(snapshot_read.wait(), 1)
+        stop = asyncio.create_task(adapter.stop(StopReason.GRIP_RELEASED))
+        await _wait_until(lambda: not adapter._preflight_ready)
+        adapter._sdk_lock.release()
+
+        try:
+            with pytest.raises(BackendCommandError, match="^preflight_not_ready$"):
+                await asyncio.wait_for(gripper, 1)
+        finally:
+            await asyncio.wait_for(stop, 1)
+        assert "set_claw" not in [call[0] for call in client.write_calls]
+    finally:
+        if adapter._sdk_lock.locked():
+            adapter._sdk_lock.release()
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_gripper_started_before_stop_stays_revoked_after_new_preflight() -> None:
+    adapter, client, _ = await _connected_control_adapter()
+    snapshot_recorded = asyncio.Event()
+    release_recording = asyncio.Event()
+    blocked_once = False
+
+    async def record(event, _timestamp):
+        nonlocal blocked_once
+        if event.get("kind") == "robot_kinematics" and not blocked_once:
+            blocked_once = True
+            snapshot_recorded.set()
+            await release_recording.wait()
+
+    adapter._event_callback = record
+    gripper = asyncio.create_task(adapter.set_gripper(0.5))
+    try:
+        await asyncio.wait_for(snapshot_recorded.wait(), 1)
+        await asyncio.wait_for(adapter.stop(StopReason.GRIP_RELEASED), 1)
+        assert (await adapter.preflight()).ready
+        release_recording.set()
+
+        with pytest.raises(BackendCommandError, match="^preflight_not_ready$"):
+            await asyncio.wait_for(gripper, 1)
+        assert "set_claw" not in [call[0] for call in client.write_calls]
+    finally:
+        release_recording.set()
+        if not gripper.done():
+            gripper.cancel()
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_gripper_started_before_disconnect_cannot_write_after_reconnect() -> None:
+    adapter, old_client, _ = await _connected_control_adapter()
+    new_client = FakeLebaiClient.idle()
+    adapter._client_factory = AsyncMock(return_value=new_client)
+    snapshot_recorded = asyncio.Event()
+    release_recording = asyncio.Event()
+    blocked_once = False
+
+    async def record(event, _timestamp):
+        nonlocal blocked_once
+        if event.get("kind") == "robot_kinematics" and not blocked_once:
+            blocked_once = True
+            snapshot_recorded.set()
+            await release_recording.wait()
+
+    adapter._event_callback = record
+    gripper = asyncio.create_task(adapter.set_gripper(0.5))
+    try:
+        await asyncio.wait_for(snapshot_recorded.wait(), 1)
+        await asyncio.wait_for(adapter.disconnect(), 1)
+        await asyncio.wait_for(adapter.connect(), 1)
+        release_recording.set()
+
+        with pytest.raises(BackendCommandError, match="^preflight_not_ready$"):
+            await asyncio.wait_for(gripper, 1)
+        assert "set_claw" not in [call[0] for call in old_client.write_calls]
+        assert "set_claw" not in [call[0] for call in new_client.write_calls]
+    finally:
+        release_recording.set()
+        if not gripper.done():
+            gripper.cancel()
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_snapshot_timestamp_is_conservative_and_total_read_deadline_is_enforced() -> None:
     adapter, client, clock = await _connected_control_adapter()
     original_get_tcp = client.get_tcp

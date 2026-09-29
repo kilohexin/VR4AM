@@ -145,7 +145,7 @@ function formatRuntimeSummary(summary: RobotRuntimeSummary): string {
     const gripper = summary.gripper === null || !Number.isFinite(summary.gripper)
       ? '—'
       : `${Math.round(summary.gripper * 100)}%`;
-    return `真机已连接 · ${mode} · TCP ${tcp} · 夹爪${gripper} · ${latency}`;
+    return `真机已连接 · ${mode} · TCP ${tcp} · 夹爪闭合度${gripper} · ${latency}`;
   }
   if (summary.backend === 'LEBAI_FAKE') return `仿真已连接 · TCP ${tcp} · ${latency}`;
   return `SIMULATOR · TCP ${tcp} · ${latency}`;

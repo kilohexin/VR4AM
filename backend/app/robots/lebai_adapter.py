@@ -136,6 +136,7 @@ class RealLebaiAdapter:
         self._disconnecting = 0
         self._stop_transaction: StopTransaction | None = None
         self._stop_episode_id = 0
+        self._gripper_revocation_generation = 0
         self._sdk_request_id = 0
         self._pvat_request_id_in_flight: int | None = None
         self._sdk_diagnostic_tasks: set[asyncio.Task[None]] = set()
@@ -224,6 +225,8 @@ class RealLebaiAdapter:
             raise
 
     async def disconnect(self) -> None:
+        # Revoke pending gripper calls even when no motion needs a stop RPC.
+        self._gripper_revocation_generation += 1
         self._disconnecting += 1
         try:
             async with self._stop_lock:
@@ -279,6 +282,7 @@ class RealLebaiAdapter:
 
     async def set_gripper(self, value: float) -> None:
         self._require_control()
+        gripper_generation = self._gripper_revocation_generation
         client = self._client
         if client is None:
             raise BackendCommandError("robot_disconnected")
@@ -307,6 +311,14 @@ class RealLebaiAdapter:
             )
         )
         async with self._sdk_lock:
+            # Stop or disconnect may revoke permission while this call waits.
+            if (
+                self._stop_lock.locked()
+                or not self._preflight_ready
+                or self._latched_fault is not None
+                or gripper_generation != self._gripper_revocation_generation
+            ):
+                raise BackendCommandError("preflight_not_ready")
             try:
                 await asyncio.wait_for(
                     client.set_claw(gripper.max_force_percent, amplitude),
@@ -354,6 +366,7 @@ class RealLebaiAdapter:
 
     async def _stop_in_transaction(self, reason: StopReason) -> None:
         assert self._stop_transaction is not None
+        self._gripper_revocation_generation += 1
         diagnostics: dict[str, Any] = {
             "kind": "stop_diagnostics",
             "stop_policy": "stop_move_only",

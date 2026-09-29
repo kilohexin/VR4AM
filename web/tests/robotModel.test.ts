@@ -121,7 +121,7 @@ describe('RobotModel', () => {
     expect(joint2.rotation.z).toBeCloseTo(1.2);
   });
 
-  it('maps clamped gripper values to Take 001 frames 0 through 20', () => {
+  it('maps normalized open to Take 001 frame 20 and closed to frame 0', () => {
     const root = createScene();
     const finger = new THREE.Object3D();
     finger.name = 'Finger';
@@ -136,9 +136,9 @@ describe('RobotModel', () => {
     model.setGripper(0.5);
     expect(finger.position.x).toBeCloseTo(10);
     model.setGripper(-1);
-    expect(finger.position.x).toBeCloseTo(0);
-    model.setGripper(2);
     expect(finger.position.x).toBeCloseTo(20);
+    model.setGripper(2);
+    expect(finger.position.x).toBeCloseTo(0);
   });
 
   it('does nothing when the gripper animation is absent', () => {

@@ -115,7 +115,8 @@ function createGripperController(
 
   return {
     set(value: number): void {
-      action.time = start + (end - start) * value;
+      // The GLB opens across frames 0..20; normalized 0 means fully open.
+      action.time = start + (end - start) * (1 - value);
       mixer.update(0);
     },
   };
