@@ -20,6 +20,7 @@ export type ConstraintKind =
   | 'ik_boundary'
   | 'joint_boundary'
   | 'motion_continuity_boundary'
+  | 'tracking_lag'
   | 'self_collision';
 export type RecoveryPhase = 'stopping' | 'homing' | 'stabilizing';
 
@@ -376,6 +377,7 @@ const CONSTRAINT_KINDS: readonly ConstraintKind[] = [
   'ik_boundary',
   'joint_boundary',
   'motion_continuity_boundary',
+  'tracking_lag',
   'self_collision',
 ];
 const RECOVERY_PHASES: readonly RecoveryPhase[] = ['stopping', 'homing', 'stabilizing'];

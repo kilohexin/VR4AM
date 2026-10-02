@@ -853,9 +853,10 @@ class RobotControl:
                         "ik_joint_limit",
                     }:
                         self._set_constraint("joint_boundary")
+                    elif code == "ik_tracking_lag":
+                        self._set_constraint("tracking_lag")
                     elif code in {
                         "ik_joint_jump",
-                        "ik_tracking_lag",
                         "joint_speed_limit",
                     }:
                         self._set_constraint("motion_continuity_boundary")

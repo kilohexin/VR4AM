@@ -210,6 +210,7 @@ describe('VR safety presentation', () => {
     ['ik_boundary', '当前姿态暂不可达，保持 Grip 退回上一个位置'],
     ['joint_boundary', '已到达关节操作边界，保持 Grip 反向退回'],
     ['motion_continuity_boundary', '运动变化过快，保持 Grip 放慢或反向退回'],
+    ['tracking_lag', '机械臂尚未跟上目标 减小位移或旋转，等待跟随'],
   ] as const)('uses the specific safe recovery instruction for %s', (constraint, instruction) => {
     const presentation = describeVrSafety({...state('active'), constraint}, true);
     expect(`${presentation.title} ${presentation.instruction}`).toContain(instruction);

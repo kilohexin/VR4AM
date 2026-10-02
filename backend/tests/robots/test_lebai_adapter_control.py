@@ -573,7 +573,7 @@ async def test_tracking_lag_reuses_last_solution_without_advancing_history() -> 
         assert adapter._last_accepted_solution_q[0] == pytest.approx(0.22)
         assert adapter._last_sent_tcp == _target(0.301)
         assert adapter._accepted_target_command_id == 1
-        assert adapter.constraint == "motion_continuity_boundary"
+        assert adapter.constraint == "tracking_lag"
         assert adapter.pump_fault is None
         assert _last_pvat_event(events)["pvat_mode"] == "catch_up"
     finally:
@@ -682,7 +682,7 @@ async def test_tracking_backpressure_diagnostic_is_best_effort() -> None:
         )
 
         assert adapter.pump_fault is None
-        assert adapter.constraint == "motion_continuity_boundary"
+        assert adapter.constraint == "tracking_lag"
         assert adapter._last_accepted_solution_q[0] == pytest.approx(0.22)
     finally:
         await adapter.disconnect()

@@ -295,9 +295,10 @@ def test_self_collision_is_a_valid_robot_state_constraint() -> None:
     assert state.constraint == "self_collision"
 
 
-def test_motion_continuity_is_a_valid_robot_state_constraint() -> None:
+@pytest.mark.parametrize("constraint", ["motion_continuity_boundary", "tracking_lag"])
+def test_motion_constraint_round_trips_through_model_and_json_schema(constraint: str) -> None:
     payload = load_fixture("robot-state-valid.json")
-    payload["constraint"] = "motion_continuity_boundary"
+    payload["constraint"] = constraint
 
     state = RobotStateMessage.model_validate(payload)
     schema = load_protocol_schema()
@@ -305,7 +306,7 @@ def test_motion_continuity_is_a_valid_robot_state_constraint() -> None:
         {**schema, "$ref": "#/$defs/RobotStateMessage"}
     )
 
-    assert state.constraint == "motion_continuity_boundary"
+    assert state.constraint == constraint
     assert not list(validator.iter_errors(payload))
 
 

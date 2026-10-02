@@ -1015,7 +1015,7 @@ class RealLebaiAdapter:
                 if not self._pump.is_current(request.generation):
                     return
                 if selected.pvat_mode == "catch_up":
-                    self._constraint = "motion_continuity_boundary"
+                    self._constraint = "tracking_lag"
                     self._constraint_error = "ik_tracking_lag"
                 elif selected.recovery_fraction == 1.0:
                     self._constraint = None

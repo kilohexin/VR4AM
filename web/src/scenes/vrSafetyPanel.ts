@@ -128,6 +128,7 @@ function constraintInstruction(constraint: NonNullable<ArmSafetySnapshot['constr
   if (constraint === 'ik_boundary') return '保持 Grip 退回上一个位置';
   if (constraint === 'joint_boundary') return '保持 Grip 反向退回';
   if (constraint === 'motion_continuity_boundary') return '运动变化过快，保持 Grip 放慢或反向退回';
+  if (constraint === 'tracking_lag') return '减小位移或旋转，等待跟随';
   return '将手柄移回可达区域，无需复位';
 }
 

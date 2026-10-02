@@ -2753,7 +2753,7 @@ async def test_pvat_continuity_rejection_is_a_soft_constraint(
 
 
 @pytest.mark.asyncio
-async def test_tracking_lag_is_public_motion_continuity_boundary() -> None:
+async def test_tracking_lag_has_distinct_feedback_without_advancing_target() -> None:
     control, latest, backend, clock = make_control()
     await connect_release_arm(control, latest, clock)
     latest.publish(frame(2, True), clock.now_ns())
@@ -2770,7 +2770,7 @@ async def test_tracking_lag_is_public_motion_continuity_boundary() -> None:
     await control.tick()
 
     state = await control.state_message()
-    assert state.constraint == "motion_continuity_boundary"
+    assert state.constraint == "tracking_lag"
     assert control.mode is TeleopMode.ACTIVE
     assert control._fault is None
     assert control.last_target == safe_target
