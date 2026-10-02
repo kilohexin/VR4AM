@@ -1,15 +1,17 @@
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
 import app.control.robot_control as robot_control_module
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.control.safety import SafetyLimiter
 from app.recording.noop import NoopRecorder
-from app.recording.commissioning import RecorderUnavailable
+from app.recording.commissioning import CommissioningRecorder, RecorderUnavailable
 from app.robots.base import BackendCommandError, BackendPreflight, StopReason
 from app.schemas.messages import (
     BackendState,
@@ -112,6 +114,16 @@ class RecordingRecorder(NoopRecorder):
                 "server_mono_ns": server_mono_ns,
             }
         )
+
+
+class TargetSampleRecorder(RecordingRecorder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.samples: list[dict[str, object]] = []
+
+    async def write_event(self, event: object, server_mono_ns: int) -> None:
+        if isinstance(event, dict) and event.get("kind") == "control_target_sample":
+            self.samples.append({**event, "server_mono_ns": server_mono_ns})
 
 
 def frame(
@@ -2774,6 +2786,217 @@ async def test_tracking_lag_has_distinct_feedback_without_advancing_target() -> 
     assert control.mode is TeleopMode.ACTIVE
     assert control._fault is None
     assert control.last_target == safe_target
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("motion", ["translation", "rotation", "combined"])
+async def test_target_sample_separates_mapping_filter_and_motion_limit(motion: str) -> None:
+    recorder = TargetSampleRecorder()
+    limiter = SafetyLimiter(
+        max_linear_speed=0.005, max_linear_accel=0.02,
+        max_angular_speed=0.1, max_angular_accel=0.2,
+    )
+    control, latest, backend, clock = make_control(recorder=recorder, limiter=limiter)
+    control.mapper.set_translation_scale(0.2)
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    previous = control.last_target.model_copy(deep=True)
+    position = (0.03, 1.2, -0.3) if motion != "rotation" else (0.0, 1.2, -0.3)
+    moved = frame(3, True, p=position)
+    if motion != "translation":
+        moved.right.q = tuple(Rotation.from_euler("z", 10, degrees=True).as_quat())
+    clock.advance_ms(20)
+    latest.publish(moved, clock.now_ns())
+    await control.tick()
+
+    assert len(recorder.samples) == 1
+    event = recorder.samples[0]
+    assert event["command_id"] == 3
+    assert event["session_id"] == "test"
+    assert event["control_generation"] == control.control_generation
+    assert event["frame_received_ns"] == clock.now_ns()
+    assert event["server_mono_ns"] == clock.now_ns()
+    assert event["control_dt_s"] == 0.02
+    assert event["translation_scale"] == 0.2
+    assert event["previous_target_tcp"] == previous.model_dump(mode="json")
+    assert event["hand_pose"] == Pose(p=moved.right.p, q=moved.right.q).model_dump(mode="json")
+    assert event["workspace_hold"] is False
+    assert event["workspace_constrained"] is False
+    assert event["mapped_tcp"] == event["workspace_tcp"]
+    mapped = Pose.model_validate(event["mapped_tcp"])
+    filtered = Pose.model_validate(event["filtered_tcp"])
+    limited = Pose.model_validate(event["limited_tcp"])
+    alpha = 1 - np.exp(-2 * np.pi * 8 * 0.02)
+    expected_distance = 0.006 if motion != "rotation" else 0
+    expected_angle = np.deg2rad(10) if motion != "translation" else 0
+    assert np.linalg.norm(np.asarray(mapped.p) - previous.p) == pytest.approx(expected_distance)
+    assert np.linalg.norm(np.asarray(filtered.p) - previous.p) == pytest.approx(expected_distance * alpha)
+    assert Rotation.from_quat(mapped.q).magnitude() == pytest.approx(expected_angle)
+    assert Rotation.from_quat(filtered.q).magnitude() == pytest.approx(expected_angle * alpha)
+    assert np.linalg.norm(np.asarray(limited.p) - previous.p) == pytest.approx(
+        0.02 * 0.02**2 if expected_distance else 0
+    )
+    assert Rotation.from_quat(limited.q).magnitude() == pytest.approx(
+        0.2 * 0.02**2 if expected_angle else 0
+    )
+    assert backend.targets == [(3, limited)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary_mode", ["hold", "axis_clamp"])
+async def test_target_sample_distinguishes_workspace_hold_and_projection(boundary_mode: str) -> None:
+    recorder = TargetSampleRecorder()
+    control, latest, backend, clock = make_control(
+        recorder=recorder,
+        limiter=SafetyLimiter(workspace_half_extent_m=0.02, workspace_boundary_mode=boundary_mode),
+    )
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    latest.publish(frame(3, True, p=(0.03, 1.2, -0.3)), clock.now_ns())
+    await control.tick()
+
+    assert len(recorder.samples) == 1
+    event = recorder.samples[0]
+    assert event["workspace_constrained"] is True
+    assert event["workspace_hold"] is (boundary_mode == "hold")
+    if boundary_mode == "hold":
+        assert event["filtered_tcp"] is None
+        assert event["limited_tcp"] is None
+        assert not backend.targets
+    else:
+        assert event["workspace_tcp"]["p"][0] == pytest.approx(0.32)
+        assert event["mapped_tcp"]["p"][0] == pytest.approx(0.33)
+        assert event["limited_tcp"] == backend.targets[0][1].model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_target_sample_is_rate_limited_without_dropping_control_frames() -> None:
+    recorder = TargetSampleRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    for seq in range(3, 18):
+        clock.advance_ms(20)
+        latest.publish(frame(seq, True, p=(0.01, 1.2, -0.3)), clock.now_ns())
+        await control.tick()
+        await control.tick()  # The same input does not create another command/sample.
+
+    assert [event["command_id"] for event in recorder.samples] == [3, 8, 13]
+    assert [event["rate_limited_frames"] for event in recorder.samples] == [0, 4, 4]
+    assert [seq for seq, _ in backend.targets] == list(range(3, 18))
+
+
+@pytest.mark.asyncio
+async def test_target_sample_recorder_failure_prevents_submission_and_latches_fault() -> None:
+    recorder = TargetSampleRecorder()
+    recorder.write_event = AsyncMock(side_effect=RecorderUnavailable("log_write_failed"))
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    latest.publish(frame(3, True, p=(0.01, 1.2, -0.3)), clock.now_ns())
+    await control.tick()
+
+    recorder.write_event.assert_awaited_once()
+    assert not backend.targets
+    assert backend.stops == [StopReason.FAULT]
+    assert control.mode is TeleopMode.FAULT
+    assert control._fault == "recording_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["disarm", "disconnect", "new_frame", "stale"])
+async def test_target_sample_await_cannot_submit_an_invalidated_frame(interruption: str) -> None:
+    recorder = TargetSampleRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def delayed_record(event: object, server_mono_ns: int) -> None:
+        entered.set()
+        await resume.wait()
+
+    recorder.write_event = delayed_record
+    latest.publish(frame(3, True, p=(0.01, 1.2, -0.3)), clock.now_ns())
+    tick = asyncio.create_task(control.tick())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        if interruption == "disarm":
+            await control.disarm()
+        elif interruption == "disconnect":
+            await control.on_disconnect()
+        elif interruption == "new_frame":
+            latest.publish(frame(4, False), clock.now_ns())
+        else:
+            clock.advance_ms(100)
+        resume.set()
+        await asyncio.wait_for(tick, timeout=1)
+        assert not backend.targets
+        if interruption in {"new_frame", "stale"}:
+            assert control.filter.value == control.last_target
+            assert np.array_equal(control.limiter.linear_velocity, np.zeros(3))
+            assert np.array_equal(control.limiter.angular_velocity, np.zeros(3))
+    finally:
+        resume.set()
+        if not tick.done():
+            tick.cancel()
+        await asyncio.gather(tick, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_target_sample_is_a_request_not_an_accepted_ik_target() -> None:
+    recorder = TargetSampleRecorder()
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    previous = control.last_target
+    backend.command_tcp = AsyncMock(side_effect=BackendCommandError("ik_tracking_lag"))
+    latest.publish(frame(3, True, p=(0.01, 1.2, -0.3)), clock.now_ns())
+    await control.tick()
+
+    assert len(recorder.samples) == 1
+    assert recorder.samples[0]["limited_tcp"] != previous.model_dump(mode="json")
+    assert control.last_target == previous
+    assert (await control.state_message()).constraint == "tracking_lag"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_queue", [False, True])
+async def test_target_sample_uses_bounded_normal_queue_and_preserves_stop_events(tmp_path, full_queue: bool) -> None:
+    recorder = CommissioningRecorder(
+        tmp_path, metadata={"source": "synthetic-test"},
+        session_id="target-samples", capacity=2 if full_queue else 32,
+    )
+    control, latest, backend, clock = make_control(recorder=recorder)
+    await connect_release_arm(control, latest, clock)
+    latest.publish(frame(2, True), clock.now_ns())
+    await control.tick()
+    latest.publish(frame(3, True, p=(0.01, 1.2, -0.3)), clock.now_ns())
+    await control.tick()
+    assert len(backend.targets) == 1
+    await control.disarm()
+    # Flush the real recorder locally; the backend above remains a fake.
+    await recorder.start()
+    await recorder.close()
+    entries = [json.loads(line) for line in recorder.jsonl_path.read_text(encoding="utf-8").splitlines()]
+    samples = [entry for entry in entries if entry["kind"] == "control_target_sample"]
+    assert any(entry["kind"] == "stop_confirmed" for entry in entries)
+    assert control._fault is None
+    if full_queue:
+        assert not samples
+        assert recorder.dropped_normal_events == 2  # VR frame 3 and its target sample.
+    else:
+        assert len(samples) == 1
+        assert samples[0]["critical"] is False
+        assert samples[0]["limited_tcp"] == backend.targets[0][1].model_dump(mode="json")
+        assert recorder.dropped_normal_events == 0
 
 
 @pytest.mark.asyncio

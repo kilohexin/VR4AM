@@ -8,7 +8,7 @@ from typing import Literal
 
 from app.control.coordinate_mapper import CoordinateMapper
 from app.control.filters import PoseFilter
-from app.control.safety import SafetyLimiter, SafetyViolation
+from app.control.safety import SafetyLimiter, SafetyViolation, WorkspaceProjection
 from app.control.state_machine import TeleopStateMachine
 from app.recording.base import RecorderSink
 from app.recording.commissioning import RecorderUnavailable
@@ -31,11 +31,13 @@ from app.schemas.messages import (
 from app.timebase import MonotonicClock
 
 CONTROL_PERIOD_NS = 20_000_000
+CONTROL_DT_S = CONTROL_PERIOD_NS / 1_000_000_000
 OVERRUN_NS = 40_000_000
 GRIPPER_PERIOD_NS = 100_000_000
 GRIPPER_MIN_DELTA = 0.02
 GRIPPER_ACTIVATION_DELTA = 0.1
 VR_FRAME_STALE_MS = 100.0
+TARGET_SAMPLE_PERIOD_NS = 100_000_000
 RECOVERABLE_FAULTS = frozenset(
     {
         "workspace_violation",
@@ -152,6 +154,8 @@ class RobotControl:
         self.last_seq: int | None = None
         self._last_frame_id: tuple[str, int] | None = None
         self.last_target: Pose | None = None
+        self._last_target_sample_ns: int | None = None
+        self._target_sample_rate_limited_frames = 0
         self._last_sample_age_ms: float | None = None
         self._last_gripper_sent: float | None = None
         self._last_gripper_sent_ns: int | None = None
@@ -829,10 +833,38 @@ class RobotControl:
             elif self.machine.mode == TeleopMode.ACTIVE and is_new_frame:
                 if self.last_target is None:
                     raise RuntimeError("active_without_target")
+                generation = self._control_generation
+                previous_target = self.last_target
                 raw_requested = self.mapper.target(
                     Pose(p=received.frame.right.p, q=received.frame.right.q)
                 )
                 workspace = self.limiter.project_workspace(raw_requested)
+                requested = None
+                target = None
+                if not (workspace.constrained and workspace.hold):
+                    requested = self.filter.update(workspace.pose, CONTROL_DT_S)
+                    target = self.limiter.limit_motion(
+                        previous_target, requested, CONTROL_DT_S,
+                    )
+                await self._record_target_sample(
+                    received=received,
+                    generation=generation,
+                    previous_target=previous_target,
+                    mapped=raw_requested,
+                    workspace=workspace,
+                    filtered=requested,
+                    limited=target,
+                )
+                # Recording implementations can yield. Do not submit an old
+                # target after a stop, a newer input, or an expired VR frame.
+                if not self._target_frame_is_current(received, generation):
+                    if (
+                        generation == self._control_generation
+                        and self.last_target is not None
+                    ):
+                        self.filter.reset(self.last_target)
+                        self.limiter.reset_motion()
+                    return
                 if workspace.constrained and workspace.hold:
                     self.filter.reset(self.last_target)
                     self.limiter.reset_motion()
@@ -840,8 +872,7 @@ class RobotControl:
                     self.last_seq = received.frame.seq
                     self._last_frame_id = frame_id
                     return
-                requested = self.filter.update(workspace.pose, 0.02)
-                target = self.limiter.limit_motion(self.last_target, requested, 0.02)
+                assert target is not None
                 try:
                     await self.backend.command_tcp(target, received.frame.seq)
                 except BackendCommandError as error:
@@ -878,6 +909,72 @@ class RobotControl:
             await self._handle_recording_unavailable()
         except (BackendCommandError, SafetyViolation) as error:
             await self._enter_fault(str(error))
+
+    async def _record_target_sample(
+        self,
+        *,
+        received: ReceivedFrame,
+        generation: int,
+        previous_target: Pose,
+        mapped: Pose,
+        workspace: WorkspaceProjection,
+        filtered: Pose | None,
+        limited: Pose | None,
+    ) -> None:
+        now_ns = self.clock.now_ns()
+        if (
+            self._last_target_sample_ns is not None
+            and now_ns - self._last_target_sample_ns < TARGET_SAMPLE_PERIOD_NS
+        ):
+            self._target_sample_rate_limited_frames += 1
+            return
+        # This is a pre-submission sample, not evidence of IK acceptance or
+        # robot execution. Use the recorder's bounded normal-event queue.
+        await self.recorder.write_event(
+            {
+                "kind": "control_target_sample",
+                "session_id": received.frame.session_id,
+                "command_id": received.frame.seq,
+                "control_generation": generation,
+                "frame_received_ns": received.received_ns,
+                "control_dt_s": CONTROL_DT_S,
+                "sample_period_ns": TARGET_SAMPLE_PERIOD_NS,
+                "rate_limited_frames": self._target_sample_rate_limited_frames,
+                "translation_scale": self.mapper.translation_scale,
+                "hand_pose": Pose(
+                    p=received.frame.right.p, q=received.frame.right.q,
+                ).model_dump(mode="json"),
+                "previous_target_tcp": previous_target.model_dump(mode="json"),
+                "mapped_tcp": mapped.model_dump(mode="json"),
+                "workspace_tcp": workspace.pose.model_dump(mode="json"),
+                "workspace_constrained": workspace.constrained,
+                "workspace_hold": workspace.hold,
+                "filtered_tcp": (
+                    None if filtered is None else filtered.model_dump(mode="json")
+                ),
+                "limited_tcp": (
+                    None if limited is None else limited.model_dump(mode="json")
+                ),
+            },
+            now_ns,
+        )
+        self._last_target_sample_ns = now_ns
+        self._target_sample_rate_limited_frames = 0
+
+    def _target_frame_is_current(
+        self, received: ReceivedFrame, generation: int,
+    ) -> bool:
+        return (
+            generation == self._control_generation
+            and self.machine.mode is TeleopMode.ACTIVE
+            and self._fault is None
+            and not self._shutdown_started
+            and not self._disarm_in_progress
+            and not self._recovery_lock.locked()
+            and self.latest.snapshot() is received
+            and self.clock.now_ns() - received.received_ns
+            < VR_FRAME_STALE_MS * 1_000_000
+        )
 
     async def state_message(self) -> RobotStateMessage:
         state = await self.backend.get_state()
