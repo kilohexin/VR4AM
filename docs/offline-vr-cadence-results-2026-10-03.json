@@ -1,0 +1,167 @@
+{
+  "source_sha256": "d48d1768cc5ce74157b4efafec3b90d8e86e7cda51b35d3e554d6ac187caff5b",
+  "window": {
+    "start_ns": 1913580687000000,
+    "end_ns": 1913584875000000,
+    "duration_s": 4.188,
+    "bounds": "inclusive",
+    "event_count": 638
+  },
+  "normal_log_drop_count": null,
+  "frames": {
+    "count": 156,
+    "grip_true": 155,
+    "first_seq": 6414,
+    "last_seq": 6594,
+    "unobserved_sequence_numbers": 25,
+    "sequence_delta_counts": {
+      "1": 131,
+      "2": 23,
+      "3": 1
+    },
+    "server_receipt_intervals_ms": {
+      "count": 155,
+      "min": 0.0,
+      "p50": 31.0,
+      "p95": 47.0,
+      "max": 62.0,
+      "mean": 27.019354838709678
+    },
+    "client_intervals_ms": {
+      "count": 155,
+      "min": 17.231999999989057,
+      "p50": 23.03299999999581,
+      "p95": 50.68770000000075,
+      "max": 57.17300000000978,
+      "mean": 27.078664516129027
+    },
+    "observed_receipt_rate_hz": 37.01050620821395
+  },
+  "pvat": {
+    "count": 76,
+    "modes": {
+      "advance": 33,
+      "catch_up": 43
+    },
+    "event_intervals_ms": {
+      "count": 75,
+      "min": 31.0,
+      "p50": 47.0,
+      "p95": 78.0,
+      "max": 79.0,
+      "mean": 53.333333333333336
+    },
+    "observed_event_rate_hz": 18.75,
+    "previous_call_gap_ms": {
+      "count": 75,
+      "min": 31.0,
+      "p50": 47.0,
+      "p95": 63.0,
+      "max": 94.0,
+      "mean": 53.13333333333333
+    },
+    "matched_frame_count": 76,
+    "unmatched_frame_count": 0,
+    "receipt_to_event_ms": {
+      "count": 76,
+      "min": 46.0,
+      "p50": 70.5,
+      "p95": 109.0,
+      "max": 125.0,
+      "mean": 73.9342105263158
+    }
+  },
+  "sdk_move_pvat": {
+    "count": 76,
+    "start_intervals_ms": {
+      "count": 75,
+      "min": 31.0,
+      "p50": 47.0,
+      "p95": 63.0,
+      "max": 94.0,
+      "mean": 53.13333333333333
+    },
+    "observed_start_rate_hz": 18.820577164366373,
+    "await_ms": {
+      "count": 76,
+      "min": 0.0,
+      "p50": 15.0,
+      "p95": 16.0,
+      "max": 31.0,
+      "mean": 10.394736842105264
+    }
+  },
+  "timing_ms": {
+    "snapshot_read": {
+      "count": 76,
+      "min": 0.0,
+      "p50": 31.0,
+      "p95": 47.0,
+      "max": 47.0,
+      "mean": 28.986842105263158
+    },
+    "snapshot_lock_wait": {
+      "count": 76,
+      "min": 0.0,
+      "p50": 16.0,
+      "p95": 31.0,
+      "max": 32.0,
+      "mean": 13.289473684210526
+    },
+    "command_lock_wait": {
+      "count": 76,
+      "min": 0.0,
+      "p50": 0.0,
+      "p95": 16.0,
+      "max": 32.0,
+      "mean": 4.565789473684211
+    },
+    "candidate_selection": {
+      "count": 76,
+      "min": 0.0,
+      "p50": 15.0,
+      "p95": 16.0,
+      "max": 31.0,
+      "mean": 8.460526315789474
+    },
+    "send_sdk": {
+      "count": 76,
+      "min": 0.0,
+      "p50": 15.0,
+      "p95": 16.0,
+      "max": 31.0,
+      "mean": 10.394736842105264
+    },
+    "handler_to_send_complete": {
+      "count": 76,
+      "min": 31.0,
+      "p50": 47.0,
+      "p95": 78.0,
+      "max": 79.0,
+      "mean": 52.60526315789474
+    },
+    "snapshot_age_at_send": {
+      "count": 76,
+      "min": 15.0,
+      "p50": 31.0,
+      "p95": 47.0,
+      "max": 78.0,
+      "mean": 28.92105263157895
+    },
+    "accounting_residual": {
+      "count": 76,
+      "min": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "max": 15.0,
+      "mean": 0.19736842105263158
+    }
+  },
+  "limitations": [
+    "VR frames are consumer-logged receipt timestamps, not every received frame or tick start.",
+    "Sequence gaps may involve latest-only coalescing or recording loss; source receipt coverage is unknown.",
+    "Command matching requires one observed frame session and unique increasing sequences in this window.",
+    "PVAT events and SDK returns do not establish device execution or physical feedback freshness.",
+    "Missing timing and normal-log-drop evidence remain unknown; window boundaries can exclude related events."
+  ]
+}

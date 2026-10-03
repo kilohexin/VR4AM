@@ -96,6 +96,34 @@ async def test_latest_request_replaces_unsent_request() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("handler_ms", [12, 53, 80])
+async def test_serial_handler_duration_limits_cadence_and_coalesces_pending(handler_ms) -> None:
+    scheduler = FakeScheduler()
+    handled = []
+    starts = []
+
+    async def handler(request: PvatRequest) -> None:
+        starts.append(scheduler.now())
+        handled.append(request.command_id)
+        if request.command_id == 1:
+            # Two newer targets arrive while one send is in flight.
+            pump.submit(_pose(0.001), 2)
+            pump.submit(_pose(0.002), 3)
+        scheduler.value += handler_ms / 1000
+
+    pump = PvatPump(handler, period_s=0.04, clock=scheduler.now, sleep=scheduler.sleep)
+    await pump.start()
+    try:
+        pump.submit(_pose(), 1)
+        await _wait_until(lambda: len(handled) == 2 and len(scheduler.sleep_calls) >= 2)
+        assert handled == [1, 3]
+        assert starts[1] - starts[0] == pytest.approx(max(0.04, handler_ms / 1000))
+        assert scheduler.sleep_calls[0] == pytest.approx(max(0, 0.04 - handler_ms / 1000))
+    finally:
+        await pump.stop()
+
+
+@pytest.mark.asyncio
 async def test_invalidate_blocks_delayed_generation() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
