@@ -72,3 +72,17 @@ local retrieval, not sensor/controller sample times. Identical values with
 new local timestamps cannot establish whether the device stayed still or the
 SDK returned cached source data. Device-side timestamps or sequence numbers
 would be needed for an independent source-freshness assessment.
+
+## Snapshot read purposes
+
+`robot_kinematics.snapshot_read_purpose` labels the adapter entry point:
+`connection`, `state`, `preflight`, `motion`, `gripper`, `home`, `prepare`,
+or `joint_move`. Stop samples and stop observations expose `read_purpose`
+as `stop_verification` and `stop_observation`. Direct private reads default
+to `unspecified`; absent fields in older logs remain unknown.
+
+These labels add no reads and change no lock ordering, caching, freshness
+checks or stop deadlines. `state` means a `get_state()` call, which can be
+used by display code **or control decisions**; it does not uniquely identify
+UI polling. A read that fails before producing a snapshot has no successful
+snapshot event. Purpose labels cannot retrospectively fill either gap.

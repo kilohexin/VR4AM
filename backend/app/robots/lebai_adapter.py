@@ -72,6 +72,7 @@ class LebaiSnapshot:
     captured_ns: int
     read_requested_ns: int
     read_completed_ns: int
+    read_purpose: str
     robot_state: BackendState
     estop: str | None
     actual_q: JointVector
@@ -215,7 +216,7 @@ class RealLebaiAdapter:
         self._client = client
         self._capabilities = detect_capabilities(client)
         try:
-            snapshot = await self._read_snapshot()
+            snapshot = await self._read_snapshot(read_purpose="connection")
             preflight = self._preflight_from_snapshot(snapshot)
             self._preflight_ready = preflight.ready
             if self.settings.mode == "control" and preflight.ready:
@@ -290,7 +291,7 @@ class RealLebaiAdapter:
             raise BackendCommandError("robot_disconnected")
         if not self._preflight_ready:
             raise BackendCommandError("preflight_not_ready")
-        snapshot = await self._read_snapshot()
+        snapshot = await self._read_snapshot(read_purpose="gripper")
         boundary_fault = self._motion_boundary_fault(snapshot)
         if boundary_fault is not None:
             self._preflight_ready = False
@@ -484,7 +485,9 @@ class RealLebaiAdapter:
         stable_anchor: LebaiSnapshot | None = transaction.stable_anchor
         try:
             while True:
-                snapshot = await self._read_snapshot(emit_kinematics=False)
+                snapshot = await self._read_snapshot(
+                    emit_kinematics=False, read_purpose="stop_verification",
+                )
                 now_ns = self._clock()
                 stationary = (
                     max(abs(value) for value in snapshot.actual_qd) <= 0.02
@@ -514,6 +517,7 @@ class RealLebaiAdapter:
                     "captured_ns": snapshot.captured_ns,
                     "read_requested_ns": snapshot.read_requested_ns,
                     "read_completed_ns": snapshot.read_completed_ns,
+                    "read_purpose": snapshot.read_purpose,
                     "observed_ns": now_ns,
                     "raw_robot_state": snapshot.raw_robot_state,
                     "estop": snapshot.estop,
@@ -612,7 +616,7 @@ class RealLebaiAdapter:
         client = self._client
         if client is None:
             raise BackendCommandError("robot_disconnected")
-        snapshot = await self._read_snapshot()
+        snapshot = await self._read_snapshot(read_purpose="home")
         preflight = self._preflight_from_snapshot(
             snapshot,
             allow_singular=True,
@@ -636,7 +640,7 @@ class RealLebaiAdapter:
         self._require_control()
         if self._client is None:
             raise BackendCommandError("robot_disconnected")
-        snapshot = await self._read_snapshot()
+        snapshot = await self._read_snapshot(read_purpose="prepare")
         preflight = self._preflight_from_snapshot(
             snapshot,
             allow_singular=True,
@@ -696,7 +700,7 @@ class RealLebaiAdapter:
         stable_since_ns: int | None = None
         stabilizing = False
         while True:
-            snapshot = await self._read_snapshot()
+            snapshot = await self._read_snapshot(read_purpose="joint_move")
             async with self._sdk_lock:
                 try:
                     motion_state = await asyncio.wait_for(
@@ -751,7 +755,7 @@ class RealLebaiAdapter:
     async def get_state(self) -> RobotStateMessage:
         if self._pump.fault is not None and self._latched_fault is None:
             raise self._pump.fault
-        snapshot = await self._read_snapshot()
+        snapshot = await self._read_snapshot(read_purpose="state")
         robot_state = (
             BackendState.FAULT
             if self._latched_fault is not None
@@ -772,7 +776,7 @@ class RealLebaiAdapter:
         )
 
     async def preflight(self) -> BackendPreflight:
-        snapshot = await self._read_snapshot()
+        snapshot = await self._read_snapshot(read_purpose="preflight")
         result = self._preflight_from_snapshot(snapshot)
         self._preflight_ready = result.ready
         if (
@@ -879,7 +883,7 @@ class RealLebaiAdapter:
         self, request: PvatRequest, lifecycle: dict[str, object]
     ) -> None:
         handler_started_ns = self._clock()
-        snapshot = await self._read_snapshot()
+        snapshot = await self._read_snapshot(read_purpose="motion")
         snapshot_finished_ns = self._clock()
         if not self._pump.is_current(request.generation):
             return
@@ -1422,11 +1426,13 @@ class RealLebaiAdapter:
         """
         snapshot = await self._read_snapshot(
             emit_kinematics=False, include_raw_kinematics=self._stop_diagnostic_sampling,
+            read_purpose="stop_observation",
         )
         observation = {
             "captured_ns": snapshot.captured_ns,
             "read_requested_ns": snapshot.read_requested_ns,
             "read_completed_ns": snapshot.read_completed_ns,
+            "read_purpose": snapshot.read_purpose,
             "observed_ns": self._clock(),
             "raw_robot_state": snapshot.raw_robot_state,
             "robot_state": snapshot.robot_state.value,
@@ -1451,6 +1457,7 @@ class RealLebaiAdapter:
 
     async def _read_snapshot(
         self, *, emit_kinematics: bool = True, include_raw_kinematics: bool = False,
+        read_purpose: str = "unspecified",
     ) -> LebaiSnapshot:
         client = self._client
         if client is None:
@@ -1543,6 +1550,7 @@ class RealLebaiAdapter:
             captured_ns=captured_ns,
             read_requested_ns=read_requested_ns,
             read_completed_ns=read_completed_ns,
+            read_purpose=read_purpose,
             robot_state=robot_state,
             estop=estop_fault(raw_estop),
             actual_q=joint_vector(
@@ -1660,6 +1668,7 @@ class RealLebaiAdapter:
             "snapshot_read_requested_ns": snapshot.read_requested_ns,
             "snapshot_read_started_ns": snapshot.captured_ns,
             "snapshot_read_completed_ns": snapshot.read_completed_ns,
+            "snapshot_read_purpose": snapshot.read_purpose,
             "snapshot_lock_wait_ms": snapshot.sdk_lock_wait_ms,
             "raw_robot_state": snapshot.raw_robot_state,
             "robot_state": snapshot.robot_state.value,
