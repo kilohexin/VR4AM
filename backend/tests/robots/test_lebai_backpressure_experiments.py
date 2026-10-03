@@ -64,12 +64,12 @@ async def wait_until(predicate) -> None:
 
 
 class Experiment:
-    def __init__(self) -> None:
+    def __init__(self, settings=None) -> None:
         self.client = FakeLebaiClient.idle()
         self.clock = ManualClock()
         self.events: list[dict[str, object]] = []
         self.sent: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-        settings = control_settings()
+        settings = control_settings() if settings is None else settings
         settings = replace(
             settings,
             control=replace(settings.control, max_joint_speed_radps=0.05),
