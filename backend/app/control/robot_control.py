@@ -977,9 +977,28 @@ class RobotControl:
         )
 
     async def state_message(self) -> RobotStateMessage:
+        """Observe, compose, record, then advance pending stop state in that order."""
+        state = await self._read_observed_state()
+        message = self._compose_state_message(state)
+        await self._record_state_message(message)
+        # Recheck live control flags after recording yields. The returned message
+        # deliberately describes the state before this completion transition.
+        self._complete_pending_stop_from_state(state)
+        return message
+
+    async def _read_observed_state(self) -> RobotStateMessage:
+        """Read the backend and apply its fault observation to control authority."""
         state = await self.backend.get_state()
         if state.fault is not None and self._fault is None:
             self._latch_backend_fault(state.fault)
+        return state
+
+    def _compose_state_message(self, state: RobotStateMessage) -> RobotStateMessage:
+        """Overlay current control metadata without I/O or control transitions.
+
+        Composition does not observe faults or confirm a stop. This legacy wire
+        message also has no robot-measurement age; it is not a cached-display API.
+        """
         server_mono_ns = self.clock.now_ns()
         received = self.latest.snapshot()
         sample_age_ms = (
@@ -988,7 +1007,7 @@ class RobotControl:
             if received is None
             else max(0.0, (server_mono_ns - received.received_ns) / 1_000_000)
         )
-        message = state.model_copy(
+        return state.model_copy(
             update={
                 "server_mono_ns": server_mono_ns,
                 "ack_seq": self.last_seq,
@@ -1000,10 +1019,19 @@ class RobotControl:
                 "translation_scale": self.mapper.translation_scale,
             }
         )
+
+    async def _record_state_message(self, message: RobotStateMessage) -> None:
+        """Record the composed message and retain the existing failure response."""
         try:
-            await self.recorder.write_robot_state(message, server_mono_ns)
+            await self.recorder.write_robot_state(message, message.server_mono_ns)
         except RecorderUnavailable:
             await self._handle_recording_unavailable()
+
+    def _complete_pending_stop_from_state(self, state: RobotStateMessage) -> None:
+        """Apply existing completion rules to this call's authoritative read.
+
+        Must run after recording; a display cache must never call this helper.
+        """
         if self._pending_stop_completion and self.machine.mode in {
             TeleopMode.STALE,
             TeleopMode.FAULT,
@@ -1020,7 +1048,6 @@ class RobotControl:
             self._hard_stop_completion = False
             self.machine.stop_complete()
             self._advance_control_generation()
-        return message
 
     async def command_gripper(self, value: float) -> None:
         if (
