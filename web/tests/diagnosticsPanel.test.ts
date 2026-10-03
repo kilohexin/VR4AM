@@ -29,6 +29,8 @@ describe('DiagnosticsPanel', () => {
     expect(root.textContent).toContain('hardware_verified=false');
     expect(root.textContent).toContain('Dropped events0');
     expect(root.textContent).toContain('Log directory—');
+    expect(root.textContent).toContain('VR input age');
+    expect(root.textContent).not.toContain('Sample age');
   });
 
   it('renders only the twenty events supplied by the bounded backend message', () => {

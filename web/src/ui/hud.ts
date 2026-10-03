@@ -87,7 +87,7 @@ export class Hud {
             <span class="status-value" data-field="trigger">0%</span>
             <span class="trigger-meter" aria-hidden="true"><span data-field="trigger-fill"></span></span>
           </div>
-          ${statusRow('clock', '样本年龄', '<span data-field="sample-age">— ms</span>')}
+          ${statusRow('clock', 'VR 输入帧龄', '<span data-field="sample-age">— ms</span>')}
           <div class="status-row latency-row" data-row="latency">
             ${icon('gauge')}
             <span class="status-label">延迟</span>

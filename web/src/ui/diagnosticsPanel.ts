@@ -139,7 +139,7 @@ export class DiagnosticsPanel {
   ): HTMLElement {
     const card = cardElement('LINK & CONTROL');
     appendMetric(card, 'WebSocket', `${formatMilliseconds(latency.currentMs)} / P95 ${formatMilliseconds(latency.p95Ms)}`);
-    appendMetric(card, 'Sample age', formatMilliseconds(state.sample_age_ms ?? null));
+    appendMetric(card, 'VR input age', formatMilliseconds(state.sample_age_ms ?? null));
     appendMetric(card, 'SDK', formatSdkLatencies(diagnostics?.sdk_latencies_ms ?? {}));
     appendMetric(card, 'IK', diagnostics?.target_tcp ? 'target available' : 'no target');
     appendMetric(card, 'PVAT', `PVAT ${formatRate(diagnostics?.pvat_send_hz ?? null)} Hz`);

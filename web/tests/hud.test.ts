@@ -15,6 +15,12 @@ beforeEach(() => {
 });
 
 describe('Chinese simulator HUD', () => {
+  it('labels the age as VR input freshness', () => {
+    const root = document.querySelector<HTMLElement>('#app')!;
+    new Hud(root);
+    expect(root.textContent).toContain('VR 输入帧龄');
+    expect(root.textContent).not.toContain('样本年龄');
+  });
   it('constrains narrow intrinsic widths and keeps rehearsal actions within one viewport column', () => {
     const narrowRules = styles.slice(styles.indexOf('@media (max-width: 900px)'));
 

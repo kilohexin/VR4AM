@@ -70,6 +70,8 @@ _STOP_TCP_DRIFT_M = 0.0005
 @dataclass(frozen=True)
 class LebaiSnapshot:
     captured_ns: int
+    read_requested_ns: int
+    read_completed_ns: int
     robot_state: BackendState
     estop: str | None
     actual_q: JointVector
@@ -510,6 +512,8 @@ class RealLebaiAdapter:
                     )
                 diagnostics["samples"].append({
                     "captured_ns": snapshot.captured_ns,
+                    "read_requested_ns": snapshot.read_requested_ns,
+                    "read_completed_ns": snapshot.read_completed_ns,
                     "observed_ns": now_ns,
                     "raw_robot_state": snapshot.raw_robot_state,
                     "estop": snapshot.estop,
@@ -1421,6 +1425,8 @@ class RealLebaiAdapter:
         )
         observation = {
             "captured_ns": snapshot.captured_ns,
+            "read_requested_ns": snapshot.read_requested_ns,
+            "read_completed_ns": snapshot.read_completed_ns,
             "observed_ns": self._clock(),
             "raw_robot_state": snapshot.raw_robot_state,
             "robot_state": snapshot.robot_state.value,
@@ -1526,6 +1532,7 @@ class RealLebaiAdapter:
                     motion_state = raw_motion_state.strip().upper()
                 if motion_state == "FINISHED":
                     running_motion = None
+        read_completed_ns = self._clock()
         if not isinstance(raw_kin, Mapping):
             raise BackendCommandError("invalid_sdk_kin_data")
         if not isinstance(raw_tcp, Mapping):
@@ -1534,6 +1541,8 @@ class RealLebaiAdapter:
             raise BackendCommandError("invalid_sdk_claw")
         snapshot = LebaiSnapshot(
             captured_ns=captured_ns,
+            read_requested_ns=read_requested_ns,
+            read_completed_ns=read_completed_ns,
             robot_state=robot_state,
             estop=estop_fault(raw_estop),
             actual_q=joint_vector(
@@ -1647,6 +1656,10 @@ class RealLebaiAdapter:
             return
         event = {
             "kind": "robot_kinematics",
+            # Local sequential SDK-read boundaries, not device sample times.
+            "snapshot_read_requested_ns": snapshot.read_requested_ns,
+            "snapshot_read_started_ns": snapshot.captured_ns,
+            "snapshot_read_completed_ns": snapshot.read_completed_ns,
             "snapshot_lock_wait_ms": snapshot.sdk_lock_wait_ms,
             "raw_robot_state": snapshot.raw_robot_state,
             "robot_state": snapshot.robot_state.value,

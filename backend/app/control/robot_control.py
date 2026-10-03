@@ -983,6 +983,7 @@ class RobotControl:
         server_mono_ns = self.clock.now_ns()
         received = self.latest.snapshot()
         sample_age_ms = (
+            # The legacy wire field measures VR input age, not robot telemetry age.
             None
             if received is None
             else max(0.0, (server_mono_ns - received.received_ns) / 1_000_000)
