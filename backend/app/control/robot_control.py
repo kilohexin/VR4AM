@@ -292,7 +292,17 @@ class RobotControl:
             raise RuntimeError("arm_blocked_by_fault")
         if self._recovery_lock.locked():
             raise RuntimeError("arm_blocked_by_recovery")
+        generation, mode = self._control_generation, self.machine.mode
+
+        def ensure_current() -> None:
+            if (
+                self.machine.mode is not mode
+                or not self._control_generation_is_current(generation)
+            ):
+                raise RuntimeError("arm_authority_changed")
+
         preflight = await self.backend.preflight()
+        ensure_current()
         recorded = await self._record_critical(
             "preflight_result",
             {
@@ -306,6 +316,7 @@ class RobotControl:
         if not recorded:
             self._latch_recording_fault()
             raise RuntimeError("arm_blocked_by_preflight:recording_unavailable")
+        ensure_current()
         if not preflight.ready:
             raise RuntimeError(f"arm_blocked_by_preflight:{preflight.reason}")
         recorded = await self._record_critical(
@@ -315,6 +326,7 @@ class RobotControl:
         if not recorded:
             self._latch_recording_fault()
             raise RuntimeError("arm_blocked_by_preflight:recording_unavailable")
+        ensure_current()
         self.machine.arm()
         self._completed_stale_stop = False
         # The physical gripper may not match the released Trigger position.
@@ -750,8 +762,11 @@ class RobotControl:
                     self._clear_stop_episode()
                     self.machine.disarm()
             is_new_frame = frame_id != self._last_frame_id
+            frame_generation = self._control_generation
             if is_new_frame:
                 await self.recorder.write_vr_frame(received.frame, received.received_ns)
+                if not self._frame_is_current(received, frame_generation):
+                    return
             if (
                 self._fault is None
                 and not self._loop_failed
@@ -784,6 +799,11 @@ class RobotControl:
                     and received.frame.right.grip
                 ):
                     preflight = await self.backend.preflight()
+                    if (
+                        self.machine.mode is not mode_before_grip
+                        or not self._frame_is_current(received, frame_generation)
+                    ):
+                        return
                     recorded = await self._record_critical(
                         "preflight_result",
                         {
@@ -797,11 +817,42 @@ class RobotControl:
                     if not recorded:
                         await self._handle_recording_unavailable()
                         return
+                    if (
+                        self.machine.mode is not mode_before_grip
+                        or not self._frame_is_current(received, frame_generation)
+                    ):
+                        return
                     if not preflight.ready:
                         reason = preflight.reason or "unknown"
                         raise BackendCommandError(
                             f"preflight_not_ready:{reason}"
                         )
+                activating = (
+                    mode_before_grip in {TeleopMode.ARMED, TeleopMode.HOLD}
+                    and received.frame.right.grip
+                )
+                if activating:
+                    # Keep the stopped/armed mode while obtaining the anchor.
+                    # No await may separate a validated capture from activation.
+                    state = await self.backend.get_state()
+                    if (
+                        self.machine.mode is not mode_before_grip
+                        or not self._frame_is_current(received, frame_generation)
+                    ):
+                        return
+                    try:
+                        self.mapper.capture(
+                            Pose(p=received.frame.right.p, q=received.frame.right.q),
+                            state.actual_tcp,
+                            received.frame.head_q,
+                        )
+                    except RuntimeError as error:
+                        if str(error) != "invalid_control_basis":
+                            raise
+                        raise SafetyViolation("invalid_numeric") from error
+                    self.limiter.set_pose_anchor(state.actual_tcp)
+                    self.filter.reset(state.actual_tcp)
+                    self.last_target = state.actual_tcp
                 self.machine.observe_grip(received.frame.right.grip)
                 if self.machine.mode != mode_before_grip:
                     recorded = await self._record_critical(
@@ -814,24 +865,12 @@ class RobotControl:
                     if not recorded:
                         await self._handle_recording_unavailable()
                         return
+                    if activating and not self._target_frame_is_current(received, frame_generation):
+                        return
             if (
                 previous_mode in {TeleopMode.ARMED, TeleopMode.HOLD}
                 and self.machine.mode == TeleopMode.ACTIVE
             ):
-                state = await self.backend.get_state()
-                try:
-                    self.mapper.capture(
-                        Pose(p=received.frame.right.p, q=received.frame.right.q),
-                        state.actual_tcp,
-                        received.frame.head_q,
-                    )
-                except RuntimeError as error:
-                    if str(error) != "invalid_control_basis":
-                        raise
-                    raise SafetyViolation("invalid_numeric") from error
-                self.limiter.set_pose_anchor(state.actual_tcp)
-                self.filter.reset(state.actual_tcp)
-                self.last_target = state.actual_tcp
                 if previous_mode == TeleopMode.HOLD:
                     self._deadline_rebase_requested = True
             elif previous_mode == TeleopMode.ACTIVE and self.machine.mode == TeleopMode.HOLD:
@@ -981,15 +1020,20 @@ class RobotControl:
         self, received: ReceivedFrame, generation: int,
     ) -> bool:
         return (
+            self._control_generation_is_current(generation)
+            and self.latest.snapshot() is received
+            and self.clock.now_ns() - received.received_ns
+            < VR_FRAME_STALE_MS * 1_000_000
+        )
+
+    def _control_generation_is_current(self, generation: int) -> bool:
+        return (
             generation == self._control_generation
             and self._fault is None
             and not self._loop_failed
             and not self._shutdown_started
             and not self._disarm_in_progress
             and not self._recovery_lock.locked()
-            and self.latest.snapshot() is received
-            and self.clock.now_ns() - received.received_ns
-            < VR_FRAME_STALE_MS * 1_000_000
         )
 
     async def state_message(self) -> RobotStateMessage:
@@ -1066,14 +1110,12 @@ class RobotControl:
             self._advance_control_generation()
 
     async def command_gripper(self, value: float) -> None:
-        if (
-            self.machine.mode not in {TeleopMode.ARMED, TeleopMode.ACTIVE}
-            or self._fault is not None
-            or self._loop_failed
-            or self._shutdown_started
-        ):
+        generation = self._control_generation
+        if not self._gripper_authority_is_current(generation):
             raise RuntimeError("gripper_command_requires_armed")
         preflight = await self.backend.preflight()
+        if not self._gripper_authority_is_current(generation):
+            raise RuntimeError("gripper_command_authority_changed")
         recorded = await self._record_critical(
             "preflight_result",
             {
@@ -1087,6 +1129,8 @@ class RobotControl:
         if not recorded:
             self._latch_recording_fault()
             raise RuntimeError("gripper_command_preflight_failed:recording_unavailable")
+        if not self._gripper_authority_is_current(generation):
+            raise RuntimeError("gripper_command_authority_changed")
         if not preflight.ready:
             raise RuntimeError(
                 f"gripper_command_preflight_failed:{preflight.reason}"
@@ -1094,6 +1138,12 @@ class RobotControl:
         await self.backend.set_gripper(value)
         self._last_gripper_sent = value
         self._last_gripper_sent_ns = self.clock.now_ns()
+
+    def _gripper_authority_is_current(self, generation: int) -> bool:
+        return (
+            self.machine.mode in {TeleopMode.ARMED, TeleopMode.ACTIVE}
+            and self._control_generation_is_current(generation)
+        )
 
     async def _send_latest_gripper(self, value: float, now_ns: int) -> int | None:
         if self._armed_trigger_baseline is None:
