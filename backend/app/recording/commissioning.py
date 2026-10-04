@@ -112,6 +112,17 @@ class CommissioningRecorder:
         event: object,
         server_mono_ns: int,
     ) -> None:
+        self._enqueue_event(event, server_mono_ns)
+
+    def try_write_event(self, event: object, server_mono_ns: int) -> bool:
+        """Best-effort normal-queue enqueue: no waits, disk I/O or critical slot."""
+        try:
+            return self._enqueue_event(event, server_mono_ns)
+        except Exception:
+            self.dropped_normal_events += 1
+            return False
+
+    def _enqueue_event(self, event: object, server_mono_ns: int) -> bool:
         self._raise_if_unavailable()
         payload = _serializable_payload(event)
         if isinstance(payload, dict):
@@ -128,10 +139,11 @@ class CommissioningRecorder:
         )
         if len(self._normal) >= self.capacity:
             self.dropped_normal_events += 1
-            return
+            return False
         self._normal.append(entry)
         if self._started:
             self._wake.set()
+        return True
 
     async def write_critical_event(
         self,

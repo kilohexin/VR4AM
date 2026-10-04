@@ -9,6 +9,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from app.control.robot_control import LatestVRFrame, RobotControl
+from app.diagnostics.session_trace import SessionTrace
 from app.diagnostics.store import DiagnosticsStore
 from app.rehearsal.report import HARDWARE_PENDING, RehearsalReportStore
 from app.schemas.messages import (
@@ -513,7 +514,9 @@ async def _run_coupled_session(
     sender_tasks: set[asyncio.Task[None]],
     owner_token: object | None = None,
     rehearsal_active: asyncio.Event | None = None,
+    session_trace: SessionTrace | None = None,
 ) -> None:
+    session_trace = session_trace or SessionTrace(control)
     start_sender = asyncio.Event()
     send_lock = asyncio.Lock()
     rehearsal_messages: asyncio.Queue[
@@ -574,6 +577,9 @@ async def _run_coupled_session(
         )
         tasks.append(diagnostics_task)
         sender_tasks.add(diagnostics_task)
+    for task in tasks:
+        task.add_done_callback(session_trace.task_done)
+    session_trace.mark("tasks_started")
     wait_error: BaseException | None = None
     try:
         with anyio.CancelScope(shield=True):
@@ -584,6 +590,13 @@ async def _run_coupled_session(
         wait_error = error
     finally:
         try:
+            session_trace.mark(
+                "cancel_requested",
+                cancel_reason=(
+                    "external_cancel" if isinstance(wait_error, asyncio.CancelledError)
+                    else "wait_error" if wait_error is not None else "peer_completed"
+                ),
+            )
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -592,6 +605,7 @@ async def _run_coupled_session(
                     *tasks,
                     return_exceptions=True,
                 )
+                session_trace.mark("tasks_joined")
         finally:
             for task in tasks:
                 sender_tasks.discard(task)
@@ -628,6 +642,8 @@ async def teleop_websocket(websocket: WebSocket) -> None:
         return
     session_error: BaseException | None = None
     cleanup_error: BaseException | None = None
+    session_trace = SessionTrace(control)
+    session_trace.mark("accepted")
     rehearsal_active = asyncio.Event()
     try:
         if control.mode == TeleopMode.DISCONNECTED:
@@ -638,6 +654,7 @@ async def teleop_websocket(websocket: WebSocket) -> None:
             app.state.teleop_sender_tasks,
             owner_token,
             rehearsal_active,
+            session_trace,
         )
     except BaseException as error:
         session_error = error
@@ -676,10 +693,20 @@ async def teleop_websocket(websocket: WebSocket) -> None:
                         # backend stop must finish independently of that scope;
                         # cancellation is not evidence that the robot stopped.
                         with anyio.CancelScope(shield=True):
+                            session_trace.mark("disconnect_started")
                             await control.on_disconnect()
                     except BaseException as error:
+                        session_trace.mark(
+                            "disconnect_completed",
+                            disconnect_outcome=(
+                                "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
+                            ),
+                            disconnect_error_type=type(error).__name__[:128],
+                        )
                         if cleanup_error is None:
                             cleanup_error = error
+                    else:
+                        session_trace.mark("disconnect_completed", disconnect_outcome="returned")
                     finally:
                         latest = LatestVRFrame()
                         control.latest = latest
@@ -689,6 +716,7 @@ async def teleop_websocket(websocket: WebSocket) -> None:
                     async with app.state.teleop_owner_lock:
                         if app.state.teleop_owner is owner_token:
                             app.state.teleop_owner = None
+                            session_trace.mark("owner_released")
     if session_error is not None:
         raise session_error
     if cleanup_error is not None:

@@ -1,4 +1,7 @@
 class NoopRecorder:
+    def try_write_event(self, event: object, server_mono_ns: int) -> bool:
+        return True
+
     async def start(self) -> None:
         return None
 
