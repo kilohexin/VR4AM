@@ -758,11 +758,19 @@ class RobotControl:
                 and not self._shutdown_started
                 and self.machine.mode in {TeleopMode.ARMED, TeleopMode.ACTIVE}
             ):
+                gripper_generation = self._control_generation
                 gripper_wait_ns = await self._send_latest_gripper(
                     received.frame.right.trigger, now_ns
                 )
                 if gripper_wait_ns is not None and self.machine.mode == TeleopMode.ARMED:
                     self._deadline_compensation_ns += gripper_wait_ns
+                # A claw RPC can yield before Grip transitions or anchor
+                # capture. Revalidate the input and authority after it returns.
+                if (
+                    self.machine.mode not in {TeleopMode.ARMED, TeleopMode.ACTIVE}
+                    or not self._frame_is_current(received, gripper_generation)
+                ):
+                    return
             previous_mode = self.machine.mode
             if (
                 is_new_frame
@@ -965,9 +973,17 @@ class RobotControl:
         self, received: ReceivedFrame, generation: int,
     ) -> bool:
         return (
+            self.machine.mode is TeleopMode.ACTIVE
+            and self._frame_is_current(received, generation)
+        )
+
+    def _frame_is_current(
+        self, received: ReceivedFrame, generation: int,
+    ) -> bool:
+        return (
             generation == self._control_generation
-            and self.machine.mode is TeleopMode.ACTIVE
             and self._fault is None
+            and not self._loop_failed
             and not self._shutdown_started
             and not self._disarm_in_progress
             and not self._recovery_lock.locked()
