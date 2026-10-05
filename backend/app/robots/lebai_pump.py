@@ -19,6 +19,7 @@ class PvatRequest:
     generation: int
     submission_id: int = 0  # Reserved for legacy, directly constructed requests.
     completion: CommandCompletion | None = field(default=None, compare=False, repr=False)
+    catch_up_from: CommandRef | None = None
 
     @property
     def reference(self) -> CommandRef:
@@ -72,7 +73,9 @@ class PvatPump:
             name="lebai-pvat-pump",
         )
 
-    def submit(self, target: Pose, command_id: int) -> CommandAdmission:
+    def submit(
+        self, target: Pose, command_id: int, *, catch_up_from: CommandRef | None = None,
+    ) -> CommandAdmission:
         if not self._running:
             raise BackendCommandError("pvat_pump_not_running")
         if self._fault is not None:
@@ -85,6 +88,7 @@ class PvatPump:
             generation=self._generation,
             submission_id=self._submission_id + 1,
             completion=completion,
+            catch_up_from=catch_up_from,
         )
         if self._pending is not None and self._pending.completion is not None:
             self._pending.completion._resolve('overwritten')

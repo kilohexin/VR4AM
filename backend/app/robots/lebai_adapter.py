@@ -281,6 +281,30 @@ class RealLebaiAdapter:
         No await separates permission checks, enqueue and receipt creation.
         Hard failures retain the original exceptions and enqueue nothing.
         """
+        self._check_submission_ready()
+        admission = self._pump.submit(target, command_id)
+        return replace(admission, previous_feedback=self._constraint_feedback)
+
+    async def submit_catch_up(
+        self, accepted_command: CommandRef, command_id: int,
+    ) -> CommandAdmission:
+        """Request one PVAT toward the same accepted solution, without new IK.
+
+        Opt-in only: the owner must supervise VR freshness and stop/reanchor.
+        This does not indicate convergence or restore candidate velocity history.
+        The reference is scoped to this adapter and checked again at dispatch.
+        """
+        self._check_submission_ready()
+        if (accepted_command is None or accepted_command != self._accepted_target_ref
+                or not self._pump.is_current(accepted_command.generation)
+                or self._last_sent_tcp is None or self._last_accepted_solution_q is None):
+            raise BackendCommandError("catch_up_target_changed")
+        admission = self._pump.submit(
+            self._last_sent_tcp, command_id, catch_up_from=accepted_command,
+        )
+        return replace(admission, previous_feedback=self._constraint_feedback)
+
+    def _check_submission_ready(self) -> None:
         self._require_control()
         snapshot = self._snapshot
         if snapshot is None:
@@ -294,8 +318,6 @@ class RealLebaiAdapter:
             raise BackendCommandError("preflight_not_ready")
         if not self._pump.running:
             raise BackendCommandError("preflight_not_ready")
-        admission = self._pump.submit(target, command_id)
-        return replace(admission, previous_feedback=self._constraint_feedback)
 
     async def set_gripper(self, value: float) -> None:
         self._require_control()
@@ -949,7 +971,22 @@ class RealLebaiAdapter:
         async with self._sdk_lock:
             lock_acquired_ns = self._clock()
             selected: _SolvedCandidate | None = None
-            if self._backend_label == "LEBAI_FAKE":
+            if not self._pump.is_current(request.generation):
+                return
+            if request.catch_up_from is not None:
+                # An earlier in-flight advance can change acceptance after
+                # admission. Never silently pursue that different target.
+                if request.catch_up_from != self._accepted_target_ref:
+                    if request.completion is not None:
+                        request.completion._invalidate()
+                        request.completion._resolve(
+                            "invalidated", error="catch_up_target_changed",
+                            accepted_command=self._accepted_target_ref,
+                        )
+                    return
+                self._ensure_command_snapshot_fresh(snapshot)
+                selected = self._build_catch_up_candidate(snapshot, request)
+            elif self._backend_label == "LEBAI_FAKE":
                 for fraction, candidate in recovery_candidates(
                     self._last_sent_tcp,
                     request.target,
@@ -1125,6 +1162,7 @@ class RealLebaiAdapter:
         await self._emit_event(
             {
                 "kind": "pvat_sent",
+                "request_kind": "catch_up" if request.catch_up_from is not None else "target",
                 "generation": request.generation,
                 "submission_id": request.submission_id,
                 "accepted_target_generation": (
