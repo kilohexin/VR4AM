@@ -1,0 +1,204 @@
+{
+  "source": "synthetic injected SDK tests; no field or physical measurements",
+  "test_file": "backend/tests/robots/test_retarget_backpressure.py",
+  "rows": [
+    {
+      "channel": "linear",
+      "case": "catch_up_reset",
+      "current_id": 18,
+      "accepted_id": 16,
+      "control_matches_adapter_target": false,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "generated_id": 18,
+      "before_reset_speed": 0.005,
+      "control_target_advanced": false,
+      "pvat_mode": "catch_up"
+    },
+    {
+      "channel": "angular",
+      "case": "catch_up_reset",
+      "current_id": 18,
+      "accepted_id": 16,
+      "control_matches_adapter_target": false,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "generated_id": 18,
+      "before_reset_speed": 0.030000000000000013,
+      "control_target_advanced": false,
+      "pvat_mode": "catch_up"
+    },
+    {
+      "channel": "linear",
+      "case": "recovered_but_local_history_frozen",
+      "current_id": 18,
+      "accepted_id": 18,
+      "control_matches_adapter_target": false,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "pvat_mode": "advance"
+    },
+    {
+      "channel": "angular",
+      "case": "recovered_but_local_history_frozen",
+      "current_id": 18,
+      "accepted_id": 18,
+      "control_matches_adapter_target": false,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "pvat_mode": "advance"
+    },
+    {
+      "channel": "linear",
+      "case": "true_rejection_then_recovery",
+      "current_id": 18,
+      "accepted_id": 18,
+      "control_matches_adapter_target": false,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "rejected_id": 17,
+      "rejection_reasons": [
+        "ik_joint_jump",
+        "ik_joint_jump",
+        "ik_joint_jump"
+      ]
+    },
+    {
+      "channel": "angular",
+      "case": "true_rejection_then_recovery",
+      "current_id": 18,
+      "accepted_id": 18,
+      "control_matches_adapter_target": false,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "rejected_id": 17,
+      "rejection_reasons": [
+        "ik_joint_jump",
+        "ik_joint_jump",
+        "ik_joint_jump"
+      ]
+    },
+    {
+      "channel": "linear",
+      "case": "overwritten_pending",
+      "current_id": 20,
+      "accepted_id": 20,
+      "control_matches_adapter_target": true,
+      "current_candidate_speed": 0.005,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "generated_ids": [
+        17,
+        18,
+        19,
+        20
+      ],
+      "sent_ids": [
+        17,
+        20
+      ]
+    },
+    {
+      "channel": "angular",
+      "case": "overwritten_pending",
+      "current_id": 20,
+      "accepted_id": 20,
+      "control_matches_adapter_target": true,
+      "current_candidate_speed": 0.03600000000000002,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "generated_ids": [
+        17,
+        18,
+        19,
+        20
+      ],
+      "sent_ids": [
+        17,
+        20
+      ]
+    },
+    {
+      "channel": "linear",
+      "case": "braking_phase_cleared_by_old_feedback",
+      "current_id": 18,
+      "accepted_id": 16,
+      "control_matches_adapter_target": false,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "generated_braking": true,
+      "generated_speed": 0.0046
+    },
+    {
+      "channel": "angular",
+      "case": "braking_phase_cleared_by_old_feedback",
+      "current_id": 18,
+      "accepted_id": 16,
+      "control_matches_adapter_target": false,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "generated_braking": true,
+      "generated_speed": 0.02800000000000001
+    },
+    {
+      "channel": "linear",
+      "case": "release_and_reanchor",
+      "current_id": 21,
+      "accepted_id": null,
+      "control_matches_adapter_target": false,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "new_writes": [
+        "stop_move"
+      ]
+    },
+    {
+      "channel": "angular",
+      "case": "release_and_reanchor",
+      "current_id": 21,
+      "accepted_id": null,
+      "control_matches_adapter_target": false,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "ACTIVE",
+      "new_writes": [
+        "stop_move"
+      ]
+    },
+    {
+      "channel": "linear",
+      "case": "release_failed",
+      "current_id": 20,
+      "accepted_id": null,
+      "control_matches_adapter_target": true,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "FAULT",
+      "new_writes": [
+        "stop_move"
+      ]
+    },
+    {
+      "channel": "angular",
+      "case": "release_failed",
+      "current_id": 20,
+      "accepted_id": null,
+      "control_matches_adapter_target": true,
+      "current_candidate_speed": 0.0,
+      "candidate_braking": false,
+      "mode": "FAULT",
+      "new_writes": [
+        "stop_move"
+      ]
+    }
+  ]
+}
