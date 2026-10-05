@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from app.robots.base import BackendCommandError
+from app.robots.command_admission import CommandAdmission, CommandRef
 from app.schemas.messages import Pose
 
 Clock = Callable[[], float]
@@ -16,6 +17,11 @@ class PvatRequest:
     target: Pose
     command_id: int
     generation: int
+    submission_id: int = 0  # Reserved for legacy, directly constructed requests.
+
+    @property
+    def reference(self) -> CommandRef:
+        return CommandRef(self.command_id, self.generation, self.submission_id)
 
 
 class PvatPump:
@@ -35,6 +41,7 @@ class PvatPump:
         self._sleep = sleep
         self._pending: PvatRequest | None = None
         self._generation = 0
+        self._submission_id = 0
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._running = False
@@ -63,17 +70,22 @@ class PvatPump:
             name="lebai-pvat-pump",
         )
 
-    def submit(self, target: Pose, command_id: int) -> None:
+    def submit(self, target: Pose, command_id: int) -> CommandAdmission:
         if not self._running:
             raise BackendCommandError("pvat_pump_not_running")
         if self._fault is not None:
             raise self._fault
-        self._pending = PvatRequest(
+        replaced = self._pending.reference if self._pending is not None else None
+        request = PvatRequest(
             target=target.model_copy(deep=True),
             command_id=command_id,
             generation=self._generation,
+            submission_id=self._submission_id + 1,
         )
+        self._submission_id = request.submission_id
+        self._pending = request
         self._wake.set()
+        return CommandAdmission(request.reference, replaced)
 
     def invalidate(self) -> int:
         self._generation += 1

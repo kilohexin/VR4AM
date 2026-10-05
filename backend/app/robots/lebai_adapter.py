@@ -5,7 +5,7 @@ import copy
 import math
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from scipy.spatial.transform import Rotation
@@ -37,6 +37,7 @@ from app.robots.lebai_sdk_bridge import (
     detect_capabilities,
 )
 from app.robots.lebai_pump import PvatPump, PvatRequest
+from app.robots.command_admission import CommandAdmission, CommandFeedback, CommandRef
 from app.robots.lebai_pvat import PvatLimits, PvatPoint, build_pvat_point
 from app.robots.lebai_stop_transaction import StopTransaction
 from app.robots.lebai_stop_diagnostics import StopDiagnosticSampler
@@ -176,8 +177,10 @@ class RealLebaiAdapter:
         self._last_sent_tcp: Pose | None = None
         self._last_accepted_solution_q: JointVector | None = None
         self._accepted_target_command_id: int | None = None
+        self._accepted_target_ref: CommandRef | None = None
         self._constraint: str | None = None
         self._constraint_error: str | None = None
+        self._constraint_feedback: CommandFeedback | None = None
         self._consecutive_ik_failures = 0
         self._latched_fault: str | None = None
         self._latched_fault_from_cancelled_stop = False
@@ -266,6 +269,18 @@ class RealLebaiAdapter:
         self._preflight_ready = False
 
     async def command_tcp(self, target: Pose, command_id: int) -> None:
+        # Preserve the legacy contract used by RobotControl: enqueue first,
+        # then return the previous asynchronous constraint as an exception.
+        await self.submit_tcp(target, command_id)
+        if self._constraint_error is not None:
+            raise BackendCommandError(self._constraint_error)
+
+    async def submit_tcp(self, target: Pose, command_id: int) -> CommandAdmission:
+        """Opt-in admission receipt; previous feedback does not reject this queue write.
+
+        No await separates permission checks, enqueue and receipt creation.
+        Hard failures retain the original exceptions and enqueue nothing.
+        """
         self._require_control()
         snapshot = self._snapshot
         if snapshot is None:
@@ -279,9 +294,8 @@ class RealLebaiAdapter:
             raise BackendCommandError("preflight_not_ready")
         if not self._pump.running:
             raise BackendCommandError("preflight_not_ready")
-        self._pump.submit(target, command_id)
-        if self._constraint_error is not None:
-            raise BackendCommandError(self._constraint_error)
+        admission = self._pump.submit(target, command_id)
+        return replace(admission, previous_feedback=self._constraint_feedback)
 
     async def set_gripper(self, value: float) -> None:
         self._require_control()
@@ -974,6 +988,7 @@ class RealLebaiAdapter:
                     "request_id": self._sdk_request_id,
                     "command_id": request.command_id,
                     "generation": request.generation,
+                    "submission_id": request.submission_id,
                     "started_ns": pvat_started,
                     "rpc_outcome": "started",
                     "p": list(selected.point.q),
@@ -1025,14 +1040,20 @@ class RealLebaiAdapter:
                 if selected.pvat_mode == "catch_up":
                     self._constraint = "tracking_lag"
                     self._constraint_error = "ik_tracking_lag"
+                    self._constraint_feedback = CommandFeedback(
+                        request.reference, "ik_tracking_lag", "catch_up",
+                    )
                 elif selected.recovery_fraction == 1.0:
                     self._constraint = None
                     self._constraint_error = None
+                    self._constraint_feedback = None
                     self._consecutive_ik_failures = 0
                 else:
                     self._note_soft_constraint(
                         last_recoverable_error or "ik_unreachable",
                         persistent=False,
+                        command=request.reference,
+                        outcome="interpolated_advance",
                     )
                 self._previous_sent_qd = selected.point.qd
                 self._last_pvat_started_ns = pvat_started
@@ -1044,6 +1065,7 @@ class RealLebaiAdapter:
                         selected.metrics.solution_q
                     )
                     self._accepted_target_command_id = request.command_id
+                    self._accepted_target_ref = request.reference
                 self._command_id = request.command_id
                 self._motion_accepted = True
                 accepted = (selected, pvat_latency_ms)
@@ -1052,20 +1074,27 @@ class RealLebaiAdapter:
                 self._note_soft_constraint(
                     last_recoverable_error or "ik_unreachable",
                     persistent=self._backend_label != "LEBAI_FAKE",
+                    command=request.reference,
                 )
             except BackendCommandError:
-                for event in diagnostic_events:
-                    await self._emit_diagnostic_event(event)
+                await self._emit_candidate_diagnostics(diagnostic_events, request)
                 if not self._pump.is_current(request.generation):
                     return
                 raise
-            for event in diagnostic_events:
-                await self._emit_diagnostic_event(event)
+            await self._emit_candidate_diagnostics(diagnostic_events, request)
             return
         selected, pvat_latency_ms = accepted
         await self._emit_event(
             {
                 "kind": "pvat_sent",
+                "generation": request.generation,
+                "submission_id": request.submission_id,
+                "accepted_target_generation": (
+                    self._accepted_target_ref.generation if self._accepted_target_ref else None
+                ),
+                "accepted_target_submission_id": (
+                    self._accepted_target_ref.submission_id if self._accepted_target_ref else None
+                ),
                 "previous_pvat_gap_ms": previous_pvat_gap_ms,
                 "timing_ms": {
                     "snapshot_read": (snapshot_finished_ns - handler_started_ns) / 1_000_000,
@@ -1094,7 +1123,14 @@ class RealLebaiAdapter:
                 "sdk_latency_ms": pvat_latency_ms,
             }
         )
-        for event in diagnostic_events:
+        await self._emit_candidate_diagnostics(diagnostic_events, request)
+
+    async def _emit_candidate_diagnostics(
+        self, events: list[dict[str, object]], request: PvatRequest,
+    ) -> None:
+        for event in events:
+            event["generation"] = request.generation
+            event["submission_id"] = request.submission_id
             await self._emit_diagnostic_event(event)
 
     async def _solve_candidate(
@@ -1362,12 +1398,15 @@ class RealLebaiAdapter:
         reason: str,
         *,
         persistent: bool = True,
+        command: CommandRef | None = None,
+        outcome: Literal["rejected", "interpolated_advance"] = "rejected",
     ) -> None:
         self._consecutive_ik_failures += 1
         self._constraint_error = (
             "ik_unreachable" if reason in {"ik_unreachable", "ik_invalid"}
             else reason
         )
+        self._constraint_feedback = CommandFeedback(command, self._constraint_error, outcome)
         self._constraint = (
             "ik_boundary"
             if self._constraint_error == "ik_unreachable"
@@ -1398,6 +1437,7 @@ class RealLebaiAdapter:
         self._last_sent_tcp = None
         self._last_accepted_solution_q = None
         self._accepted_target_command_id = None
+        self._accepted_target_ref = None
 
     async def _emit_event(self, event: dict[str, object]) -> None:
         if self._event_callback is None:

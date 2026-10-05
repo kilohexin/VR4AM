@@ -910,6 +910,8 @@ async def test_rejected_ik_candidate_records_runtime_joint_delta_without_pvat() 
         "kind": "ik_candidate_rejected",
         "reason": "ik_joint_jump",
         "command_id": 17,
+        "generation": 0,
+        "submission_id": 1,
         "target_translation_delta_m": pytest.approx(
             0.00223606797749979
         ),
