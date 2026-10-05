@@ -866,9 +866,28 @@ class RealLebaiAdapter:
 
     async def _send_target(self, request: PvatRequest) -> None:
         lifecycle: dict[str, object] = {}
+        error_code: str | None = None
+        cancelled = False
         try:
             await self._send_target_impl(request, lifecycle)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except BackendCommandError as error:
+            error_code = str(error)
+            raise
+        except Exception:
+            error_code = "pvat_pump_failed"
+            raise
         finally:
+            if request.completion is not None:
+                request.completion._resolve(
+                    "cancelled" if cancelled else "failed" if error_code else
+                    "invalidated" if request.completion.invalidated else "handled",
+                    sdk_outcome=lifecycle.get("rpc_outcome", "not_started"),
+                    sdk_request_id=lifecycle.get("request_id"),
+                    error=error_code,
+                )
             # The implementation has released the SDK lock before recording,
             # including early returns after generation invalidation.
             if lifecycle:
@@ -1076,14 +1095,33 @@ class RealLebaiAdapter:
                     persistent=self._backend_label != "LEBAI_FAKE",
                     command=request.reference,
                 )
-            except BackendCommandError:
+            except BackendCommandError as error:
+                if request.completion is not None:
+                    request.completion._resolve(
+                        "ik_rejected", error=str(error),
+                        accepted_command=self._accepted_target_ref,
+                    )
                 await self._emit_candidate_diagnostics(diagnostic_events, request)
                 if not self._pump.is_current(request.generation):
                     return
                 raise
+            if request.completion is not None:
+                request.completion._resolve(
+                    "ik_rejected", error=self._constraint_error,
+                    accepted_command=self._accepted_target_ref,
+                )
             await self._emit_candidate_diagnostics(diagnostic_events, request)
             return
         selected, pvat_latency_ms = accepted
+        # Dispatch result is available before potentially blocking/failing
+        # recording. Later recorder failure still follows the existing fault path.
+        if request.completion is not None:
+            request.completion._resolve(
+                "sdk_returned", sdk_outcome="returned",
+                sdk_request_id=lifecycle.get("request_id"),
+                accepted_command=self._accepted_target_ref,
+                pvat_mode=selected.pvat_mode,
+            )
         await self._emit_event(
             {
                 "kind": "pvat_sent",
