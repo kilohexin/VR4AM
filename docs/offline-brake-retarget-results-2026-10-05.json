@@ -1,0 +1,562 @@
+{
+  "source": "synthetic command-space tests; no physical measurements",
+  "test_file": "backend/tests/control/test_brake_retarget.py",
+  "rows": [
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "reverse",
+      "pattern_ms": [
+        20
+      ],
+      "brake_time_s": 0.5000000000000001,
+      "old_direction_drift_mm": 0.5759999999999654,
+      "old_direction_rotation_deg": 0.6875493541569871,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "reverse",
+      "pattern_ms": [
+        40
+      ],
+      "brake_time_s": 0.5199999999999999,
+      "old_direction_drift_mm": 0.5280000000000284,
+      "old_direction_rotation_deg": 0.6600473799907081,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "reverse",
+      "pattern_ms": [
+        20,
+        60
+      ],
+      "brake_time_s": 0.5,
+      "old_direction_drift_mm": 0.5039999999999489,
+      "old_direction_rotation_deg": 0.6462963929075687,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "reverse",
+      "pattern_ms": [
+        20,
+        80
+      ],
+      "brake_time_s": 0.5,
+      "old_direction_drift_mm": 0.47600000000003195,
+      "old_direction_rotation_deg": 0.6187944187412894,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "near",
+      "pattern_ms": [
+        20
+      ],
+      "brake_time_s": 0.5000000000000001,
+      "old_direction_drift_mm": 0.5759999999999654,
+      "old_direction_rotation_deg": 0.6875493541569871,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "near",
+      "pattern_ms": [
+        40
+      ],
+      "brake_time_s": 0.5199999999999999,
+      "old_direction_drift_mm": 0.5280000000000284,
+      "old_direction_rotation_deg": 0.6600473799907081,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "near",
+      "pattern_ms": [
+        20,
+        60
+      ],
+      "brake_time_s": 0.5,
+      "old_direction_drift_mm": 0.5039999999999489,
+      "old_direction_rotation_deg": 0.6462963929075687,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "near",
+      "pattern_ms": [
+        20,
+        80
+      ],
+      "brake_time_s": 0.5,
+      "old_direction_drift_mm": 0.47600000000003195,
+      "old_direction_rotation_deg": 0.6187944187412894,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "sideways",
+      "pattern_ms": [
+        20
+      ],
+      "brake_time_s": 0.5000000000000001,
+      "old_direction_drift_mm": 0.5759999999999654,
+      "old_direction_rotation_deg": 0.6875493541569871,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "sideways",
+      "pattern_ms": [
+        40
+      ],
+      "brake_time_s": 0.5199999999999999,
+      "old_direction_drift_mm": 0.5280000000000284,
+      "old_direction_rotation_deg": 0.6600473799907081,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "sideways",
+      "pattern_ms": [
+        20,
+        60
+      ],
+      "brake_time_s": 0.5,
+      "old_direction_drift_mm": 0.5039999999999489,
+      "old_direction_rotation_deg": 0.6462963929075687,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "sideways",
+      "pattern_ms": [
+        20,
+        80
+      ],
+      "brake_time_s": 0.5,
+      "old_direction_drift_mm": 0.47600000000003195,
+      "old_direction_rotation_deg": 0.6187944187412894,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "changing_during_brake",
+      "pattern_ms": [
+        20
+      ],
+      "brake_time_s": 0.5000000000000001,
+      "old_direction_drift_mm": 0.5759999999999654,
+      "old_direction_rotation_deg": 0.6875493541569871,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "changing_during_brake",
+      "pattern_ms": [
+        40
+      ],
+      "brake_time_s": 0.5199999999999999,
+      "old_direction_drift_mm": 0.5280000000000284,
+      "old_direction_rotation_deg": 0.6600473799907081,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "changing_during_brake",
+      "pattern_ms": [
+        20,
+        60
+      ],
+      "brake_time_s": 0.5,
+      "old_direction_drift_mm": 0.5039999999999489,
+      "old_direction_rotation_deg": 0.6462963929075687,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "RETARGET_RESULT",
+      "path": "changing_during_brake",
+      "pattern_ms": [
+        20,
+        80
+      ],
+      "brake_time_s": 0.5,
+      "old_direction_drift_mm": 0.47600000000003195,
+      "old_direction_rotation_deg": 0.6187944187412894,
+      "brake_episodes": 1
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "smooth_wave",
+      "pattern_ms": [
+        20
+      ],
+      "total_brake_episodes": 8,
+      "moving_brake_episodes": 8,
+      "measured_moving_window_s": 3.980000000000003,
+      "brake_fraction": 0.47236180904522607,
+      "input_frequency_hz": 1.0,
+      "peak_follow_error_mm": 3.5892557291366534,
+      "rms_follow_error_mm": 1.8644424263179962,
+      "peak_orientation_error_deg": 1.7922426116918806
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "smooth_wave",
+      "pattern_ms": [
+        40
+      ],
+      "total_brake_episodes": 8,
+      "moving_brake_episodes": 8,
+      "measured_moving_window_s": 3.9600000000000026,
+      "brake_fraction": 0.4747474747474747,
+      "input_frequency_hz": 1.0,
+      "peak_follow_error_mm": 3.4685745014573777,
+      "rms_follow_error_mm": 1.8091515581511017,
+      "peak_orientation_error_deg": 1.684825082772934
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "smooth_wave",
+      "pattern_ms": [
+        20,
+        60
+      ],
+      "total_brake_episodes": 8,
+      "moving_brake_episodes": 7,
+      "measured_moving_window_s": 3.940000000000003,
+      "brake_fraction": 0.4873096446700507,
+      "input_frequency_hz": 1.0,
+      "peak_follow_error_mm": 3.4605745014573697,
+      "rms_follow_error_mm": 1.820466426552215,
+      "peak_orientation_error_deg": 1.6891102085683254
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "smooth_wave",
+      "pattern_ms": [
+        20,
+        80
+      ],
+      "total_brake_episodes": 7,
+      "moving_brake_episodes": 7,
+      "measured_moving_window_s": 3.920000000000002,
+      "brake_fraction": 0.5153061224489794,
+      "input_frequency_hz": 1.0,
+      "peak_follow_error_mm": 3.5445745014573427,
+      "rms_follow_error_mm": 1.834327374093817,
+      "peak_orientation_error_deg": 1.710035225758695
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "slow_wave",
+      "pattern_ms": [
+        20
+      ],
+      "total_brake_episodes": 0,
+      "moving_brake_episodes": 0,
+      "measured_moving_window_s": 3.980000000000003,
+      "brake_fraction": 0.0,
+      "input_frequency_hz": 0.2,
+      "peak_follow_error_mm": 0.15402075536591342,
+      "rms_follow_error_mm": 0.09266665511365194,
+      "peak_orientation_error_deg": 0.1682165399492534
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "slow_wave",
+      "pattern_ms": [
+        40
+      ],
+      "total_brake_episodes": 0,
+      "moving_brake_episodes": 0,
+      "measured_moving_window_s": 3.9600000000000026,
+      "brake_fraction": 0.0,
+      "input_frequency_hz": 0.2,
+      "peak_follow_error_mm": 0.1535137114433982,
+      "rms_follow_error_mm": 0.09173539813193962,
+      "peak_orientation_error_deg": 0.16742799270360068
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "slow_wave",
+      "pattern_ms": [
+        20,
+        60
+      ],
+      "total_brake_episodes": 0,
+      "moving_brake_episodes": 0,
+      "measured_moving_window_s": 3.940000000000003,
+      "brake_fraction": 0.0,
+      "input_frequency_hz": 0.2,
+      "peak_follow_error_mm": 0.15330337809515981,
+      "rms_follow_error_mm": 0.09157222266907217,
+      "peak_orientation_error_deg": 0.16706108500902012
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "slow_wave",
+      "pattern_ms": [
+        20,
+        80
+      ],
+      "total_brake_episodes": 0,
+      "moving_brake_episodes": 0,
+      "measured_moving_window_s": 3.920000000000002,
+      "brake_fraction": 0.0,
+      "input_frequency_hz": 0.2,
+      "peak_follow_error_mm": 0.1527262137011598,
+      "rms_follow_error_mm": 0.0908108190542846,
+      "peak_orientation_error_deg": 0.1663533748597559
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "corner",
+      "pattern_ms": [
+        20
+      ],
+      "total_brake_episodes": 4,
+      "moving_brake_episodes": 4,
+      "measured_moving_window_s": 3.980000000000003,
+      "brake_fraction": 0.3768844221105527,
+      "input_frequency_hz": null,
+      "peak_follow_error_mm": 2.820427124746207,
+      "rms_follow_error_mm": 1.9509356645474376,
+      "peak_orientation_error_deg": 1.6182640329211888
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "corner",
+      "pattern_ms": [
+        40
+      ],
+      "total_brake_episodes": 5,
+      "moving_brake_episodes": 5,
+      "measured_moving_window_s": 3.9600000000000026,
+      "brake_fraction": 0.37373737373737365,
+      "input_frequency_hz": null,
+      "peak_follow_error_mm": 2.828427124746191,
+      "rms_follow_error_mm": 1.9036064223114764,
+      "peak_orientation_error_deg": 1.6159710702598236
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "corner",
+      "pattern_ms": [
+        20,
+        60
+      ],
+      "total_brake_episodes": 7,
+      "moving_brake_episodes": 6,
+      "measured_moving_window_s": 3.940000000000003,
+      "brake_fraction": 0.40101522842639586,
+      "input_frequency_hz": null,
+      "peak_follow_error_mm": 2.828427124746191,
+      "rms_follow_error_mm": 1.88365034958349,
+      "peak_orientation_error_deg": 1.6102062274862494
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "corner",
+      "pattern_ms": [
+        20,
+        80
+      ],
+      "total_brake_episodes": 4,
+      "moving_brake_episodes": 4,
+      "measured_moving_window_s": 3.920000000000002,
+      "brake_fraction": 0.3928571428571427,
+      "input_frequency_hz": null,
+      "peak_follow_error_mm": 2.733571510616754,
+      "rms_follow_error_mm": 1.945599452049811,
+      "peak_orientation_error_deg": 1.6016339123789365
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "jitter",
+      "pattern_ms": [
+        20
+      ],
+      "total_brake_episodes": 0,
+      "moving_brake_episodes": 0,
+      "measured_moving_window_s": 3.980000000000003,
+      "brake_fraction": 0.0,
+      "input_frequency_hz": null,
+      "peak_follow_error_mm": 0.19599999999997397,
+      "rms_follow_error_mm": 0.13571682016750086,
+      "peak_orientation_error_deg": 0.11459155902615523
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "jitter",
+      "pattern_ms": [
+        40
+      ],
+      "total_brake_episodes": 0,
+      "moving_brake_episodes": 0,
+      "measured_moving_window_s": 3.9600000000000026,
+      "brake_fraction": 0.0,
+      "input_frequency_hz": null,
+      "peak_follow_error_mm": 0.1833776408148302,
+      "rms_follow_error_mm": 0.10972032399006063,
+      "peak_orientation_error_deg": 0.10993141722064197
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "jitter",
+      "pattern_ms": [
+        20,
+        60
+      ],
+      "total_brake_episodes": 4,
+      "moving_brake_episodes": 4,
+      "measured_moving_window_s": 3.940000000000003,
+      "brake_fraction": 0.08121827411167507,
+      "input_frequency_hz": null,
+      "peak_follow_error_mm": 0.19999999999997797,
+      "rms_follow_error_mm": 0.09659055486265794,
+      "peak_orientation_error_deg": 0.11382761529931909
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "jitter",
+      "pattern_ms": [
+        20,
+        80
+      ],
+      "total_brake_episodes": 2,
+      "moving_brake_episodes": 2,
+      "measured_moving_window_s": 3.920000000000002,
+      "brake_fraction": 0.05102040816326528,
+      "input_frequency_hz": null,
+      "peak_follow_error_mm": 0.19999999999997797,
+      "rms_follow_error_mm": 0.08652212425580837,
+      "peak_orientation_error_deg": 0.11378729616834747
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "circle",
+      "pattern_ms": [
+        20
+      ],
+      "total_brake_episodes": 8,
+      "moving_brake_episodes": 8,
+      "measured_moving_window_s": 3.980000000000003,
+      "brake_fraction": 0.4020100502512562,
+      "input_frequency_hz": 1.0,
+      "peak_follow_error_mm": 3.13506807157733,
+      "rms_follow_error_mm": 2.11545413181777,
+      "peak_orientation_error_deg": 1.9456973707217005
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "circle",
+      "pattern_ms": [
+        40
+      ],
+      "total_brake_episodes": 8,
+      "moving_brake_episodes": 8,
+      "measured_moving_window_s": 3.9600000000000026,
+      "brake_fraction": 0.404040404040404,
+      "input_frequency_hz": 1.0,
+      "peak_follow_error_mm": 3.1326591447991166,
+      "rms_follow_error_mm": 2.089912129473151,
+      "peak_orientation_error_deg": 1.9389215896149816
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "circle",
+      "pattern_ms": [
+        20,
+        60
+      ],
+      "total_brake_episodes": 9,
+      "moving_brake_episodes": 9,
+      "measured_moving_window_s": 3.940000000000003,
+      "brake_fraction": 0.4568527918781725,
+      "input_frequency_hz": 1.0,
+      "peak_follow_error_mm": 3.2808115979336887,
+      "rms_follow_error_mm": 2.1119051017641093,
+      "peak_orientation_error_deg": 2.007026280455109
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "circle",
+      "pattern_ms": [
+        20,
+        80
+      ],
+      "total_brake_episodes": 9,
+      "moving_brake_episodes": 9,
+      "measured_moving_window_s": 3.920000000000002,
+      "brake_fraction": 0.4540816326530612,
+      "input_frequency_hz": 1.0,
+      "peak_follow_error_mm": 3.338814004824702,
+      "rms_follow_error_mm": 2.107185810453019,
+      "peak_orientation_error_deg": 2.028518765663995
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "slow_circle",
+      "pattern_ms": [
+        20
+      ],
+      "total_brake_episodes": 1,
+      "moving_brake_episodes": 0,
+      "measured_moving_window_s": 3.980000000000003,
+      "brake_fraction": 0.0,
+      "input_frequency_hz": 0.2,
+      "peak_follow_error_mm": 0.1566273923269648,
+      "rms_follow_error_mm": 0.15472421432681174,
+      "peak_orientation_error_deg": 0.17598393788335132
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "slow_circle",
+      "pattern_ms": [
+        40
+      ],
+      "total_brake_episodes": 1,
+      "moving_brake_episodes": 0,
+      "measured_moving_window_s": 3.9600000000000026,
+      "brake_fraction": 0.0,
+      "input_frequency_hz": 0.2,
+      "peak_follow_error_mm": 0.15629918030320597,
+      "rms_follow_error_mm": 0.15380674723954096,
+      "peak_orientation_error_deg": 0.17530785134329785
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "slow_circle",
+      "pattern_ms": [
+        20,
+        60
+      ],
+      "total_brake_episodes": 1,
+      "moving_brake_episodes": 0,
+      "measured_moving_window_s": 3.940000000000003,
+      "brake_fraction": 0.0,
+      "input_frequency_hz": 0.2,
+      "peak_follow_error_mm": 0.1561672510027271,
+      "rms_follow_error_mm": 0.15348305093268305,
+      "peak_orientation_error_deg": 0.17501121828023758
+    },
+    {
+      "experiment": "CONTINUOUS_RESULT",
+      "path": "slow_circle",
+      "pattern_ms": [
+        20,
+        80
+      ],
+      "total_brake_episodes": 1,
+      "moving_brake_episodes": 0,
+      "measured_moving_window_s": 3.920000000000002,
+      "brake_fraction": 0.0,
+      "input_frequency_hz": 0.2,
+      "peak_follow_error_mm": 0.15588545822817074,
+      "rms_follow_error_mm": 0.15268464750801627,
+      "peak_orientation_error_deg": 0.17442967690957958
+    }
+  ]
+}
