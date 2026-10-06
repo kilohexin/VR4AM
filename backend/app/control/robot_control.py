@@ -10,6 +10,7 @@ from app.control.coordinate_mapper import CoordinateMapper
 from app.control.filters import PoseFilter
 from app.control.safety import SafetyLimiter, SafetyViolation, WorkspaceProjection
 from app.control.state_machine import TeleopStateMachine
+from app.control.target_strategy import DefaultTargetStrategy, TargetStrategy
 from app.recording.base import RecorderSink
 from app.recording.commissioning import RecorderUnavailable
 from app.robots.base import (
@@ -134,6 +135,7 @@ class RobotControl:
         limiter: SafetyLimiter | None = None,
         constraint_clear_ms: int = 100,
         home_options: HomeOptions | None = None,
+        target_strategy: TargetStrategy | None = None,
     ) -> None:
         self.backend = backend
         self.latest = latest
@@ -141,6 +143,7 @@ class RobotControl:
         self.recorder = recorder
         self.mapper = mapper if mapper is not None else CoordinateMapper()
         self.limiter = limiter if limiter is not None else SafetyLimiter()
+        self.target_strategy = target_strategy if target_strategy is not None else DefaultTargetStrategy()
         self.constraint_clear_ns = constraint_clear_ms * 1_000_000
         self.home_options = home_options or HomeOptions(
             max_speed_radps=0.25,
@@ -888,11 +891,13 @@ class RobotControl:
                 workspace = self.limiter.project_workspace(raw_requested)
                 requested = None
                 target = None
+                plan = None
                 if not (workspace.constrained and workspace.hold):
                     requested = self.filter.update(workspace.pose, CONTROL_DT_S)
-                    target = self.limiter.limit_motion(
-                        previous_target, requested, CONTROL_DT_S,
+                    plan = self.target_strategy.prepare(
+                        previous_target, requested, CONTROL_DT_S, limiter=self.limiter,
                     )
+                    target = plan.pose
                 await self._record_target_sample(
                     received=received,
                     generation=generation,
@@ -901,6 +906,7 @@ class RobotControl:
                     workspace=workspace,
                     filtered=requested,
                     limited=target,
+                    dispatch_kind=plan.kind if plan is not None else 'workspace_hold',
                 )
                 # Recording implementations can yield. Do not submit an old
                 # target after a stop, a newer input, or an expired VR frame.
@@ -919,37 +925,49 @@ class RobotControl:
                     self.last_seq = received.frame.seq
                     self._last_frame_id = frame_id
                     return
-                assert target is not None
+                assert plan is not None
                 try:
-                    await self.backend.command_tcp(target, received.frame.seq)
+                    committed = None
+                    if plan.kind != 'wait':
+                        committed = await self.target_strategy.dispatch(
+                            plan, received.frame.seq, backend=self.backend,
+                        )
                 except BackendCommandError as error:
                     code = str(error)
                     if code in {"ik_unreachable", "ik_singular"}:
-                        self._set_constraint("ik_boundary")
+                        constraint = "ik_boundary"
                     elif code in {
                         "joint_safety_window",
                         "ik_joint_limit",
                     }:
-                        self._set_constraint("joint_boundary")
+                        constraint = "joint_boundary"
                     elif code == "ik_tracking_lag":
-                        self._set_constraint("tracking_lag")
+                        constraint = "tracking_lag"
                     elif code in {
                         "ik_joint_jump",
                         "joint_speed_limit",
                     }:
-                        self._set_constraint("motion_continuity_boundary")
+                        constraint = "motion_continuity_boundary"
                     elif code == "self_collision":
-                        self._set_constraint("self_collision")
+                        constraint = "self_collision"
                     else:
                         raise
+                    if not self._target_frame_is_current(received, generation):
+                        return
+                    self._set_constraint(constraint)
                     self.filter.reset(self.last_target)
                     self.limiter.reset_motion()
                 else:
-                    self.last_target = target
-                    if workspace.constrained:
-                        self._set_constraint("workspace_boundary")
-                    else:
-                        self._observe_valid_constraint(now_ns)
+                    # Dispatch may wait. Never restore a stopped anchor or
+                    # consume an old frame after a newer input takes ownership.
+                    if not self._target_frame_is_current(received, generation):
+                        return
+                    if committed is not None:
+                        self.last_target = committed.model_copy(deep=True)
+                        if workspace.constrained:
+                            self._set_constraint("workspace_boundary")
+                        else:
+                            self._observe_valid_constraint(now_ns)
             self.last_seq = received.frame.seq
             self._last_frame_id = frame_id
         except RecorderUnavailable:
@@ -967,6 +985,7 @@ class RobotControl:
         workspace: WorkspaceProjection,
         filtered: Pose | None,
         limited: Pose | None,
+        dispatch_kind: str = 'candidate',
     ) -> None:
         now_ns = self.clock.now_ns()
         if (
@@ -985,6 +1004,7 @@ class RobotControl:
                 "control_generation": generation,
                 "frame_received_ns": received.received_ns,
                 "control_dt_s": CONTROL_DT_S,
+                "dispatch_kind": dispatch_kind,
                 "sample_period_ns": TARGET_SAMPLE_PERIOD_NS,
                 "rate_limited_frames": self._target_sample_rate_limited_frames,
                 "translation_scale": self.mapper.translation_scale,

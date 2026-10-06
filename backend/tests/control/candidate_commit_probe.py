@@ -29,6 +29,14 @@ class Draft:
     version: int
 
 
+@dataclass
+class Prepared:
+    owner: object
+    candidate: BrakeBeforeRetarget
+    pose: Pose
+    version: int
+
+
 class CandidateCoordinator:
     def __init__(self, backend, limits, anchor, *, authority, generation_current):
         self.backend = backend
@@ -55,7 +63,7 @@ class CandidateCoordinator:
     def _authorized(self):
         return self.authority() == (self.epoch, True)
 
-    async def propose(self, requested, command_id, dt):
+    def _check_ready(self):
         if self._pending is not None or self._submitting:
             raise RuntimeError('request_pending')
         if self.frozen_reason:
@@ -64,18 +72,30 @@ class CandidateCoordinator:
                                      and not self.generation_current(self._generation)):
             self.frozen_reason = 'authority_revoked'
             raise RuntimeError('authority_unavailable')
+
+    def prepare(self, requested, dt):
+        self._check_ready()
         trial = copy.deepcopy(self._candidate)
         try:
             pose = trial.limit_motion(self._pose, requested, dt)
         except Exception:
             self.frozen_reason = 'candidate_failed'
             raise
+        return Prepared(self, trial, pose, self._version)
+
+    async def propose(self, requested, command_id, dt):
+        return await self.submit_prepared(self.prepare(requested, dt), command_id)
+
+    async def submit_prepared(self, prepared, command_id):
+        self._check_ready()
+        if prepared.owner is not self or prepared.version != self._version:
+            raise RuntimeError('prepared_candidate_obsolete')
         self._submitting = True
         try:
-            receipt = await self.backend.submit_tcp(pose, command_id)
+            receipt = await self.backend.submit_tcp(prepared.pose, command_id)
             if receipt.completion is None:
                 raise RuntimeError('completion_missing')
-            self._pending = Draft(trial, pose, receipt, self._version)
+            self._pending = Draft(prepared.candidate, prepared.pose, receipt, self._version)
             if self._generation is None:
                 self._generation = receipt.command.generation
             if not self._authorized():

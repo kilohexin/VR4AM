@@ -1,15 +1,14 @@
 """TEST ONLY: original RobotControl.tick, with transactional motion dispatch.
 
-The limiter seam captures the original filtered input and returns the committed
-pose as a hold value. Thus the original tick's optimistic last_target assignment
-cannot advance history. Actual candidate generation happens at the backend seam,
-after the original recording/freshness guards. Original target samples describe
-the hold value; candidate_inputs/requests below are separate experiment traces.
-No production module imports this policy and no websocket session is replaced.
+Uses the production TargetStrategy seam. Preparation copies candidate history;
+sampling records its actual pose before dispatch. None commits no optimistic
+target; completion collection advances history separately. No production module
+imports this policy and no websocket session is replaced.
 """
 
 from app.control.robot_control import RobotControl
 from app.control.safety import SafetyViolation
+from app.control.target_strategy import TargetPlan
 from app.robots.base import BackendCommandError
 from app.schemas.messages import TeleopMode
 from tests.control.braking_approach_probe import InfeasibleApproach
@@ -18,7 +17,8 @@ from tests.control.catch_up_probe import CatchUpProbe
 from tests.robots.test_vr_profile_experiments import limiter
 
 
-class InputGate:
+class AnchoredLimits:
+    """Observe anchor lifecycle only; all limiter behavior is delegated."""
     def __init__(self, owner):
         self.owner = owner
         self.limits = limiter()
@@ -32,22 +32,29 @@ class InputGate:
         self.anchor_version += 1
         self.owner.latest_requested = None
 
-    def limit_motion(self, previous, requested, dt):
-        assert dt == .02
-        self.owner.latest_requested = requested.model_copy(deep=True)
-        return previous.model_copy(deep=True)
+class TransactionalStrategy:
+    def __init__(self, owner):
+        self.owner = owner
 
+    def prepare(self, previous, requested, dt, *, limiter):
+        owner = self.owner
+        owner.latest_requested = requested.model_copy(deep=True)
+        if owner.pursuit is not None:
+            if owner.pursuit.pending is not None or owner.pursuit._check() != 'pursuing':
+                return TargetPlan('wait', None)
+            return TargetPlan('catch_up', owner.adapter._last_sent_tcp.model_copy(deep=True))
+        if owner.coordinator._pending is not None:
+            return TargetPlan('wait', None)
+        owner.candidate_inputs.append(requested.model_copy(deep=True))
+        try:
+            draft = owner.coordinator.prepare(requested, dt)
+        except InfeasibleApproach as error:
+            raise SafetyViolation('target_braking_infeasible') from error
+        return TargetPlan('candidate', draft.pose, draft)
 
-class DispatchBackend:
-    def __init__(self, owner, backend):
-        self.owner, self.backend = owner, backend
-
-    def __getattr__(self, name):
-        return getattr(self.backend, name)
-
-    async def command_tcp(self, target, command_id):
-        # target is the committed hold pose, not a candidate to send.
-        await self.owner.dispatch(command_id)
+    async def dispatch(self, plan, command_id, *, backend):
+        await self.owner.dispatch(plan, command_id)
+        return None
 
 
 class TransactionalControl(RobotControl):
@@ -61,8 +68,9 @@ class TransactionalControl(RobotControl):
         self.exits = []
         self.halted = False
         self._captured_anchor_version = 0
-        gate = InputGate(self)
-        super().__init__(backend=DispatchBackend(self, backend), limiter=gate, **kwargs)
+        gate = AnchoredLimits(self)
+        super().__init__(backend=backend, limiter=gate,
+            target_strategy=TransactionalStrategy(self), **kwargs)
 
     def input_authorized(self):
         received = self.latest.snapshot()
@@ -142,13 +150,12 @@ class TransactionalControl(RobotControl):
         self.halted = True
         await self.disarm()
 
-    async def dispatch(self, command_id):
+    async def dispatch(self, plan, command_id):
         if not self.input_authorized() or self.halted:
             return
         if self.pursuit is not None:
             # Gripper/recording awaits can consume the budget after collect().
-            # Stop after super().tick() returns, so its optimistic assignment
-            # cannot resurrect last_target after disarm cleared the anchor.
+            # Let the owner complete its frame bookkeeping before stopping.
             if self.pursuit._check() != 'pursuing':
                 return
             if self.pursuit.pending is not None:
@@ -158,11 +165,7 @@ class TransactionalControl(RobotControl):
         else:
             if self.coordinator._pending is not None:
                 return
-            self.candidate_inputs.append(self.latest_requested.model_copy(deep=True))
-            try:
-                receipt = await self.coordinator.propose(self.latest_requested, command_id, .02)
-            except InfeasibleApproach as error:
-                raise SafetyViolation('target_braking_infeasible') from error
+            receipt = await self.coordinator.submit_prepared(plan.payload, command_id)
             self.requests.append(('candidate', receipt))
 
     async def tick(self):
