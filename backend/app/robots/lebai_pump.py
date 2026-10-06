@@ -59,6 +59,10 @@ class PvatPump:
         return self._running
 
     @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
     def has_pending(self) -> bool:
         return self._pending is not None
 

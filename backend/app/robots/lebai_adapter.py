@@ -38,6 +38,7 @@ from app.robots.lebai_sdk_bridge import (
 )
 from app.robots.lebai_pump import PvatPump, PvatRequest
 from app.robots.command_admission import CommandAdmission, CommandFeedback, CommandRef
+from app.robots.motion_view import AcceptedTarget, JointObservation, MotionView
 from app.robots.lebai_pvat import PvatLimits, PvatPoint, build_pvat_point
 from app.robots.lebai_stop_transaction import StopTransaction
 from app.robots.lebai_stop_diagnostics import StopDiagnosticSampler
@@ -146,6 +147,7 @@ class RealLebaiAdapter:
         self._sdk_diagnostic_tasks: set[asyncio.Task[None]] = set()
         self._sdk_diagnostics_dropped = 0
         self._snapshot: LebaiSnapshot | None = None
+        self._motion_observation: JointObservation | None = None
         self._capabilities = SdkCapabilities(names=())
         self._command_id: int | None = None
         self._motion_accepted = False
@@ -194,6 +196,28 @@ class RealLebaiAdapter:
     def pump_fault(self) -> BackendCommandError | None:
         return self._pump.fault
 
+    def read_motion_view(self) -> MotionView:
+        """Copy cached facts synchronously on the owning event loop; no I/O.
+
+        A missing/stale sample stays missing/stale. No SDK reads, tasks, logging
+        or fallback. Old view objects do not track later revocation or faults.
+        """
+        accepted = None
+        if (self._accepted_target_ref is not None and self._last_sent_tcp is not None
+                and self._last_accepted_solution_q is not None):
+            accepted = AcceptedTarget(
+                self._accepted_target_ref, tuple(self._last_sent_tcp.p),
+                tuple(self._last_sent_tcp.q), tuple(self._last_accepted_solution_q),
+            )
+        return MotionView(
+            observed_ns=self._clock(), generation=self._pump.generation,
+            client_attached=self._client is not None, pump_running=self._pump.running,
+            pump_fault=str(self._pump.fault) if self._pump.fault is not None else None,
+            latched_fault=self._latched_fault, preflight_ready=self._preflight_ready,
+            stop_in_progress=self._stop_lock.locked(), accepted=accepted,
+            sample=self._motion_observation,
+        )
+
     async def connect(self) -> None:
         if self._disconnecting:
             raise BackendCommandError("disconnect_in_progress")
@@ -227,6 +251,7 @@ class RealLebaiAdapter:
         except BaseException:
             self._client = None
             self._snapshot = None
+            self._motion_observation = None
             self._preflight_ready = False
             raise
 
@@ -264,6 +289,7 @@ class RealLebaiAdapter:
             await asyncio.sleep(0)
         self._reset_pvat_history()
         self._snapshot = None
+        self._motion_observation = None
         self._client = None
         self._motion_accepted = False
         self._preflight_ready = False
@@ -1580,6 +1606,7 @@ class RealLebaiAdapter:
             raise BackendCommandError("robot_disconnected")
         latencies: dict[str, float] = {}
         read_requested_ns = self._clock()
+        read_generation = self._pump.generation
         async with self._sdk_lock:
             captured_ns = self._clock()
             sdk_lock_wait_ms = (captured_ns - read_requested_ns) / 1_000_000
@@ -1707,6 +1734,14 @@ class RealLebaiAdapter:
             motion_state=motion_state,
         )
         self._snapshot = snapshot
+        # A queued/in-flight old read must not replace current public evidence.
+        # The previous sample may remain visible with its original generation.
+        if client is self._client and read_generation == self._pump.generation:
+            self._motion_observation = JointObservation(
+                generation=read_generation, captured_ns=snapshot.captured_ns,
+                read_completed_ns=snapshot.read_completed_ns, read_purpose=read_purpose,
+                actual_q=tuple(snapshot.actual_q), actual_qd=tuple(snapshot.actual_qd),
+            )
         if emit_kinematics:
             await self._emit_kinematics(snapshot)
         return snapshot

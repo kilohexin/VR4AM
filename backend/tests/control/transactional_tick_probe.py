@@ -25,7 +25,11 @@ class TransactionalStrategy:
         if owner.pursuit is not None:
             if owner.pursuit.pending is not None or owner.pursuit._check() != 'pursuing':
                 return TargetPlan('wait', None)
-            return TargetPlan('catch_up', owner.adapter._last_sent_tcp.model_copy(deep=True))
+            view = owner.adapter.read_motion_view()
+            if (view.accepted is None or view.accepted.command != owner.pursuit.accepted
+                    or not view.is_current(view.accepted.command.generation)):
+                raise SafetyViolation('candidate_dispatch_failed')
+            return TargetPlan('catch_up', view.accepted.tcp)
         if owner.coordinator._pending is not None:
             return TargetPlan('wait', None)
         owner.candidate_inputs.append(requested.model_copy(deep=True))
@@ -69,7 +73,7 @@ class TransactionalControl(RobotControl):
         return self._target_context().authorized
 
     def pump_current(self, generation):
-        return self.adapter._pump.is_current(generation) and self.adapter.pump_fault is None
+        return self.adapter.read_motion_view().is_current(generation)
 
     def capture_epoch(self, pose):
         if self.coordinator is None:
@@ -89,10 +93,11 @@ class TransactionalControl(RobotControl):
         if self.coordinator is None or self.halted:
             return idle
         settled = self.coordinator.settle()
+        view = self.adapter.read_motion_view()
         committed = self.coordinator._pose.model_copy(deep=True) if settled == 'committed' else None
-        if (self.adapter.pump_fault is not None and context.active
+        if (view.pump_fault is not None and context.active
                 and self._fault is None):
-            return TargetUpdate(context.generation, fault=str(self.adapter.pump_fault))
+            return TargetUpdate(context.generation, fault=view.pump_fault)
         if not context.authorized:
             # Let the unchanged tick handle Grip/session/stale input transitions.
             return idle
@@ -101,19 +106,20 @@ class TransactionalControl(RobotControl):
                 return TargetUpdate(context.generation, fault='candidate_dispatch_failed')
             receipt = self.requests[-1][1]
             done = receipt.completion.result
-            accepted = self.adapter._accepted_target_ref
-            if (done is None or done.accepted_command != accepted or accepted is None
-                    or not self.pump_current(accepted.generation)):
+            accepted = view.accepted
+            if (done is None or accepted is None or done.accepted_command != accepted.command
+                    or not view.is_current(accepted.command.generation)):
                 return TargetUpdate(context.generation, fault='candidate_dispatch_failed')
             epoch = self.control_generation
-            self.pursuit = CatchUpProbe(self.adapter, accepted,
-                self.adapter._last_accepted_solution_q, clock=self.clock.now_ns,
+            self.pursuit = CatchUpProbe(self.adapter, accepted.command,
+                accepted.solution_q, clock=self.clock.now_ns,
                 authorized=lambda: self.input_authorized() and self.control_generation == epoch,
                 generation_current=self.pump_current)
         if self.pursuit is not None:
             state = self.pursuit.settle()
-            snapshot = self.adapter._snapshot
+            snapshot = view.sample
             if (state == 'pursuing' and snapshot is not None
+                    and snapshot.generation == view.generation == self.pursuit.accepted.generation
                     and snapshot.captured_ns > self.pursuit.last_sample_ns):
                 state = self.pursuit.observe(snapshot)
             if state in {'observed_settled', 'budget_expired'}:
