@@ -36,6 +36,41 @@ class TargetStrategy(Protocol):
                        backend: RobotBackend) -> Pose | None: ...
 
 
+@dataclass(frozen=True)
+class TargetContext:
+    generation: int
+    now_ns: int
+    active: bool
+    authorized: bool
+
+
+@dataclass(frozen=True)
+class TargetUpdate:
+    generation: int
+    committed: Pose | None = None
+    stop: bool = False
+    fault: str | None = None
+
+    def __post_init__(self):
+        if sum((self.committed is not None, self.stop, self.fault is not None)) > 1:
+            raise ValueError('conflicting_target_update')
+
+
+class TargetLifecycle(Protocol):
+    """Synchronous hooks: no I/O, no waiting, no owner/robot commands.
+
+    collect reads completed receipts without waiting. Owner applies its single
+    decision under current authority. Revocation is notification, not SDK cancel
+    or proof of stop; hook failure cannot prevent the owner's stop transaction.
+    """
+
+    def collect(self, context: TargetContext) -> TargetUpdate: ...
+
+    def on_anchor(self, pose: Pose, context: TargetContext) -> None: ...
+
+    def on_revoke(self, generation: int) -> None: ...
+
+
 class DefaultTargetStrategy:
     """Compatibility path: original limiter and command_tcp soft-error rules."""
 

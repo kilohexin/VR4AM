@@ -363,7 +363,7 @@ async def test_original_pump_fault_code_survives_transactional_collection(failur
 async def test_workspace_hold_does_not_bypass_pursuit_budget_supervision():
     async with rig() as r:
         await r.warm(pursuit=True)
-        r.control.limiter.limits.workspace_half_extent_m = .001
+        r.control.limiter.workspace_half_extent_m = .001
         count = len(r.control.requests)
         before = r.control.coordinator.snapshot()
         await r.tick(x=.2)

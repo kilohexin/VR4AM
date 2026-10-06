@@ -10,7 +10,9 @@ from app.control.coordinate_mapper import CoordinateMapper
 from app.control.filters import PoseFilter
 from app.control.safety import SafetyLimiter, SafetyViolation, WorkspaceProjection
 from app.control.state_machine import TeleopStateMachine
-from app.control.target_strategy import DefaultTargetStrategy, TargetStrategy
+from app.control.target_strategy import (
+    DefaultTargetStrategy, TargetContext, TargetLifecycle, TargetStrategy, TargetUpdate,
+)
 from app.recording.base import RecorderSink
 from app.recording.commissioning import RecorderUnavailable
 from app.robots.base import (
@@ -136,6 +138,7 @@ class RobotControl:
         constraint_clear_ms: int = 100,
         home_options: HomeOptions | None = None,
         target_strategy: TargetStrategy | None = None,
+        target_lifecycle: TargetLifecycle | None = None,
     ) -> None:
         self.backend = backend
         self.latest = latest
@@ -144,6 +147,8 @@ class RobotControl:
         self.mapper = mapper if mapper is not None else CoordinateMapper()
         self.limiter = limiter if limiter is not None else SafetyLimiter()
         self.target_strategy = target_strategy if target_strategy is not None else DefaultTargetStrategy()
+        self.target_lifecycle = target_lifecycle
+        self._target_lifecycle_failed = False
         self.constraint_clear_ns = constraint_clear_ms * 1_000_000
         self.home_options = home_options or HomeOptions(
             max_speed_radps=0.25,
@@ -719,6 +724,62 @@ class RobotControl:
             raise
 
     async def tick(self) -> None:
+        if self.target_lifecycle is None:
+            await self._tick_frame()
+            return
+        try:
+            if await self._apply_target_update():
+                return
+            await self._tick_frame()
+            await self._apply_target_update()
+        except (BackendCommandError, SafetyViolation) as error:
+            await self._enter_fault(str(error))
+
+    def _target_context(self) -> TargetContext:
+        received = self.latest.snapshot()
+        authorized = (
+            received is not None
+            and self._target_frame_is_current(received, self.control_generation)
+            and received.received_ns <= self.clock.now_ns()
+            and received.frame.right.grip and received.frame.tracking_valid
+            and received.frame.visibility == 'visible'
+            and (self._last_frame_id is None
+                 or received.frame.session_id == self._last_frame_id[0])
+        )
+        return TargetContext(self.control_generation, self.clock.now_ns(),
+                             self.mode is TeleopMode.ACTIVE, authorized)
+
+    async def _apply_target_update(self) -> bool:
+        if self._target_lifecycle_failed:
+            if self._fault is None:
+                await self._enter_fault('target_strategy_failed')
+            return True
+        context = self._target_context()
+        try:
+            update = self.target_lifecycle.collect(context)
+            if not isinstance(update, TargetUpdate):
+                raise TypeError('invalid_target_update')
+        except (Exception, asyncio.CancelledError):
+            self._target_lifecycle_failed = True
+            await self._enter_fault('target_strategy_failed')
+            return True
+        if update.generation != context.generation or context.generation != self.control_generation:
+            return False
+        if update.fault is not None:
+            if self._fault is None:
+                await self._enter_fault(update.fault)
+                return True
+            return False
+        if not context.authorized or not self._target_context().authorized:
+            return False
+        if update.stop:
+            await self.disarm()
+            return True
+        if update.committed is not None:
+            self.last_target = update.committed.model_copy(deep=True)
+        return False
+
+    async def _tick_frame(self) -> None:
         if self._recovery_lock.locked() or self._disarm_in_progress:
             return
         received = self.latest.snapshot()
@@ -857,6 +918,14 @@ class RobotControl:
                     self.filter.reset(state.actual_tcp)
                     self.last_target = state.actual_tcp
                 self.machine.observe_grip(received.frame.right.grip)
+                if activating and self.target_lifecycle is not None:
+                    try:
+                        self.target_lifecycle.on_anchor(
+                            state.actual_tcp.model_copy(deep=True), self._target_context(),
+                        )
+                    except (Exception, asyncio.CancelledError) as error:
+                        self._target_lifecycle_failed = True
+                        raise BackendCommandError('target_strategy_failed') from error
                 if self.machine.mode != mode_before_grip:
                     recorded = await self._record_critical(
                         "state_transition",
@@ -1054,6 +1123,7 @@ class RobotControl:
             and not self._shutdown_started
             and not self._disarm_in_progress
             and not self._recovery_lock.locked()
+            and not self._target_lifecycle_failed
         )
 
     async def state_message(self) -> RobotStateMessage:
@@ -1424,6 +1494,16 @@ class RobotControl:
 
     def _advance_control_generation(self) -> None:
         self._control_generation += 1
+        if self.target_lifecycle is not None:
+            try:
+                self.target_lifecycle.on_revoke(self._control_generation)
+            except (Exception, asyncio.CancelledError):
+                # Never let a strategy callback interrupt permission revocation
+                # or prevent the stop that follows it. Fail closed on next tick.
+                # A synchronous hook cannot receive task cancellation at an
+                # await: its own CancelledError is a callback failure. Actual
+                # cancellation in the owner's awaited stop still propagates.
+                self._target_lifecycle_failed = True
 
     def _home_rejection(self) -> HomeResult | None:
         if self._fault is not None:
