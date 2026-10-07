@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import re
 from asyncio import sleep
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +40,14 @@ def load_readonly(path):
     return before, ip
 
 
+def validate_config_hash(raw, expected):
+    if expected is None:
+        return
+    if (type(expected) is not str or re.fullmatch('[a-f0-9]{64}', expected) is None
+            or hashlib.sha256(raw).hexdigest() != expected):
+        raise ValueError('readonly_config_hash_mismatch_or_invalid')
+
+
 def validate_read(name, raw):
     # IDLE is only an admission condition for these queries, never stop proof.
     if name == 'get_robot_state' and map_robot_state(raw) is not BackendState.IDLE:
@@ -55,7 +64,8 @@ def validate_read(name, raw):
         raise ValueError('invalid_velocity_factor')
 
 
-async def collect_state(config_path, output_path, client_factory=None, *, include_velocity_factor=False):
+async def collect_state(config_path, output_path, client_factory=None, *, include_velocity_factor=False,
+                        expected_config_sha256=None):
     """One SDK connection, fixed query list, no adapter or control cleanup.
 
     Run as a standalone CLI process for live use. Async deadlines bound query
@@ -67,6 +77,7 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
     if type(include_velocity_factor) is not bool:
         raise ValueError('invalid_velocity_factor_option')
     before, ip = load_readonly(config_path)
+    validate_config_hash(before, expected_config_sha256)
     initial_methods = READ_METHODS + (('get_velocity_factor',) if include_velocity_factor else ())
     report = dict(started_utc=utc(), complete=False, mode='readonly', reads=[],
                   clock_anchor_started=sample_clock_anchor(),
@@ -157,6 +168,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--expected-config-sha256',
+                        help='Pin the approved configuration bytes before any connection')
     parser.add_argument('--execute-readonly', action='store_true',
                         help='Connect only after explicit onsite read-only authorization')
     parser.add_argument('--include-velocity-factor', action='store_true',
@@ -164,6 +177,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not args.execute_readonly:
         before, _ = load_readonly(args.config)
+        validate_config_hash(before, args.expected_config_sha256)
         print(json.dumps(dict(action='offline_config_preview', mode='readonly',
                               config_sha256=hashlib.sha256(before).hexdigest(),
                               query_allowlist=list(READ_METHODS + (('get_velocity_factor',)
@@ -172,4 +186,5 @@ def main(argv=None):
     if args.output is None:
         parser.error('--execute-readonly requires --output')
     return asyncio.run(collect_state(args.config, args.output,
-                                    include_velocity_factor=args.include_velocity_factor))
+                                    include_velocity_factor=args.include_velocity_factor,
+                                    expected_config_sha256=args.expected_config_sha256))
