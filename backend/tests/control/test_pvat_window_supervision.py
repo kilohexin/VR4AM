@@ -16,6 +16,7 @@ from tests.robots.pvat_phase_encoding_probe import encode_phases,retarget_window
 from tests.robots.pvat_overlap_probe import build_brake_reserve,start_overlap,renew_overlap
 from tests.robots.pvat_terminal_probe import start_terminal,renew_terminal
 from tests.control.test_pvat_observation import view as observation_view,qualify as qualify_view
+from tests.control.test_pvat_alignment import compare as compare_aligned,linear_reference,observed as aligned_observation
 from tests.robots.test_lebai_adapter_control import _connected_control_adapter,_wait_until,_target
 
 ZERO=(0.,)*6
@@ -81,7 +82,8 @@ async def test_expiry_faults_even_without_a_new_vr_frame_and_never_dispatches_a_
                                     'short_phase','retarget_expired','retarget_infeasible',
                                     'overlap_expired','overlap_limit','brake_reserve',
                                     'terminal_short','terminal_changed','terminal_reversal','terminal_deadline',
-                                    'observation_stale','observation_generation','observation_missing_acc'])
+                                    'observation_stale','observation_generation','observation_missing_acc',
+                                    'alignment_unknown','alignment_coverage','alignment_incompatible'])
 @pytest.mark.parametrize('outcome',['confirmed','incomplete','error','late','cancelled'])
 async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latches(trigger,outcome):
     adapter,client,clock=await _connected_control_adapter()
@@ -108,7 +110,10 @@ async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latc
                            'terminal_reversal':'pvat_terminal_not_monotonic',
                            'observation_stale':'pvat_observation_stale',
                            'observation_generation':'pvat_observation_generation',
-                           'observation_missing_acc':'pvat_observation_acceleration_missing'}
+                           'observation_missing_acc':'pvat_observation_acceleration_missing',
+                           'alignment_unknown':'pvat_alignment_time_unknown',
+                           'alignment_coverage':'pvat_alignment_coverage',
+                           'alignment_incompatible':'pvat_alignment_incompatible'}
         if trigger in rejection_reasons:
             with pytest.raises(ValueError,match=rejection_reasons[trigger]) as rejected:
                 if trigger=='interpolation':
@@ -127,6 +132,13 @@ async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latc
                     if trigger=='observation_stale':qualify_view(v,max_age_ns=20_000_000)
                     elif trigger=='observation_generation':qualify_view(replace(v,sample=replace(v.sample,generation=2)))
                     else:qualify_view(replace(v,sample=replace(v.sample,actual_qdd=None)))
+                elif trigger.startswith('alignment_'):
+                    if trigger=='alignment_unknown':compare_aligned(timing=None)
+                    elif trigger=='alignment_coverage':
+                        compare_aligned(evidence=aligned_observation(captured_ms=30,completed_ms=40,checked_ms=80))
+                    else:
+                        reference=linear_reference()
+                        compare_aligned(reference,aligned_observation(reference,state=(axis(.1),axis(.02),ZERO)))
                 elif trigger.startswith('terminal_'):
                     reference=build_cruise_plan(ZERO,axis(.001),replace(RampLimits(),speed_cap=.045,acceleration_cap=.18))
                     previous=renew_overlap(start_overlap(reference,0),20_000_000)
