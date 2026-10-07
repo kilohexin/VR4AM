@@ -23,7 +23,7 @@ async def test_unusable_observations_cannot_count_toward_pursuit_exit(sample_kin
         probe = r.control.pursuit
         assert probe.dispatched and probe.pending is None
         read_view = r.run.adapter.read_motion_view
-        for _ in range(3):
+        for index in range(3):
             r.clock.advance_ms(20)
             r.publish()
             view = read_view()
@@ -39,10 +39,11 @@ async def test_unusable_observations_cannot_count_toward_pursuit_exit(sample_kin
                 sample = replace(sample, captured_ns=r.clock.now_ns() - 41_000_000)
             monkeypatch.setattr(r.run.adapter, 'read_motion_view', lambda: replace(view, sample=sample))
             update = r.control.collect(r.control._target_context())
-            assert not update.stop and update.fault is None
-            assert probe.good_samples == 0 and probe.state == 'pursuing'
+            assert update.stop == (index == 2) and update.fault is None
+            assert probe.good_samples == 0
+            assert probe.state == ('feedback_expired' if index == 2 else 'pursuing')
         assert r.control.mode is TeleopMode.ACTIVE
-        assert not r.control.exits
+        assert r.control.exits == ['feedback_expired']
 
 
 @pytest.mark.parametrize('acceptance', ['missing', 'changed'])

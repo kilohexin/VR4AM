@@ -137,7 +137,7 @@ async def test_pursuit_keeps_history_while_original_mapping_and_filter_read_new_
         assert len(r.control.requests) == count
 
 
-@pytest.mark.parametrize('exit_reason', ['observed_settled', 'budget_expired'])
+@pytest.mark.parametrize('exit_reason', ['observed_settled', 'budget_expired', 'feedback_expired'])
 async def test_pursuit_exit_stops_and_requires_explicit_arm_and_fresh_anchor(exit_reason):
     async with rig() as r:
         await r.warm(pursuit=True)
@@ -147,8 +147,11 @@ async def test_pursuit_exit_stops_and_requires_explicit_arm_and_fresh_anchor(exi
             await r.dispatch()
             r.run.client.kin_data['actual_joint_pose'] = joints(.22)
             for _ in range(2):
-                await r.dispatch(x=-.1)
+                await r.tick(x=-.1)
             await r.tick(x=-.1)
+        elif exit_reason == 'feedback_expired':
+            await r.dispatch()
+            await r.tick(elapsed=41,x=-.1)
         else:
             await r.tick(elapsed=500, x=-.1)
         assert r.control.mode is TeleopMode.DISARMED
@@ -381,7 +384,12 @@ async def test_deliberate_trigger_close_and_open_share_original_tick_with_arm_di
         await r.warm(pursuit=pursuit)
         before = r.control.coordinator.snapshot()
         await r.dispatch(q=.24, trigger=.8)
-        await r.dispatch(q=.24, elapsed=100, trigger=0)
+        if pursuit:
+            # Keep pursuit feedback current during the 100 ms claw debounce.
+            for _ in range(4):await r.dispatch(q=.24,elapsed=20,trigger=.8)
+            await r.dispatch(q=.24,elapsed=20,trigger=0)
+        else:
+            await r.dispatch(q=.24, elapsed=100, trigger=0)
         assert [c for c in r.run.client.write_calls if c[0] == 'set_claw'] == [
             ('set_claw', 30, 20), ('set_claw', 30, 100)]
         assert r.control.mode is TeleopMode.ACTIVE

@@ -72,12 +72,12 @@ class TransactionalTargetStrategy:
         if self.coordinator is None or self.halted:
             return TargetPlan('wait', None)
         if self.pursuit is not None:
-            if self.pursuit.pending is not None or self.pursuit._check() != 'pursuing':
-                return TargetPlan('wait', None)
             view = self.backend.read_motion_view()
             if (view.accepted is None or view.accepted.command != self.pursuit.accepted
                     or not view.is_current(view.accepted.command.generation)):
                 raise SafetyViolation('candidate_dispatch_failed')
+            if not self.pursuit.ready_to_submit:
+                return TargetPlan('wait', None)
             return TargetPlan('catch_up', view.accepted.tcp,
                 PursuitPlan(self.coordinator.epoch, view.accepted.command))
         if self.coordinator.pending:
@@ -101,7 +101,7 @@ class TransactionalTargetStrategy:
         try:
             if self.pursuit is not None:
                 # Recording/gripper awaits can consume the pursuit budget.
-                if self.pursuit._check() != 'pursuing' or self.pursuit.pending is not None:
+                if not self.pursuit.ready_to_submit:
                     return None
                 if (plan.kind != 'catch_up' or plan.payload != PursuitPlan(
                         self.coordinator.epoch, self.pursuit.accepted)):
@@ -130,6 +130,13 @@ class TransactionalTargetStrategy:
             return TargetUpdate(context.generation, fault=view.pump_fault)
         if not context.active or not context.authorized:
             return idle
+        if view.latched_fault is not None:
+            return TargetUpdate(context.generation, fault=view.latched_fault)
+        if self.pursuit is not None and (
+                not view.client_attached or not view.preflight_ready or view.stop_in_progress
+                or view.accepted is None or view.accepted.command != self.pursuit.accepted
+                or not view.is_current(self.pursuit.accepted.generation)):
+            return TargetUpdate(context.generation, fault='candidate_dispatch_failed')
         if self.coordinator.frozen_reason and self.pursuit is None:
             if self.coordinator.frozen_reason != 'catch_up':
                 return TargetUpdate(context.generation, fault='candidate_dispatch_failed')
@@ -150,7 +157,7 @@ class TransactionalTargetStrategy:
                     and sample.generation == view.generation == self.pursuit.accepted.generation
                     and sample.captured_ns > self.pursuit.last_sample_ns):
                 state = self.pursuit.observe(sample)
-            if state in {'observed_settled', 'budget_expired'}:
+            if state in {'observed_settled', 'budget_expired', 'feedback_expired'}:
                 self.last_exit = state
                 self.halted = True
                 return TargetUpdate(context.generation, stop=True)

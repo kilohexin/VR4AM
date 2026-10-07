@@ -274,7 +274,9 @@ def test_custom_observation_parameters_are_applied(mismatch):
         sample = replace(sample, actual_q=(.00011,) * 6)
     elif mismatch == 'velocity':
         sample = replace(sample, actual_qd=(.00021,) * 6)
-    assert probe.observe(sample) == ('observed_settled' if mismatch == 'none' else 'pursuing')
+    expected = 'observed_settled' if mismatch == 'none' else (
+        'feedback_expired' if mismatch in {'age','gap'} else 'pursuing')
+    assert probe.observe(sample) == expected
 
 
 def test_optional_step_caps_and_invalid_motion_limits():

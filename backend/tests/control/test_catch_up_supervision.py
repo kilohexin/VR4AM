@@ -75,6 +75,7 @@ async def test_pursuit_completion_and_idle_do_not_thaw_candidate_or_prove_conver
         assert before.linear_velocity[0] > 0
         for seq in range(20, 25):
             snapshot = await sample(run, latest, clock, seq, q=0)
+            probe.observe(snapshot)  # New feedback releases the preceding wait.
             receipt = await probe.submit(seq)
             await result(receipt)
             assert probe.settle() == 'pursuing'
@@ -120,7 +121,7 @@ async def test_exit_requires_distinct_fresh_finite_near_stationary_samples(bad):
         elif bad == 'stale':
             clock.advance_ms(50)
             publish(latest, clock, 22, True, .1, 0)
-            assert probe.observe(snapshot) == 'pursuing'
+            assert probe.observe(snapshot) == 'feedback_expired'
         else:
             snapshot = await sample(run, latest, clock, 22,
                 q=.21 if bad == 'far' else .22, speed=.01 if bad == 'moving' else 0)
