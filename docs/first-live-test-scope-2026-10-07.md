@@ -22,7 +22,7 @@
 
 后续只读倍率采集已独立批准并完成；当前倍率 100 不追认历史速度或停止表现。B 的历史范围见 [单次基座 +Z 3 mm 早停诊断草案](early-stop-scope-2026-10-07.md)。历史速度验收失败保持；不能自动推进后续动作。
 
-B 后续：上述 3 mm 范围已单独批准并执行一次，位置途径捕获窗口；stop_move await 610 ms，200 ms 截止失败并保留 stop_unverified。授权已消费，不能推进 C。详见 [执行结果与只读收尾](early-stop-result-2026-10-07.md)。事后现场观察仍待用户答复。
+B 后续：上述 3 mm 范围已单独批准并执行一次，位置途径捕获窗口；stop_move await 610 ms，200 ms 截止失败并保留 stop_unverified。授权已消费，不能推进 C。详见 [执行结果与只读收尾](early-stop-result-2026-10-07.md)。用户事后确认“完全静止，无异常、未使用急停”；该观察不追认软件停止截止通过。
 
 A 的证据齐备后，先评估既有 `docs/commissioning-early-stop-diagnostic.md` 的非 VR 早停诊断范围。该路径在 motion evidence 窗口释放虚拟 Grip，走原 stop_move 和核验流程；它会真实驱动机械臂，不能因 A 或软件测试通过而自动运行。
 
