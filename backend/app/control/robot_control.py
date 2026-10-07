@@ -202,6 +202,7 @@ class RobotControl:
         self._control_generation = 0
         self._disconnect_stop_pending_frame = False
         self._disarm_in_progress = False
+        self._disconnecting = 0
 
     @property
     def mode(self) -> TeleopMode:
@@ -591,6 +592,16 @@ class RobotControl:
         return FaultResetResult(True)
 
     async def on_disconnect(self) -> None:
+        # The session's old input remains stored until cleanup completes.
+        # Withdraw its authority before any stop/logging await can let run()
+        # collect a revoked pursuit or prepare another target.
+        self._disconnecting += 1
+        try:
+            await self._disconnect_session()
+        finally:
+            self._disconnecting -= 1
+
+    async def _disconnect_session(self) -> None:
         self._disconnect_stop_pending_frame = False
         self._recovery_phase = None
         self._advance_control_generation()
@@ -734,6 +745,8 @@ class RobotControl:
             raise
 
     async def tick(self) -> None:
+        if self._disconnecting:
+            return
         if self.target_lifecycle is None:
             await self._tick_frame()
             return
@@ -1132,6 +1145,7 @@ class RobotControl:
             and not self._loop_failed
             and not self._shutdown_started
             and not self._disarm_in_progress
+            and not self._disconnecting
             and not self._recovery_lock.locked()
             and not self._target_lifecycle_failed
         )
