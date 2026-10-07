@@ -1,6 +1,8 @@
 # 单次 3 mm 运动中停止诊断草案
 
-2026-10-07，Asia/Shanghai。**尚未授权、未执行、没有创建新 control 配置。** 当前完成的是 [速度倍率只读采集](velocity-factor-readonly-result-2026-10-07.md)，它的授权已经消费。
+2026-10-07，Asia/Shanghai。本文保留执行前草案：提出时尚未授权、未执行、没有创建新 control 配置，已完成的是 [速度倍率只读采集](velocity-factor-readonly-result-2026-10-07.md)。当前执行状态见下段。
+
+**后续状态：** 用户已另行批准此范围与合并现场条件，一次执行已结束，授权已消费。捕获到了运动窗口，但 stop_move 610 ms 迟到，stop_unverified 保留；完整证据见 [本次诊断结果](early-stop-result-2026-10-07.md)。以下保留当时草案，不是可重复执行的许可。
 
 ## 目的与仍未解决的问题
 
