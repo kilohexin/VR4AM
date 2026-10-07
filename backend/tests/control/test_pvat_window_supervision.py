@@ -10,6 +10,8 @@ from tests.control.pvat_window_supervision_probe import WindowGuard,WindowSuperv
 from tests.control.test_robot_control import FakeBackend,FakeClock,RecordingRecorder
 from tests.robots.pvat_cruise_candidate import build_cruise_plan,fit_reference_window
 from tests.robots.pvat_ramp_candidate import build_ramp_candidate
+from tests.robots.pvat_interpolation_probe import quintic_segment
+from tests.robots.pvat_phase_encoding_probe import encode_phases,retarget_window
 from tests.robots.test_lebai_adapter_control import _connected_control_adapter,_wait_until,_target
 
 ZERO=(0.,)*6
@@ -71,7 +73,8 @@ async def test_expiry_faults_even_without_a_new_vr_frame_and_never_dispatches_a_
     assert not (await control.reset_fault()).accepted
 
 
-@pytest.mark.parametrize('trigger',['expiry','position','velocity','acceleration','missing','interpolation'])
+@pytest.mark.parametrize('trigger',['expiry','position','velocity','acceleration','missing','interpolation',
+                                    'short_phase','retarget_expired','retarget_infeasible'])
 @pytest.mark.parametrize('outcome',['confirmed','incomplete','error','late','cancelled'])
 async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latches(trigger,outcome):
     adapter,client,clock=await _connected_control_adapter()
@@ -86,9 +89,20 @@ async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latc
     try:
         control,guard,latest,_,_,recorder=await active(adapter,clock)
         guard.commit(window(),clock.now_ns())
-        if trigger=='interpolation':
-            with pytest.raises(ValueError,match='pvat_window_interpolation_limit') as rejected:
-                fit_reference_window(build_cruise_plan(ZERO,axis(.5)),.35,.08)
+        rejection_reasons={'interpolation':'pvat_window_interpolation_limit',
+                           'short_phase':'pvat_phase_too_short',
+                           'retarget_expired':'pvat_retarget_window_expired',
+                           'retarget_infeasible':'no_feasible_settling_plan'}
+        if trigger in rejection_reasons:
+            with pytest.raises(ValueError,match=rejection_reasons[trigger]) as rejected:
+                if trigger=='interpolation':
+                    fit_reference_window(build_cruise_plan(ZERO,axis(.5)),.35,.08)
+                elif trigger=='short_phase':
+                    encode_phases(build_cruise_plan(ZERO,axis(.00001)).segments)
+                else:
+                    segment=quintic_segment(ZERO,axis(.01),axis(.1),axis(.00112),axis(.018),axis(.1),.08)
+                    packet=encode_phases((segment,))[0]
+                    retarget_window(packet,.08 if trigger=='retarget_expired' else 0.,axis(.1))
             guard.reject(str(rejected.value))
         elif trigger!='missing':
             state=[ZERO,ZERO,ZERO]
@@ -104,7 +118,8 @@ async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latc
             with pytest.raises(asyncio.CancelledError):await task
             release.set()
         else:await asyncio.wait_for(task,2)
-        expected_fault='pvat_window_expired' if trigger=='expiry' else ('pvat_window_interpolation_limit' if trigger=='interpolation' else ('pvat_reference_missing' if trigger=='missing' else f'pvat_reference_{trigger}_mismatch'))
+        expected_fault=rejection_reasons.get(trigger, 'pvat_window_expired' if trigger=='expiry' else
+                                            ('pvat_reference_missing' if trigger=='missing' else f'pvat_reference_{trigger}_mismatch'))
         expected=expected_fault if outcome=='confirmed' else ('stop_incomplete' if outcome=='incomplete' else 'stop_unverified')
         assert (await control.state_message()).fault==expected
         client.kin_data['actual_joint_speed']=[0.]*6
@@ -187,3 +202,32 @@ async def test_normal_grip_release_revokes_reference_without_fault_or_a_second_s
     # Keep input fresh: original STALE handling legitimately stops old frames.
     clock.advance_ms(100);publish(latest,clock,4,False,0,0);await control.tick()
     assert len(backend.stops)==1 and control._fault is None
+
+
+def test_phase_partition_at_endpoint_cannot_bypass_window_expiry():
+    packets=encode_phases(build_cruise_plan(ZERO,axis(.5)).segments)
+    guard=WindowGuard();guard.commit(packets[0].segment,0)
+    guard.observe(*packets[0].state(.074))
+    assert guard.check(74_000_000) is None
+    with pytest.raises(ValueError,match='guard_faulted'):
+        guard.commit(packets[1].segment,75_000_000)
+    assert guard.fault=='pvat_window_expired'
+
+
+def test_phase_partition_sent_early_cannot_pretend_its_future_pva_is_current():
+    packets=encode_phases(build_cruise_plan(ZERO,axis(.5)).segments)
+    guard=WindowGuard();guard.commit(packets[0].segment,0)
+    with pytest.raises(ValueError,match='guard_faulted'):
+        guard.commit(packets[1].segment,20_000_000)
+    assert guard.fault=='pvat_reference_discontinuous'
+
+
+def test_moving_retarget_can_renew_before_expiry_with_matching_pva_and_new_observation():
+    original=encode_phases((quintic_segment(ZERO,axis(.02),ZERO,axis(.0016),axis(.02),ZERO,.08),))[0]
+    guard=WindowGuard();guard.commit(original.segment,0);guard.observe(*original.state(0.))
+    next_window=retarget_window(original,.04,axis(-.001))[0]
+    guard.commit(next_window.segment,40_000_000)
+    assert guard.observation is None
+    guard.observe(*next_window.state(0.))
+    assert guard.check(40_000_000) is None
+    assert guard.fault is None
