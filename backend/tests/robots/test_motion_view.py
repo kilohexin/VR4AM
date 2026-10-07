@@ -13,6 +13,29 @@ from tests.robots.test_lebai_backpressure_experiments import (
 )
 
 
+def test_legacy_observation_explicitly_has_missing_acceleration_not_zero():
+    from app.robots.motion_view import JointObservation
+    sample=JointObservation(0,0,0,'state',(0.,)*6,(0.,)*6)
+    assert getattr(sample,'actual_qdd','field_missing') is None
+
+
+async def test_view_exposes_same_read_acceleration_without_refresh_or_alias():
+    async with experiment() as run:
+        acceleration=[.01,-.02,.03,-.04,.05,-.06]
+        run.client.kin_data['actual_joint_acc']=acceleration
+        run.clock.advance(.02)
+        await run.adapter.get_state()
+        reads,writes=list(run.client.read_calls),list(run.client.write_calls)
+        view=run.adapter.read_motion_view()
+        assert getattr(view.sample,'actual_qdd',None)==tuple(acceleration)
+        assert view.sample.read_purpose=='state'
+        acceleration[0]=99.
+        assert run.adapter.read_motion_view().sample.actual_qdd[0]==.01
+        assert run.adapter.read_motion_view().sample.captured_ns==view.sample.captured_ns
+        assert run.client.read_calls==reads and run.client.write_calls==writes
+        with pytest.raises(FrozenInstanceError):view.sample.actual_qdd=()
+
+
 def test_cold_view_does_not_connect_or_create_work():
     run = Experiment()
     view = run.adapter.read_motion_view()
@@ -92,6 +115,7 @@ async def test_generation_change_during_read_never_relabels_observation(boundary
     run = Experiment()
     await run.adapter.connect()
     before = run.adapter.read_motion_view()
+    run.client.kin_data['actual_joint_acc']=[.1]*6
     original = run.client.get_kin_data
     started, release = asyncio.Event(), asyncio.Event()
 
@@ -119,11 +143,13 @@ async def test_generation_change_during_read_never_relabels_observation(boundary
         assert not after.is_current(before.generation)
         assert after.sample.generation == before.generation
         assert after.sample.generation != after.generation
+        assert after.sample.actual_qdd==before.sample.actual_qdd
         run.clock.advance(.01)
         await run.adapter.get_state()
         fresh = run.adapter.read_motion_view()
         assert fresh.sample.generation == fresh.generation
         assert fresh.sample.captured_ns > before.sample.captured_ns
+        assert fresh.sample.actual_qdd==(.1,)*6
     finally:
         release.set()
         await run.adapter.disconnect()

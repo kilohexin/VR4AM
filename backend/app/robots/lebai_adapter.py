@@ -1786,6 +1786,7 @@ class RealLebaiAdapter:
                 generation=read_generation, captured_ns=snapshot.captured_ns,
                 read_completed_ns=snapshot.read_completed_ns, read_purpose=read_purpose,
                 actual_q=tuple(snapshot.actual_q), actual_qd=tuple(snapshot.actual_qd),
+                actual_qdd=tuple(snapshot.actual_qdd),
             )
         if emit_kinematics:
             await self._emit_kinematics(snapshot)

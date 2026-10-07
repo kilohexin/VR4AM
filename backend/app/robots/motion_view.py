@@ -34,6 +34,8 @@ class JointObservation:
     read_purpose: str
     actual_q: JointVector
     actual_qd: JointVector
+    # Older/synthetic producers can omit acceleration; missing is never zero.
+    actual_qdd: JointVector | None = None
 
 
 @dataclass(frozen=True)

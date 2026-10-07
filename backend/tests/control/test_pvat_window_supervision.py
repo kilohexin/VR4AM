@@ -15,6 +15,7 @@ from tests.robots.pvat_interpolation_probe import quintic_segment
 from tests.robots.pvat_phase_encoding_probe import encode_phases,retarget_window
 from tests.robots.pvat_overlap_probe import build_brake_reserve,start_overlap,renew_overlap
 from tests.robots.pvat_terminal_probe import start_terminal,renew_terminal
+from tests.control.test_pvat_observation import view as observation_view,qualify as qualify_view
 from tests.robots.test_lebai_adapter_control import _connected_control_adapter,_wait_until,_target
 
 ZERO=(0.,)*6
@@ -79,7 +80,8 @@ async def test_expiry_faults_even_without_a_new_vr_frame_and_never_dispatches_a_
 @pytest.mark.parametrize('trigger',['expiry','position','velocity','acceleration','missing','interpolation',
                                     'short_phase','retarget_expired','retarget_infeasible',
                                     'overlap_expired','overlap_limit','brake_reserve',
-                                    'terminal_short','terminal_changed','terminal_reversal','terminal_deadline'])
+                                    'terminal_short','terminal_changed','terminal_reversal','terminal_deadline',
+                                    'observation_stale','observation_generation','observation_missing_acc'])
 @pytest.mark.parametrize('outcome',['confirmed','incomplete','error','late','cancelled'])
 async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latches(trigger,outcome):
     adapter,client,clock=await _connected_control_adapter()
@@ -103,7 +105,10 @@ async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latc
                            'brake_reserve':'pvat_brake_reserve_limit',
                            'terminal_short':'pvat_terminal_short_window',
                            'terminal_changed':'pvat_terminal_target_changed',
-                           'terminal_reversal':'pvat_terminal_not_monotonic'}
+                           'terminal_reversal':'pvat_terminal_not_monotonic',
+                           'observation_stale':'pvat_observation_stale',
+                           'observation_generation':'pvat_observation_generation',
+                           'observation_missing_acc':'pvat_observation_acceleration_missing'}
         if trigger in rejection_reasons:
             with pytest.raises(ValueError,match=rejection_reasons[trigger]) as rejected:
                 if trigger=='interpolation':
@@ -117,6 +122,11 @@ async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latc
                     start_overlap(build_cruise_plan(ZERO,axis(.5),replace(RampLimits(),acceleration_cap=.4)),0)
                 elif trigger=='brake_reserve':
                     build_brake_reserve(ZERO,axis(.049),axis(.1))
+                elif trigger.startswith('observation_'):
+                    v=observation_view()
+                    if trigger=='observation_stale':qualify_view(v,max_age_ns=20_000_000)
+                    elif trigger=='observation_generation':qualify_view(replace(v,sample=replace(v.sample,generation=2)))
+                    else:qualify_view(replace(v,sample=replace(v.sample,actual_qdd=None)))
                 elif trigger.startswith('terminal_'):
                     reference=build_cruise_plan(ZERO,axis(.001),replace(RampLimits(),speed_cap=.045,acceleration_cap=.18))
                     previous=renew_overlap(start_overlap(reference,0),20_000_000)
