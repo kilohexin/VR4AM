@@ -14,6 +14,7 @@ from tests.robots.pvat_ramp_candidate import RampLimits,build_ramp_candidate
 from tests.robots.pvat_interpolation_probe import quintic_segment
 from tests.robots.pvat_phase_encoding_probe import encode_phases,retarget_window
 from tests.robots.pvat_overlap_probe import build_brake_reserve,start_overlap,renew_overlap
+from tests.robots.pvat_terminal_probe import start_terminal,renew_terminal
 from tests.robots.test_lebai_adapter_control import _connected_control_adapter,_wait_until,_target
 
 ZERO=(0.,)*6
@@ -77,7 +78,8 @@ async def test_expiry_faults_even_without_a_new_vr_frame_and_never_dispatches_a_
 
 @pytest.mark.parametrize('trigger',['expiry','position','velocity','acceleration','missing','interpolation',
                                     'short_phase','retarget_expired','retarget_infeasible',
-                                    'overlap_expired','overlap_limit','brake_reserve'])
+                                    'overlap_expired','overlap_limit','brake_reserve',
+                                    'terminal_short','terminal_changed','terminal_reversal','terminal_deadline'])
 @pytest.mark.parametrize('outcome',['confirmed','incomplete','error','late','cancelled'])
 async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latches(trigger,outcome):
     adapter,client,clock=await _connected_control_adapter()
@@ -98,7 +100,10 @@ async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latc
                            'retarget_infeasible':'no_feasible_settling_plan',
                            'overlap_expired':'pvat_overlap_time',
                            'overlap_limit':'pvat_window_interpolation_limit',
-                           'brake_reserve':'pvat_brake_reserve_limit'}
+                           'brake_reserve':'pvat_brake_reserve_limit',
+                           'terminal_short':'pvat_terminal_short_window',
+                           'terminal_changed':'pvat_terminal_target_changed',
+                           'terminal_reversal':'pvat_terminal_not_monotonic'}
         if trigger in rejection_reasons:
             with pytest.raises(ValueError,match=rejection_reasons[trigger]) as rejected:
                 if trigger=='interpolation':
@@ -112,11 +117,27 @@ async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latc
                     start_overlap(build_cruise_plan(ZERO,axis(.5),replace(RampLimits(),acceleration_cap=.4)),0)
                 elif trigger=='brake_reserve':
                     build_brake_reserve(ZERO,axis(.049),axis(.1))
+                elif trigger.startswith('terminal_'):
+                    reference=build_cruise_plan(ZERO,axis(.001),replace(RampLimits(),speed_cap=.045,acceleration_cap=.18))
+                    previous=renew_overlap(start_overlap(reference,0),20_000_000)
+                    if trigger=='terminal_reversal':
+                        start_terminal(replace(previous,plan=replace(reference,target=axis(-.001))),40_000_000)
+                    else:
+                        terminal=start_terminal(previous,40_000_000)
+                        if trigger=='terminal_changed':renew_terminal(terminal,60_000_000,axis(-.001))
+                        else:renew_terminal(renew_terminal(terminal,100_000_000),175_000_000)
                 else:
                     segment=quintic_segment(ZERO,axis(.01),axis(.1),axis(.00112),axis(.018),axis(.1),.08)
                     packet=encode_phases((segment,))[0]
                     retarget_window(packet,.08 if trigger=='retarget_expired' else 0.,axis(.1))
             guard.reject(str(rejected.value))
+        elif trigger=='terminal_deadline':
+            reference=build_cruise_plan(ZERO,axis(.001),replace(RampLimits(),speed_cap=.045,acceleration_cap=.18))
+            previous=renew_overlap(start_overlap(reference,0),20_000_000)
+            terminal=start_terminal(previous,40_000_000)
+            for timestamp in (60,80,100,120):terminal=renew_terminal(terminal,timestamp*1_000_000)
+            guard.revoke();guard.commit(terminal.packet.segment,clock.now_ns())
+            clock.advance_ms(terminal.packet.duration_s*1000)
         elif trigger!='missing':
             state=[ZERO,ZERO,ZERO]
             if trigger!='expiry':state[{'position':0,'velocity':1,'acceleration':2}[trigger]]=axis(1.)
@@ -131,7 +152,7 @@ async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latc
             with pytest.raises(asyncio.CancelledError):await task
             release.set()
         else:await asyncio.wait_for(task,2)
-        expected_fault=rejection_reasons.get(trigger, 'pvat_window_expired' if trigger=='expiry' else
+        expected_fault=rejection_reasons.get(trigger, 'pvat_window_expired' if trigger in ('expiry','terminal_deadline') else
                                             ('pvat_reference_missing' if trigger=='missing' else f'pvat_reference_{trigger}_mismatch'))
         expected=expected_fault if outcome=='confirmed' else ('stop_incomplete' if outcome=='incomplete' else 'stop_unverified')
         assert (await control.state_message()).fault==expected
