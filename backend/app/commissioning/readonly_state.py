@@ -10,6 +10,7 @@ from time import monotonic_ns
 
 import yaml
 
+from app.recording.clock_anchor import sample_clock_anchor
 from app.robots.lebai_codec import estop_fault, joint_vector, map_robot_state, pose_from_lebai
 from app.robots.lebai_sdk_bridge import connect_real_client
 from app.schemas.messages import BackendState
@@ -68,6 +69,7 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
     before, ip = load_readonly(config_path)
     initial_methods = READ_METHODS + (('get_velocity_factor',) if include_velocity_factor else ())
     report = dict(started_utc=utc(), complete=False, mode='readonly', reads=[],
+                  clock_anchor_started=sample_clock_anchor(),
                   scope='state queries only; no motion readiness or stopping verdict',
                   config_sha256_before=hashlib.sha256(before).hexdigest(),
                   query_allowlist=list(initial_methods), window_ms=5_000,
@@ -135,6 +137,7 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
             # Exception messages may contain credentials or device details.
             report['error_type'] = type(error).__name__
         finally:
+            report['clock_anchor_completed'] = sample_clock_anchor()
             report['completed_utc'] = utc()
             report['completed_ns'] = monotonic_ns()
             try:

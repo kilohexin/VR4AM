@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.recording.clock_anchor import sample_clock_anchor
+
 
 class RecorderUnavailable(RuntimeError):
     pass
@@ -279,6 +281,8 @@ class CommissioningRecorder:
             "critical": critical,
             **payload,
         }
+        if kind in {"session_started", "session_ended"}:
+            entry["clock_anchor"] = sample_clock_anchor()
         try:
             json.dumps(entry, allow_nan=False)
         except (TypeError, ValueError, OverflowError):
