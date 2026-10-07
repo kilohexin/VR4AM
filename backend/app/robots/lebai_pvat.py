@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -24,6 +25,8 @@ class PvatPoint:
     qd: JointVector
     qdd: JointVector
     horizon_s: float
+    reference_qd: JointVector
+    reference_source: Literal["observed_velocity", "previous_command_velocity"]
 
 
 def build_pvat_point(
@@ -91,6 +94,12 @@ def build_pvat_point(
         qd=_joint_tuple(qd),
         qdd=_joint_tuple(qdd),
         horizon_s=float(limits.horizon_s),
+        # Keep the chosen inputs with the immutable point. Recorder timing and
+        # subsequent PVAT history must not change their provenance.
+        reference_qd=_joint_tuple(reference_speed),
+        reference_source=(
+            "observed_velocity" if previous_qd is None else "previous_command_velocity"
+        ),
     )
 
 

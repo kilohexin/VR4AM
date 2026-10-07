@@ -107,6 +107,24 @@ class _SolvedCandidate:
     advances_target: bool
 
 
+def _pvat_point_inputs(snapshot: LebaiSnapshot, point: PvatPoint) -> dict[str, object]:
+    # Saved input evidence only: no new SDK reads, clocks, or planning choices.
+    # Each event gets separate lists so recorder mutation cannot cross records.
+    return {
+        "snapshot_read_requested_ns": snapshot.read_requested_ns,
+        "snapshot_read_started_ns": snapshot.captured_ns,
+        "snapshot_read_completed_ns": snapshot.read_completed_ns,
+        "actual_q": list(snapshot.actual_q),
+        "actual_qd": list(snapshot.actual_qd),
+        "actual_qdd": list(snapshot.actual_qdd),
+        "controller_target_q": list(snapshot.target_q),
+        "controller_target_qd": list(snapshot.target_qd),
+        "controller_target_qdd": list(snapshot.target_qdd),
+        "velocity_reference_source": point.reference_source,
+        "velocity_reference_qd": list(point.reference_qd),
+    }
+
+
 class _CandidateRejected(BackendCommandError):
     def __init__(self, reason: str, metrics: IkCandidateMetrics) -> None:
         super().__init__(reason)
@@ -1102,6 +1120,7 @@ class RealLebaiAdapter:
                     "v": list(selected.point.qd),
                     "a": list(selected.point.qdd),
                     "horizon_s": selected.point.horizon_s,
+                    "point_inputs": _pvat_point_inputs(snapshot, selected.point),
                 })
                 self._pvat_request_id_in_flight = self._sdk_request_id
                 try:
@@ -1248,6 +1267,7 @@ class RealLebaiAdapter:
                 "a": list(selected.point.qdd),
                 "horizon_s": selected.point.horizon_s,
                 "sdk_latency_ms": pvat_latency_ms,
+                "point_inputs": _pvat_point_inputs(snapshot, selected.point),
             }
         )
         await self._emit_candidate_diagnostics(diagnostic_events, request)
