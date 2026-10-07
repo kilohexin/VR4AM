@@ -735,23 +735,40 @@ class RealLebaiAdapter:
         self._pump.invalidate()
         self._reset_pvat_history()
         on_phase("homing")
+        lifecycle: dict[str, object] = {}
         try:
             async with self._sdk_lock:
                 self._begin_motion_epoch()
                 self._motion_accepted = True
-                motion_id = await asyncio.wait_for(
-                    client.movej(
-                        list(target_q),
-                        self.settings.control.max_joint_acceleration_radps2,
-                        min(
-                            options.max_speed_radps,
-                            self.settings.control.max_joint_speed_radps,
+                speed = min(options.max_speed_radps, self.settings.control.max_joint_speed_radps)
+                acceleration = self.settings.control.max_joint_acceleration_radps2
+                self._sdk_request_id += 1
+                lifecycle.update({
+                    'kind': 'sdk_request_lifecycle', 'method': 'movej',
+                    'request_id': self._sdk_request_id, 'failure_code': failure,
+                    'started_ns': self._clock(), 'rpc_outcome': 'started',
+                    'p': list(target_q), 'a': acceleration, 'v': speed, 't': 0., 'r': 0.,
+                    'evidence_scope': 'local_sdk_call_not_remote_execution',
+                })
+                try:
+                    motion_id = await asyncio.wait_for(
+                        client.movej(
+                            list(target_q), acceleration, speed, 0., 0.,
                         ),
-                        0.0,
-                        0.0,
-                    ),
-                    timeout=0.20,
-                )
+                        timeout=0.20,
+                    )
+                    lifecycle.update(rpc_outcome='returned', motion_id=motion_id)
+                except asyncio.CancelledError:
+                    lifecycle['rpc_outcome'] = 'cancelled'
+                    raise
+                except TimeoutError:
+                    lifecycle['rpc_outcome'] = 'timeout'
+                    raise
+                except Exception as error:
+                    lifecycle.update(rpc_outcome='error', error_type=type(error).__name__)
+                    raise
+                finally:
+                    lifecycle['completed_ns'] = self._clock()
         except asyncio.CancelledError:
             await asyncio.shield(self.stop(StopReason.HOME))
             raise
@@ -761,6 +778,11 @@ class RealLebaiAdapter:
         except Exception:
             await self.stop(StopReason.HOME)
             raise BackendCommandError("sdk_call_failed:movej") from None
+        finally:
+            # Existing bounded best-effort recording. No logging await before
+            # the error's original stop path; RPC timings exclude cleanup time.
+            if lifecycle:
+                self._schedule_sdk_diagnostic(lifecycle)
         started_ns = self._clock()
         stable_since_ns: int | None = None
         stabilizing = False

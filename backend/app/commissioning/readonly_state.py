@@ -50,9 +50,11 @@ def validate_read(name, raw):
         joint_vector(raw.get('actual_joint_pose'), 'actual_joint_pose')
         joint_vector(raw.get('actual_joint_speed'), 'actual_joint_speed')
         pose_from_lebai(raw.get('actual_tcp_pose'))
+    if name == 'get_velocity_factor' and type(raw) is not int:
+        raise ValueError('invalid_velocity_factor')
 
 
-async def collect_state(config_path, output_path, client_factory=None):
+async def collect_state(config_path, output_path, client_factory=None, *, include_velocity_factor=False):
     """One SDK connection, fixed query list, no adapter or control cleanup.
 
     Run as a standalone CLI process for live use. Async deadlines bound query
@@ -61,11 +63,14 @@ async def collect_state(config_path, output_path, client_factory=None):
     from dropping this function's client reference.
     """
     config_path, output_path = Path(config_path), Path(output_path)
+    if type(include_velocity_factor) is not bool:
+        raise ValueError('invalid_velocity_factor_option')
     before, ip = load_readonly(config_path)
+    initial_methods = READ_METHODS + (('get_velocity_factor',) if include_velocity_factor else ())
     report = dict(started_utc=utc(), complete=False, mode='readonly', reads=[],
                   scope='state queries only; no motion readiness or stopping verdict',
                   config_sha256_before=hashlib.sha256(before).hexdigest(),
-                  query_allowlist=list(READ_METHODS), window_ms=5_000,
+                  query_allowlist=list(initial_methods), window_ms=5_000,
                   hardware_stop_verified=False,
                   connection_release='process_exit_required_not_verified')
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +90,7 @@ async def collect_state(config_path, output_path, client_factory=None):
                 raise ValueError('config_changed_during_connect')
             deadline = monotonic_ns() + WINDOW_NS
             report['window_deadline_ns'] = deadline
-            methods = READ_METHODS
+            methods = initial_methods
             first_cycle = True
             while monotonic_ns() < deadline:
                 for name in methods:
@@ -151,13 +156,17 @@ def main(argv=None):
     parser.add_argument('--output', type=Path)
     parser.add_argument('--execute-readonly', action='store_true',
                         help='Connect only after explicit onsite read-only authorization')
+    parser.add_argument('--include-velocity-factor', action='store_true',
+                        help='Add exactly one get_velocity_factor query; needs scope approval for live use')
     args = parser.parse_args(argv)
     if not args.execute_readonly:
         before, _ = load_readonly(args.config)
         print(json.dumps(dict(action='offline_config_preview', mode='readonly',
                               config_sha256=hashlib.sha256(before).hexdigest(),
-                              query_allowlist=list(READ_METHODS), window_ms=5_000)))
+                              query_allowlist=list(READ_METHODS + (('get_velocity_factor',)
+                                                   if args.include_velocity_factor else ())), window_ms=5_000)))
         return 0
     if args.output is None:
         parser.error('--execute-readonly requires --output')
-    return asyncio.run(collect_state(args.config, args.output))
+    return asyncio.run(collect_state(args.config, args.output,
+                                    include_velocity_factor=args.include_velocity_factor))

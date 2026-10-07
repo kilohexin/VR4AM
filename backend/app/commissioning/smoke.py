@@ -26,6 +26,7 @@ from app.commissioning.actions import (
     TranslationAction,
 )
 from app.commissioning.stop_observation import observe_after_stop, validate_observation_seconds
+from app.commissioning.joint_move_speed import JointMoveSpeedAudit
 from app.config import REAL_ROBOT_CONFIRMATION, Settings
 from app.control.robot_control import LatestVRFrame, RobotControl
 from app.main import _build_limiter, _build_mapper, build_backend
@@ -68,13 +69,17 @@ class _MotionActionResult:
 
 
 class _SmokeRecorder(CommissioningRecorder):
-    def __init__(self, root: Path, metadata: dict[str, object]) -> None:
+    def __init__(self, root: Path, metadata: dict[str, object], *, joint_move_limit_radps: float | None = None) -> None:
         super().__init__(root, metadata)
         self._actual_qd: JointVector | None = None
         self._kinematics_ns: int | None = None
+        self.joint_move_speed = (None if joint_move_limit_radps is None else
+                                 JointMoveSpeedAudit(joint_move_limit_radps))
 
     async def write_event(self, event: object, server_mono_ns: int) -> None:
         if isinstance(event, Mapping) and event.get("kind") == "robot_kinematics":
+            if self.joint_move_speed is not None:
+                self.joint_move_speed.observe(event)
             self._actual_qd = _joint_velocity(event.get("actual_qd"))
             self._kinematics_ns = server_mono_ns
         await super().write_event(event, server_mono_ns)
@@ -636,6 +641,8 @@ async def run_smoke(
     action_name = _action_name(options.action)
     recorder = _SmokeRecorder(
         COMMISSIONING_LOG_ROOT,
+        joint_move_limit_radps=min(settings.home_joint_speed_radps,
+                                  settings.lebai.control.max_joint_speed_radps),
         metadata={
             "backend": "LEBAI",
             "real_robot_mode": "control",
@@ -704,7 +711,15 @@ async def run_smoke(
                 backend,
                 settings.home_timeout_s,
             )
-            result = SmokeResult(action_name, before, after, stable=True)
+            # Acceptance only after normal arrival. No extra SDK query or stop;
+            # failed/incomplete evidence must not become a successful smoke result.
+            speed_audit = recorder.joint_move_speed.report()
+            speed_audit['arrival_stable'] = True
+            await recorder.write_critical_event('joint_move_speed_audit', speed_audit, clock.now_ns())
+            if speed_audit['status'] != 'within_observed_limit':
+                raise RuntimeError(f"smoke_joint_speed_{speed_audit['status']}")
+            result = SmokeResult(action_name, before, after, stable=True,
+                                 joint_move_speed_audit=speed_audit)
             await recorder.write_critical_event(
                 "smoke_result",
                 result.to_dict(),

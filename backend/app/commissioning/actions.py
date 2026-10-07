@@ -78,6 +78,8 @@ class SmokeResult:
     max_cross_axis_drift_m: float | None = None
     early_stop_triggered: bool = False
 
+    joint_move_speed_audit: dict[str, object] | None = None
+
     def to_dict(self) -> dict[str, object]:
         return {
             "action": self.action,
@@ -92,4 +94,5 @@ class SmokeResult:
             "settled_cross_axis_drift_m": self.settled_cross_axis_drift_m,
             "max_cross_axis_drift_m": self.max_cross_axis_drift_m,
             "early_stop_triggered": self.early_stop_triggered,
+            "joint_move_speed_audit": self.joint_move_speed_audit,
         }
