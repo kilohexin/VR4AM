@@ -5,6 +5,7 @@ import math
 import platform
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -45,7 +46,11 @@ def build_recorder(
         "real_robot_mode": settings.lebai.mode,
         "python_version": platform.python_version(),
         "platform": platform.platform(),
+        "target_strategy": ('transactional_experimental'
+                            if settings.transactional_target is not None else 'legacy'),
     }
+    if settings.transactional_target is not None:
+        metadata['pursuit_settings'] = asdict(settings.transactional_target)
     if runtime == "LEBAI_FAKE":
         metadata.update(
             {
@@ -185,6 +190,7 @@ def create_app(
             recorder=recorder,
             mapper=_build_mapper(runtime_settings),
             limiter=_build_limiter(runtime_settings, runtime_backend),
+            transactional_settings=runtime_settings.transactional_target,
             constraint_clear_ms=runtime_settings.constraint_clear_ms,
             home_options=HomeOptions(
                 max_speed_radps=runtime_settings.home_joint_speed_radps,

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from app.control.transactional_settings import PursuitSettings, parse_target_strategy
 
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "default.yaml"
@@ -99,6 +100,7 @@ class Settings:
     home_position_tolerance_rad: float
     home_velocity_tolerance_radps: float
     home_stable_ms: int
+    transactional_target: PursuitSettings | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":
@@ -114,6 +116,8 @@ class Settings:
         lebai = _parse_lebai(payload) if backend == "lebai" else None
         common_payload = payload if backend == "simulator" else _default_payload()
         return cls(
+            transactional_target=parse_target_strategy(payload, backend=backend,
+                mode=lebai.mode if lebai is not None else None),
             backend=backend,
             lebai=lebai,
             control_hz=_positive_int(common_payload, "control_hz"),

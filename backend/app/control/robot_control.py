@@ -10,6 +10,7 @@ from app.control.coordinate_mapper import CoordinateMapper
 from app.control.filters import PoseFilter
 from app.control.safety import SafetyLimiter, SafetyViolation, WorkspaceProjection
 from app.control.state_machine import TeleopStateMachine
+from app.control.transactional_settings import PursuitSettings
 from app.control.target_strategy import (
     DefaultTargetStrategy, TargetContext, TargetLifecycle, TargetStrategy, TargetUpdate,
 )
@@ -139,6 +140,7 @@ class RobotControl:
         home_options: HomeOptions | None = None,
         target_strategy: TargetStrategy | None = None,
         target_lifecycle: TargetLifecycle | None = None,
+        transactional_settings: PursuitSettings | None = None,
     ) -> None:
         self.backend = backend
         self.latest = latest
@@ -148,6 +150,14 @@ class RobotControl:
         self.limiter = limiter if limiter is not None else SafetyLimiter()
         self.target_strategy = target_strategy if target_strategy is not None else DefaultTargetStrategy()
         self.target_lifecycle = target_lifecycle
+        if transactional_settings is not None:
+            if target_strategy is not None or target_lifecycle is not None:
+                raise ValueError('conflicting_target_strategy')
+            from app.control.transactional_strategy import TransactionalTargetStrategy
+            strategy = TransactionalTargetStrategy(backend, self.limiter,
+                transactional_settings, context=self._target_context)
+            self.target_strategy = strategy
+            self.target_lifecycle = strategy
         self._target_lifecycle_failed = False
         self.constraint_clear_ns = constraint_clear_ms * 1_000_000
         self.home_options = home_options or HomeOptions(

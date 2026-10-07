@@ -53,7 +53,7 @@ async def test_prepare_rejects_disappeared_or_changed_accepted_target(acceptance
         accepted = None if acceptance == 'missing' else replace(view.accepted,
             command=replace(view.accepted.command, submission_id=999))
         monkeypatch.setattr(r.run.adapter, 'read_motion_view', lambda: replace(view, accepted=accepted))
-        strategy = transactional_tick_probe.TransactionalStrategy(r.control)
+        strategy = r.control.target_strategy
         with pytest.raises(SafetyViolation, match='candidate_dispatch_failed'):
             strategy.prepare(r.control.last_target, r.control.latest_requested, .02,
                 limiter=r.control.limiter)
