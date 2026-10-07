@@ -743,7 +743,10 @@ class RealLebaiAdapter:
                     client.movej(
                         list(target_q),
                         self.settings.control.max_joint_acceleration_radps2,
-                        options.max_speed_radps,
+                        min(
+                            options.max_speed_radps,
+                            self.settings.control.max_joint_speed_radps,
+                        ),
                         0.0,
                         0.0,
                     ),
