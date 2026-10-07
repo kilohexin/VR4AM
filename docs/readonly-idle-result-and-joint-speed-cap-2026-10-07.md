@@ -32,7 +32,9 @@ J3 最小绝对角度约 **0.0275°**，J5 约 **0.0824°**，均在现有 **5°
 .venv/Scripts/python.exe -m pytest backend/tests/robots/test_joint_move_speed_limit.py backend/tests/robots/test_lebai_adapter_control.py backend/tests/robots/test_lebai_adapter_readonly.py backend/tests/config/test_low_speed_profile.py backend/tests/robots/test_stop_transaction.py backend/tests/scripts/test_real_robot_scripts.py -q -p no:cacheprovider -o asyncio_default_fixture_loop_scope=function
 ```
 
-## 拟议下一步，尚未授权
+## 当时拟议范围与后续执行
+
+以下保留当时提出的范围。此后用户已明确批准一次 prepare 并选择本人观察/控制急停，执行已结束，授权已消费；到位完成，但实际速度反馈与请求不符，后续真机动作暂停。当前结论见 [单次准备位姿结果](prepare-motion-result-2026-10-07.md)，不能继续按“等待 prepare 授权”的旧状态执行。
 
 已生成独立低速 **readonly** 候选与 `prepare-motion-scope.json`，包括保存的当前/目标准备关节、变化量、profile 哈希及待确认事实；没有生成或选用 control 配置。拟议仅一次 `real_robot_smoke.py prepare`：关节速度最多 **0.05 rad/s**（约 2.86°/s），加速度最多 **0.2 rad/s²**，原关节移动超时 **15 s**，目标仅为既有准备位姿。最大角变化约 23.10°；只按速度计算的时长下界约 8.06 s，不是完成时间保证。
 
