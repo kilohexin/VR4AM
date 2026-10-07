@@ -1,5 +1,6 @@
 """Offline guard plus original fault/stop transactions; injected clients only."""
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -9,9 +10,10 @@ from tests.control.elapsed_step_probe import publish
 from tests.control.pvat_window_supervision_probe import WindowGuard,WindowSupervisedControl
 from tests.control.test_robot_control import FakeBackend,FakeClock,RecordingRecorder
 from tests.robots.pvat_cruise_candidate import build_cruise_plan,fit_reference_window
-from tests.robots.pvat_ramp_candidate import build_ramp_candidate
+from tests.robots.pvat_ramp_candidate import RampLimits,build_ramp_candidate
 from tests.robots.pvat_interpolation_probe import quintic_segment
 from tests.robots.pvat_phase_encoding_probe import encode_phases,retarget_window
+from tests.robots.pvat_overlap_probe import build_brake_reserve,start_overlap,renew_overlap
 from tests.robots.test_lebai_adapter_control import _connected_control_adapter,_wait_until,_target
 
 ZERO=(0.,)*6
@@ -74,7 +76,8 @@ async def test_expiry_faults_even_without_a_new_vr_frame_and_never_dispatches_a_
 
 
 @pytest.mark.parametrize('trigger',['expiry','position','velocity','acceleration','missing','interpolation',
-                                    'short_phase','retarget_expired','retarget_infeasible'])
+                                    'short_phase','retarget_expired','retarget_infeasible',
+                                    'overlap_expired','overlap_limit','brake_reserve'])
 @pytest.mark.parametrize('outcome',['confirmed','incomplete','error','late','cancelled'])
 async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latches(trigger,outcome):
     adapter,client,clock=await _connected_control_adapter()
@@ -92,13 +95,23 @@ async def test_guard_fault_uses_original_adapter_stop_and_preserves_failure_latc
         rejection_reasons={'interpolation':'pvat_window_interpolation_limit',
                            'short_phase':'pvat_phase_too_short',
                            'retarget_expired':'pvat_retarget_window_expired',
-                           'retarget_infeasible':'no_feasible_settling_plan'}
+                           'retarget_infeasible':'no_feasible_settling_plan',
+                           'overlap_expired':'pvat_overlap_time',
+                           'overlap_limit':'pvat_window_interpolation_limit',
+                           'brake_reserve':'pvat_brake_reserve_limit'}
         if trigger in rejection_reasons:
             with pytest.raises(ValueError,match=rejection_reasons[trigger]) as rejected:
                 if trigger=='interpolation':
                     fit_reference_window(build_cruise_plan(ZERO,axis(.5)),.35,.08)
                 elif trigger=='short_phase':
                     encode_phases(build_cruise_plan(ZERO,axis(.00001)).segments)
+                elif trigger=='overlap_expired':
+                    previous=start_overlap(build_cruise_plan(ZERO,axis(.5)),0)
+                    renew_overlap(previous,110_000_000)
+                elif trigger=='overlap_limit':
+                    start_overlap(build_cruise_plan(ZERO,axis(.5),replace(RampLimits(),acceleration_cap=.4)),0)
+                elif trigger=='brake_reserve':
+                    build_brake_reserve(ZERO,axis(.049),axis(.1))
                 else:
                     segment=quintic_segment(ZERO,axis(.01),axis(.1),axis(.00112),axis(.018),axis(.1),.08)
                     packet=encode_phases((segment,))[0]
