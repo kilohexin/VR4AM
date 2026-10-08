@@ -19,6 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location('wire_capture_safety', Path(__file__).with_name('readonly_wire_capture.py'))
 _base = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_base)
+_connection_spec = importlib.util.spec_from_file_location('local_rpc_table', Path(__file__).with_name('local_rpc_connections.py'))
+_connections = importlib.util.module_from_spec(_connection_spec)
+_connection_spec.loader.exec_module(_connections)
 digest_text, owns_capture = _base.digest_text, _base.owns_capture
 CONFIRM = 'I_APPROVE_ONE_Z3MM_MOTION_STOP_WIRE_CAPTURE'
 # This host displays at most 26 name characters in `pktmon filter list`.
@@ -34,7 +37,7 @@ def runtime_hashes():
     paths = sorted((ROOT / 'backend/app').rglob('*.py'))
     paths += [ROOT / 'scripts' / name for name in
               ('readonly_wire_capture.py', 'motion_stop_wire_capture.py', 'real_robot_wire_stop.py',
-               'real_robot_smoke.py', 'launch_readonly_wire_capture.ps1')]
+               'real_robot_smoke.py', 'launch_readonly_wire_capture.ps1', 'local_rpc_connections.py')]
     return {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.is_file()}
 
 
@@ -110,17 +113,8 @@ class Native:
     def admin(self):
         return _base.Native().admin
     def existing_rpc_connections(self):
-        # Local connection table only; failure rejects, never a network probe.
-        command = '$ErrorActionPreference="Stop"; $wireConnections=@(Get-NetTCPConnection | Where-Object { $_.State -eq "Established" -and $_.RemotePort -eq 3031 }); $wireConnections.Count | ConvertTo-Json -Compress'
-        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
-                                capture_output=True, text=True, timeout=5, shell=False,
-                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        if result.returncode:
-            raise ValueError('local_connection_table_unavailable')
-        count = json.loads(result.stdout)
-        if type(count) is not int or count < 0:
-            raise ValueError('local_connection_table_invalid')
-        return count
+        # Local numeric table only; unknown or failed output never becomes zero.
+        return _connections.read_rpc_connections()
     def motion(self, args, stdout, stderr, budget_s):
         environment = dict(os.environ, PYTHONPATH=str(ROOT / 'backend'))
         with Path(stdout).open('xb') as out, Path(stderr).open('xb') as err:

@@ -240,6 +240,7 @@ def test_motion_launcher_forwards_attention_while_harmless_stub_still_runs(tmp_p
     shutil.copyfile(ROOT/'.venv/pyvenv.cfg', root/'.venv/pyvenv.cfg')
     launcher = scripts/'launch_readonly_wire_capture.ps1'
     shutil.copyfile(ROOT/'scripts/launch_readonly_wire_capture.ps1', launcher)
+    (scripts/'local_rpc_connections.py').write_text('print(0)\n', encoding='utf-8')
     (scripts/'motion_stop_wire_capture.py').write_text(
         "import pathlib,sys,time\np=pathlib.Path(sys.argv[sys.argv.index('--output')+1])\n"
         "p.mkdir(parents=True)\n(p/'attention-required.json').write_text('{}')\n"
@@ -267,3 +268,40 @@ def test_motion_launcher_forwards_attention_while_harmless_stub_still_runs(tmp_p
     record = json.loads((root/'.tmp/launch/launch.json').read_text(encoding='utf-8-sig'))
     assert record['operator_attention_required'] and record['python_exit'] == 2
     assert record['process_exited']
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows launcher')
+@pytest.mark.parametrize('child_exit', [0, 2])
+def test_post_child_table_failure_cannot_report_success(tmp_path, child_exit):
+    """Both subprocesses are local stdlib stubs; no SDK or system query."""
+    import shutil
+    root = tmp_path/'isolated-post-query'
+    scripts = root/'scripts'
+    scripts.mkdir(parents=True)
+    python_dir = root/'.venv/Scripts'
+    python_dir.mkdir(parents=True)
+    shutil.copyfile(ROOT/'.venv/Scripts/python.exe', python_dir/'python.exe')
+    shutil.copyfile(ROOT/'.venv/pyvenv.cfg', root/'.venv/pyvenv.cfg')
+    launcher = scripts/'launch_readonly_wire_capture.ps1'
+    shutil.copyfile(ROOT/'scripts/launch_readonly_wire_capture.ps1', launcher)
+    (scripts/'local_rpc_connections.py').write_text(
+        "import pathlib,sys\np=pathlib.Path(__file__).with_suffix('.count')\n"
+        "if p.exists(): sys.exit(1)\np.write_text('queried')\nprint(0)\n", encoding='utf-8')
+    (scripts/'motion_stop_wire_capture.py').write_text(
+        f'import sys\nsys.exit({child_exit})\n', encoding='utf-8')
+    result = subprocess.run([
+        'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(launcher),
+        '-MotionStop', '-Execute', '-Config', 'stub.yaml', '-Output', str(root/'.tmp/capture'),
+        '-ComponentId', '3', '-RecordDirectory', str(root/'.tmp/launch'),
+        '-ToolBaseline', 'stub.json', '-ExpectedConfigSha256', 'stub',
+        '-ApprovedPreview', 'stub.json', '-ApprovedPreviewSha256', 'stub',
+        '-AuthorizationExpiresUtc', 'stub', '-Confirm', 'I_APPROVE_ONE_Z3MM_MOTION_STOP_WIRE_CAPTURE'],
+        capture_output=True, timeout=30)
+    record = json.loads((root/'.tmp/launch/launch.json').read_text(encoding='utf-8-sig'))
+    assert result.returncode == (child_exit or 1)
+    assert record['python_exit'] == child_exit and record['process_exited']
+    assert record['rpc_connections_after_status'] == 'unknown'
+    assert 'rpc_connections_after' not in record
+    assert record['launcher_exit'] == result.returncode
+    assert record['error_type']
+    assert not (root/'.tmp/capture').exists()

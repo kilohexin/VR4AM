@@ -27,7 +27,7 @@ def digest_text(text):
 def runtime_hashes():
     paths = sorted((ROOT / 'backend/app').rglob('*.py'))
     paths += [ROOT / 'scripts/real_robot_readonly_state.py', ROOT / 'scripts/readonly_wire_capture.py',
-              ROOT / 'scripts/launch_readonly_wire_capture.ps1']
+              ROOT / 'scripts/launch_readonly_wire_capture.ps1', ROOT / 'scripts/local_rpc_connections.py']
     return {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in paths if path.is_file()}
 

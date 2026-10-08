@@ -255,6 +255,17 @@ def test_truncated_filter_display_is_not_accepted_as_full_ownership(module, cand
     assert not module.owns_filters(displayed, candidate, name)
 
 
+def test_connection_admission_uses_only_numeric_local_netstat_table(module, monkeypatch):
+    from types import SimpleNamespace
+    def run(args, **kwargs):
+        assert args == ['netstat.exe', '-ano']
+        return SimpleNamespace(returncode=0, stderr=b'', stdout=(
+            b'Active Connections\nProto Local Address Foreign Address State PID\n'
+            b'TCP 127.0.0.1:5000 192.0.2.1:3031 ESTABLISHED 12\n'))
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    assert module.Native().existing_rpc_connections() == 1
+
+
 @pytest.mark.parametrize('key,value', [('max_joint_speed_radps', .5), ('max_tcp_step_m', True), ('max_tcp_speed_mps', 0)])
 def test_unsafe_caps_cannot_create_candidate(module, candidate, key, value):
     import yaml

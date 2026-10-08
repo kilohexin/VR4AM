@@ -36,6 +36,13 @@ $record = @{ started_utc=[DateTime]::UtcNow.ToString('o'); mode=$(if ($MotionSto
 $exitCode = 1
 try {
     $python = Join-Path $repoRoot '.venv/Scripts/python.exe'
+    function Get-LocalRpcCount {
+        $probeOutput = & $python -X utf8 (Join-Path $PSScriptRoot 'local_rpc_connections.py')
+        if ($LASTEXITCODE -ne 0) { throw 'LOCAL_CONNECTION_TABLE_UNAVAILABLE' }
+        $count = ($probeOutput -join "`n") | ConvertFrom-Json
+        if ($count -isnot [int] -or $count -lt 0) { throw 'INVALID_LOCAL_CONNECTION_COUNT' }
+        return $count
+    }
     $entry = Join-Path $PSScriptRoot $(if ($MotionStop) { 'motion_stop_wire_capture.py' } else { 'readonly_wire_capture.py' })
     $arguments = @('-X','utf8',$entry,'--config',[IO.Path]::GetFullPath($Config),
                    '--output',$capturePath,'--component-id',[string]$ComponentId)
@@ -52,9 +59,8 @@ try {
                         '--approved-preview',[IO.Path]::GetFullPath($ApprovedPreview),
                         '--approved-preview-sha256',$ApprovedPreviewSha256,
                         '--authorization-expires-utc',$AuthorizationExpiresUtc)
-        $existing = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.RemotePort -eq 3031 -and $_.State -eq 'Established' })
-        $record.existing_rpc_connections = $existing.Count
-        if ($existing.Count -ne 0) { throw 'EXISTING_RPC_CLIENT_ABORT' }
+        $record.existing_rpc_connections = Get-LocalRpcCount
+        if ($record.existing_rpc_connections -ne 0) { throw 'EXISTING_RPC_CLIENT_ABORT' }
     }
     foreach ($argument in $arguments) {
         if ($argument.Contains('"') -or $argument.Contains("`n") -or $argument.Contains("`r") -or $argument.EndsWith('\')) {
@@ -103,10 +109,16 @@ try {
     if ($null -eq $child.ExitCode) { throw 'MISSING_CHILD_EXIT_CODE' }
     $exitCode = $child.ExitCode
     if ($Execute) {
-        $record.rpc_connections_after = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.RemotePort -eq 3031 -and $_.State -eq 'Established' }).Count
+        $record.rpc_connections_after_status = 'unknown'
+        $record.rpc_connections_after = Get-LocalRpcCount
+        $record.rpc_connections_after_status = 'readable'
     }
-} catch { $record.error_type = $_.Exception.GetType().Name }
+} catch {
+    $record.error_type = $_.Exception.GetType().Name
+    if ($exitCode -eq 0) { $exitCode = 1 }
+}
 finally {
+    $record.launcher_exit = $exitCode
     $record.completed_utc = [DateTime]::UtcNow.ToString('o')
     $record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $recordPath 'launch.json') -Encoding UTF8
 }
