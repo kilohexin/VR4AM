@@ -2,6 +2,8 @@
 
 2026-10-08（用户端 Asia/Shanghai 日期）。接续 [停止收发计划](stop-wire-diagnostic-plan-2026-10-07.md)。用户要求加速并完成更多工作后汇报；本轮完成解析器、只读采集入口和配置哈希绑定。**没有新的机器人连接/命令、现场抓包、服务部署或推送。运动中 stop_move 约 610 ms 与实际限速问题仍未验收。**
 
+后续用户已批准一次只读范围，但 Windows 确认超过原启动有效期，未连接或抓包。启动入口、预览与唯一目录绑定、父子进程有效期复核已补齐，见 [启动失败与修正](readonly-wire-launch-2026-10-08.md)。下文冻结哈希和 150 项结果属于上一提交；旧预览因源码变化已失效，保留原件。
+
 ## 本机工具状态
 
 - 用户明确要求代为安装后，标准 Wireshark 4.6.9 x64 已安装到 `C:\Program Files\Wireshark`：系统卸载项、TShark 版本与有效签名均核对，安装进程已结束。下载包 97,931,232 字节，SHA-256 `bf9b5ce8a89f244c376a9b1a946276eaa06463dde3e33069a34d7f102f5878cf`，与 [官方发布记录](https://lists.wireshark.org/archives/wireshark-announce/202609/msg00000.html) 一致。TShark 本机 SHA-256 `662e10fd28a8c58575fe567845d0248080a2856c3d18d6f2ff7a4b4c8511f69b`。

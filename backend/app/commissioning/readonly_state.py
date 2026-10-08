@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 from asyncio import sleep
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic_ns
 
@@ -48,6 +48,25 @@ def validate_config_hash(raw, expected):
         raise ValueError('readonly_config_hash_mismatch_or_invalid')
 
 
+class ReadAuthorizationExpired(ValueError):
+    pass
+
+
+def validate_authorization_expiry(value):
+    if value is None:
+        return
+    try:
+        if type(value) is not str:
+            raise ValueError
+        expires = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if expires.tzinfo is None or expires.utcoffset() != timedelta(0):
+            raise ValueError
+    except ValueError:
+        raise ValueError('invalid_readonly_authorization_expiry') from None
+    if datetime.now(UTC) >= expires:
+        raise ReadAuthorizationExpired('readonly_authorization_expired')
+
+
 def validate_read(name, raw):
     # IDLE is only an admission condition for these queries, never stop proof.
     if name == 'get_robot_state' and map_robot_state(raw) is not BackendState.IDLE:
@@ -65,7 +84,7 @@ def validate_read(name, raw):
 
 
 async def collect_state(config_path, output_path, client_factory=None, *, include_velocity_factor=False,
-                        expected_config_sha256=None):
+                        expected_config_sha256=None, authorization_expires_utc=None):
     """One SDK connection, fixed query list, no adapter or control cleanup.
 
     Run as a standalone CLI process for live use. Async deadlines bound query
@@ -80,6 +99,8 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
     validate_config_hash(before, expected_config_sha256)
     initial_methods = READ_METHODS + (('get_velocity_factor',) if include_velocity_factor else ())
     report = dict(started_utc=utc(), complete=False, mode='readonly', reads=[],
+                  connection_attempted=False,
+                  authorization_expired=False, authorization_expires_utc=authorization_expires_utc,
                   clock_anchor_started=sample_clock_anchor(),
                   scope='state queries only; no motion readiness or stopping verdict',
                   config_sha256_before=hashlib.sha256(before).hexdigest(),
@@ -95,6 +116,8 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
             connect = client_factory or connect_real_client
             report['connect_started_ns'] = monotonic_ns()
             connect_deadline = report['connect_started_ns'] + WINDOW_NS
+            validate_authorization_expiry(authorization_expires_utc)
+            report['connection_attempted'] = True
             client = await asyncio.wait_for(connect(ip), WINDOW_NS / 1e9)
             report['connect_completed_ns'] = monotonic_ns()
             if monotonic_ns() >= connect_deadline:
@@ -147,6 +170,7 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
         except Exception as error:
             # Exception messages may contain credentials or device details.
             report['error_type'] = type(error).__name__
+            report['authorization_expired'] = isinstance(error, ReadAuthorizationExpired)
         finally:
             report['clock_anchor_completed'] = sample_clock_anchor()
             report['completed_utc'] = utc()
@@ -170,6 +194,8 @@ def main(argv=None):
     parser.add_argument('--output', type=Path)
     parser.add_argument('--expected-config-sha256',
                         help='Pin the approved configuration bytes before any connection')
+    parser.add_argument('--authorization-expires-utc',
+                        help='Reject expired approved launch immediately before SDK connection')
     parser.add_argument('--execute-readonly', action='store_true',
                         help='Connect only after explicit onsite read-only authorization')
     parser.add_argument('--include-velocity-factor', action='store_true',
@@ -187,4 +213,5 @@ def main(argv=None):
         parser.error('--execute-readonly requires --output')
     return asyncio.run(collect_state(args.config, args.output,
                                     include_velocity_factor=args.include_velocity_factor,
-                                    expected_config_sha256=args.expected_config_sha256))
+                                    expected_config_sha256=args.expected_config_sha256,
+                                    authorization_expires_utc=args.authorization_expires_utc))

@@ -1,6 +1,7 @@
 """Preview by default; one separately approved readonly process and Pktmon capture."""
 import argparse
 import ctypes
+from datetime import datetime, UTC, timedelta
 import hashlib
 import ipaddress
 import json
@@ -25,7 +26,8 @@ def digest_text(text):
 
 def runtime_hashes():
     paths = sorted((ROOT / 'backend/app').rglob('*.py'))
-    paths += [ROOT / 'scripts/real_robot_readonly_state.py', ROOT / 'scripts/readonly_wire_capture.py']
+    paths += [ROOT / 'scripts/real_robot_readonly_state.py', ROOT / 'scripts/readonly_wire_capture.py',
+              ROOT / 'scripts/launch_readonly_wire_capture.ps1']
     return {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in paths if path.is_file()}
 
@@ -52,6 +54,7 @@ def prepare(config, output, *, component_id, port=3031, baseline=None):
 
 def preview(plan):
     return dict(mode='offline_preview', config_sha256=plan['config_sha256'],
+                capture_output=str(plan['output']),
                 component_id=plan['component_id'], port=plan['port'],
                 readonly_window_ms=5000, capture_budget_ms=15000,
                 new_site_authorization_required=True, reviewed_tool_baseline_required=True,
@@ -104,7 +107,44 @@ def owns_capture(status, directory):
             and re.fullmatch(r'capture(?:_?\d+)?\.etl', path.name, re.IGNORECASE) is not None)
 
 
-def execute(plan, native, *, confirm, clock=time.monotonic):
+class AuthorizationExpired(ValueError):
+    pass
+
+
+def check_expiry(expires):
+    if expires is not None and datetime.now(UTC) >= expires:
+        raise AuthorizationExpired('authorization_expired')
+
+
+def approved_launch(plan, preview_path, preview_sha256, expiry):
+    if not preview_path or not preview_sha256 or not expiry:
+        raise ValueError('approved_preview_and_expiry_required')
+    try:
+        expires = datetime.fromisoformat(expiry.replace('Z', '+00:00'))
+        if expires.tzinfo is None or expires.utcoffset() != timedelta(0):
+            raise ValueError
+    except (ValueError, TypeError):
+        raise ValueError('invalid_authorization_expiry') from None
+    check_expiry(expires)
+    raw = Path(preview_path).read_bytes()
+    if (not re.fullmatch('[a-f0-9]{64}', preview_sha256)
+            or hashlib.sha256(raw).hexdigest() != preview_sha256):
+        raise ValueError('approved_preview_hash_mismatch')
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError):
+        raise ValueError('approved_preview_invalid') from None
+    if (not isinstance(value, dict) or value.get('mode') != 'offline_preview'
+            or value.get('capture_output') != str(plan['output'])
+            or type(value.get('component_id')) is not int or type(value.get('port')) is not int
+            or any(value.get(name) != plan[name] for name in
+                   ('component_id', 'port', 'config_sha256', 'runtime_hashes'))):
+        raise ValueError('approved_preview_inputs_changed')
+    return expires
+
+
+def execute(plan, native, *, confirm, clock=time.monotonic, authorization_expires=None):
+    check_expiry(authorization_expires)
     if confirm != CONFIRM:
         raise ValueError('onsite_scope_confirmation_required')
     if not native.admin:
@@ -122,6 +162,8 @@ def execute(plan, native, *, confirm, clock=time.monotonic):
     output = plan['output']
     output.mkdir(parents=True, exist_ok=False)  # Consumes episode; never repeat/overwrite.
     report = dict(complete=False, acquisition_complete=False, hardware_stop_verified=False, tool_commands=[],
+                  authorization_expired=False,
+                  authorization_expires_utc=authorization_expires.isoformat() if authorization_expires else None,
                   capture_started=False, capture_stopped=False,
                   manual_capture_cleanup_required=False, manual_filter_cleanup_required=False,
                   manual_process_cleanup_required=False,
@@ -163,6 +205,7 @@ def execute(plan, native, *, confirm, clock=time.monotonic):
                 or runtime_hashes() != plan['runtime_hashes']):
             raise ValueError('inputs_changed_before_capture')
         capture_deadline = clock() + 15
+        check_expiry(authorization_expires)
         start_attempted = True
         command(['start', '--capture', '--comp', str(plan['component_id']), '--pkt-size', '0',
                  '--file-name', str(output / 'capture.etl'), '--file-size', '32', '--log-mode', 'multi-file'])
@@ -173,15 +216,18 @@ def execute(plan, native, *, confirm, clock=time.monotonic):
         if (plan['config'].read_bytes() != plan['config_bytes'] or shadow.read_bytes() != plan['config_bytes']
                 or runtime_hashes() != plan['runtime_hashes']):
             raise ValueError('inputs_changed_before_readonly_connection')
+        check_expiry(authorization_expires)
         child_result = native.readonly([
             str(ROOT / 'scripts/real_robot_readonly_state.py'), '--config', str(shadow),
             '--output', str(output / 'state-report.json'), '--expected-config-sha256', plan['config_sha256'],
-            '--execute-readonly'],
+            '--execute-readonly', *(['--authorization-expires-utc', authorization_expires.isoformat()]
+                                   if authorization_expires else [])],
             output / 'reader-stdout.txt', output / 'reader-stderr.txt', budget)
         report['readonly_process'] = child_result
         report['manual_process_cleanup_required'] = not child_result.get('process_exited')
     except Exception as error:
         report['error_type'] = type(error).__name__
+        report['authorization_expired'] = isinstance(error, AuthorizationExpired)
     finally:
         if report['capture_started']:
             try:
@@ -241,6 +287,9 @@ def main(argv=None):
     parser.add_argument('--port', type=int, default=3031)
     parser.add_argument('--tool-baseline', type=Path)
     parser.add_argument('--expected-config-sha256')
+    parser.add_argument('--approved-preview', type=Path)
+    parser.add_argument('--approved-preview-sha256')
+    parser.add_argument('--authorization-expires-utc')
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--confirm')
     args = parser.parse_args(argv)
@@ -251,8 +300,11 @@ def main(argv=None):
         return 0
     if args.expected_config_sha256 != plan['config_sha256']:
         raise ValueError('approved_config_hash_required')
-    report = execute(plan, Native(), confirm=args.confirm)
+    expires = approved_launch(plan, args.approved_preview, args.approved_preview_sha256,
+                              args.authorization_expires_utc)
+    report = execute(plan, Native(), confirm=args.confirm, authorization_expires=expires)
     print(json.dumps(dict(complete=report['complete'], acquisition_complete=report['acquisition_complete'],
+                          authorization_expired=report['authorization_expired'],
                           episode_filter_name=report['episode_filter_name'], hardware_stop_verified=False,
                           manual_capture_cleanup_required=report['manual_capture_cleanup_required'],
                           manual_filter_cleanup_required=report['manual_filter_cleanup_required'],
