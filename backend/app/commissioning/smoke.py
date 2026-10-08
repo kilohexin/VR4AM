@@ -6,7 +6,7 @@ import json
 import math
 import os
 import platform
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -303,6 +303,7 @@ async def _run_motion_action(
     action: TranslationAction | RotationAction | GripperAction,
     *,
     early_stop_on_motion: bool = False,
+    before_motion: Callable[[], None] | None = None,
 ) -> _MotionActionResult:
     # The released sample is deliberately ticked before arming so the
     # RobotControl session guards remain the sole authority for motion.
@@ -314,6 +315,8 @@ async def _run_motion_action(
     await control.tick()
     await control.arm()
 
+    if before_motion is not None:
+        before_motion()
     latest.publish(
         _frame(2, grip=True, trigger=observed_trigger),
         clock.now_ns(),
@@ -358,6 +361,11 @@ async def _run_motion_action(
                 )
                 + 1
             )
+            # Setup reads may yield long enough to expire the separately
+            # approved episode. Check again at the first target input; later
+            # frames retain the existing RobotControl guards and stop path.
+            if before_motion is not None:
+                before_motion()
             for _ in range(maximum_frames):
                 cycle_started_ns = clock.now_ns()
                 latest.publish(
@@ -524,6 +532,8 @@ async def _run_motion_action(
         else:
             await asyncio.sleep(1 / settings.lebai.gripper.command_hz)
             trigger = 0.0 if action.target == "open" else 1.0
+            if before_motion is not None:
+                before_motion()
             await control.command_gripper(trigger)
             sequence += 1
     finally:
@@ -606,6 +616,7 @@ def _requested_displacement(
 async def run_smoke(
     options: SmokeOptions,
     client_factory: ClientFactory = connect_real_client,
+    *, before_motion: Callable[[], None] | None = None,
 ) -> SmokeResult:
     _validate_stop_rpc_diagnostics(options.stop_rpc_diagnostics, options.action)
     _validate_early_stop_on_motion(options.early_stop_on_motion, options.action)
@@ -701,6 +712,8 @@ async def run_smoke(
         )
         before = await backend.get_state()
         if isinstance(options.action, PrepareAction):
+            if before_motion is not None:
+                before_motion()
             await backend.prepare(home_options, lambda _phase: None)
             prepared = await backend.preflight()
             if not prepared.ready:
@@ -752,6 +765,8 @@ async def run_smoke(
             print(json.dumps(result.to_dict(), separators=(",", ":")))
             return result
         motion_result = _MotionActionResult(None, None, None)
+        if before_motion is not None:
+            before_motion()
         if isinstance(options.action, (TranslationAction, RotationAction, GripperAction)):
             motion_result = await _run_motion_action(
                 control,
@@ -761,6 +776,7 @@ async def run_smoke(
                 settings,
                 options.action,
                 early_stop_on_motion=options.early_stop_on_motion,
+                before_motion=before_motion,
             )
         elif isinstance(options.action, HomeAction):
             latest.publish(_frame(1, grip=False), clock.now_ns())

@@ -11,7 +11,8 @@ param(
     [string]$ApprovedPreviewSha256,
     [string]$AuthorizationExpiresUtc,
     [string]$Confirm,
-    [switch]$Execute
+    [switch]$Execute,
+    [switch]$MotionStop
 )
 $ErrorActionPreference = 'Stop'
 $OutputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -29,18 +30,24 @@ if ($recordPath -eq $capturePath -or $recordPath.StartsWith(($capturePath + '\')
 }
 if (Test-Path -LiteralPath $recordPath) { throw 'REFUSE_EXISTING_LAUNCH_RECORD' }
 New-Item -ItemType Directory -Path $recordPath | Out-Null
-$record = @{ started_utc=[DateTime]::UtcNow.ToString('o'); mode=$(if ($Execute) { 'approved_readonly' } else { 'offline_preview' }) }
+$record = @{ started_utc=[DateTime]::UtcNow.ToString('o'); mode=$(if ($MotionStop) {
+    if ($Execute) { 'approved_motion_stop' } else { 'motion_stop_offline_preview' }
+} elseif ($Execute) { 'approved_readonly' } else { 'offline_preview' }) }
 $exitCode = 1
 try {
     $python = Join-Path $repoRoot '.venv/Scripts/python.exe'
-    $entry = Join-Path $PSScriptRoot 'readonly_wire_capture.py'
+    $entry = Join-Path $PSScriptRoot $(if ($MotionStop) { 'motion_stop_wire_capture.py' } else { 'readonly_wire_capture.py' })
     $arguments = @('-X','utf8',$entry,'--config',[IO.Path]::GetFullPath($Config),
                    '--output',$capturePath,'--component-id',[string]$ComponentId)
+    if ($ToolBaseline) {
+        $arguments += @('--tool-baseline',[IO.Path]::GetFullPath($ToolBaseline))
+    }
     if ($Execute) {
-        if ($Confirm -ne 'I_APPROVE_ONE_READONLY_WIRE_CAPTURE') { throw 'ONSITE_SCOPE_CONFIRMATION_REQUIRED' }
+        $requiredConfirm = if ($MotionStop) { 'I_APPROVE_ONE_Z3MM_MOTION_STOP_WIRE_CAPTURE' } else { 'I_APPROVE_ONE_READONLY_WIRE_CAPTURE' }
+        if ($Confirm -ne $requiredConfirm) { throw 'ONSITE_SCOPE_CONFIRMATION_REQUIRED' }
         if (!$ToolBaseline -or !$ExpectedConfigSha256 -or !$ApprovedPreview -or
             !$ApprovedPreviewSha256 -or !$AuthorizationExpiresUtc) { throw 'FROZEN_APPROVAL_ARTIFACTS_REQUIRED' }
-        $arguments += @('--execute','--confirm',$Confirm,'--tool-baseline',[IO.Path]::GetFullPath($ToolBaseline),
+        $arguments += @('--execute','--confirm',$Confirm,
                         '--expected-config-sha256',$ExpectedConfigSha256,
                         '--approved-preview',[IO.Path]::GetFullPath($ApprovedPreview),
                         '--approved-preview-sha256',$ApprovedPreviewSha256,
@@ -55,8 +62,41 @@ try {
         }
     }
     $quoted = @($arguments | ForEach-Object { '"' + $_ + '"' })
-    # -Wait retains ExitCode; native stderr is a file, not a PowerShell error.
-    $child = Start-Process -FilePath $python -ArgumentList $quoted -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput (Join-Path $recordPath 'stdout.txt') -RedirectStandardError (Join-Path $recordPath 'stderr.txt')
+    $launchOptions = @{ FilePath=$python; ArgumentList=$quoted; WindowStyle='Hidden'; PassThru=$true;
+        RedirectStandardOutput=(Join-Path $recordPath 'stdout.txt'); RedirectStandardError=(Join-Path $recordPath 'stderr.txt') }
+    if ($MotionStop -and $Execute) {
+        function Publish-MotionAttention {
+            $signal = Join-Path $capturePath 'attention-required.json'
+            $printed = $record.operator_attention_required -eq $true
+            # File presence is conservative: no need to wait for JSON parsing.
+            # Also forward the ASCII token if creating the signal file failed.
+            $alert = Test-Path -LiteralPath $signal
+            if (!$alert -and !$printed) {
+                try { $alert = [IO.File]::ReadAllText((Join-Path $recordPath 'stdout.txt')).Contains('VR4ARM_STOP_UNKNOWN') } catch {}
+            }
+            if ($alert -and !$printed) {
+                $record.operator_attention_required = $true
+                [Console]::Out.WriteLine('VR4ARM_STOP_UNKNOWN: Robot stopping is unverified. Inspect the site and follow the onsite safety procedure. Do not retry.')
+                [Console]::Out.Flush()
+            }
+        }
+        $child = Start-Process @launchOptions
+        # Retain a process handle before Refresh sees an exited process;
+        # Windows PowerShell otherwise may lose its native exit code.
+        $retainedHandle = $child.Handle
+        do {
+            Publish-MotionAttention
+            Start-Sleep -Milliseconds 100
+            $child.Refresh()
+        } while (!$child.HasExited)
+        # Explicitly wait after observing exit so redirected output/ExitCode
+        # are settled; never kill or terminate a motion client.
+        $child.WaitForExit()
+        Publish-MotionAttention
+    } else {
+        # Preview and readonly keep the original synchronous exit handling.
+        $child = Start-Process @launchOptions -Wait
+    }
     $record.child_pid = $child.Id
     $record.python_exit = $child.ExitCode
     $record.process_exited = $child.HasExited

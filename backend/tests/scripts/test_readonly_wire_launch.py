@@ -182,3 +182,88 @@ def test_actual_windows_launcher_preserves_preview_result_and_error(tmp_path, va
         assert json.loads((record / 'stdout.txt').read_text(encoding='utf-8-sig'))['mode'] == 'offline_preview'
     else:
         assert 'readonly_configuration_required' in (record / 'stderr.txt').read_text(encoding='utf-8-sig')
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows launcher')
+@pytest.mark.parametrize('valid', [True, False])
+def test_actual_windows_motion_switch_only_previews_fixed_scope_and_binds_baseline(tmp_path, valid):
+    import yaml
+    from tests.config.test_real_robot_config import REAL_CONFIG_TEMPLATE
+    spec = importlib.util.spec_from_file_location('motion_preview_launch', ROOT/'scripts/motion_stop_wire_capture.py')
+    motion = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(motion)
+    data = yaml.safe_load(REAL_CONFIG_TEMPLATE.format(mode='control'))
+    data['real_robot']['ip'] = '192.0.2.1'
+    data['real_robot']['control'].update(motion.CAPS)
+    if not valid:
+        data['real_robot']['control']['max_joint_speed_radps'] = .5
+    config = tmp_path/'motion config with spaces.yaml'
+    config.write_text(yaml.safe_dump(data), encoding='utf-8')
+    baseline = tmp_path/'reviewed baseline.json'
+    baseline_data = dict(reviewed_idle=True, reviewed_empty_filters=True,
+                         idle_status_sha256='1'*64, empty_filters_sha256='2'*64)
+    baseline.write_text(json.dumps(baseline_data), encoding='utf-8')
+    unique = uuid4().hex
+    record = ROOT/'.tmp'/('offline-motion-launch-record-'+unique)
+    capture = ROOT/'.tmp'/('offline-motion-launch-capture-'+unique)
+    result = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                             str(ROOT/'scripts/launch_readonly_wire_capture.ps1'), '-MotionStop',
+                             '-Config', str(config), '-Output', str(capture), '-ComponentId', '3',
+                             '-RecordDirectory', str(record), '-ToolBaseline', str(baseline)],
+                            capture_output=True, timeout=30)
+    assert (result.returncode == 0) is valid
+    metadata = json.loads((record/'launch.json').read_text(encoding='utf-8-sig'))
+    assert metadata['mode'] == 'motion_stop_offline_preview'
+    assert metadata['python_exit'] == result.returncode and metadata['process_exited']
+    assert not capture.exists()
+    if valid:
+        report = json.loads((record/'stdout.txt').read_text(encoding='utf-8-sig'))
+        assert report['mode'] == 'motion_stop_wire_offline_preview'
+        assert report['action'] == motion.ACTION
+        assert report['tool_baseline_sha256'] == hashlib.sha256(json.dumps(baseline_data, sort_keys=True).encode()).hexdigest()
+        assert report['runtime_hashes']['scripts/launch_readonly_wire_capture.ps1']
+        assert report['hardware_stop_verified'] is False
+    else:
+        assert 'diagnostic_cap_invalid' in (record/'stderr.txt').read_text(encoding='utf-8-sig')
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows launcher')
+def test_motion_launcher_forwards_attention_while_harmless_stub_still_runs(tmp_path):
+    """Isolated launcher copy; child is a stdlib-only stub, never robot code."""
+    import shutil
+    root = tmp_path/'isolated'
+    scripts = root/'scripts'
+    scripts.mkdir(parents=True)
+    python_dir = root/'.venv/Scripts'
+    python_dir.mkdir(parents=True)
+    shutil.copyfile(ROOT/'.venv/Scripts/python.exe', python_dir/'python.exe')
+    shutil.copyfile(ROOT/'.venv/pyvenv.cfg', root/'.venv/pyvenv.cfg')
+    launcher = scripts/'launch_readonly_wire_capture.ps1'
+    shutil.copyfile(ROOT/'scripts/launch_readonly_wire_capture.ps1', launcher)
+    (scripts/'motion_stop_wire_capture.py').write_text(
+        "import pathlib,sys,time\np=pathlib.Path(sys.argv[sys.argv.index('--output')+1])\n"
+        "p.mkdir(parents=True)\n(p/'attention-required.json').write_text('{}')\n"
+        "time.sleep(2)\n(p/'stub-completed').write_text('done')\nsys.exit(2)\n", encoding='utf-8')
+    # Replace the local connection-table command only; real launcher process,
+    # redirection, polling, warning and exit-code handling remain exercised.
+    driver = root/'driver.ps1'
+    driver.write_text("function Get-NetTCPConnection { return @() }\n"
+                      ". '"+str(launcher)+"' -MotionStop -Execute -Config 'stub.yaml' "
+                      "-Output '"+str(root/'.tmp/capture')+"' -ComponentId 3 -RecordDirectory '"+
+                      str(root/'.tmp/launch')+"' -ToolBaseline 'stub.json' -ExpectedConfigSha256 'stub' "
+                      "-ApprovedPreview 'stub.json' -ApprovedPreviewSha256 'stub' "
+                      "-AuthorizationExpiresUtc 'stub' -Confirm 'I_APPROVE_ONE_Z3MM_MOTION_STOP_WIRE_CAPTURE'\nexit $LASTEXITCODE\n",
+                      encoding='utf-8')
+    child = subprocess.Popen(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(driver)],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    seen_while_running = False
+    for line in child.stdout:
+        if b'VR4ARM_STOP_UNKNOWN' in line:
+            seen_while_running = not (root/'.tmp/capture/stub-completed').exists()
+            break
+    stdout, stderr = child.communicate(timeout=30)
+    assert child.returncode == 2, stderr.decode(errors='replace')
+    assert seen_while_running, stdout.decode(errors='replace')
+    record = json.loads((root/'.tmp/launch/launch.json').read_text(encoding='utf-8-sig'))
+    assert record['operator_attention_required'] and record['python_exit'] == 2
+    assert record['process_exited']

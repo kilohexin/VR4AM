@@ -128,6 +128,55 @@ def test_translate_early_stop_is_explicit_opt_in() -> None:
     assert options.early_stop_on_motion is True
 
 
+async def test_wire_admission_guard_runs_after_preflight_before_motion_inputs(tmp_path, monkeypatch):
+    client = FakeLebaiClient.idle()
+    monkeypatch.setattr('app.commissioning.smoke.COMMISSIONING_LOG_ROOT',tmp_path/'logs')
+    def refuse_motion():
+        raise ValueError('approval_expired_before_motion')
+    with pytest.raises(ValueError,match='approval_expired_before_motion'):
+        await run_smoke(SmokeOptions(_control_config(tmp_path),TranslationAction('z',.003),REAL_ROBOT_CONFIRMATION),
+                        AsyncMock(return_value=client),before_motion=refuse_motion)
+    assert all(call[0]=='stop_move' for call in client.write_calls)
+
+
+@pytest.mark.parametrize('wait_stage', ['gripper_read', 'initial_state'])
+async def test_wire_admission_rechecks_after_real_motion_setup_waits(tmp_path, monkeypatch, wait_stage):
+    from app.commissioning import smoke
+    client = FakeLebaiClient.idle()
+    expired = False
+    original = smoke.RobotControl
+    class WaitingControl(original):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            state_read = self.backend.get_state
+            async def delayed_state():
+                nonlocal expired
+                result = await state_read()
+                if wait_stage == 'initial_state' and self.mode.value == 'ACTIVE':
+                    await asyncio.sleep(0)
+                    expired = True
+                return result
+            self.backend.get_state = delayed_state
+        async def initialize_observed_gripper(self):
+            nonlocal expired
+            result = await super().initialize_observed_gripper()
+            if wait_stage == 'gripper_read':
+                await asyncio.sleep(0)
+                expired = True
+            return result
+    def guard():
+        if expired:
+            raise ValueError('approval_expired_during_setup')
+    monkeypatch.setattr(smoke, 'RobotControl', WaitingControl)
+    monkeypatch.setattr(smoke, 'COMMISSIONING_LOG_ROOT', tmp_path/'logs')
+    monkeypatch.setattr(smoke, 'COMMISSIONING_MOTION_TIMEOUT_S', .04)
+    with pytest.raises(ValueError, match='approval_expired_during_setup'):
+        await run_smoke(SmokeOptions(_control_config(tmp_path), TranslationAction('z', .003),
+                                    REAL_ROBOT_CONFIRMATION), AsyncMock(return_value=client), before_motion=guard)
+    assert expired
+    assert all(call[0] == 'stop_move' for call in client.write_calls)
+
+
 @pytest.mark.asyncio
 async def test_early_stop_rejects_other_actions_before_connection(tmp_path: Path) -> None:
     factory = AsyncMock()
