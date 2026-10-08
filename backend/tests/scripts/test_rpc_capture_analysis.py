@@ -39,6 +39,7 @@ def pdml(messages, *, handshake=True, truncate=False):
                             ('websocket.mask', '1' if item.get('client', True) else '0')]:
             ET.SubElement(ws, 'field', name=name, show=value)
         raw = item.get('raw', json.dumps(item.get('rpc')).encode())
+        ET.SubElement(ws, 'field', name='websocket.payload_length', show=str(len(raw)))
         ET.SubElement(ws, 'field', name='websocket.payload', value=raw.hex())
     return ET.tostring(root)
 
@@ -72,6 +73,24 @@ def test_pdml_boolean_display_uses_raw_value_instead_of_display_label():
         field.set('value', '1')
     report = module.analyze_pdml(ET.tostring(root))
     assert len(report['matched_pairs']) == 1
+
+
+def test_complete_ping_pong_close_are_reported_separately_without_rpc_or_fragment_issues():
+    controls = [request(opcode=9, raw=b''), response(opcode=10, raw=b''),
+                request(opcode=8, raw=b'\x03\xe8')]
+    report = module.analyze_pdml(pdml([request(), *controls, response()]))
+    assert len(report['matched_pairs']) == 1
+    assert report['decoded_jsonrpc_messages'] == 2
+    assert report['issues'] == []
+    assert [(c['opcode'], c['payload_length']) for c in report['websocket_control_frames']] == [(9, 0), (10, 0), (8, 2)]
+
+
+@pytest.mark.parametrize('opcode,fin,payload', [(9, 0, b''), (10, 1, b'x' * 126), (8, 1, b'x')])
+def test_fragmented_or_invalid_size_control_frame_remains_explicit(opcode, fin, payload):
+    report = module.analyze_pdml(pdml([request(opcode=opcode, fin=fin, raw=payload)]))
+    assert not report['matched_pairs']
+    assert report.get('websocket_control_frames', []) == []
+    assert any(i['reason'] == 'invalid_websocket_control' for i in report['issues'])
 
 
 def test_orphan_response_and_missing_reply_are_reported_without_false_pairing():

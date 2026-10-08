@@ -5,6 +5,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.recording.clock_anchor import sample_performance_anchor, sample_performance_ns
+
 
 class StopRpc:
     def __init__(self, episode_id: int, request_id: int, method: str,
@@ -24,14 +26,20 @@ class StopRpc:
         self.error: Exception | None = None
         self.sdk_await_started_ns: int | None = None
         self.sdk_await_completed_ns: int | None = None
+        self.diagnostic_timing = {
+            'clock': 'time.perf_counter_ns', 'started_ns': sample_performance_ns(),
+            'anchor_started': sample_performance_anchor(),
+        }
         self.task = asyncio.create_task(self._run(send))
 
     async def _run(self, send: Callable[[], Awaitable[object]]) -> None:
         try:
             self.sdk_await_started_ns = self.clock()
+            self.diagnostic_timing['sdk_await_started_ns'] = sample_performance_ns()
             try:
                 self.result = await send()
             finally:
+                self.diagnostic_timing['sdk_await_completed_ns'] = sample_performance_ns()
                 self.sdk_await_completed_ns = self.clock()
         except asyncio.CancelledError:
             self.wait_failed = True
@@ -47,6 +55,8 @@ class StopRpc:
             self.outcome = 'returned_late' if late else 'returned'
             self.wait_failed |= late
         finally:
+            self.diagnostic_timing['completed_ns'] = sample_performance_ns()
+            self.diagnostic_timing['anchor_completed'] = sample_performance_anchor()
             self.emit({
                 'kind': 'stop_rpc_lifecycle', 'episode_id': self.episode_id,
                 'request_id': self.request_id, 'method': self.method,
@@ -57,6 +67,7 @@ class StopRpc:
                 'error_type': type(self.error).__name__ if self.error else None,
                 'wait_failed': self.wait_failed,
                 'remote_result_unknown': self.outcome == 'unknown_on_local_cancel',
+                'diagnostic_timing': self.diagnostic_timing,
             })
 
     async def wait(self) -> object:

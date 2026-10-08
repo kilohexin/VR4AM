@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from app.robots.lebai_sdk_bridge import LebaiClientProtocol
+from app.recording.clock_anchor import sample_performance_ns
 
 READ_TIMEOUT_S = .1
 DURATION_S = 2.
@@ -71,9 +72,13 @@ class StopDiagnosticSampler:
                 raise asyncio.CancelledError
             timing = {"method": method, "started_ns": self.clock()}
             event["reads"].append(timing)
+            diagnostic = timing['diagnostic_timing'] = {
+                'clock': 'time.perf_counter_ns', 'sdk_await_started_ns': sample_performance_ns(),
+            }
             try:
                 event[field] = await getattr(self.client, method)()
             finally:
+                diagnostic['sdk_await_completed_ns'] = sample_performance_ns()
                 timing["completed_ns"] = self.clock()
 
     async def _run(self) -> None:

@@ -1,6 +1,7 @@
 """Host clock correspondence for diagnostics, never a motion safety clock."""
 from collections.abc import Callable
-from time import monotonic_ns, time_ns
+import math
+from time import get_clock_info, monotonic_ns, perf_counter_ns, time_ns
 
 
 def sample_clock_anchor(
@@ -27,4 +28,46 @@ def sample_clock_anchor(
         }
     except Exception:
         # A diagnostic failure must not turn into a control/cleanup failure.
+        return None
+
+
+def sample_performance_ns(performance: Callable[[], int] | None = None) -> int | None:
+    """Independent short-duration timestamp; never a control deadline input."""
+    try:
+        value = (performance or perf_counter_ns)()
+        return value if type(value) is int and value >= 0 else None
+    except Exception:
+        return None
+
+
+def sample_performance_anchor(
+    performance: Callable[[], int] | None = None,
+    wall: Callable[[], int] | None = None,
+) -> dict[str, object] | None:
+    """Bracket wall time in the performance epoch, without asserting alignment.
+
+    Resolution and the bracket do not bound wall-clock quantization, drift,
+    clock adjustments, driver timestamp errors or packet capture accuracy.
+    """
+    try:
+        before = sample_performance_ns(performance)
+        timestamp = (wall or time_ns)()
+        after = sample_performance_ns(performance)
+        if (before is None or after is None or after < before
+                or type(timestamp) is not int or timestamp < 0):
+            return None
+        info = {}
+        for name in ('perf_counter', 'time'):
+            item = vars(get_clock_info(name))
+            if not math.isfinite(item['resolution']) or item['resolution'] <= 0:
+                return None
+            info[name] = item
+        return {
+            'clock': 'time.perf_counter_ns', 'wall_clock': 'time.time_ns',
+            'performance_before_ns': before, 'wall_time_ns': timestamp,
+            'performance_after_ns': after, 'sampling_span_ns': after - before,
+            'clock_info': info, 'alignment_verified': False,
+            'assessment': 'diagnostic_only',
+        }
+    except Exception:
         return None

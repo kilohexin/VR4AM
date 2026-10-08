@@ -82,7 +82,7 @@ def analyze_pdml(document, *, port=3031):
     issues, packets = [], root.findall('packet')
     payload_frames, accounted_frames = set(), set()
     pending_tails, later_reassembled = set(), set()
-    decoded = 0
+    decoded, controls = 0, []
     for packet in packets:
         stream = frame = None
         try:
@@ -141,8 +141,20 @@ def analyze_pdml(document, *, port=3031):
         except ValueError:
             issues.append(dict(reason='invalid_packet_metadata', frame=frame, stream=stream))
         for websocket in packet.findall(".//proto[@name='websocket']"):
-            if ((_field(websocket, 'websocket.fin', 'value') or _field(websocket, 'websocket.fin')) != '1'
-                    or _field(websocket, 'websocket.opcode') != '1'):
+            fin = (_field(websocket, 'websocket.fin', 'value') or _field(websocket, 'websocket.fin'))
+            opcode = _field(websocket, 'websocket.opcode')
+            if opcode in ('8', '9', '10'):
+                try:
+                    size = _integer(_field(websocket, 'websocket.payload_length'))
+                    if fin != '1' or size > 125 or (opcode == '8' and size == 1):
+                        raise ValueError('invalid_control')
+                except ValueError:
+                    issues.append(dict(reason='invalid_websocket_control', frame=frame, stream=stream))
+                else:
+                    controls.append(dict(frame=frame, stream=stream, opcode=int(opcode),
+                                         payload_length=size, complete_epoch_ns=timestamp))
+                continue
+            if fin != '1' or opcode != '1':
                 issues.append(dict(reason='unsupported_websocket_fragment', frame=frame, stream=stream))
                 continue
             try:
@@ -199,7 +211,7 @@ def analyze_pdml(document, *, port=3031):
         issues.append(dict(reason='missing_upgrade'))
     pairs.sort(key=lambda pair: (pair['request_complete_epoch_ns'], pair['stream'], pair['request_complete_frame']))
     return dict(schema_version=1, packet_count=len(packets), decoded_jsonrpc_messages=decoded,
-                matched_pairs=pairs, issues=issues, hardware_stop_verified=False,
+                matched_pairs=pairs, issues=issues, websocket_control_frames=controls, hardware_stop_verified=False,
                 app_clock_alignment_verified=False,
                 scope='Dissector completion frames only; not controller receipt or physical stopping time')
 

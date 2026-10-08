@@ -11,7 +11,7 @@ from time import monotonic_ns
 
 import yaml
 
-from app.recording.clock_anchor import sample_clock_anchor
+from app.recording.clock_anchor import sample_clock_anchor, sample_performance_anchor, sample_performance_ns
 from app.robots.lebai_codec import estop_fault, joint_vector, map_robot_state, pose_from_lebai
 from app.robots.lebai_sdk_bridge import connect_real_client
 from app.schemas.messages import BackendState
@@ -102,6 +102,7 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
                   connection_attempted=False,
                   authorization_expired=False, authorization_expires_utc=authorization_expires_utc,
                   clock_anchor_started=sample_clock_anchor(),
+                  performance_anchor_started=sample_performance_anchor(),
                   scope='state queries only; no motion readiness or stopping verdict',
                   config_sha256_before=hashlib.sha256(before).hexdigest(),
                   query_allowlist=list(initial_methods), window_ms=5_000,
@@ -118,7 +119,13 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
             connect_deadline = report['connect_started_ns'] + WINDOW_NS
             validate_authorization_expiry(authorization_expires_utc)
             report['connection_attempted'] = True
-            client = await asyncio.wait_for(connect(ip), WINDOW_NS / 1e9)
+            connection_timing = report['connection_diagnostic_timing'] = {
+                'clock': 'time.perf_counter_ns', 'sdk_await_started_ns': sample_performance_ns(),
+            }
+            try:
+                client = await asyncio.wait_for(connect(ip), WINDOW_NS / 1e9)
+            finally:
+                connection_timing['sdk_await_completed_ns'] = sample_performance_ns()
             report['connect_completed_ns'] = monotonic_ns()
             if monotonic_ns() >= connect_deadline:
                 raise TimeoutError('late_connect')
@@ -141,10 +148,15 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
                                 read_purpose='readonly_site_state')
                     report['reads'].append(item)
                     rpc_deadline = min(deadline, started + READ_TIMEOUT_NS)
+                    timing = item['diagnostic_timing'] = {'clock': 'time.perf_counter_ns'}
                     try:
                         # Fixed names only, no user-selected/generic RPC facility.
-                        raw = await asyncio.wait_for(getattr(client, name)(),
-                                                     (rpc_deadline - started) / 1e9)
+                        timing['sdk_await_started_ns'] = sample_performance_ns()
+                        try:
+                            raw = await asyncio.wait_for(getattr(client, name)(),
+                                                         (rpc_deadline - started) / 1e9)
+                        finally:
+                            timing['sdk_await_completed_ns'] = sample_performance_ns()
                         item['raw'] = json.loads(json.dumps(raw, allow_nan=False))
                         if monotonic_ns() >= rpc_deadline:
                             raise TimeoutError('late_read')
@@ -173,6 +185,7 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
             report['authorization_expired'] = isinstance(error, ReadAuthorizationExpired)
         finally:
             report['clock_anchor_completed'] = sample_clock_anchor()
+            report['performance_anchor_completed'] = sample_performance_anchor()
             report['completed_utc'] = utc()
             report['completed_ns'] = monotonic_ns()
             try:

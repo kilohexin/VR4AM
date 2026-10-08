@@ -10,6 +10,8 @@ from typing import Any, Literal
 
 from scipy.spatial.transform import Rotation
 
+from app.recording.clock_anchor import sample_performance_ns
+
 from app.config import TELEOP_SINGULARITY_GUARD_RAD, LebaiSettings
 from app.robots.base import (
     BackendCommandError,
@@ -532,14 +534,20 @@ class RealLebaiAdapter:
                 "requested_ns": lock_requested_ns,
                 "acquired_ns": None,
                 "wait_ns": None,
+                "diagnostic_timing": {
+                    "clock": "time.perf_counter_ns", "requested_ns": sample_performance_ns(),
+                    "acquired_ns": None,
+                },
             }
             try:
                 async with self._sdk_lock:
+                    lock_timing["diagnostic_timing"]["acquired_ns"] = sample_performance_ns()
                     lock_acquired_ns = self._clock()
                     lock_timing["acquired_ns"] = lock_acquired_ns
                     lock_timing["wait_ns"] = lock_acquired_ns - lock_requested_ns
                     await self._call_stop_rpc(client, "stop_move", diagnostics)
             finally:
+                lock_timing["diagnostic_timing"]["completed_ns"] = sample_performance_ns()
                 if lock_timing["acquired_ns"] is None:
                     lock_timing["wait_ns"] = self._clock() - lock_requested_ns
         except asyncio.CancelledError:

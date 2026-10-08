@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from app.recording.clock_anchor import sample_clock_anchor
+from app.recording.clock_anchor import sample_clock_anchor, sample_performance_anchor
 
 
 class RecorderUnavailable(RuntimeError):
@@ -283,6 +283,7 @@ class CommissioningRecorder:
         }
         if kind in {"session_started", "session_ended"}:
             entry["clock_anchor"] = sample_clock_anchor()
+            entry["performance_anchor"] = sample_performance_anchor()
         try:
             json.dumps(entry, allow_nan=False)
         except (TypeError, ValueError, OverflowError):
