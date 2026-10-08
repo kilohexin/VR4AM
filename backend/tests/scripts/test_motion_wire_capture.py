@@ -220,10 +220,39 @@ def test_ready_receipt_binds_actual_capture_and_approval_before_child(module,can
         assert receipt['config_sha256']==candidate['config_sha256']
         assert receipt['approved_preview_sha256']==candidate['approval']['sha256']
         assert receipt['component_id']==3
-        assert receipt['filter_name'].startswith('VR4ArmMotionStop_')
+        assert receipt['filter_name'].startswith(module.FILTER_PREFIX)
         return original(*args)
     native.motion=check
     assert execute(module,candidate,native)['acquisition_complete']
+
+
+def test_filter_name_is_fully_visible_in_observed_pktmon_name_column(module, candidate):
+    # Windows listed the first 23 characters plus "..." for a 28-char name;
+    # the earlier 26-char readonly name was displayed in full. Keep full-name
+    # comparison and make the generated name fit that observed column.
+    native = FakeNative()
+    original = native.command
+    def displayed(args):
+        value = original(args)
+        if args == ['filter', 'list'] and value != 'EMPTY':
+            fields = value.split()
+            if len(fields[1]) > 26:
+                fields[1] = fields[1][:23] + '...'
+            return ' '.join(fields)
+        return value
+    native.command = displayed
+    report = execute(module, candidate, native)
+    assert report['acquisition_complete']
+    assert len(report['episode_filter_name']) <= 26
+    suffix = report['episode_filter_name'].rsplit('_', 1)[1]
+    assert len(suffix) == 12 and all(value in '0123456789abcdef' for value in suffix)
+    assert sum(call[0] == 'motion' for call in native.calls) == 1
+
+
+def test_truncated_filter_display_is_not_accepted_as_full_ownership(module, candidate):
+    name = 'VR4ArmMotionStop_8a52ed2d299e'
+    displayed = '1 VR4ArmMotionStop_8a52ed2... TCP 192.0.2.1 3031'
+    assert not module.owns_filters(displayed, candidate, name)
 
 
 @pytest.mark.parametrize('key,value', [('max_joint_speed_radps', .5), ('max_tcp_step_m', True), ('max_tcp_speed_mps', 0)])

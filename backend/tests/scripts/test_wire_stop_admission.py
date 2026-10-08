@@ -41,13 +41,13 @@ def context(tmp_path,monkeypatch):
          authorization_expires_utc=(datetime.now(UTC)+timedelta(minutes=10)).isoformat(),
          execute_once=True,confirm=child.capture.CONFIRM)
     receipt=dict(config_sha256=plan['config_sha256'],approved_preview_sha256=args.approved_preview_sha256,
-                 component_id=3,filter_name='VR4ArmMotionStop_000000000001')
+                 component_id=3,filter_name='VR4ArmStop_000000000001')
     (output/'capture-ready.json').write_text(json.dumps(receipt),encoding='utf-8')
     class LocalCapture:
         admin=True
         def command(self,args):
             if args==['status']: return 'Log file: '+str(output/'capture.etl')
-            if args==['filter','list']: return '1 VR4ArmMotionStop_000000000001 TCP 192.0.2.1 3031'
+            if args==['filter','list']: return '1 VR4ArmStop_000000000001 TCP 192.0.2.1 3031'
             pytest.fail('unexpected local capture operation')
         def existing_rpc_connections(self): return 0
     monkeypatch.setattr(child.capture,'Native',LocalCapture)
@@ -65,6 +65,36 @@ async def test_child_invalid_admission_never_enters_sdk_factory(context,failure)
     async def forbidden(_): pytest.fail('SDK factory must not run')
     with pytest.raises(ValueError):
         await child.run_once(args,client_factory=forbidden)
+    assert not (args.output/'motion-admission.json').exists()
+
+
+@pytest.mark.parametrize('problem', ['truncated_display', 'foreign_filter', 'bad_nonce', 'legacy_long_name'])
+async def test_full_short_filter_identity_is_required_before_sdk_factory(context, monkeypatch, problem):
+    child, args = context
+    from app.commissioning import smoke
+    local_type = child.capture.Native
+    if problem in ('bad_nonce', 'legacy_long_name'):
+        receipt = json.loads((args.output/'capture-ready.json').read_text(encoding='utf-8'))
+        receipt['filter_name'] = ('VR4ArmStop_' + 'g'*12 if problem == 'bad_nonce'
+                                  else 'VR4ArmMotionStop_000000000001')
+        (args.output/'capture-ready.json').write_text(json.dumps(receipt), encoding='utf-8')
+    else:
+        class ChangedFilters(local_type):
+            def command(self, values):
+                text = super().command(values)
+                if values == ['filter', 'list']:
+                    if problem == 'truncated_display':
+                        return '1 VR4ArmStop_000000... TCP 192.0.2.1 3031'
+                    return text + '\n2 VR4ArmStop_000000000002 TCP 192.0.2.1 3031'
+                return text
+        monkeypatch.setattr(child.capture, 'Native', ChangedFilters)
+    async def fake_workflow(options, client_factory, *, before_motion):
+        await client_factory('192.0.2.1')
+    monkeypatch.setattr(smoke, 'run_smoke', fake_workflow)
+    async def forbidden(_):
+        pytest.fail('incomplete or foreign filter identity must not enter SDK factory')
+    with pytest.raises(ValueError):
+        await child.run_once(args, client_factory=forbidden)
     assert not (args.output/'motion-admission.json').exists()
 
 

@@ -21,6 +21,9 @@ _base = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_base)
 digest_text, owns_capture = _base.digest_text, _base.owns_capture
 CONFIRM = 'I_APPROVE_ONE_Z3MM_MOTION_STOP_WIRE_CAPTURE'
+# This host displays at most 26 name characters in `pktmon filter list`.
+# Keep the 12-hex nonce and full-name ownership checks; never trust ellipses.
+FILTER_PREFIX = 'VR4ArmStop_'
 ACTION = dict(axis='z', distance_m=.003, early_stop_on_motion=True, observe_stop_seconds=2.0)
 CAPS = dict(max_tcp_speed_mps=.005, max_tcp_rotation_radps=.05, max_tcp_acceleration_mps2=.02,
             max_tcp_angular_acceleration_radps2=.1, max_joint_speed_radps=.05,
@@ -163,7 +166,7 @@ def execute(plan, native, *, confirm, approved_preview, approved_preview_sha256,
                   config_sha256=plan['config_sha256'], runtime_hashes=plan['runtime_hashes'],
                   approved_preview_sha256=approved_preview_sha256,
                   authorization_expires_utc=authorization_expires_utc,
-                  episode_filter_name='VR4ArmMotionStop_' + uuid4().hex[:12])
+                  episode_filter_name=FILTER_PREFIX + uuid4().hex[:12])
     attempted = False
     def stop_unknown():
         report.update(robot_stop_unknown=True, operator_attention_required=True)

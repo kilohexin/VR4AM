@@ -33,7 +33,7 @@ def checked_capture(args, plan, *, before_connection=False):
             or receipt.get('approved_preview_sha256') != args.approved_preview_sha256
             or type(receipt.get('component_id')) is not int or receipt['component_id'] != plan['component_id']
             or type(receipt.get('filter_name')) is not str
-            or re.fullmatch('VR4ArmMotionStop_[a-f0-9]{12}',receipt['filter_name']) is None):
+            or re.fullmatch(re.escape(capture.FILTER_PREFIX) + '[a-f0-9]{12}',receipt['filter_name']) is None):
         raise ValueError('capture_ready_receipt_not_bound')
     native = capture.Native()
     if not native.admin:
