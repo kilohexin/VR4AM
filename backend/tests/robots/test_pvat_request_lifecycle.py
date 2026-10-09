@@ -4,13 +4,17 @@ import pytest
 
 from app.robots.base import BackendCommandError
 from app.robots.lebai_pump import PvatRequest
+from app.robots.lebai_observer_window import ObserverWindow
 from tests.robots.test_lebai_adapter_control import _connected_control_adapter, _target
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('outcome', ['returned', 'timeout', 'cancelled', 'error'])
-async def test_inflight_pvat_is_audited_even_when_invalidated(outcome):
+@pytest.mark.parametrize('observer_enabled', [True, False])
+async def test_inflight_pvat_is_audited_even_when_invalidated(outcome, observer_enabled):
     adapter, client, clock = await _connected_control_adapter()
+    if observer_enabled:
+        adapter._observer_window = ObserverWindow(.02)
     events = []
     lock_states = []
     entered = asyncio.Event()
@@ -34,6 +38,7 @@ async def test_inflight_pvat_is_audited_even_when_invalidated(outcome):
     task = asyncio.create_task(adapter._send_target(request))
     try:
         await asyncio.wait_for(entered.wait(), 1)
+        assert adapter._observer_window.active is observer_enabled
         adapter._pump.invalidate()
         if outcome == 'cancelled':
             task.cancel()
@@ -44,6 +49,7 @@ async def test_inflight_pvat_is_audited_even_when_invalidated(outcome):
                 release.set()
             await task
         records = [e for e in events if e['kind'] == 'sdk_request_lifecycle']
+        assert not adapter._observer_window.active
         assert len(records) == 1
         assert lock_states == [False]
         record = records[0]

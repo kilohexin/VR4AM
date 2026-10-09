@@ -11,6 +11,7 @@ from typing import Any, Literal
 from scipy.spatial.transform import Rotation
 
 from app.recording.clock_anchor import sample_performance_ns
+from app.robots.lebai_observer_window import ObserverWindow
 
 from app.config import TELEOP_SINGULARITY_GUARD_RAD, LebaiSettings
 from app.robots.base import (
@@ -147,6 +148,7 @@ class RealLebaiAdapter:
         pump_clock: Callable[[], float] | None = None,
         pump_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         stop_diagnostic_sampling: bool = False,
+        observer_wait_s: float = 0.0,
     ) -> None:
         self.settings = settings
         self._client_factory = client_factory
@@ -158,6 +160,7 @@ class RealLebaiAdapter:
         self._backend_label = backend_label
         self._client: LebaiClientProtocol | None = None
         self._sdk_lock = asyncio.Lock()
+        self._observer_window = ObserverWindow(observer_wait_s)
         self._stop_lock = asyncio.Lock()
         self._disconnecting = 0
         self._stop_transaction: StopTransaction | None = None
@@ -277,6 +280,7 @@ class RealLebaiAdapter:
             raise
 
     async def disconnect(self) -> None:
+        self._observer_window.release_all()
         # Revoke pending gripper calls even when no motion needs a stop RPC.
         self._gripper_revocation_generation += 1
         self._disconnecting += 1
@@ -416,6 +420,7 @@ class RealLebaiAdapter:
                 raise BackendCommandError("sdk_call_failed:set_claw") from None
 
     async def stop(self, reason: StopReason) -> None:
+        self._observer_window.release_all()
         if self.settings.mode == "readonly":
             return
         async with self._stop_lock:
@@ -671,6 +676,7 @@ class RealLebaiAdapter:
         *,
         from_cancelled_stop: bool = False,
     ) -> None:
+        self._observer_window.release_all()
         if self._latched_fault not in {"stop_unverified", "stop_incomplete"}:
             self._latched_fault = "stop_unverified"
         self._latched_fault_from_cancelled_stop = from_cancelled_stop
@@ -686,6 +692,7 @@ class RealLebaiAdapter:
         preserve_fault: bool = False,
         from_cancelled_stop: bool = False,
     ) -> None:
+        self._observer_window.release_all()
         if not preserve_fault:
             self._latch_unverified_stop(
                 from_cancelled_stop=from_cancelled_stop,
@@ -869,7 +876,21 @@ class RealLebaiAdapter:
     async def get_state(self) -> RobotStateMessage:
         if self._pump.fault is not None and self._latched_fault is None:
             raise self._pump.fault
-        snapshot = await self._read_snapshot(read_purpose="state")
+        observer_timing = None
+        if (self._observer_window.max_wait_s > 0 and self._latched_fault is None
+                and not self._disconnecting and not self._stop_lock.locked()):
+            observer_timing = {
+                "clock": "time.perf_counter_ns", "alignment_verified": False,
+                "budget_s": self._observer_window.max_wait_s,
+                "requested_ns": sample_performance_ns(),
+            }
+            await self._observer_window.wait()
+            observer_timing["completed_ns"] = sample_performance_ns()
+            if self._pump.fault is not None and self._latched_fault is None:
+                raise self._pump.fault
+        snapshot = await self._read_snapshot(
+            read_purpose="state", observer_timing=observer_timing,
+        )
         robot_state = (
             BackendState.FAULT
             if self._latched_fault is not None
@@ -968,6 +989,12 @@ class RealLebaiAdapter:
         lifecycle: dict[str, object] = {}
         error_code: str | None = None
         cancelled = False
+        observer_lease = (
+            self._observer_window.begin()
+            if (self._pump.is_current(request.generation)
+                and self._latched_fault is None and not self._disconnecting
+                and not self._stop_lock.locked()) else None
+        )
         try:
             await self._send_target_impl(request, lifecycle)
         except asyncio.CancelledError:
@@ -980,6 +1007,7 @@ class RealLebaiAdapter:
             error_code = "pvat_pump_failed"
             raise
         finally:
+            self._observer_window.finish(observer_lease)
             if request.completion is not None:
                 request.completion._resolve(
                     "cancelled" if cancelled else "failed" if error_code else
@@ -1022,7 +1050,7 @@ class RealLebaiAdapter:
         }
         snapshot = await self._read_snapshot(read_purpose="motion")
         performance_timing["snapshot_finished_ns"] = sample_performance_ns()
-        performance_timing["snapshot_timing"] = dict(snapshot.diagnostic_timing or {})
+        performance_timing["snapshot_timing"] = copy.deepcopy(snapshot.diagnostic_timing or {})
         snapshot_finished_ns = self._clock()
         if not self._pump.is_current(request.generation):
             return
@@ -1274,7 +1302,7 @@ class RealLebaiAdapter:
                 },
                 "diagnostic_timing": {
                     **performance_timing,
-                    "snapshot_timing": dict(snapshot.diagnostic_timing or {}),
+                    "snapshot_timing": copy.deepcopy(snapshot.diagnostic_timing or {}),
                 },
                 "command_id": request.command_id,
                 "requested_tcp": request.target.model_dump(),
@@ -1670,6 +1698,7 @@ class RealLebaiAdapter:
     async def _read_snapshot(
         self, *, emit_kinematics: bool = True, include_raw_kinematics: bool = False,
         read_purpose: str = "unspecified",
+        observer_timing: dict[str, object] | None = None,
     ) -> LebaiSnapshot:
         client = self._client
         if client is None:
@@ -1679,6 +1708,8 @@ class RealLebaiAdapter:
             "clock": "time.perf_counter_ns", "alignment_verified": False,
             "requested_ns": sample_performance_ns(),
         }
+        if observer_timing is not None:
+            performance_timing["observer_window"] = dict(observer_timing)
         read_requested_ns = self._clock()
         read_generation = self._pump.generation
         async with self._sdk_lock:
@@ -1899,7 +1930,7 @@ class RealLebaiAdapter:
             "snapshot_read_completed_ns": snapshot.read_completed_ns,
             "snapshot_read_purpose": snapshot.read_purpose,
             "snapshot_lock_wait_ms": snapshot.sdk_lock_wait_ms,
-            "diagnostic_timing": dict(snapshot.diagnostic_timing or {}),
+            "diagnostic_timing": copy.deepcopy(snapshot.diagnostic_timing or {}),
             "raw_robot_state": snapshot.raw_robot_state,
             "robot_state": snapshot.robot_state.value,
             "estop": snapshot.estop,
