@@ -60,6 +60,15 @@ _POSITION_MOTION_PROGRESS_M = 0.0001
 _POSITION_MOTION_MAX_GAP_NS = 200_000_000
 
 
+def _next_motion_cycle(
+    previous_deadline_s: float, period_s: float,
+    cycle_started_s: float, tick_finished_s: float,
+) -> tuple[float, float]:
+    """Spend the remaining cycle budget; discard missed waiting slots."""
+    deadline_s = max(previous_deadline_s + period_s, cycle_started_s)
+    return deadline_s, max(0.0, deadline_s - tick_finished_s)
+
+
 @dataclass(frozen=True)
 class _MotionActionResult:
     reached_state: RobotStateMessage | None
@@ -372,7 +381,10 @@ async def _run_motion_action(
                 # approval after that await; never relax adapter freshness.
                 await control.backend.get_state()
                 (before_motion_commit or before_motion)()
+            cadence_clock = asyncio.get_running_loop().time
+            next_cycle_deadline_s = cadence_clock()
             for _ in range(maximum_frames):
+                cycle_started_s = cadence_clock()
                 cycle_started_ns = clock.now_ns()
                 latest.publish(
                     target_frame.model_copy(
@@ -386,7 +398,12 @@ async def _run_motion_action(
                 await control.tick()
                 tick_finished_ns = clock.now_ns()
                 sequence += 1
-                await asyncio.sleep(period_s)
+                next_cycle_deadline_s, cycle_delay_s = _next_motion_cycle(
+                    next_cycle_deadline_s, period_s, cycle_started_s,
+                    cadence_clock(),
+                )
+                # Keep the await even when late: yield to the pump/stop tasks.
+                await asyncio.sleep(cycle_delay_s)
                 sleep_finished_ns = clock.now_ns()
                 current = await control.backend.get_state()
                 state_finished_ns = clock.now_ns()
@@ -398,6 +415,7 @@ async def _run_motion_action(
                         "sleep_ms": (sleep_finished_ns - tick_finished_ns) / 1_000_000,
                         "state_read_ms": (state_finished_ns - sleep_finished_ns) / 1_000_000,
                         "cycle_to_state_ms": (state_finished_ns - cycle_started_ns) / 1_000_000,
+                        "scheduled_sleep_ms": cycle_delay_s * 1000,
                     },
                     state_finished_ns,
                 )

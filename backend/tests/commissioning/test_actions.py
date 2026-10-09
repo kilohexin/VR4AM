@@ -31,6 +31,41 @@ CONFIG = ROOT / "config" / "fake-lebai.yaml"
 
 
 @pytest.mark.asyncio
+async def test_motion_cadence_skips_wait_consumed_by_slow_state_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.commissioning import smoke
+
+    client = FakeLebaiClient.idle()
+    original_read = client.get_kin_data
+
+    async def slow_read():
+        await asyncio.sleep(0.025)
+        return await original_read()
+
+    client.get_kin_data = slow_read
+    monkeypatch.setattr(smoke, "COMMISSIONING_LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr(smoke, "COMMISSIONING_MOTION_TIMEOUT_S", 0.12)
+    with pytest.raises(RuntimeError, match="^smoke_early_stop_not_reproduced$"):
+        await run_smoke(
+            SmokeOptions(
+                _control_config(tmp_path), TranslationAction("z", 0.003),
+                REAL_ROBOT_CONFIRMATION, early_stop_on_motion=True,
+            ),
+            AsyncMock(return_value=client),
+        )
+    events = [json.loads(line) for p in (tmp_path / "logs").glob("*/session.jsonl")
+              for line in p.read_text(encoding="utf-8").splitlines()]
+    cycles = [x for x in events if x["kind"] == "smoke_cycle_timing"]
+    assert len(cycles) >= 2
+    assert all(x["scheduled_sleep_ms"] == 0 for x in cycles[1:])
+    methods = [call[0] for call in client.write_calls]
+    assert "stop_sys" not in methods
+    first_stop = methods.index("stop_move")
+    assert "move_pvat" not in methods[first_stop + 1:]
+
+
+@pytest.mark.asyncio
 async def test_stability_wait_preserves_stop_fault_instead_of_timing_out() -> None:
     state = RobotStateMessage(
         server_mono_ns=1, mode="FAULT", robot_state=BackendState.HOLD,
