@@ -88,7 +88,7 @@ async def test_full_short_filter_identity_is_required_before_sdk_factory(context
                     return text + '\n2 VR4ArmStop_000000000002 TCP 192.0.2.1 3031'
                 return text
         monkeypatch.setattr(child.capture, 'Native', ChangedFilters)
-    async def fake_workflow(options, client_factory, *, before_motion):
+    async def fake_workflow(options, client_factory, *, before_motion, before_motion_commit=None):
         await client_factory('192.0.2.1')
     monkeypatch.setattr(smoke, 'run_smoke', fake_workflow)
     async def forbidden(_):
@@ -105,7 +105,7 @@ async def test_fixed_options_factory_rechecks_and_unique_admission_prevents_seco
     async def factory(ip):
         connections.append(ip)
         return object()
-    async def fake_workflow(options,client_factory,*,before_motion):
+    async def fake_workflow(options,client_factory,*,before_motion,before_motion_commit=None):
         received.append(options)
         await client_factory('192.0.2.1')
         before_motion()
@@ -123,7 +123,7 @@ async def test_fixed_options_factory_rechecks_and_unique_admission_prevents_seco
 async def test_child_expiry_is_checked_again_at_actual_factory(context,monkeypatch):
     child,args=context
     from app.commissioning import smoke
-    async def fake_workflow(options,client_factory,*,before_motion):
+    async def fake_workflow(options,client_factory,*,before_motion,before_motion_commit=None):
         args.authorization_expires_utc='2000-01-01T00:00:00Z'
         await client_factory('192.0.2.1')
     monkeypatch.setattr(smoke,'run_smoke',fake_workflow)
@@ -137,7 +137,7 @@ async def test_child_expiry_after_connection_blocks_motion_guard(context,monkeyp
     child,args=context
     from app.commissioning import smoke
     async def factory(_): return object()
-    async def fake_workflow(options,client_factory,*,before_motion):
+    async def fake_workflow(options,client_factory,*,before_motion,before_motion_commit=None):
         await client_factory('192.0.2.1')
         args.authorization_expires_utc='2000-01-01T00:00:00Z'
         before_motion()
@@ -170,6 +170,64 @@ async def test_real_child_workflow_expiry_during_setup_blocks_motion(context, mo
     assert (args.output/'motion-admission.json').exists()
 
 
+@pytest.mark.parametrize('problem', ['expired', 'config_changed'])
+async def test_final_scope_check_after_refresh_rejects_without_capture_queries(context, monkeypatch, problem):
+    child, args = context
+    from app.commissioning import smoke
+    async def factory(_): return object()
+    async def fake_workflow(options, client_factory, *, before_motion, before_motion_commit):
+        await client_factory('192.0.2.1')
+        before_motion()
+        # A state read can yield past expiry or allow local material changes.
+        if problem == 'expired':
+            args.authorization_expires_utc = '2000-01-01T00:00:00Z'
+        else:
+            args.config.write_text('backend: lebai\nreal_robot:\n  mode: readonly\n')
+        class ForbiddenQueries:
+            def __init__(self): pytest.fail('final check must not query capture tools again')
+        monkeypatch.setattr(child.capture, 'Native', ForbiddenQueries)
+        before_motion_commit()
+        pytest.fail('expired or changed material must not authorize input')
+    monkeypatch.setattr(smoke, 'run_smoke', fake_workflow)
+    with pytest.raises(ValueError):
+        await child.run_once(args, client_factory=factory)
+
+
+async def test_expiry_during_post_guard_snapshot_refresh_prevents_pvat(context, monkeypatch):
+    child, args = context
+    from app.commissioning import smoke
+    from tests.robots.fake_lebai import FakeLebaiClient
+    client = FakeLebaiClient.idle()
+    full_guard_calls = 0
+    refreshing = False
+    original_guard = child.checked_capture
+    def guard(*values, **kwargs):
+        nonlocal full_guard_calls, refreshing
+        result = original_guard(*values, **kwargs)
+        if not kwargs.get('before_connection', False):
+            full_guard_calls += 1
+            refreshing = full_guard_calls == 3
+        return result
+    monkeypatch.setattr(child, 'checked_capture', guard)
+    original_control = smoke.RobotControl
+    class ExpiringControl(original_control):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            original_read = self.backend.get_state
+            async def read():
+                result = await original_read()
+                if refreshing:
+                    args.authorization_expires_utc = '2000-01-01T00:00:00Z'
+                return result
+            self.backend.get_state = read
+    monkeypatch.setattr(smoke, 'RobotControl', ExpiringControl)
+    async def factory(_): return client
+    with pytest.raises(ValueError):
+        await child.run_once(args, client_factory=factory)
+    assert refreshing
+    assert all(call[0] == 'stop_move' for call in client.write_calls)
+
+
 @pytest.mark.parametrize('problem',['missing_receipt','receipt_hash','foreign_capture'])
 async def test_child_capture_not_owned_prevents_sdk_connection(context,monkeypatch,problem):
     child,args=context
@@ -185,7 +243,7 @@ async def test_child_capture_not_owned_prevents_sdk_connection(context,monkeypat
             def command(self,args): return 'Log file: C:/foreign/capture.etl'
             def existing_rpc_connections(self): return 0
         monkeypatch.setattr(child.capture,'Native',Foreign)
-    async def fake_workflow(options,client_factory,*,before_motion):
+    async def fake_workflow(options,client_factory,*,before_motion,before_motion_commit=None):
         await client_factory('192.0.2.1')
     monkeypatch.setattr(smoke,'run_smoke',fake_workflow)
     async def forbidden(_): pytest.fail('unowned capture must not connect')

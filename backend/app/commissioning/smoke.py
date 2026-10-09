@@ -304,6 +304,7 @@ async def _run_motion_action(
     *,
     early_stop_on_motion: bool = False,
     before_motion: Callable[[], None] | None = None,
+    before_motion_commit: Callable[[], None] | None = None,
 ) -> _MotionActionResult:
     # The released sample is deliberately ticked before arming so the
     # RobotControl session guards remain the sole authority for motion.
@@ -366,6 +367,11 @@ async def _run_motion_action(
             # frames retain the existing RobotControl guards and stop path.
             if before_motion is not None:
                 before_motion()
+                # Local capture ownership queries may outlive snapshot validity.
+                # Refresh through the normal backend path, then recheck the
+                # approval after that await; never relax adapter freshness.
+                await control.backend.get_state()
+                (before_motion_commit or before_motion)()
             for _ in range(maximum_frames):
                 cycle_started_ns = clock.now_ns()
                 latest.publish(
@@ -617,7 +623,10 @@ async def run_smoke(
     options: SmokeOptions,
     client_factory: ClientFactory = connect_real_client,
     *, before_motion: Callable[[], None] | None = None,
+    before_motion_commit: Callable[[], None] | None = None,
 ) -> SmokeResult:
+    if before_motion_commit is not None and before_motion is None:
+        raise ValueError("motion_commit_guard_requires_full_guard")
     _validate_stop_rpc_diagnostics(options.stop_rpc_diagnostics, options.action)
     _validate_early_stop_on_motion(options.early_stop_on_motion, options.action)
     validate_observation_seconds(options.observe_stop_seconds)
@@ -777,6 +786,7 @@ async def run_smoke(
                 options.action,
                 early_stop_on_motion=options.early_stop_on_motion,
                 before_motion=before_motion,
+                before_motion_commit=before_motion_commit,
             )
         elif isinstance(options.action, HomeAction):
             latest.publish(_frame(1, grip=False), clock.now_ns())

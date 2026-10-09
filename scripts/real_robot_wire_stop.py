@@ -75,12 +75,18 @@ async def run_once(args, client_factory=None):
         current = checked_scope(args)
         checked_capture(args,current)
 
+    def commit_motion():
+        # After the fresh state await, validate local scope/hash/expiry without
+        # repeating the slow native capture queries that aged the snapshot.
+        checked_scope(args)
+
     old_root = smoke.COMMISSIONING_LOG_ROOT
     smoke.COMMISSIONING_LOG_ROOT = plan['output']/'sessions'
     try:
         await smoke.run_smoke(SmokeOptions(args.config,TranslationAction('z',.003),REAL_ROBOT_CONFIRMATION,
                                           observe_stop_seconds=2.,stop_rpc_diagnostics=True,early_stop_on_motion=True),
-                              admitted_connect,before_motion=admit_motion)
+                              admitted_connect,before_motion=admit_motion,
+                              before_motion_commit=commit_motion)
     finally:
         smoke.COMMISSIONING_LOG_ROOT = old_root
     return 0

@@ -139,6 +139,47 @@ async def test_wire_admission_guard_runs_after_preflight_before_motion_inputs(tm
     assert all(call[0]=='stop_move' for call in client.write_calls)
 
 
+@pytest.mark.parametrize('commit_delay', [None, 0, .55])
+async def test_slow_first_target_local_guard_refreshes_snapshot_before_submission(tmp_path, monkeypatch, commit_delay):
+    """Reproduce the field's 500 ms local-query gap, with a fake robot only."""
+    import time
+    from app.commissioning import smoke
+    client = FakeLebaiClient.idle()
+    guard_calls = 0
+    def local_guard():
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 3:
+            time.sleep(.55)
+    commit_calls = 0
+    def final_scope_guard():
+        nonlocal commit_calls
+        commit_calls += 1
+        assert guard_calls == 3
+        if commit_delay:
+            time.sleep(commit_delay)
+    monkeypatch.setattr(smoke, 'COMMISSIONING_LOG_ROOT', tmp_path/'logs')
+    monkeypatch.setattr(smoke, 'COMMISSIONING_MOTION_TIMEOUT_S', .12)
+    with pytest.raises(RuntimeError, match='smoke_early_stop_not_reproduced'):
+        await run_smoke(SmokeOptions(_control_config(tmp_path), TranslationAction('z', .003),
+                                    REAL_ROBOT_CONFIRMATION, early_stop_on_motion=True),
+                        AsyncMock(return_value=client), before_motion=local_guard,
+                        before_motion_commit=None if commit_delay is None else final_scope_guard)
+    events = [json.loads(line) for p in (tmp_path/'logs').glob('*/session.jsonl')
+              for line in p.read_text(encoding='utf-8').splitlines()]
+    assert any(call[0] == 'move_pvat' for call in client.write_calls) == (not commit_delay)
+    assert any(e.get('reason') == 'robot_state_stale' for e in events) == bool(commit_delay)
+    assert commit_calls == int(commit_delay is not None)
+
+
+async def test_commit_callback_requires_full_guard_before_connecting(tmp_path):
+    factory = AsyncMock()
+    with pytest.raises(ValueError, match='motion_commit_guard_requires_full_guard'):
+        await run_smoke(SmokeOptions(_control_config(tmp_path), TranslationAction('z', .003),
+                                    REAL_ROBOT_CONFIRMATION), factory, before_motion_commit=lambda: None)
+    factory.assert_not_awaited()
+
+
 @pytest.mark.parametrize('wait_stage', ['gripper_read', 'initial_state'])
 async def test_wire_admission_rechecks_after_real_motion_setup_waits(tmp_path, monkeypatch, wait_stage):
     from app.commissioning import smoke
