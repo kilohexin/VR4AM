@@ -54,6 +54,15 @@ async def test_inflight_pvat_is_audited_even_when_invalidated(outcome):
         assert record['completed_ns'] >= record['started_ns']
         assert len(record['p']) == len(record['v']) == len(record['a']) == 6
         assert record['horizon_s'] == .08
+        diagnostic = record['diagnostic_timing']
+        assert diagnostic['clock'] == 'time.perf_counter_ns'
+        assert diagnostic['alignment_verified'] is False
+        stages = ['handler_started_ns', 'snapshot_finished_ns',
+                  'command_lock_requested_ns', 'command_lock_acquired_ns',
+                  'sdk_await_started_ns', 'sdk_await_completed_ns']
+        values = [diagnostic[key] for key in stages]
+        assert all(type(value) is int for value in values)
+        assert values == sorted(values)
         assert not any(e['kind'] == 'pvat_sent' for e in events)
     finally:
         release.set()
@@ -61,11 +70,50 @@ async def test_inflight_pvat_is_audited_even_when_invalidated(outcome):
 
 
 @pytest.mark.asyncio
-async def test_successful_requests_have_distinct_ids_and_keep_sent_events():
+@pytest.mark.parametrize('performance_available', [True, False])
+async def test_snapshot_performance_evidence_does_not_change_sdk_reads(
+    monkeypatch, performance_available,
+):
+    adapter, client, clock = await _connected_control_adapter()
+    try:
+        client.read_calls.clear()
+        baseline = await adapter._read_snapshot(emit_kinematics=False)
+        expected_reads = list(client.read_calls)
+        client.read_calls.clear()
+        if not performance_available:
+            monkeypatch.setattr('app.robots.lebai_adapter.sample_performance_ns', lambda: None)
+        snapshot = await adapter._read_snapshot(emit_kinematics=False)
+        assert client.read_calls == expected_reads
+        assert snapshot.captured_ns == baseline.captured_ns
+        assert snapshot.actual_q == baseline.actual_q
+        diagnostic = snapshot.diagnostic_timing
+        assert diagnostic['clock'] == 'time.perf_counter_ns'
+        assert diagnostic['alignment_verified'] is False
+        values = [diagnostic[key] for key in
+                  ['requested_ns', 'acquired_ns', 'completed_ns']]
+        if performance_available:
+            assert values == sorted(values)
+        else:
+            assert values == [None, None, None]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('performance_available', [True, False])
+@pytest.mark.parametrize('mutate_sent_event', [True, False])
+async def test_successful_requests_have_distinct_ids_and_keep_sent_events(
+    monkeypatch, performance_available, mutate_sent_event,
+):
     adapter, client, clock = await _connected_control_adapter()
     events = []
+    if not performance_available:
+        monkeypatch.setattr('app.robots.lebai_adapter.sample_performance_ns', lambda: None)
 
     async def record(event, timestamp):
+        if mutate_sent_event and event['kind'] == 'pvat_sent':
+            event['diagnostic_timing']['handler_started_ns'] = -1
+            event['diagnostic_timing']['snapshot_timing']['requested_ns'] = -1
         events.append(event)
 
     adapter._event_callback = record
@@ -82,6 +130,13 @@ async def test_successful_requests_have_distinct_ids_and_keep_sent_events():
         assert records[0]['request_id'] != records[1]['request_id']
         assert all(e['rpc_outcome'] == 'returned' and not e['invalidated'] for e in records)
         assert len([e for e in events if e['kind'] == 'pvat_sent']) == 2
+        for record in records:
+            diag = record['diagnostic_timing']
+            assert diag['handler_started_ns'] != -1
+            assert diag['snapshot_timing']['requested_ns'] != -1
+            if not performance_available:
+                assert diag['sdk_await_started_ns'] is None
+                assert diag['sdk_await_completed_ns'] is None
     finally:
         await adapter.disconnect()
 

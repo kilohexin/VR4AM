@@ -97,6 +97,7 @@ class LebaiSnapshot:
     raw_kinematics: dict[str, Any] | None = None
     raw_running_motion: object | None = None
     motion_state: str | None = None
+    diagnostic_timing: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -1015,7 +1016,13 @@ class RealLebaiAdapter:
         self, request: PvatRequest, lifecycle: dict[str, object]
     ) -> None:
         handler_started_ns = self._clock()
+        performance_timing: dict[str, object] = {
+            "clock": "time.perf_counter_ns", "alignment_verified": False,
+            "handler_started_ns": sample_performance_ns(),
+        }
         snapshot = await self._read_snapshot(read_purpose="motion")
+        performance_timing["snapshot_finished_ns"] = sample_performance_ns()
+        performance_timing["snapshot_timing"] = dict(snapshot.diagnostic_timing or {})
         snapshot_finished_ns = self._clock()
         if not self._pump.is_current(request.generation):
             return
@@ -1045,8 +1052,10 @@ class RealLebaiAdapter:
         last_recoverable_error: str | None = None
         diagnostic_events: list[dict[str, object]] = []
         lock_requested_ns = self._clock()
+        performance_timing["command_lock_requested_ns"] = sample_performance_ns()
         async with self._sdk_lock:
             lock_acquired_ns = self._clock()
+            performance_timing["command_lock_acquired_ns"] = sample_performance_ns()
             selected: _SolvedCandidate | None = None
             if not self._pump.is_current(request.generation):
                 return
@@ -1109,6 +1118,7 @@ class RealLebaiAdapter:
                 self._ensure_command_snapshot_fresh(snapshot)
                 self._begin_motion_epoch()
                 pvat_started = self._clock()
+                performance_timing["candidate_finished_ns"] = sample_performance_ns()
                 if self._last_pvat_started_ns is not None:
                     previous_pvat_gap_ms = (
                         pvat_started - self._last_pvat_started_ns
@@ -1117,6 +1127,7 @@ class RealLebaiAdapter:
                 # Local call evidence, not an acknowledgement of remote execution.
                 lifecycle.update({
                     "kind": "sdk_request_lifecycle",
+                    "diagnostic_timing": performance_timing,
                     "method": "move_pvat",
                     "request_id": self._sdk_request_id,
                     "command_id": request.command_id,
@@ -1132,6 +1143,7 @@ class RealLebaiAdapter:
                 })
                 self._pvat_request_id_in_flight = self._sdk_request_id
                 try:
+                    performance_timing["sdk_await_started_ns"] = sample_performance_ns()
                     await asyncio.wait_for(
                         client.move_pvat(
                             list(selected.point.q),
@@ -1159,6 +1171,7 @@ class RealLebaiAdapter:
                         "sdk_call_failed:move_pvat"
                     ) from None
                 finally:
+                    performance_timing["sdk_await_completed_ns"] = sample_performance_ns()
                     self._pvat_request_id_in_flight = None
                     lifecycle["completed_ns"] = self._clock()
                     lifecycle["invalidated"] = not self._pump.is_current(
@@ -1258,6 +1271,10 @@ class RealLebaiAdapter:
                     "send_sdk": pvat_latency_ms,
                     "handler_to_send_complete": (send_finished_ns - handler_started_ns) / 1_000_000,
                     "snapshot_age_at_send": (pvat_started - snapshot.captured_ns) / 1_000_000,
+                },
+                "diagnostic_timing": {
+                    **performance_timing,
+                    "snapshot_timing": dict(snapshot.diagnostic_timing or {}),
                 },
                 "command_id": request.command_id,
                 "requested_tcp": request.target.model_dump(),
@@ -1658,9 +1675,14 @@ class RealLebaiAdapter:
         if client is None:
             raise BackendCommandError("robot_disconnected")
         latencies: dict[str, float] = {}
+        performance_timing: dict[str, object] = {
+            "clock": "time.perf_counter_ns", "alignment_verified": False,
+            "requested_ns": sample_performance_ns(),
+        }
         read_requested_ns = self._clock()
         read_generation = self._pump.generation
         async with self._sdk_lock:
+            performance_timing["acquired_ns"] = sample_performance_ns()
             captured_ns = self._clock()
             sdk_lock_wait_ms = (captured_ns - read_requested_ns) / 1_000_000
             deadline_ns = captured_ns + _SNAPSHOT_READ_TIMEOUT_NS
@@ -1735,6 +1757,7 @@ class RealLebaiAdapter:
                     motion_state = raw_motion_state.strip().upper()
                 if motion_state == "FINISHED":
                     running_motion = None
+        performance_timing["completed_ns"] = sample_performance_ns()
         read_completed_ns = self._clock()
         if not isinstance(raw_kin, Mapping):
             raise BackendCommandError("invalid_sdk_kin_data")
@@ -1785,6 +1808,7 @@ class RealLebaiAdapter:
             raw_kinematics=raw_kinematics,
             raw_running_motion=raw_running,
             motion_state=motion_state,
+            diagnostic_timing=performance_timing,
         )
         self._snapshot = snapshot
         # A queued/in-flight old read must not replace current public evidence.
@@ -1875,6 +1899,7 @@ class RealLebaiAdapter:
             "snapshot_read_completed_ns": snapshot.read_completed_ns,
             "snapshot_read_purpose": snapshot.read_purpose,
             "snapshot_lock_wait_ms": snapshot.sdk_lock_wait_ms,
+            "diagnostic_timing": dict(snapshot.diagnostic_timing or {}),
             "raw_robot_state": snapshot.raw_robot_state,
             "robot_state": snapshot.robot_state.value,
             "estop": snapshot.estop,
