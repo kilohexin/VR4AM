@@ -130,7 +130,7 @@ async def test_display_reads_between_motion_snapshot_and_ik_add_command_wait(rea
 
 
 @pytest.mark.parametrize("readers", [0, 1, 3])
-async def test_display_reads_queued_before_stop_delay_rpc_creation(readers):
+async def test_display_reads_queued_before_stop_do_not_delay_rpc_creation(readers):
     async with delayed_adapter() as (adapter, client, clock, events, tasks, _, _release):
         await adapter._sdk_lock.acquire()
         try:
@@ -146,14 +146,14 @@ async def test_display_reads_queued_before_stop_delay_rpc_creation(readers):
         await _wait_until(lambda: any(e["kind"] == "stop_rpc_lifecycle" for e in events))
         diagnostic = next(e for e in events if e["kind"] == "stop_diagnostics")
         rpc = next(e for e in events if e["kind"] == "stop_rpc_lifecycle")
-        assert diagnostic["stop_move_lock"]["wait_ns"] == readers * 16_000_000
-        assert rpc["started_ns"] == readers * 16_000_000
+        assert diagnostic["stop_move_lock"]["wait_ns"] == 0
+        assert rpc["started_ns"] == 0
         assert rpc["deadline_ns"] - rpc["started_ns"] == 200_000_000
         assert rpc["outcome"] == "returned"
         assert client.write_calls == [("stop_move",)]
         assert diagnostic["samples"]
         assert all(s["read_purpose"] == "stop_verification" for s in diagnostic["samples"])
-        print("CONTENTION_RESULT " + json.dumps(dict(order="display_before_stop", readers=readers, stop_lock_wait_ms=readers * 16)))
+        print("CONTENTION_RESULT " + json.dumps(dict(order="display_before_stop", readers=readers, stop_lock_wait_ms=0)))
 
 
 async def test_newer_display_snapshot_cannot_refresh_an_old_motion_snapshot():

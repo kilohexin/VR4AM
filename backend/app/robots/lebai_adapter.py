@@ -12,6 +12,7 @@ from scipy.spatial.transform import Rotation
 
 from app.recording.clock_anchor import sample_performance_ns
 from app.robots.lebai_observer_window import ObserverWindow
+from app.robots.lebai_sdk_lock import SdkLock
 
 from app.config import TELEOP_SINGULARITY_GUARD_RAD, LebaiSettings
 from app.robots.base import (
@@ -171,7 +172,7 @@ class RealLebaiAdapter:
         self._event_callback = event_callback
         self._backend_label = backend_label
         self._client: LebaiClientProtocol | None = None
-        self._sdk_lock = asyncio.Lock()
+        self._sdk_lock = SdkLock()
         self._observer_window = ObserverWindow(observer_wait_s)
         self._stop_lock = asyncio.Lock()
         self._disconnecting = 0
@@ -565,7 +566,7 @@ class RealLebaiAdapter:
                 },
             }
             try:
-                async with self._sdk_lock:
+                async with self._sdk_lock.stop_priority():
                     lock_timing["diagnostic_timing"]["acquired_ns"] = sample_performance_ns()
                     lock_acquired_ns = self._clock()
                     lock_timing["acquired_ns"] = lock_acquired_ns

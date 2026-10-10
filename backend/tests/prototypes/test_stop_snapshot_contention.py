@@ -4,18 +4,19 @@ import asyncio
 import pytest
 
 from app.robots.base import StopReason
+from app.robots.lebai_sdk_lock import SdkLock
 from tests.robots.test_lebai_adapter_control import _connected_control_adapter
 
 
-class ObservedLock(asyncio.Lock):
+class ObservedLock(SdkLock):
     def __init__(self):
         super().__init__()
         self.contended = asyncio.Event()
 
-    async def acquire(self):
+    async def acquire(self, *, stop=False):
         if self.locked():
             self.contended.set()
-        return await super().acquire()
+        return await super().acquire(stop=stop)
 
 
 @pytest.mark.parametrize("cancel_reader", [False, True])

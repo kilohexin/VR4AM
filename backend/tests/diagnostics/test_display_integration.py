@@ -287,7 +287,7 @@ async def test_three_display_consumers_compare_stop_lock_wait(passive):
         await _wait_until(lambda: any(e["kind"] == "stop_rpc_lifecycle" for e in events))
         diagnostic = next(e for e in events if e["kind"] == "stop_diagnostics")
         rpc = next(e for e in events if e["kind"] == "stop_rpc_lifecycle")
-        assert diagnostic["stop_move_lock"]["wait_ns"] == (0 if passive else 48_000_000)
+        assert diagnostic["stop_move_lock"]["wait_ns"] == 0
         assert rpc["deadline_ns"] - rpc["started_ns"] == 200_000_000
         assert client.read_calls.count("get_kin_data") - before == len(diagnostic["samples"]) + readers
         assert client.write_calls == [("stop_move",)]

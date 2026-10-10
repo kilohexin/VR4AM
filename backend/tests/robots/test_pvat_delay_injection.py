@@ -5,6 +5,7 @@ import pytest
 
 from app.recording.commissioning import CommissioningRecorder
 from app.robots.lebai_pump import PvatRequest
+from app.robots.lebai_sdk_lock import SdkLock
 from tests.robots.test_lebai_adapter_control import _connected_control_adapter, _target
 
 
@@ -30,7 +31,7 @@ async def test_injected_delay_is_attributed_to_its_software_phase(monkeypatch, p
             performance[0] += DELAY_NS
         return await original_ik(*args)
 
-    class InjectedLock(asyncio.Lock):
+    class InjectedLock(SdkLock):
         count = 0
 
         async def __aenter__(self):

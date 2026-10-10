@@ -397,7 +397,7 @@ async def test_contention_comparison_includes_one_authoritative_observation(shar
                 assert event["timing_ms"]["handler_to_send_complete"] == 32 + reads * 16
                 assert client.read_calls.count("get_kin_data") - before == reads + 1
             else:
-                assert event["stop_move_lock"]["wait_ns"] == reads * 16_000_000
+                assert event["stop_move_lock"]["wait_ns"] == 0
                 assert client.read_calls.count("get_kin_data") - before == reads + len(event["samples"])
                 rpc = next(e for e in events if e["kind"] == "stop_rpc_lifecycle")
                 assert rpc["deadline_ns"] - rpc["started_ns"] == 200_000_000
