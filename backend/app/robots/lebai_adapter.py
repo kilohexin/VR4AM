@@ -398,6 +398,8 @@ class RealLebaiAdapter:
             raise BackendCommandError("robot_disconnected")
         if not self._preflight_ready:
             raise BackendCommandError("preflight_not_ready")
+        generation = self._pump.generation
+        read_floor = self._snapshot_read_sequence
         snapshot = await self._read_snapshot(read_purpose="gripper")
         boundary_fault = self._motion_boundary_fault(snapshot)
         if boundary_fault is not None:
@@ -429,6 +431,23 @@ class RealLebaiAdapter:
                 or gripper_generation != self._gripper_revocation_generation
             ):
                 raise BackendCommandError("preflight_not_ready")
+            try:
+                if not self._pump.is_current(generation):
+                    raise BackendCommandError("preflight_not_ready")
+                self._check_known_snapshot_fault(client, generation)
+                # New health cannot erase a known fault or extend this
+                # request's original read lifetime while it waits for the lock.
+                self._ensure_command_snapshot_fresh(snapshot)
+                current = self._dispatch_snapshot(client, generation, read_floor)
+                boundary_fault = self._motion_boundary_fault(current)
+                if boundary_fault is not None:
+                    raise _MotionSnapshotFault(boundary_fault)
+            except _MotionSnapshotFault as error:
+                self._preflight_ready = False
+                raise BackendCommandError(f"preflight_not_ready:{error}") from None
+            except BackendCommandError:
+                self._preflight_ready = False
+                raise
             try:
                 await asyncio.wait_for(
                     client.set_claw(gripper.max_force_percent, amplitude),
