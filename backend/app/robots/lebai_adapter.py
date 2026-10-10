@@ -111,6 +111,18 @@ class _SolvedCandidate:
     advances_target: bool
 
 
+@dataclass
+class _SnapshotRead:
+    client: LebaiClientProtocol | None
+    generation: int
+    sequence: int = 0
+    snapshot: LebaiSnapshot | None = None
+
+
+class _MotionSnapshotFault(BackendCommandError):
+    """A known read fault; process stopping after releasing the SDK lock."""
+
+
 def _pvat_point_inputs(snapshot: LebaiSnapshot, point: PvatPoint) -> dict[str, object]:
     # Saved input evidence only: no new SDK reads, clocks, or planning choices.
     # Each event gets separate lists so recorder mutation cannot cross records.
@@ -171,6 +183,9 @@ class RealLebaiAdapter:
         self._sdk_diagnostic_tasks: set[asyncio.Task[None]] = set()
         self._sdk_diagnostics_dropped = 0
         self._snapshot: LebaiSnapshot | None = None
+        self._snapshot_read_sequence = 0
+        self._latest_snapshot_read: _SnapshotRead | None = None
+        self._snapshot_read_fault: tuple[_SnapshotRead, str] | None = None
         self._motion_observation: JointObservation | None = None
         self._capabilities = SdkCapabilities(names=())
         self._command_id: int | None = None
@@ -275,6 +290,8 @@ class RealLebaiAdapter:
         except BaseException:
             self._client = None
             self._snapshot = None
+            self._latest_snapshot_read = None
+            self._snapshot_read_fault = None
             self._motion_observation = None
             self._preflight_ready = False
             raise
@@ -314,6 +331,8 @@ class RealLebaiAdapter:
             await asyncio.sleep(0)
         self._reset_pvat_history()
         self._snapshot = None
+        self._latest_snapshot_read = None
+        self._snapshot_read_fault = None
         self._motion_observation = None
         self._client = None
         self._motion_accepted = False
@@ -996,7 +1015,10 @@ class RealLebaiAdapter:
                 and not self._stop_lock.locked()) else None
         )
         try:
-            await self._send_target_impl(request, lifecycle)
+            try:
+                await self._send_target_impl(request, lifecycle)
+            except _MotionSnapshotFault as error:
+                await self._stop_for_motion_fault(str(error))
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -1044,37 +1066,24 @@ class RealLebaiAdapter:
         self, request: PvatRequest, lifecycle: dict[str, object]
     ) -> None:
         handler_started_ns = self._clock()
+        read_floor = self._snapshot_read_sequence
+        client = self._client
         performance_timing: dict[str, object] = {
             "clock": "time.perf_counter_ns", "alignment_verified": False,
             "handler_started_ns": sample_performance_ns(),
         }
         snapshot = await self._read_snapshot(read_purpose="motion")
+        motion_snapshot = snapshot
         performance_timing["snapshot_finished_ns"] = sample_performance_ns()
         performance_timing["snapshot_timing"] = copy.deepcopy(snapshot.diagnostic_timing or {})
         snapshot_finished_ns = self._clock()
         if not self._pump.is_current(request.generation):
             return
-        self._ensure_command_snapshot_fresh(snapshot)
-        client = self._client
-        if client is None:
-            raise BackendCommandError("robot_disconnected")
+        self._check_known_snapshot_fault(client, request.generation)
         runtime_fault = self._runtime_motion_fault(snapshot)
         if runtime_fault is not None:
-            self._latched_fault = runtime_fault
-            self._preflight_ready = False
-            self._motion_accepted = False
-            self._pump.invalidate()
-            self._reset_pvat_history()
-            try:
-                await self.stop(StopReason.FAULT)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                if self._latched_fault == runtime_fault:
-                    self._latched_fault = "stop_unverified"
-            if self._latched_fault == runtime_fault:
-                raise BackendCommandError(runtime_fault)
-            raise BackendCommandError(self._latched_fault or "stop_unverified")
+            await self._stop_for_motion_fault(runtime_fault)
+        self._ensure_command_snapshot_fresh(snapshot)
         accepted: tuple[_SolvedCandidate, float] | None = None
         previous_pvat_gap_ms: float | None = None
         last_recoverable_error: str | None = None
@@ -1087,6 +1096,14 @@ class RealLebaiAdapter:
             selected: _SolvedCandidate | None = None
             if not self._pump.is_current(request.generation):
                 return
+            self._check_known_snapshot_fault(client, request.generation)
+            # A newer observation supplies current inputs, not permission to
+            # extend the lifetime of this motion request's original read.
+            self._ensure_command_snapshot_fresh(motion_snapshot)
+            snapshot = self._dispatch_snapshot(client, request.generation, read_floor)
+            performance_timing["dispatch_snapshot_timing"] = copy.deepcopy(snapshot.diagnostic_timing or {})
+            performance_timing["dispatch_snapshot_read_purpose"] = snapshot.read_purpose
+            performance_timing["dispatch_snapshot_changed"] = snapshot is not motion_snapshot
             if request.catch_up_from is not None:
                 # An earlier in-flight advance can change acceptance after
                 # admission. Never silently pursue that different target.
@@ -1143,6 +1160,8 @@ class RealLebaiAdapter:
             if selected is not None:
                 if not self._pump.is_current(request.generation):
                     return
+                self._check_known_snapshot_fault(client, request.generation)
+                self._ensure_command_snapshot_fresh(motion_snapshot)
                 self._ensure_command_snapshot_fresh(snapshot)
                 self._begin_motion_epoch()
                 pvat_started = self._clock()
@@ -1293,16 +1312,17 @@ class RealLebaiAdapter:
                 "previous_pvat_gap_ms": previous_pvat_gap_ms,
                 "timing_ms": {
                     "snapshot_read": (snapshot_finished_ns - handler_started_ns) / 1_000_000,
-                    "snapshot_lock_wait": snapshot.sdk_lock_wait_ms,
+                    "snapshot_lock_wait": motion_snapshot.sdk_lock_wait_ms,
                     "command_lock_wait": (lock_acquired_ns - lock_requested_ns) / 1_000_000,
                     "candidate_selection": (pvat_started - lock_acquired_ns) / 1_000_000,
                     "send_sdk": pvat_latency_ms,
                     "handler_to_send_complete": (send_finished_ns - handler_started_ns) / 1_000_000,
                     "snapshot_age_at_send": (pvat_started - snapshot.captured_ns) / 1_000_000,
+                    "motion_snapshot_age_at_send": (pvat_started - motion_snapshot.captured_ns) / 1_000_000,
                 },
                 "diagnostic_timing": {
                     **performance_timing,
-                    "snapshot_timing": copy.deepcopy(snapshot.diagnostic_timing or {}),
+                    "snapshot_timing": copy.deepcopy(motion_snapshot.diagnostic_timing or {}),
                 },
                 "command_id": request.command_id,
                 "requested_tcp": request.target.model_dump(),
@@ -1324,6 +1344,61 @@ class RealLebaiAdapter:
             }
         )
         await self._emit_candidate_diagnostics(diagnostic_events, request)
+
+    async def _stop_for_motion_fault(self, fault: str) -> None:
+        # Must be called outside the SDK lock: stop acquires that same lock.
+        self._latched_fault = fault
+        self._preflight_ready = False
+        self._motion_accepted = False
+        self._pump.invalidate()
+        self._reset_pvat_history()
+        try:
+            await self.stop(StopReason.FAULT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if self._latched_fault == fault:
+                self._latched_fault = "stop_unverified"
+        if self._latched_fault == fault:
+            raise BackendCommandError(fault)
+        raise BackendCommandError(self._latched_fault or "stop_unverified")
+
+    def _remember_snapshot_fault(self, read: _SnapshotRead, fault: str) -> None:
+        if (self._pump.running and read.sequence and read.client is self._client
+                and read.generation == self._pump.generation):
+            previous = self._snapshot_read_fault
+            # Keep the first known fault for this prepared generation. A read
+            # already in flight when motion enters also belongs to this fence;
+            # later health or recorder errors cannot erase its source.
+            if (previous is None or previous[0].client is not read.client
+                    or previous[0].generation != read.generation):
+                self._snapshot_read_fault = (read, fault)
+
+    def _check_known_snapshot_fault(
+        self, client: LebaiClientProtocol | None, generation: int,
+    ) -> None:
+        if client is None or client is not self._client:
+            raise BackendCommandError("robot_disconnected")
+        fault = self._snapshot_read_fault
+        if (fault is not None and fault[0].client is client
+                and fault[0].generation == generation):
+            raise _MotionSnapshotFault(fault[1])
+
+    def _dispatch_snapshot(
+        self, client: LebaiClientProtocol, generation: int, read_floor: int,
+    ) -> LebaiSnapshot:
+        self._check_known_snapshot_fault(client, generation)
+        read = self._latest_snapshot_read
+        if (read is None or read.client is not client or read.generation != generation
+                or read.sequence <= read_floor or read.snapshot is None):
+            raise _MotionSnapshotFault("robot_state_stale")
+        self._ensure_command_snapshot_fresh(read.snapshot)
+        fault_code = self._runtime_motion_fault(read.snapshot)
+        if fault_code is not None:
+            raise _MotionSnapshotFault(fault_code)
+        if not self._tcp_matches(read.snapshot.tcp_setting):
+            raise _MotionSnapshotFault("tcp_mismatch")
+        return read.snapshot
 
     async def _emit_candidate_diagnostics(
         self, events: list[dict[str, object]], request: PvatRequest,
@@ -1700,6 +1775,24 @@ class RealLebaiAdapter:
         read_purpose: str = "unspecified",
         observer_timing: dict[str, object] | None = None,
     ) -> LebaiSnapshot:
+        read = _SnapshotRead(self._client, self._pump.generation)
+        try:
+            return await self._read_snapshot_impl(
+                read, emit_kinematics=emit_kinematics,
+                include_raw_kinematics=include_raw_kinematics,
+                read_purpose=read_purpose, observer_timing=observer_timing,
+            )
+        except BaseException as error:
+            self._remember_snapshot_fault(
+                read, str(error) if isinstance(error, BackendCommandError) else "robot_state_stale",
+            )
+            raise
+
+    async def _read_snapshot_impl(
+        self, read: _SnapshotRead, *, emit_kinematics: bool,
+        include_raw_kinematics: bool, read_purpose: str,
+        observer_timing: dict[str, object] | None,
+    ) -> LebaiSnapshot:
         client = self._client
         if client is None:
             raise BackendCommandError("robot_disconnected")
@@ -1713,6 +1806,9 @@ class RealLebaiAdapter:
         read_requested_ns = self._clock()
         read_generation = self._pump.generation
         async with self._sdk_lock:
+            self._snapshot_read_sequence += 1
+            read.sequence = self._snapshot_read_sequence
+            self._latest_snapshot_read = read
             performance_timing["acquired_ns"] = sample_performance_ns()
             captured_ns = self._clock()
             sdk_lock_wait_ms = (captured_ns - read_requested_ns) / 1_000_000
@@ -1842,6 +1938,12 @@ class RealLebaiAdapter:
             diagnostic_timing=performance_timing,
         )
         self._snapshot = snapshot
+        read.snapshot = snapshot
+        fault = self._runtime_motion_fault(snapshot)
+        if fault is None and not self._tcp_matches(snapshot.tcp_setting):
+            fault = "tcp_mismatch"
+        if fault is not None:
+            self._remember_snapshot_fault(read, fault)
         # A queued/in-flight old read must not replace current public evidence.
         # The previous sample may remain visible with its original generation.
         if client is self._client and read_generation == self._pump.generation:

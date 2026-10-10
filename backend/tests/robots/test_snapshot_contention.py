@@ -122,7 +122,10 @@ async def test_display_reads_between_motion_snapshot_and_ik_add_command_wait(rea
         assert timing["snapshot_read"] == 16
         assert timing["command_lock_wait"] == readers * 16
         assert timing["handler_to_send_complete"] == 32 + readers * 16
-        assert timing["snapshot_age_at_send"] == 24 + readers * 16
+        assert timing["motion_snapshot_age_at_send"] == 24 + readers * 16
+        # Complete intervening reads supply actual dispatch inputs; the
+        # original motion age remains independently bounded and recorded.
+        assert timing["snapshot_age_at_send"] == 24
         print("CONTENTION_RESULT " + json.dumps(dict(order="display_between_read_and_ik", readers=readers, timing_ms=timing)))
 
 
