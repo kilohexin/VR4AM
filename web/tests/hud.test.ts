@@ -103,6 +103,45 @@ describe('Chinese simulator HUD', () => {
     expect(document.body.textContent).not.toContain('READY · 等待解锁');
   });
 
+  it.each(['stop_unverified', 'stop_incomplete'])('reports %s as unconfirmed stopping even with IDLE telemetry', (fault) => {
+    const hud = new Hud(document.querySelector('#app')!);
+    hud.setRuntimeIdentity('LEBAI', 'control');
+    hud.setRobotState({
+      mode: 'DISARMED', backendState: 'IDLE', sampleAgeMs: 1, fault,
+      constraint: null, recoveryPhase: null,
+    });
+    expect(document.querySelector('[data-field="mode"]')?.textContent).toBe('FAULT · 故障');
+    expect(document.querySelector('[data-field="fault"]')?.textContent).toContain('未确认');
+    expect(document.querySelector('[data-field="fault"]')?.textContent).not.toContain('仿真');
+    expect(document.querySelector('[data-row="fault"]')?.getAttribute('data-active')).toBe('true');
+  });
+
+  it('describes DISARMED as a control lock even when telemetry still says MOVING', () => {
+    const hud = new Hud(document.querySelector('#app')!);
+    hud.setRobotState({
+      mode: 'DISARMED', backendState: 'MOVING', sampleAgeMs: 1, fault: null,
+      constraint: null, recoveryPhase: null,
+    });
+    expect(document.querySelector('[data-field="mode"]')?.textContent).toBe('DISARMED · 控制已锁定');
+    expect(document.querySelector('[data-field="backend-state"]')?.textContent).toBe('MOVING');
+    expect(document.body.textContent).not.toContain('已停止');
+  });
+
+  it.each(['stop_unverified', 'stop_incomplete'])('retains the last %s warning through disconnect and reconnect until a new state', (fault) => {
+    const hud = new Hud(document.querySelector('#app')!);
+    hud.setRobotState({mode: 'FAULT', backendState: 'FAULT', sampleAgeMs: 1, fault, constraint: null, recoveryPhase: null});
+    for (const status of ['disconnected', 'reconnecting', 'unreachable', 'occupied', 'connected'] as const) {
+      hud.setConnectionStatus(status === 'occupied' ? {state: status, message: '占用'} : {state: status});
+      expect(document.querySelector('[data-field="fault"]')?.textContent).toContain('未确认');
+      expect(document.querySelector('[data-row="fault"]')?.getAttribute('data-active')).toBe('true');
+    }
+    expect(document.querySelector('[data-field="fault"]')?.textContent).toContain('上次');
+    expect(document.querySelector('[data-field="backend-state"]')?.textContent).toBe('DISCONNECTED');
+    hud.setRobotState({mode: 'READY', backendState: 'IDLE', sampleAgeMs: 1, fault: null, constraint: null, recoveryPhase: null});
+    expect(document.querySelector('[data-field="fault"]')?.textContent).toBe('无');
+    expect(document.querySelector('[data-row="fault"]')?.getAttribute('data-active')).toBe('false');
+  });
+
   it('shows self-collision as an amber soft constraint instruction', () => {
     const hud = new Hud(document.querySelector('#app')!);
 

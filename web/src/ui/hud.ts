@@ -49,6 +49,7 @@ export class Hud {
   private readonly constraintValue: HTMLElement;
   private readonly constraintRow: HTMLElement;
   private readonly sceneNotice: HTMLElement;
+  private lastFault: string | null = null;
 
   constructor(root: Element) {
     root.classList.add('operator-console');
@@ -158,8 +159,11 @@ export class Hud {
       this.backendStateValue.dataset.tone = 'muted';
       this.sampleAgeValue.textContent = formatMilliseconds(null);
       this.setLatency(null, null);
-      this.faultValue.textContent = readableFault(null);
-      this.faultRow.dataset.active = 'false';
+      const stopWarning = isStopFailure(this.lastFault);
+      this.faultValue.textContent = stopWarning
+        ? `上次：${readableFault(this.lastFault)}，等待新的后端状态`
+        : readableFault(null);
+      this.faultRow.dataset.active = stopWarning ? 'true' : 'false';
       this.constraintValue.textContent = '无';
       this.constraintRow.dataset.active = 'false';
       this.setController({tracking: false, grip: false, trigger: 0});
@@ -198,6 +202,7 @@ export class Hud {
   }
 
   setRobotState(state: RobotHudState): void {
+    this.lastFault = state.fault;
     const displayMode: TeleopMode = state.fault ? 'FAULT' : state.mode;
     this.modeValue.textContent = `${displayMode} · ${modeLabel(displayMode)}`;
     this.modeValue.parentElement?.setAttribute('data-tone', modeTone(displayMode));
@@ -255,7 +260,7 @@ function modeLabel(mode: TeleopMode): string {
     HOLD: '保持',
     STALE: '数据陈旧',
     FAULT: '故障',
-    DISARMED: '已停止',
+    DISARMED: '控制已锁定',
   };
   return labels[mode];
 }
@@ -280,6 +285,7 @@ export function readableFault(fault: string | null): string {
     ik_joint_jump: '逆解关节变化过大',
     ik_failure_persistent: '逆解连续失败',
     stop_unverified: '停止状态未确认',
+    stop_incomplete: '停止完成未确认',
     invalid_joint_count: '机器人关节数据无效',
     ik_unreachable: '目标不可达',
     ik_singular: '目标接近奇异位形',
@@ -290,6 +296,10 @@ export function readableFault(fault: string | null): string {
     backend_error: '仿真后端错误',
   };
   return labels[fault] ?? '未知仿真故障';
+}
+
+export function isStopFailure(fault: string | null): boolean {
+  return fault === 'stop_unverified' || fault === 'stop_incomplete';
 }
 
 function runtimeIdentityLabel(backend: RuntimeBackend | null, realMode: RealRobotMode | null): string {

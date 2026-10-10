@@ -7,6 +7,8 @@ import {
   VrSafetyPanel,
 } from '../src/scenes/vrSafetyPanel';
 import type {ArmSafetyPhase, ArmSafetySnapshot} from '../src/ui/armPanel';
+import {ArmPanel} from '../src/ui/armPanel';
+import type {ClientControlMessage} from '../src/protocol/messages';
 
 const state = (phase: ArmSafetyPhase): ArmSafetySnapshot => ({
   phase,
@@ -28,8 +30,8 @@ describe('VR safety presentation', () => {
     ['locked', '未解锁', '松开 Grip 后按 A', 'muted', 'shield'],
     ['pending', '解锁中', '等待仿真确认', 'cyan', 'shield'],
     ['armed', '已解锁', '按住 Grip 移动', 'cyan', 'shield'],
-    ['active', '运动中', '松开 Grip 停止 · B 紧急停止', 'cyan', 'shield'],
-    ['stopped', '已停止', '保持 Grip 松开：A 解锁，B 回 Home', 'red', 'stop'],
+    ['active', '运动中', '松开 Grip 请求停止 · B 请求停止', 'cyan', 'shield'],
+    ['stopped', '控制已锁定', '保持 Grip 松开，确认现场静止后再操作', 'red', 'stop'],
     ['fault', '无法在线复位', '保持安全距离，检查 L Master/急停', 'red', 'warning'],
     ['disconnected', '连接已中断', '保持 Grip 松开', 'red', 'warning'],
   ] as const)('maps %s to readable text and a shape', (phase, title, instruction, tone, shape) => {
@@ -166,9 +168,58 @@ describe('VR safety presentation', () => {
       faultRecoverable: false,
     }, true)).toMatchObject({
       title: '数据陈旧',
-      instruction: '机械臂已停止，请检查网络',
+      instruction: '保持 Grip 松开，停止状态未确认',
       tone: 'red',
     });
+  });
+
+  it.each(['stop_unverified', 'stop_incomplete'])('keeps %s explicit ahead of Home progress and IDLE summary', (fault) => {
+    const view = describeVrSafety({
+      ...state('fault'), fault, homePending: true, recoveryPhase: 'stopping',
+    }, false, {
+      backend: 'LEBAI', realRobotMode: 'control', actualTcp: null,
+      gripper: 0, latencyMs: 1, hardwareVerified: false,
+    });
+    expect(view.title).toContain('未确认');
+    expect(view.instruction).toBe('保持 Grip 松开，确认现场静止；异常按急停');
+    expect(view.title).not.toContain('Home');
+    expect(view.tone).toBe('red');
+    expect(view.shape).toBe('warning');
+  });
+
+  it('does not turn a local disarm request into a physical standstill claim', () => {
+    const container = document.createElement('div');
+    const sent: ClientControlMessage[] = [];
+    const panel = new ArmPanel(container, (message) => sent.push(message));
+    panel.setConnected(true);
+    panel.setMode('ARMED');
+    panel.setMode('ACTIVE');
+    expect(panel.safetyState.phase).toBe('active');
+    panel.requestDisarm('xr');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].type).toBe('disarm');
+    expect(panel.safetyState.mode).toBe('ACTIVE');
+    const view = describeVrSafety(panel.safetyState, true);
+    expect(view.title).toBe('控制已锁定');
+    expect(view.instruction).toContain('确认现场静止');
+    expect(view.instruction).not.toContain('Home');
+    expect(view.title).not.toContain('已停止');
+  });
+
+  it.each(['stop_unverified', 'stop_incomplete'])('keeps the last %s warning while disconnected', (fault) => {
+    const container = document.createElement('div');
+    const sent: ClientControlMessage[] = [];
+    const panel = new ArmPanel(container, (message) => sent.push(message));
+    panel.setConnected(true);
+    panel.setFault(fault);
+    panel.setConnectionStatus({state: 'reconnecting'});
+    panel.observeGrip(false);
+    const view = describeVrSafety(panel.safetyState, true);
+    expect(view.title).toBe('正在重连');
+    expect(view.instruction).toContain('上次停止未确认');
+    expect(view.instruction).not.toContain('Home');
+    expect(panel.requestArm('xr')).toBe(false);
+    expect(sent).toHaveLength(0);
   });
 
   it('blocks normal operation with a readable unsupported-controller message', () => {
@@ -281,7 +332,7 @@ describe('VR safety sprite resources', () => {
       'A解锁 B停止/Home · 右Grip末端 Trigger夹爪 · 左摇杆平台/按下归零 · 左Grip+摇杆升降',
     );
     expect(describeVrSafety(state('stopped'), true).instruction).toBe(
-      '保持 Grip 松开：A 解锁，B 回 Home',
+      '保持 Grip 松开，确认现场静止后再操作',
     );
     const texture = (panel.sprite.material as THREE.SpriteMaterial).map as THREE.CanvasTexture;
     expect(texture.image).toMatchObject({width: 1024, height: 256});

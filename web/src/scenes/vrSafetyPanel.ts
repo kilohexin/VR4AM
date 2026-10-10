@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type {Pose, RealRobotMode, RuntimeBackend} from '../protocol/messages';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
-import {readableConstraint, readableFault} from '../ui/hud';
+import {isStopFailure, readableConstraint, readableFault} from '../ui/hud';
 
 const CONTROL_FOOTER = 'A解锁 B停止/Home · 右Grip末端 Trigger夹爪 · 左摇杆平台/按下归零 · 左Grip+摇杆升降' as const;
 
@@ -46,20 +46,27 @@ function describeSafety(
   state: ArmSafetySnapshot,
   controllerSupported: boolean | null,
 ): VrSafetyCore {
+  const lastStopWarning = isStopFailure(state.fault);
+  const connectionInstruction = lastStopWarning
+    ? '上次停止未确认，保持 Grip 松开并检查现场'
+    : '保持 Grip 松开';
   if (state.connectionState === 'occupied') {
-    return presentation('控制端已被占用', '请关闭电脑端网页后重试', 'red', 'warning');
+    return presentation('控制端已被占用', lastStopWarning ? connectionInstruction : '请关闭电脑端网页后重试', 'red', 'warning');
   }
   if (state.connectionState === 'unreachable') {
-    return presentation('后端不可达', '保持 Grip 松开', 'red', 'warning');
+    return presentation('后端不可达', connectionInstruction, 'red', 'warning');
   }
   if (state.connectionState === 'disconnected') {
-    return presentation('连接已中断', '保持 Grip 松开', 'red', 'warning');
+    return presentation('连接已中断', connectionInstruction, 'red', 'warning');
   }
   if (state.connectionState === 'reconnecting') {
-    return presentation('正在重连', '保持 Grip 松开', 'red', 'warning');
+    return presentation('正在重连', connectionInstruction, 'red', 'warning');
   }
   if (!state.connected) {
-    return presentation('连接已中断', '保持 Grip 松开', 'red', 'warning');
+    return presentation('连接已中断', connectionInstruction, 'red', 'warning');
+  }
+  if (lastStopWarning) {
+    return presentation(readableFault(state.fault), '保持 Grip 松开，确认现场静止；异常按急停', 'red', 'warning');
   }
   if (state.homePending || state.recoveryPhase) {
     return presentation('正在返回 Home', '请保持 Grip 松开', 'red', 'warning');
@@ -74,7 +81,7 @@ function describeSafety(
     return presentation('无法在线复位', '保持安全距离，检查 L Master/急停', 'red', 'warning');
   }
   if (state.mode === 'STALE') {
-    return presentation('数据陈旧', '机械臂已停止，请检查网络', 'red', 'warning');
+    return presentation('数据陈旧', '保持 Grip 松开，停止状态未确认', 'red', 'warning');
   }
   if (controllerSupported === false) {
     return presentation('手柄不受支持', '当前配置不支持 A/B 安全控制', 'red', 'warning');
@@ -97,13 +104,13 @@ function describeSafety(
     );
   }
   if (state.phase === 'active') {
-    return presentation('运动中', '松开 Grip 停止 · B 紧急停止', 'cyan', 'shield');
+    return presentation('运动中', '松开 Grip 请求停止 · B 请求停止', 'cyan', 'shield');
   }
   if (state.phase === 'armed') {
     return presentation('已解锁', '按住 Grip 移动', 'cyan', 'shield');
   }
   if (state.phase === 'stopped') {
-    return presentation('已停止', '保持 Grip 松开：A 解锁，B 回 Home', 'red', 'stop');
+    return presentation('控制已锁定', '保持 Grip 松开，确认现场静止后再操作', 'red', 'stop');
   }
   return presentation('未解锁', '松开 Grip 后按 A', 'muted', 'shield');
 }
