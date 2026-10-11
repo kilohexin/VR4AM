@@ -103,19 +103,26 @@ class LatestVRFrame:
     def __init__(self) -> None:
         self._value: ReceivedFrame | None = None
         self._retired_sessions: set[str] = set()
+        self._grip_release_count = 0
 
     def publish(self, frame: VRFrame, received_ns: int) -> None:
-        if self._value is None:
-            self._value = ReceivedFrame(frame, received_ns)
-            return
-        current_session = self._value.frame.session_id
-        if frame.session_id == current_session:
-            if frame.seq > self._value.frame.seq:
-                self._value = ReceivedFrame(frame, received_ns)
-            return
-        if frame.session_id not in self._retired_sessions:
-            self._retired_sessions.add(current_session)
-            self._value = ReceivedFrame(frame, received_ns)
+        if self._value is not None:
+            current = self._value.frame
+            if frame.session_id == current.session_id:
+                if frame.seq <= current.seq:
+                    return
+                if current.right.grip and not frame.right.grip:
+                    self._grip_release_count += 1
+            else:
+                if frame.session_id in self._retired_sessions:
+                    return
+                self._retired_sessions.add(current.session_id)
+        self._value = ReceivedFrame(frame, received_ns)
+
+    @property
+    def grip_release_count(self) -> int:
+        """Accepted clutch edges survive coalescing without queuing motion frames."""
+        return self._grip_release_count
 
     def snapshot(self) -> ReceivedFrame | None:
         return self._value
@@ -179,6 +186,8 @@ class RobotControl:
         self._last_gripper_sent_ns: int | None = None
         self._armed_trigger_baseline: float | None = None
         self._trigger_changed_since_arm = False
+        self._observed_grip_release_count = latest.grip_release_count
+        self._grip_stop_in_progress = False
         self._consecutive_overruns = 0
         self._deadline_rebase_requested = False
         self._deadline_compensation_ns = 0
@@ -745,7 +754,10 @@ class RobotControl:
             raise
 
     async def tick(self) -> None:
-        if self._disconnecting:
+        if (self._disconnecting or self._disarm_in_progress
+                or self._recovery_lock.locked() or self._grip_stop_in_progress):
+            return
+        if await self._consume_grip_release():
             return
         if self.target_lifecycle is None:
             await self._tick_frame()
@@ -757,6 +769,64 @@ class RobotControl:
             await self._apply_target_update()
         except (BackendCommandError, SafetyViolation) as error:
             await self._enter_fault(str(error))
+
+    async def _consume_grip_release(self) -> bool:
+        count = self.latest.grip_release_count
+        if count == self._observed_grip_release_count:
+            return False
+        self._observed_grip_release_count = count
+        received = self.latest.snapshot()
+        if (
+            self.machine.mode is not TeleopMode.ACTIVE
+            or self._fault is not None or self._loop_failed or self._shutdown_started
+            or received is None
+            or not received.frame.tracking_valid or received.frame.visibility != 'visible'
+            or self.clock.now_ns() - received.received_ns >= VR_FRAME_STALE_MS * 1_000_000
+            or (self._last_frame_id is not None and received.frame.session_id != self._last_frame_id[0])
+        ):
+            return False
+
+        self._grip_stop_in_progress = True
+        generation = self._control_generation
+        self.machine.observe_grip(False)
+        self.mapper.clear()
+        self._clear_constraint()
+        self._armed_trigger_baseline = None
+        self._trigger_changed_since_arm = False
+        try:
+            frame_id = (received.frame.session_id, received.frame.seq)
+            consume_frame = not received.frame.right.grip and frame_id != self._last_frame_id
+            if consume_frame:
+                await self.recorder.write_vr_frame(received.frame, received.received_ns)
+            recorded = await self._record_critical(
+                'state_transition', {'from': 'ACTIVE', 'to': 'HOLD'},
+            )
+            if not recorded:
+                await self._handle_recording_unavailable()
+            elif (
+                self.machine.mode is TeleopMode.HOLD
+                and generation == self._control_generation
+                and self._fault is None and not self._shutdown_started
+                and not self._disarm_in_progress and not self._disconnecting
+                and not self._recovery_lock.locked()
+            ):
+                await self._stop_backend(StopReason.GRIP_RELEASED)
+                if self.machine.mode is TeleopMode.HOLD and self._fault is None and consume_frame:
+                    # The release was accepted before stop's bounded wait. Do
+                    # not reinterpret that same frame as stale after the wait.
+                    self.last_seq = received.frame.seq
+                    self._last_frame_id = frame_id
+        except asyncio.CancelledError:
+            if self.machine.mode is TeleopMode.HOLD and not self._stop_unverified:
+                self._latch_stop_unverified(from_cancelled_stop=True)
+            raise
+        except RecorderUnavailable:
+            await self._handle_recording_unavailable()
+        except (BackendCommandError, SafetyViolation) as error:
+            await self._enter_fault(str(error))
+        finally:
+            self._grip_stop_in_progress = False
+        return True
 
     def _target_context(self) -> TargetContext:
         received = self.latest.snapshot()
@@ -859,6 +929,7 @@ class RobotControl:
                 and not self._loop_failed
                 and not self._shutdown_started
                 and self.machine.mode in {TeleopMode.ARMED, TeleopMode.ACTIVE}
+                and not (self.machine.mode is TeleopMode.ACTIVE and not received.frame.right.grip)
             ):
                 gripper_generation = self._control_generation
                 gripper_wait_ns = await self._send_latest_gripper(
@@ -971,6 +1042,8 @@ class RobotControl:
             elif previous_mode == TeleopMode.ACTIVE and self.machine.mode == TeleopMode.HOLD:
                 self.mapper.clear()
                 self._clear_constraint()
+                self._armed_trigger_baseline = None
+                self._trigger_changed_since_arm = False
                 await self._stop_backend(StopReason.GRIP_RELEASED)
             elif self.machine.mode == TeleopMode.ACTIVE and is_new_frame:
                 if self.last_target is None:
@@ -1141,6 +1214,8 @@ class RobotControl:
     def _control_generation_is_current(self, generation: int) -> bool:
         return (
             generation == self._control_generation
+            and self.latest.grip_release_count == self._observed_grip_release_count
+            and not self._grip_stop_in_progress
             and self._fault is None
             and not self._loop_failed
             and not self._shutdown_started
@@ -1266,6 +1341,7 @@ class RobotControl:
         if not self._trigger_changed_since_arm:
             # Require a deliberate press before mapping Trigger to the claw.
             # Small analog jitter or releasing a held Trigger is not intent.
+            self._armed_trigger_baseline = min(self._armed_trigger_baseline, value)
             if value - self._armed_trigger_baseline < GRIPPER_ACTIVATION_DELTA:
                 return None
             self._trigger_changed_since_arm = True

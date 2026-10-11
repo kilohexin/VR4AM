@@ -294,6 +294,11 @@ export class XRSessionController {
       this.emitFrame(context, nowMs, sample, 'visible', true, headQ);
       return;
     }
+    if (!sample.grip && context.lastSample.grip) {
+      // Preserve clutch release even if a new press arrives before 60 Hz output.
+      this.emitFrame(context, nowMs, sample, 'visible', true, headQ);
+      return;
+    }
     if (nowMs - context.lastFrameMs < FRAME_INTERVAL_MS) return;
     this.emitFrame(context, nowMs, sample, 'visible', false, headQ);
   }

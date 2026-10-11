@@ -59,11 +59,12 @@ function leftSource(thumbstickY = -0.75, thumbstickPressed = true): XRInputSourc
 function questSource(options: {
   profile?: string;
   grip?: boolean;
+  trigger?: number;
   a?: boolean;
   b?: boolean;
 } = {}): XRInputSource {
   const buttons = Array.from({length: 7}, () => ({value: 0, pressed: false}));
-  buttons[0] = {value: 0.25, pressed: false};
+  buttons[0] = {value: options.trigger ?? 0.25, pressed: false};
   buttons[1] = {value: options.grip ? 1 : 0, pressed: options.grip ?? false};
   buttons[4] = {value: options.a ? 1 : 0, pressed: options.a ?? false};
   buttons[5] = {value: options.b ? 1 : 0, pressed: options.b ?? false};
@@ -470,6 +471,38 @@ describe('XRSessionController lifecycle', () => {
     emitQuest(session, host, 151, {[button]: true});
     expect(armRequests).toHaveLength(button === 'a' ? 1 : 0);
     expect(stopRequests).toHaveLength(button === 'b' ? 1 : 0);
+  });
+
+  it('publishes a Grip release immediately even when pressed again before the next transport sample', async () => {
+    const {controller, session, host, frames, controllers, controls, locks} = setup();
+    await controller.enterVR();
+    emitQuest(session, host, 100, {grip: true, trigger: 0.3});
+    const safety = {controls: controls.length, locks: locks.length};
+
+    emitQuest(session, host, 105, {grip: false, trigger: 0.8});
+    expect(frames.map(({client_mono_ms}) => client_mono_ms)).toEqual([100, 105]);
+    expect(frames.at(-1)).toMatchObject({tracking_valid: true, right: {grip: false, trigger: 0.8}});
+    expect(controllers.at(-1)).toEqual({tracking: true, grip: false, trigger: 0.8});
+    emitQuest(session, host, 110, {grip: true, trigger: 0.8});
+    expect(frames).toHaveLength(2);
+    emitQuest(session, host, 117, {grip: true, trigger: 0.8});
+    expect(frames.map(({right}) => right.grip)).toEqual([true, false, true]);
+    expect(frames.map(({seq}) => seq)).toEqual([0, 1, 2]);
+    // Clutch release keeps HOLD/re-grip semantics, rather than requesting Disarm.
+    expect(controls).toHaveLength(safety.controls);
+    expect(locks).toHaveLength(safety.locks);
+  });
+
+  it('does not bypass transport limits repeatedly while Grip remains released', async () => {
+    const {controller, session, host, frames} = setup();
+    await controller.enterVR();
+    emitQuest(session, host, 100, {grip: true});
+    for (const time of [101, 102, 103, 104, 105, 110]) {
+      emitQuest(session, host, time, {grip: false});
+    }
+    expect(frames.map(({client_mono_ms}) => client_mono_ms)).toEqual([100, 101]);
+    emitQuest(session, host, 117, {grip: false});
+    expect(frames.map(({client_mono_ms}) => client_mono_ms)).toEqual([100, 101, 117]);
   });
 
   it('session end disarms, locks, clears input, and restores the desktop loop', async () => {
