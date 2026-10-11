@@ -212,6 +212,13 @@ class RobotControl:
         self._disconnect_stop_pending_frame = False
         self._disarm_in_progress = False
         self._disconnecting = 0
+        bind_motion_authority = getattr(backend, "bind_motion_authority", None)
+        if callable(bind_motion_authority):
+            bind_motion_authority(self._has_motion_dispatch_authority)
+
+    def _has_motion_dispatch_authority(self) -> bool:
+        context = self._target_context()
+        return context.active and context.authorized
 
     @property
     def mode(self) -> TeleopMode:

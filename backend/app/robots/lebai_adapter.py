@@ -227,6 +227,36 @@ class RealLebaiAdapter:
         self._latched_fault: str | None = None
         self._latched_fault_from_cancelled_stop = False
         self._preflight_ready = False
+        self._motion_authority: Callable[[], bool] | None = None
+
+    def bind_motion_authority(self, check: Callable[[], bool]) -> None:
+        """Gate pending teleop PVAT sends; never stop an RPC already sent.
+
+        The owner still runs its original stop transaction. Standalone callers
+        retain the existing adapter contract when no teleop owner is bound.
+        """
+        if not callable(check):
+            raise TypeError("motion_authority_must_be_callable")
+        if self._motion_authority is not None and self._motion_authority != check:
+            raise RuntimeError("motion_authority_already_bound")
+        self._motion_authority = check
+
+    def _motion_dispatch_is_current(self, request: PvatRequest) -> bool:
+        if not self._pump.is_current(request.generation):
+            return False
+        if self._motion_authority is None:
+            return True
+        try:
+            permitted = self._motion_authority() is True
+        except Exception:
+            permitted = False
+        if not permitted and request.completion is not None:
+            request.completion._invalidate()
+            request.completion._resolve(
+                "invalidated", sdk_outcome="not_started",
+                error="teleop_motion_authority_revoked",
+            )
+        return permitted
 
     @property
     def constraint(self) -> str | None:
@@ -1085,6 +1115,8 @@ class RealLebaiAdapter:
     async def _send_target_impl(
         self, request: PvatRequest, lifecycle: dict[str, object]
     ) -> None:
+        if not self._motion_dispatch_is_current(request):
+            return
         handler_started_ns = self._clock()
         read_floor = self._snapshot_read_sequence
         client = self._client
@@ -1097,7 +1129,7 @@ class RealLebaiAdapter:
         performance_timing["snapshot_finished_ns"] = sample_performance_ns()
         performance_timing["snapshot_timing"] = copy.deepcopy(snapshot.diagnostic_timing or {})
         snapshot_finished_ns = self._clock()
-        if not self._pump.is_current(request.generation):
+        if not self._motion_dispatch_is_current(request):
             return
         self._check_known_snapshot_fault(client, request.generation)
         runtime_fault = self._runtime_motion_fault(snapshot)
@@ -1114,7 +1146,7 @@ class RealLebaiAdapter:
             lock_acquired_ns = self._clock()
             performance_timing["command_lock_acquired_ns"] = sample_performance_ns()
             selected: _SolvedCandidate | None = None
-            if not self._pump.is_current(request.generation):
+            if not self._motion_dispatch_is_current(request):
                 return
             self._check_known_snapshot_fault(client, request.generation)
             # A newer observation supplies current inputs, not permission to
@@ -1173,9 +1205,7 @@ class RealLebaiAdapter:
                     if str(error) not in RECOVERABLE_IK_ERRORS:
                         raise
                     last_recoverable_error = str(error)
-            if selected is None and not self._pump.is_current(
-                request.generation
-            ):
+            if not self._motion_dispatch_is_current(request):
                 return
             if selected is not None:
                 if not self._pump.is_current(request.generation):
@@ -1183,7 +1213,6 @@ class RealLebaiAdapter:
                 self._check_known_snapshot_fault(client, request.generation)
                 self._ensure_command_snapshot_fresh(motion_snapshot)
                 self._ensure_command_snapshot_fresh(snapshot)
-                self._begin_motion_epoch()
                 pvat_started = self._clock()
                 performance_timing["candidate_finished_ns"] = sample_performance_ns()
                 if self._last_pvat_started_ns is not None:
@@ -1209,17 +1238,30 @@ class RealLebaiAdapter:
                     "point_inputs": _pvat_point_inputs(snapshot, selected.point),
                 })
                 self._pvat_request_id_in_flight = self._sdk_request_id
+
+                async def send_if_authorized() -> bool:
+                    # wait_for schedules another task: recheck inside that task,
+                    # immediately before SDK entry, with no intervening await.
+                    if not self._motion_dispatch_is_current(request):
+                        return False
+                    self._begin_motion_epoch()
+                    await client.move_pvat(
+                        list(selected.point.q), list(selected.point.qd),
+                        list(selected.point.qdd), selected.point.horizon_s,
+                    )
+                    return True
+
                 try:
                     performance_timing["sdk_await_started_ns"] = sample_performance_ns()
-                    await asyncio.wait_for(
-                        client.move_pvat(
-                            list(selected.point.q),
-                            list(selected.point.qd),
-                            list(selected.point.qdd),
-                            selected.point.horizon_s,
-                        ),
-                        timeout=0.06,
-                    )
+                    sent = await asyncio.wait_for(send_if_authorized(), timeout=0.06)
+                    if not sent:
+                        lifecycle["rpc_outcome"] = "not_started"
+                        lifecycle["revocation_reason"] = (
+                            "pump_generation_revoked"
+                            if not self._pump.is_current(request.generation)
+                            else "teleop_motion_authority_revoked"
+                        )
+                        return
                     lifecycle["rpc_outcome"] = "returned"
                 except asyncio.CancelledError:
                     lifecycle["rpc_outcome"] = "cancelled"
@@ -1241,8 +1283,9 @@ class RealLebaiAdapter:
                     performance_timing["sdk_await_completed_ns"] = sample_performance_ns()
                     self._pvat_request_id_in_flight = None
                     lifecycle["completed_ns"] = self._clock()
-                    lifecycle["invalidated"] = not self._pump.is_current(
-                        request.generation
+                    lifecycle["invalidated"] = (
+                        not self._pump.is_current(request.generation)
+                        or (request.completion is not None and request.completion.invalidated)
                     )
                 pvat_latency_ms = max(
                     0.0,

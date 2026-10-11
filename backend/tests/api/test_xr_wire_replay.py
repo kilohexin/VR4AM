@@ -51,7 +51,7 @@ class MemoryWebSocket:
 
 
 @asynccontextmanager
-async def rig(monkeypatch, strategy='legacy'):
+async def rig(monkeypatch, strategy='legacy', event_callback=None):
     fixture = json.loads((ROOT / 'schemas/fixtures/xr-grip-release-wire.json').read_text())
     latest, clock = LatestVRFrame(), FakeClock()
     fake = FakeLebaiClient.idle()
@@ -59,7 +59,7 @@ async def rig(monkeypatch, strategy='legacy'):
     factory = AsyncMock(return_value=fake)  # Never imports or connects the native SDK.
     adapter = RealLebaiAdapter(control_settings(), client_factory=factory,
         # Exercise the real selection policy with an injected fake SDK.
-        clock=clock.now_ns, sleep=clock.sleep, backend_label='LEBAI')
+        clock=clock.now_ns, sleep=clock.sleep, backend_label='LEBAI', event_callback=event_callback)
     await adapter.connect()
     pursuit = PursuitSettings(budget_ms=500, max_observation_age_ms=40,
         max_observation_gap_ms=40, position_tolerance_rad=.001,
@@ -261,3 +261,87 @@ async def test_release_stop_revokes_blocked_ik_before_any_pvat_entry(monkeypatch
                 stopping.cancel()
             with suppress(asyncio.CancelledError):
                 await stopping
+
+
+@pytest.mark.parametrize('strategy', ['legacy', 'transactional'])
+async def test_pending_ik_accepts_newer_healthy_held_frame(monkeypatch, strategy):
+    async with rig(monkeypatch, strategy) as r:
+        await activate(r, pending=True)
+        receipt = r.admissions[-1]
+        await r.feed('baseline')
+        assert r.latest.grip_release_count == 0
+        r.fake.release_ik.set()
+        result = await asyncio.wait_for(receipt.completion.wait(), 1)
+        assert result.outcome == 'sdk_returned' and not result.invalidated
+        assert result.sdk_outcome == 'returned'
+        assert [call[0] for call in r.fake.write_calls] == ['stop_move', 'set_claw', 'move_pvat']
+
+
+@pytest.mark.parametrize('strategy', ['legacy', 'transactional'])
+async def test_sdk_scheduled_task_rechecks_release_before_entry(monkeypatch, strategy):
+    events, recorded = [], asyncio.Event()
+
+    async def record(event, _timestamp):
+        if event.get('kind') == 'sdk_request_lifecycle' and event.get('command_id') == 3:
+            events.append(event)
+            recorded.set()
+
+    async with rig(monkeypatch, strategy, event_callback=record) as r:
+        await activate(r, pending=True)
+        receipt = r.admissions[-1]
+        original_wait_for = asyncio.wait_for
+        intercepted = asyncio.Event()
+
+        async def revoke_before_scheduled_send(awaitable, timeout):
+            if timeout == 0.06 and not intercepted.is_set():
+                intercepted.set()
+                # This is after the outer IK/authority check, before SDK task execution.
+                released = r.latest.snapshot().frame.model_copy(deep=True)
+                released.seq += 1
+                released.right.grip = False
+                r.latest.publish(released, r.clock.now_ns())
+            return await original_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(asyncio, 'wait_for', revoke_before_scheduled_send)
+        r.fake.release_ik.set()
+        result = await original_wait_for(receipt.completion.wait(), 1)
+        await original_wait_for(recorded.wait(), 1)
+        assert intercepted.is_set()
+        assert result.invalidated and result.sdk_outcome == 'not_started'
+        assert r.fake.write_calls == r.before_release
+        assert r.control.mode is TeleopMode.ACTIVE  # No control tick or automatic stop.
+        assert events[-1]['rpc_outcome'] == 'not_started'
+        assert events[-1]['invalidated'] is True
+        assert events[-1]['revocation_reason'] == 'teleop_motion_authority_revoked'
+
+
+@pytest.mark.parametrize('strategy', ['legacy', 'transactional'])
+@pytest.mark.parametrize('revocation', ['release', 'expired', 'tracking', 'hidden', 'new_session'])
+async def test_pending_ik_checks_live_vr_authority_without_waiting_for_tick(monkeypatch, strategy, revocation):
+    async with rig(monkeypatch, strategy) as r:
+        await activate(r, pending=True)
+        receipt = r.admissions[-1]
+        if revocation == 'release':
+            await r.feed('quick_release', 'regrip')
+            assert r.latest.grip_release_count == 1
+        elif revocation == 'expired':
+            r.clock.advance_ms(100)
+        else:
+            message = r.steps['baseline']['messages'][0]
+            if revocation == 'tracking':
+                message['tracking_valid'] = False
+            elif revocation == 'hidden':
+                message['visibility'] = 'hidden'
+            else:
+                message['session_id'] = 'replacement-synthetic-session'
+            await r.feed('baseline')
+        # Intentionally do not call control.tick: SDK dispatch has its own awaits.
+        assert r.control.mode is TeleopMode.ACTIVE
+        try:
+            r.fake.release_ik.set()
+            result = await asyncio.wait_for(receipt.completion.wait(), 1)
+            assert result.invalidated and result.sdk_outcome == 'not_started'
+            assert result.outcome == 'invalidated'
+            assert r.fake.write_calls == r.before_release
+        finally:
+            r.fake.release_ik.set()
