@@ -1,0 +1,463 @@
+{
+  "description": "Synthetic offline XR wire contract. Memory transport and fake SDK only.",
+  "session_id": "quest-wire-fixture",
+  "steps": [
+    {
+      "name": "connect",
+      "at_ms": 0,
+      "input": null,
+      "tracking": true,
+      "mode": "READY",
+      "messages": [
+        {
+          "v": 1,
+          "type": "hello",
+          "request_id": "hello-1"
+        }
+      ]
+    },
+    {
+      "name": "enter",
+      "at_ms": 80,
+      "input": null,
+      "tracking": true,
+      "mode": "DISARMED",
+      "messages": [
+        {
+          "v": 1,
+          "type": "disarm",
+          "request_id": "vr-disarm-1",
+          "client_mono_ms": 80
+        }
+      ]
+    },
+    {
+      "name": "release",
+      "at_ms": 100,
+      "input": {},
+      "tracking": true,
+      "mode": "READY",
+      "messages": [
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 0,
+          "client_mono_ms": 100,
+          "tracking_valid": true,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0.4,
+              0.5,
+              0.6
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": false,
+            "trigger": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "arm",
+      "at_ms": 120,
+      "input": {
+        "a": true
+      },
+      "tracking": true,
+      "mode": "ARMED",
+      "messages": [
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 1,
+          "client_mono_ms": 120,
+          "tracking_valid": true,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0.4,
+              0.5,
+              0.6
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": false,
+            "trigger": 0
+          }
+        },
+        {
+          "v": 1,
+          "type": "arm_request",
+          "request_id": "xr-arm_request-1"
+        }
+      ]
+    },
+    {
+      "name": "active",
+      "at_ms": 140,
+      "input": {
+        "grip": true
+      },
+      "tracking": true,
+      "mode": "ACTIVE",
+      "messages": [
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 2,
+          "client_mono_ms": 140,
+          "tracking_valid": true,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0.4,
+              0.5,
+              0.6
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": true,
+            "trigger": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "trigger",
+      "at_ms": 160,
+      "input": {
+        "grip": true,
+        "trigger": 0.5
+      },
+      "tracking": true,
+      "mode": "ACTIVE",
+      "messages": [
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 3,
+          "client_mono_ms": 160,
+          "tracking_valid": true,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0.4,
+              0.5,
+              0.6
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": true,
+            "trigger": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "name": "quick_release",
+      "at_ms": 165,
+      "input": {
+        "trigger": 1
+      },
+      "tracking": true,
+      "mode": null,
+      "messages": [
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 4,
+          "client_mono_ms": 165,
+          "tracking_valid": true,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0.4,
+              0.5,
+              0.6
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": false,
+            "trigger": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "throttled_press",
+      "at_ms": 170,
+      "input": {
+        "grip": true,
+        "trigger": 1
+      },
+      "tracking": true,
+      "mode": null,
+      "messages": []
+    },
+    {
+      "name": "regrip",
+      "at_ms": 177,
+      "input": {
+        "grip": true,
+        "trigger": 1
+      },
+      "tracking": true,
+      "mode": "HOLD",
+      "messages": [
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 5,
+          "client_mono_ms": 177,
+          "tracking_valid": true,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0.4,
+              0.5,
+              0.6
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": true,
+            "trigger": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "baseline",
+      "at_ms": 200,
+      "input": {
+        "grip": true,
+        "trigger": 1
+      },
+      "tracking": true,
+      "mode": "ACTIVE",
+      "messages": [
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 6,
+          "client_mono_ms": 200,
+          "tracking_valid": true,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0.4,
+              0.5,
+              0.6
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": true,
+            "trigger": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "trigger_release",
+      "at_ms": 220,
+      "input": {
+        "grip": true
+      },
+      "tracking": true,
+      "mode": "ACTIVE",
+      "messages": [
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 7,
+          "client_mono_ms": 220,
+          "tracking_valid": true,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0.4,
+              0.5,
+              0.6
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": true,
+            "trigger": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "trigger_repress",
+      "at_ms": 240,
+      "input": {
+        "grip": true,
+        "trigger": 0.6
+      },
+      "tracking": true,
+      "mode": "ACTIVE",
+      "messages": [
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 8,
+          "client_mono_ms": 240,
+          "tracking_valid": true,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0.4,
+              0.5,
+              0.6
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": true,
+            "trigger": 0.6
+          }
+        }
+      ]
+    },
+    {
+      "name": "tracking_loss",
+      "at_ms": 245,
+      "input": {
+        "grip": true,
+        "trigger": 0.6,
+        "a": true
+      },
+      "tracking": false,
+      "mode": "STALE",
+      "messages": [
+        {
+          "v": 1,
+          "type": "disarm",
+          "request_id": "vr-disarm-2",
+          "client_mono_ms": 245
+        },
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 9,
+          "client_mono_ms": 245,
+          "tracking_valid": false,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0,
+              0,
+              0
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": false,
+            "trigger": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "tracking_recover",
+      "at_ms": 257,
+      "input": {
+        "grip": true,
+        "trigger": 0.6,
+        "a": true
+      },
+      "tracking": true,
+      "mode": "DISARMED",
+      "messages": [
+        {
+          "v": 1,
+          "type": "vr_frame",
+          "session_id": "quest-wire-fixture",
+          "seq": 10,
+          "client_mono_ms": 257,
+          "tracking_valid": true,
+          "visibility": "visible",
+          "right": {
+            "p": [
+              0.4,
+              0.5,
+              0.6
+            ],
+            "q": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "grip": true,
+            "trigger": 0.6
+          }
+        }
+      ]
+    },
+    {
+      "name": "exit",
+      "at_ms": 280,
+      "input": null,
+      "tracking": true,
+      "mode": "DISARMED",
+      "messages": [
+        {
+          "v": 1,
+          "type": "disarm",
+          "request_id": "vr-disarm-3",
+          "client_mono_ms": 280
+        }
+      ]
+    }
+  ]
+}
