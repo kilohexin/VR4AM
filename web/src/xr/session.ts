@@ -80,9 +80,10 @@ interface SessionContext {
 export class XRSessionController {
   private current: SessionContext | null = null;
   private lastConstraint: ConstraintKind | null = null;
-  private entering = false;
+  private enteringGeneration: number | null = null;
   private disposed = false;
   private cleanupPromise: Promise<void> | null = null;
+  private exitPromise: Promise<void> | null = null;
   private disposePromise: Promise<void> | null = null;
   private generation = 0;
 
@@ -106,9 +107,9 @@ export class XRSessionController {
   }
 
   async enterVR(): Promise<void> {
-    if (this.disposed || this.entering || this.current || this.cleanupPromise) return;
+    if (this.disposed || this.enteringGeneration !== null || this.current || this.cleanupPromise || this.exitPromise) return;
     const generation = ++this.generation;
-    this.entering = true;
+    this.enteringGeneration = generation;
     this.signalSafety();
     this.options.onStatus({state: 'starting'});
     try {
@@ -173,7 +174,7 @@ export class XRSessionController {
 
       if (startupFailed) {
         const endedDuringStartup = context.ending;
-        await safeEnd(session);
+        if (!endedDuringStartup) await safeEnd(session);
         await this.finishSession(context, false);
         if (!endedDuringStartup) {
           this.failIfEntryLive(generation, 'VR 渲染初始化失败，请退出后重试。');
@@ -186,18 +187,34 @@ export class XRSessionController {
       }
       this.options.onStatus({state: 'active'});
     } finally {
-      this.entering = false;
+      this.enteringGeneration = null;
     }
   }
 
-  async exitVR(): Promise<void> {
+  exitVR(): Promise<void> {
+    if (this.exitPromise) return this.exitPromise;
     const context = this.current;
     if (!context) {
-      if (this.cleanupPromise) await this.cleanupPromise;
-      return;
+      if (this.enteringGeneration === this.generation && !this.cleanupPromise && !this.disposed) {
+        // Late acquisition is ended by enterVR's generation checks, never activated.
+        this.generation += 1;
+        this.signalSafety();
+        this.options.onStatus({state: 'idle'});
+      }
+      return this.cleanupPromise ?? Promise.resolve();
     }
-    await safeEnd(context.session);
-    await this.finishSession(context, true);
+
+    // Revoke the old input before browser end can stall; retain the entry gate
+    // until both browser end and renderer teardown have completed.
+    const teardownPromise = this.finishSession(context, true);
+    let exiting!: Promise<void>;
+    exiting = Promise.all([safeEnd(context.session), teardownPromise])
+      .then(() => undefined)
+      .finally(() => {
+        if (this.exitPromise === exiting) this.exitPromise = null;
+      });
+    this.exitPromise = exiting;
+    return exiting;
   }
 
   dispose(): Promise<void> {
@@ -213,7 +230,9 @@ export class XRSessionController {
     const teardownPromise = context
       ? this.finishSession(context, false, false)
       : (this.cleanupPromise ?? Promise.resolve());
-    this.disposePromise = Promise.all([endPromise, teardownPromise]).then(() => undefined);
+    this.disposePromise = Promise.all([
+      endPromise, teardownPromise, this.exitPromise,
+    ]).then(() => undefined);
     return this.disposePromise;
   }
 
@@ -267,13 +286,15 @@ export class XRSessionController {
       headQ,
     }, nowMs);
     this.options.host.renderXR(nowMs);
-    if (nowMs - context.lastFrameMs < FRAME_INTERVAL_MS) return;
-
     const sample = pair.right;
     if (!sample.trackingValid && context.lastSample.trackingValid) {
       this.options.onDisarm();
       this.options.onLockReset();
+      // Safety transitions must not disappear between transport samples.
+      this.emitFrame(context, nowMs, sample, 'visible', true, headQ);
+      return;
     }
+    if (nowMs - context.lastFrameMs < FRAME_INTERVAL_MS) return;
     this.emitFrame(context, nowMs, sample, 'visible', false, headQ);
   }
 

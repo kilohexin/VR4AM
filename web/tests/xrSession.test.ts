@@ -432,6 +432,46 @@ describe('XRSessionController lifecycle', () => {
     expect(locks).toHaveLength(beforeLoss.locks + 1);
   });
 
+  it.each(['missing pose', 'removed controller'])('publishes %s safety loss inside the frame rate limit', async (loss) => {
+    const {controller, session, host, frames, controllers, controls, locks, controllerSupport} = setup();
+    await controller.enterVR();
+    emitQuest(session, host, 100, {grip: true});
+    const safety = {controls: controls.length, locks: locks.length};
+    if (loss === 'removed controller') session.inputSources = [];
+
+    host.loop?.(105, poseFrame(loss !== 'missing pose'));
+
+    expect(controls).toHaveLength(safety.controls + 1);
+    expect(locks).toHaveLength(safety.locks + 1);
+    expect(frames.map(({client_mono_ms}) => client_mono_ms)).toEqual([100, 105]);
+    expect(frames.at(-1)).toMatchObject({
+      seq: 1, tracking_valid: false, right: {grip: false, trigger: 0},
+    });
+    expect(controllers.at(-1)).toEqual({tracking: false, grip: false, trigger: 0});
+    expect(controllerSupport.at(-1)).toBeNull();
+
+    host.loop?.(110, poseFrame(loss !== 'missing pose'));
+    expect(controls).toHaveLength(safety.controls + 1);
+    expect(frames).toHaveLength(2);
+    emitQuest(session, host, 117, {grip: true});
+    expect(frames.map(({seq}) => seq)).toEqual([0, 1, 2]);
+  });
+
+  it.each(['a', 'b'] as const)('requires a fresh %s release after tracking loss between published frames', async (button) => {
+    const {controller, session, host, armRequests, stopRequests} = setup();
+    await controller.enterVR();
+    emitQuest(session, host, 100);
+    emitQuest(session, host, 105, {}, false);
+    emitQuest(session, host, 117, {[button]: true});
+
+    expect(armRequests).toHaveLength(0);
+    expect(stopRequests).toHaveLength(0);
+    emitQuest(session, host, 134);
+    emitQuest(session, host, 151, {[button]: true});
+    expect(armRequests).toHaveLength(button === 'a' ? 1 : 0);
+    expect(stopRequests).toHaveLength(button === 'b' ? 1 : 0);
+  });
+
   it('session end disarms, locks, clears input, and restores the desktop loop', async () => {
     const {controller, session, host, controllers, controls, locks, statuses} = setup();
     await controller.enterVR();
@@ -463,6 +503,205 @@ describe('XRSessionController lifecycle', () => {
 
     expect(session.end).toHaveBeenCalledOnce();
     expect(controller.isActive).toBe(false);
+  });
+
+  it('revokes frames and buttons before awaiting explicit session exit', async () => {
+    const ending = deferred<void>();
+    const {controller, session, host, frames, controllers, controls, locks, armRequests, stopRequests} = setup();
+    await controller.enterVR();
+    emitQuest(session, host, 100);
+    const staleLoop = host.loop;
+    const safety = {controls: controls.length, locks: locks.length};
+    let controlsAtEnd = 0;
+    session.end.mockImplementationOnce(async () => {
+      controlsAtEnd = controls.length;
+      await ending.promise;
+    });
+
+    const exiting = controller.exitVR();
+    expect(controller.isActive).toBe(false);
+    expect(controls).toHaveLength(safety.controls + 1);
+    expect(controlsAtEnd).toBe(safety.controls + 1);
+    expect(locks).toHaveLength(safety.locks + 1);
+    expect(controllers.at(-1)).toEqual({tracking: false, grip: false, trigger: 0});
+    expect(host.updateXRPresentation).toHaveBeenLastCalledWith(expect.objectContaining({
+      right: expect.objectContaining({trackingValid: false, grip: false, trigger: 0}),
+    }), expect.any(Number));
+    session.inputSources = [questSource({a: true, b: true, grip: true})];
+    staleLoop?.(120, poseFrame());
+    expect(frames).toHaveLength(1);
+    expect(armRequests).toHaveLength(0);
+    expect(stopRequests).toHaveLength(0);
+
+    ending.resolve();
+    await exiting;
+    expect(host.stopXR).toHaveBeenCalledOnce();
+  });
+
+  it('shares explicit exit and blocks entry until delayed browser end completes', async () => {
+    const ending = deferred<void>();
+    const {controller, session, xr, host, controls} = setup();
+    session.end.mockImplementationOnce(async () => ending.promise);
+    await controller.enterVR();
+    const controlsBeforeExit = controls.length;
+
+    const firstExit = controller.exitVR();
+    const secondExit = controller.exitVR();
+    expect(secondExit).toBe(firstExit);
+    await vi.waitFor(() => expect(host.stopXR).toHaveBeenCalledOnce());
+    await controller.enterVR();
+    expect(xr.requestSession).toHaveBeenCalledOnce();
+    expect(session.end).toHaveBeenCalledOnce();
+    expect(controls).toHaveLength(controlsBeforeExit + 1);
+
+    ending.resolve();
+    await Promise.all([firstExit, secondExit]);
+    const nextSession = new FakeSession();
+    vi.mocked(xr.requestSession).mockResolvedValue(nextSession as unknown as XRSession);
+    await controller.enterVR();
+    expect(xr.requestSession).toHaveBeenCalledTimes(2);
+    expect(controller.isActive).toBe(true);
+  });
+
+  it('disposal waits for an already requested browser exit without ending twice', async () => {
+    const ending = deferred<void>();
+    const {controller, session, host, statuses} = setup();
+    session.end.mockImplementationOnce(async () => ending.promise);
+    await controller.enterVR();
+    const exiting = controller.exitVR();
+    const disposal = controller.dispose();
+    let disposed = false;
+    void disposal.then(() => { disposed = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(disposed).toBe(false);
+    expect(session.end).toHaveBeenCalledOnce();
+
+    ending.resolve();
+    await Promise.all([exiting, disposal]);
+    expect(disposed).toBe(true);
+    expect(host.stopXR).toHaveBeenCalledOnce();
+    expect(statuses.at(-1)).toEqual({state: 'active'});
+  });
+
+  it.each(['success', 'failure'])('exits once without publishing active during pending renderer startup %s', async (result) => {
+    const startup = deferred<void>();
+    const {controller, session, host, frames, statuses, controls} = setup();
+    host.startXR.mockImplementationOnce(async (_session, loop) => {
+      host.loop = loop;
+      await startup.promise;
+    });
+    const entering = controller.enterVR();
+    await vi.waitFor(() => expect(host.startXR).toHaveBeenCalledOnce());
+    const staleLoop = host.loop;
+    const controlsBeforeExit = controls.length;
+
+    const exiting = controller.exitVR();
+    expect(controller.isActive).toBe(false);
+    expect(controls).toHaveLength(controlsBeforeExit + 1);
+    staleLoop?.(100, poseFrame());
+    expect(frames).toHaveLength(0);
+    expect(host.stopXR).not.toHaveBeenCalled();
+
+    if (result === 'failure') startup.reject(new Error('renderer startup'));
+    else startup.resolve();
+    await Promise.all([entering, exiting]);
+    expect(session.end).toHaveBeenCalledOnce();
+    expect(host.stopXR).toHaveBeenCalledOnce();
+    expect(statuses.some(({state}) => state === 'active')).toBe(false);
+    expect(statuses.at(-1)).toEqual({state: 'idle'});
+  });
+
+  it('contains browser end rejection while completing explicit local exit', async () => {
+    const {controller, session, host, controls, statuses} = setup();
+    await controller.enterVR();
+    session.end.mockRejectedValueOnce(new DOMException('raw browser end'));
+
+    await expect(controller.exitVR()).resolves.toBeUndefined();
+    expect(controller.isActive).toBe(false);
+    expect(controls).toHaveLength(2);
+    expect(host.stopXR).toHaveBeenCalledOnce();
+    expect(statuses.at(-1)).toEqual({state: 'idle'});
+    expect(JSON.stringify(statuses)).not.toContain('raw browser end');
+  });
+
+  it.each([
+    ['support', 'success'], ['support', 'failure'],
+    ['session', 'success'], ['session', 'failure'],
+    ['reference', 'success'], ['reference', 'failure'],
+  ])('cancels explicit entry while awaiting %s with a late %s', async (stage, result) => {
+    const waiting = deferred<void>();
+    const {controller, session, xr, host, controls, statuses} = setup();
+    const pendingCall = stage === 'support' ? vi.mocked(xr.isSessionSupported)
+      : stage === 'session' ? vi.mocked(xr.requestSession)
+        : session.requestReferenceSpace;
+    if (stage === 'support') {
+      vi.mocked(xr.isSessionSupported).mockImplementationOnce(async () => {
+        await waiting.promise;
+        return true;
+      });
+    } else if (stage === 'session') {
+      vi.mocked(xr.requestSession).mockImplementationOnce(async () => {
+        await waiting.promise;
+        return session as unknown as XRSession;
+      });
+    } else {
+      session.requestReferenceSpace.mockImplementationOnce(async () => {
+        await waiting.promise;
+        return {} as XRReferenceSpace;
+      });
+    }
+    const entering = controller.enterVR();
+    await vi.waitFor(() => expect(pendingCall).toHaveBeenCalledOnce());
+
+    await controller.exitVR();
+    await controller.exitVR();
+    expect(controls).toHaveLength(2);
+    expect(statuses.at(-1)).toEqual({state: 'idle'});
+    await controller.enterVR();
+    expect(pendingCall).toHaveBeenCalledOnce();
+
+    if (result === 'failure') waiting.reject(new Error('late entry error'));
+    else waiting.resolve();
+    await entering;
+    expect(controller.isActive).toBe(false);
+    expect(host.startXR).not.toHaveBeenCalled();
+    expect(host.stopXR).not.toHaveBeenCalled();
+    expect(statuses.some(({state}) => state === 'active' || state === 'error')).toBe(false);
+    const acquired = stage === 'reference' || (stage === 'session' && result === 'success');
+    expect(session.end).toHaveBeenCalledTimes(acquired ? 1 : 0);
+
+    const nextSession = new FakeSession();
+    vi.mocked(xr.requestSession).mockResolvedValue(nextSession as unknown as XRSession);
+    await controller.enterVR();
+    expect(controller.isActive).toBe(true);
+    expect(host.startXR).toHaveBeenCalledOnce();
+  });
+
+  it('keeps entry blocked while ending a session acquired after explicit cancellation', async () => {
+    const acquisition = deferred<XRSession>();
+    const ending = deferred<void>();
+    const {controller, session, xr, host, statuses} = setup();
+    vi.mocked(xr.requestSession).mockReturnValueOnce(acquisition.promise);
+    session.end.mockImplementationOnce(async () => ending.promise);
+    const entering = controller.enterVR();
+    await vi.waitFor(() => expect(xr.requestSession).toHaveBeenCalledOnce());
+
+    await controller.exitVR();
+    acquisition.resolve(session as unknown as XRSession);
+    await vi.waitFor(() => expect(session.end).toHaveBeenCalledOnce());
+    await controller.enterVR();
+    expect(xr.requestSession).toHaveBeenCalledOnce();
+    expect(session.requestReferenceSpace).not.toHaveBeenCalled();
+    expect(host.startXR).not.toHaveBeenCalled();
+    expect(statuses.at(-1)).toEqual({state: 'idle'});
+
+    ending.resolve();
+    await entering;
+    const nextSession = new FakeSession();
+    vi.mocked(xr.requestSession).mockResolvedValue(nextSession as unknown as XRSession);
+    await controller.enterVR();
+    expect(controller.isActive).toBe(true);
   });
 
   it.each([
