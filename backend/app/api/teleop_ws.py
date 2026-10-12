@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from time import monotonic_ns
 from typing import Any
 
 import anyio
@@ -337,7 +336,7 @@ async def _receive_messages(
             return
 
         if isinstance(message, VRFrame):
-            app.state.latest.publish(message, monotonic_ns())
+            app.state.latest.publish(message, control.clock.now_ns())
             start_sender.set()
             continue
 

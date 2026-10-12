@@ -737,7 +737,7 @@ class RobotControl:
                             ),
                             "frame_age_ms": (
                                 max(0.0, (now_ns - latest.received_ns) / 1_000_000)
-                                if latest is not None
+                                if latest is not None and latest.received_ns <= now_ns
                                 else None
                             ),
                         },
@@ -806,7 +806,7 @@ class RobotControl:
             or self._fault is not None or self._loop_failed or self._shutdown_started
             or received is None
             or not received.frame.tracking_valid or received.frame.visibility != 'visible'
-            or self.clock.now_ns() - received.received_ns >= VR_FRAME_STALE_MS * 1_000_000
+            or not 0 <= self.clock.now_ns() - received.received_ns < VR_FRAME_STALE_MS * 1_000_000
             or (self._last_frame_id is not None and received.frame.session_id != self._last_frame_id[0])
         ):
             return False
@@ -906,6 +906,16 @@ class RobotControl:
         disconnect_stop_completed = self._disconnect_stop_pending_frame
         self._disconnect_stop_pending_frame = False
         now_ns = self.clock.now_ns()
+        if received.received_ns > now_ns:
+            # A different clock epoch or backwards clock cannot grant freshness.
+            self._last_sample_age_ms = None
+            self.mapper.clear()
+            self.filter.clear()
+            self.limiter.clear()
+            self.last_target = None
+            if not (self._completed_stale_stop and self.mode is TeleopMode.DISARMED):
+                await self._safe_stop(StopReason.STALE)
+            return
         age_ms = max(0.0, (now_ns - received.received_ns) / 1_000_000)
         self._last_sample_age_ms = age_ms
         if self._completed_stale_stop and self.machine.mode == TeleopMode.DISARMED and (
@@ -1232,7 +1242,7 @@ class RobotControl:
         return (
             self._control_generation_is_current(generation)
             and self.latest.snapshot() is received
-            and self.clock.now_ns() - received.received_ns
+            and 0 <= self.clock.now_ns() - received.received_ns
             < VR_FRAME_STALE_MS * 1_000_000
         )
 
@@ -1278,7 +1288,7 @@ class RobotControl:
         sample_age_ms = (
             # The legacy wire field measures VR input age, not robot telemetry age.
             None
-            if received is None
+            if received is None or received.received_ns > server_mono_ns
             else max(0.0, (server_mono_ns - received.received_ns) / 1_000_000)
         )
         return state.model_copy(
@@ -1671,12 +1681,9 @@ class RobotControl:
                 "grip_pressed",
                 "请先松开手柄抓握键，再请求 Home。",
             )
-        sample_age_ms = max(
-            0.0,
-            (self.clock.now_ns() - received.received_ns) / 1_000_000,
-        )
+        sample_age_ns = self.clock.now_ns() - received.received_ns
         if (
-            sample_age_ms >= VR_FRAME_STALE_MS
+            not 0 <= sample_age_ns < VR_FRAME_STALE_MS * 1_000_000
             or not received.frame.tracking_valid
             or received.frame.visibility != "visible"
             or received.frame.right.grip

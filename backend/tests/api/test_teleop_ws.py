@@ -520,7 +520,7 @@ def test_pc_monotonic_receive_timestamp_is_authoritative(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     received_ns = 987_654_321
-    monkeypatch.setattr("app.api.teleop_ws.monotonic_ns", lambda: received_ns)
+    monkeypatch.setattr("app.timebase.MonotonicClock.now_ns", lambda _self: received_ns)
     app = create_app()
 
     with TestClient(app) as client, client.websocket_connect("/ws/v1/teleop") as ws:

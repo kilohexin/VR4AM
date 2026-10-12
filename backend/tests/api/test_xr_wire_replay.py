@@ -80,7 +80,6 @@ async def rig(monkeypatch, strategy='legacy', event_callback=None, initial_claw_
     await control.connect()
     socket = MemoryWebSocket(latest)
     lock = asyncio.Lock()
-    monkeypatch.setattr(teleop_ws, 'monotonic_ns', clock.now_ns)
     receiver = asyncio.create_task(teleop_ws._receive_messages(socket, control, asyncio.Event(), lock))
     steps = {step['name']: step for step in fixture['steps']}
     barrier = 0
