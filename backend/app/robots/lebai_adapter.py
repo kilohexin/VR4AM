@@ -474,8 +474,8 @@ class RealLebaiAdapter:
                 - gripper.open_amplitude_percent
             )
         )
-        async with self._sdk_lock:
-            # Stop or disconnect may revoke permission while this call waits.
+        def require_dispatch() -> None:
+            # Check both after lock acquisition and inside the scheduled SDK task.
             self._require_gripper_authority()
             if (
                 self._stop_lock.locked()
@@ -501,19 +501,24 @@ class RealLebaiAdapter:
             except BackendCommandError:
                 self._preflight_ready = False
                 raise
+
+        async with self._sdk_lock:
+            require_dispatch()
+
             async def send_if_authorized() -> None:
                 # Recheck inside the task scheduled by wait_for, before SDK entry.
-                self._require_gripper_authority()
-                await client.set_claw(gripper.max_force_percent, amplitude)
+                require_dispatch()
+                try:
+                    await client.set_claw(gripper.max_force_percent, amplitude)
+                except TimeoutError:
+                    raise
+                except Exception:
+                    raise BackendCommandError("sdk_call_failed:set_claw") from None
 
             try:
                 await asyncio.wait_for(send_if_authorized(), timeout=0.20)
-            except GripperCommandRevoked:
-                raise
             except TimeoutError:
                 raise BackendCommandError("sdk_timeout:set_claw") from None
-            except Exception:
-                raise BackendCommandError("sdk_call_failed:set_claw") from None
 
     async def stop(self, reason: StopReason) -> None:
         self._observer_window.release_all()
