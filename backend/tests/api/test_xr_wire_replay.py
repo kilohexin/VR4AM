@@ -51,10 +51,11 @@ class MemoryWebSocket:
 
 
 @asynccontextmanager
-async def rig(monkeypatch, strategy='legacy', event_callback=None):
+async def rig(monkeypatch, strategy='legacy', event_callback=None, initial_claw_amplitude=100):
     fixture = json.loads((ROOT / 'schemas/fixtures/xr-grip-release-wire.json').read_text())
     latest, clock = LatestVRFrame(), FakeClock()
     fake = FakeLebaiClient.idle()
+    fake.claw['amplitude'] = initial_claw_amplitude
     fake.ik_results = deque([list(IDLE_Q) for _ in range(20)])
     factory = AsyncMock(return_value=fake)  # Never imports or connects the native SDK.
     adapter = RealLebaiAdapter(control_settings(), client_factory=factory,

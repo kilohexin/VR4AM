@@ -23,6 +23,10 @@ class BackendCommandError(RuntimeError):
     pass
 
 
+class GripperCommandRevoked(BackendCommandError):
+    """Local pre-SDK authorization loss; no gripper command was sent."""
+
+
 HomePhase = Literal["homing", "stabilizing"]
 
 

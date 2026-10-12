@@ -19,6 +19,7 @@ from app.recording.commissioning import RecorderUnavailable
 from app.robots.base import (
     BackendCommandError,
     HomeOptions,
+    GripperCommandRevoked,
     HomePhase,
     RobotBackend,
     StopReason,
@@ -215,10 +216,27 @@ class RobotControl:
         bind_motion_authority = getattr(backend, "bind_motion_authority", None)
         if callable(bind_motion_authority):
             bind_motion_authority(self._has_motion_dispatch_authority)
+        bind_gripper_authority = getattr(backend, "bind_gripper_authority", None)
+        if callable(bind_gripper_authority):
+            bind_gripper_authority(self._has_gripper_dispatch_authority)
 
     def _has_motion_dispatch_authority(self) -> bool:
         context = self._target_context()
         return context.active and context.authorized
+
+    def _has_gripper_dispatch_authority(self) -> bool:
+        received = self.latest.snapshot()
+        return (
+            received is not None
+            and self._gripper_authority_is_current(self.control_generation)
+            and self._frame_is_current(received, self.control_generation)
+            and received.received_ns <= self.clock.now_ns()
+            and received.frame.tracking_valid
+            and received.frame.visibility == "visible"
+            and (self._last_frame_id is None
+                 or received.frame.session_id == self._last_frame_id[0])
+            and (self.mode is TeleopMode.ARMED or received.frame.right.grip)
+        )
 
     @property
     def mode(self) -> TeleopMode:
@@ -1331,9 +1349,17 @@ class RobotControl:
             raise RuntimeError(
                 f"gripper_command_preflight_failed:{preflight.reason}"
             )
-        await self.backend.set_gripper(value)
+        if not await self._try_set_gripper(value):
+            raise RuntimeError("gripper_command_authority_changed")
         self._last_gripper_sent = value
         self._last_gripper_sent_ns = self.clock.now_ns()
+
+    async def _try_set_gripper(self, value: float) -> bool:
+        try:
+            await self.backend.set_gripper(value)
+        except GripperCommandRevoked:
+            return False
+        return True
 
     def _gripper_authority_is_current(self, generation: int) -> bool:
         return (
@@ -1342,6 +1368,7 @@ class RobotControl:
         )
 
     async def _send_latest_gripper(self, value: float, now_ns: int) -> int | None:
+        had_intent = self._trigger_changed_since_arm
         if self._armed_trigger_baseline is None:
             self._armed_trigger_baseline = value
             return None
@@ -1354,7 +1381,10 @@ class RobotControl:
             self._trigger_changed_since_arm = True
         if self._last_gripper_sent is None:
             started_ns = self.clock.now_ns()
-            await self.backend.set_gripper(value)
+            if not await self._try_set_gripper(value):
+                if not had_intent:
+                    self._trigger_changed_since_arm = False
+                return None
             wait_ns = max(0, self.clock.now_ns() - started_ns)
             self._last_gripper_sent = value
             self._last_gripper_sent_ns = now_ns
@@ -1373,7 +1403,10 @@ class RobotControl:
         ):
             return None
         started_ns = self.clock.now_ns()
-        await self.backend.set_gripper(value)
+        if not await self._try_set_gripper(value):
+            if not had_intent:
+                self._trigger_changed_since_arm = False
+            return None
         wait_ns = max(0, self.clock.now_ns() - started_ns)
         self._last_gripper_sent = value
         self._last_gripper_sent_ns = now_ns

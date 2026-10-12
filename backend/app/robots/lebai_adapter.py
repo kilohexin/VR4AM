@@ -18,6 +18,7 @@ from app.config import TELEOP_SINGULARITY_GUARD_RAD, LebaiSettings
 from app.robots.base import (
     BackendCommandError,
     BackendPreflight,
+    GripperCommandRevoked,
     HomeOptions,
     HomePhase,
     StopReason,
@@ -228,6 +229,25 @@ class RealLebaiAdapter:
         self._latched_fault_from_cancelled_stop = False
         self._preflight_ready = False
         self._motion_authority: Callable[[], bool] | None = None
+        self._gripper_authority: Callable[[], bool] | None = None
+
+    def bind_gripper_authority(self, check: Callable[[], bool]) -> None:
+        """Bind a synchronous gate for claw requests that have not entered SDK."""
+        if not callable(check):
+            raise TypeError("gripper_authority_must_be_callable")
+        if self._gripper_authority is not None and self._gripper_authority != check:
+            raise RuntimeError("gripper_authority_already_bound")
+        self._gripper_authority = check
+
+    def _require_gripper_authority(self) -> None:
+        if self._gripper_authority is None:
+            return
+        try:
+            permitted = self._gripper_authority() is True
+        except Exception:
+            permitted = False
+        if not permitted:
+            raise GripperCommandRevoked("gripper_command_authority_changed")
 
     def bind_motion_authority(self, check: Callable[[], bool]) -> None:
         """Gate pending teleop PVAT sends; never stop an RPC already sent.
@@ -430,7 +450,9 @@ class RealLebaiAdapter:
             raise BackendCommandError("preflight_not_ready")
         generation = self._pump.generation
         read_floor = self._snapshot_read_sequence
+        self._require_gripper_authority()
         snapshot = await self._read_snapshot(read_purpose="gripper")
+        self._require_gripper_authority()
         boundary_fault = self._motion_boundary_fault(snapshot)
         if boundary_fault is not None:
             self._preflight_ready = False
@@ -454,6 +476,7 @@ class RealLebaiAdapter:
         )
         async with self._sdk_lock:
             # Stop or disconnect may revoke permission while this call waits.
+            self._require_gripper_authority()
             if (
                 self._stop_lock.locked()
                 or not self._preflight_ready
@@ -478,11 +501,15 @@ class RealLebaiAdapter:
             except BackendCommandError:
                 self._preflight_ready = False
                 raise
+            async def send_if_authorized() -> None:
+                # Recheck inside the task scheduled by wait_for, before SDK entry.
+                self._require_gripper_authority()
+                await client.set_claw(gripper.max_force_percent, amplitude)
+
             try:
-                await asyncio.wait_for(
-                    client.set_claw(gripper.max_force_percent, amplitude),
-                    timeout=0.20,
-                )
+                await asyncio.wait_for(send_if_authorized(), timeout=0.20)
+            except GripperCommandRevoked:
+                raise
             except TimeoutError:
                 raise BackendCommandError("sdk_timeout:set_claw") from None
             except Exception:
