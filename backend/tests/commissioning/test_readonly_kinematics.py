@@ -293,3 +293,24 @@ async def test_strict_vr_lease_boundary_is_not_renewed(settings, monkeypatch):
     report = await collect(settings, client)
     assert report['complete'] and report['chain_elapsed_ms'] == 100
     assert not report['chain_within_vr_lease'] and client.write_calls == []
+
+
+@pytest.mark.parametrize('raw', ['NONE', 'none', 'None', ' NONE ', '0', 0])
+async def test_explicit_vendor_no_estop_representations_are_accepted(settings, raw):
+    client = SurveyClient()
+    client.robot_state = 'PAUSED'
+    client.estop_reason = raw
+    report = await collect(settings, client)
+    assert report['complete'] and report['kinematics_consistent']
+    assert next(c['raw'] for c in report['calls'] if c['method'] == 'get_estop_reason') == raw
+    assert client.write_calls == []
+
+
+@pytest.mark.parametrize('raw', [None, '', False, True, 0., 'UNKNOWN', 'SYSTEM', 4, 'hard_estop', 'NONE extra', [], {}])
+async def test_unknown_ambiguous_or_fault_estop_is_still_rejected(settings, raw):
+    client = SurveyClient()
+    client.estop_reason = raw
+    report = await collect(settings, client)
+    assert not report['complete'] and report['error'] == 'survey_estop_or_unknown'
+    assert client.fk_count == 0 and 'kinematics_inverse' not in client.read_calls
+    assert client.write_calls == []

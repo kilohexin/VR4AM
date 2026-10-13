@@ -17,7 +17,7 @@ from time import monotonic_ns
 import numpy as np
 
 from app.commissioning.finite_diagnostic import _angle
-from app.robots.lebai_codec import joint_vector, pose_from_lebai, pose_to_lebai
+from app.robots.lebai_codec import estop_fault, joint_vector, pose_from_lebai, pose_to_lebai
 from app.robots.lebai_finite_pvat import build_finite_pvat_candidate, _controls
 from app.robots.lebai_pvat import PvatLimits
 from app.schemas.messages import Pose
@@ -146,6 +146,12 @@ def _agree(a, b):
     return error['position_m'] <= POSITION_TOLERANCE_M and error['rotation_deg'] <= ROTATION_TOLERANCE_DEG
 
 
+def _explicit_clear_estop(raw):
+    explicit = ((type(raw) is int and raw == 0)
+                or (type(raw) is str and raw.strip().lower() in {'0', 'none'}))
+    return explicit and estop_fault(raw) is None
+
+
 async def _observe(client, calls, settings):
     async def read(name, *args):
         return await calls.call(name, lambda: getattr(client, name)(*args))
@@ -154,7 +160,7 @@ async def _observe(client, calls, settings):
         raise SurveyError('survey_not_connected')
     state = _state(await read('get_robot_state'))
     estop = await read('get_estop_reason')
-    if type(estop) is not int or estop != 0:
+    if not _explicit_clear_estop(estop):
         raise SurveyError('survey_estop_or_unknown')
     running = await read('get_running_motion')
     if running is not None:
