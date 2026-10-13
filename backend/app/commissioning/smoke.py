@@ -340,6 +340,7 @@ async def _run_motion_action(
     measurement_initial: RobotStateMessage | None = None
     max_cross_axis_drift_m: float | None = None
     early_stop_triggered = False
+    cross_axis_deviation_event: tuple[dict[str, object], int] | None = None
     try:
         if isinstance(action, (TranslationAction, RotationAction)):
             initial = await control.backend.get_state()
@@ -450,6 +451,32 @@ async def _run_motion_action(
                     cross_axis_converged = (
                         cross_axis_drift <= TRANSLATION_TOLERANCE_M
                     )
+                    if (
+                        early_stop_on_motion
+                        and cross_axis_drift > TRANSLATION_TOLERANCE_M
+                        and not math.isclose(
+                            cross_axis_drift, TRANSLATION_TOLERANCE_M,
+                            rel_tol=0.0, abs_tol=1e-12,
+                        )
+                    ):
+                        # A scoped single-axis diagnostic must stop when its
+                        # reported path leaves the corridor, even before the
+                        # requested axis provides the normal motion evidence.
+                        # The surrounding finally retains the original release
+                        # and stop transaction; deviation is never a success.
+                        cross_axis_deviation_event = (
+                            {
+                                "axis": action.axis,
+                                "cross_axis_drift_m": cross_axis_drift,
+                                "cross_axis_limit_m": TRANSLATION_TOLERANCE_M,
+                                "signed_progress_m": signed_progress,
+                                "initial_tcp_p": list(initial.actual_tcp.p),
+                                "actual_tcp_p": list(current.actual_tcp.p),
+                                "state_server_mono_ns": current.server_mono_ns,
+                            },
+                            clock.now_ns(),
+                        )
+                        raise RuntimeError("smoke_cross_axis_deviation")
                     if target_axis_reached and cross_axis_converged:
                         cross_axes_converged_after_target = True
                 release_pose_reached_now = (
@@ -565,12 +592,21 @@ async def _run_motion_action(
             sequence += 1  # Reserve a distinct release sequence even on failure.
             await control.command_gripper(trigger)
     finally:
-        latest.publish(
-            _frame(sequence, grip=False, trigger=observed_trigger),
-            clock.now_ns(),
-        )
-        await control.tick()
-        await control.disarm()
+        try:
+            latest.publish(
+                _frame(sequence, grip=False, trigger=observed_trigger),
+                clock.now_ns(),
+            )
+            await control.tick()
+            await control.disarm()
+        finally:
+            if cross_axis_deviation_event is not None:
+                # Stop before awaiting the additional guard record. Keep the
+                # detection timestamp even though this event is written later.
+                payload, detected_ns = cross_axis_deviation_event
+                await recorder.write_critical_event(
+                    "smoke_cross_axis_deviation", payload, detected_ns,
+                )
     return _MotionActionResult(
         reached_state=reached_state,
         measurement_initial=measurement_initial,
