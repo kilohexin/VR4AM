@@ -53,8 +53,9 @@ class CruisePlan:
             raise ValueError('plan_complete')
         remaining=min(float(horizon_s),self.duration_s-elapsed_s)
         cursor=float(elapsed_s);pieces=[]
-        for segment in self.segments:
-            if cursor >= segment.duration_s-1e-12:
+        for index,segment in enumerate(self.segments):
+            boundary_roundoff=1e-12 if index<len(self.segments)-1 else 0.
+            if cursor >= segment.duration_s-boundary_roundoff:
                 cursor=max(0.,cursor-segment.duration_s)
                 continue
             duration=min(remaining,segment.duration_s-cursor)
