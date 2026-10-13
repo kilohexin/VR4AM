@@ -45,11 +45,12 @@ async def test_expired_pvat_velocity_does_not_push_field_target_past_ik(gap_ms):
     client = FakeLebaiClient.idle(q=list(actual))
     client.kin_data["actual_joint_speed"] = list(actual_speed)
     adapter = RealLebaiAdapter(control_settings(), client_factory=AsyncMock(return_value=client),
-                               clock=clock.now_ns, sleep=clock.sleep)
+                               clock=clock.now_ns, pvat_clock=clock.now_ns, sleep=clock.sleep)
     await adapter.connect()
     try:
         adapter._previous_sent_qd = previous
         adapter._last_pvat_started_ns = clock.now_ns()
+        adapter._last_pvat_clock_started_ns = clock.now_ns()
         clock.advance_ms(gap_ms)
         snapshot = replace(adapter._snapshot, captured_ns=clock.now_ns())
         metrics = evaluate_ik_candidate(solution, actual, previous_solution_q=solution)
@@ -70,6 +71,7 @@ async def test_pvat_velocity_history_is_used_only_within_its_horizon(gap_ms, exp
     try:
         adapter._previous_sent_qd = (.12, 0., 0., 0., 0., 0.)
         adapter._last_pvat_started_ns = clock.now_ns()
+        adapter._last_pvat_clock_started_ns = clock.now_ns()
         clock.advance_ms(gap_ms)
         solution = (.024, -1., 1., 0., 1.57, 0.)
         snapshot = replace(adapter._snapshot, captured_ns=clock.now_ns())
@@ -196,6 +198,7 @@ async def _connected_control_adapter(
         control_settings(),
         client_factory=AsyncMock(return_value=fake),
         clock=test_clock.now_ns,
+        pvat_clock=test_clock.now_ns,
         sleep=test_clock.sleep,
         backend_label=backend_label,
     )

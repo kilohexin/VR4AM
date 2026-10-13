@@ -156,6 +156,7 @@ class RealLebaiAdapter:
         *,
         client_factory: ClientFactory = connect_real_client,
         clock: Callable[[], int] = time.monotonic_ns,
+        pvat_clock: Callable[[], int] = time.perf_counter_ns,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         event_callback: EventCallback | None = None,
         backend_label: Literal["LEBAI", "LEBAI_FAKE"] = "LEBAI",
@@ -169,6 +170,7 @@ class RealLebaiAdapter:
         self._stop_diagnostic_sampling = stop_diagnostic_sampling
         self._stop_diagnostic_sampler: StopDiagnosticSampler | None = None
         self._clock = clock
+        self._pvat_clock = pvat_clock
         self._sleep = sleep
         self._event_callback = event_callback
         self._backend_label = backend_label
@@ -217,6 +219,7 @@ class RealLebaiAdapter:
         )
         self._previous_sent_qd: JointVector | None = None
         self._last_pvat_started_ns: int | None = None
+        self._last_pvat_clock_started_ns: int | None = None
         self._last_sent_tcp: Pose | None = None
         self._last_accepted_solution_q: JointVector | None = None
         self._accepted_target_command_id: int | None = None
@@ -1170,6 +1173,7 @@ class RealLebaiAdapter:
         self._ensure_command_snapshot_fresh(snapshot)
         accepted: tuple[_SolvedCandidate, float] | None = None
         previous_pvat_gap_ms: float | None = None
+        pvat_reference_started_ns: int | None = None
         last_recoverable_error: str | None = None
         diagnostic_events: list[dict[str, object]] = []
         lock_requested_ns = self._clock()
@@ -1272,8 +1276,39 @@ class RealLebaiAdapter:
                 self._pvat_request_id_in_flight = self._sdk_request_id
 
                 async def send_if_authorized() -> bool:
+                    nonlocal selected, pvat_reference_started_ns
                     # wait_for schedules another task: recheck inside that task,
                     # immediately before SDK entry, with no intervening await.
+                    if not self._motion_dispatch_is_current(request):
+                        return False
+                    pvat_reference_started_ns = self._pvat_reference_now()
+                    reference_rebuilt = False
+                    if (
+                        selected.point.reference_source == "previous_command_velocity"
+                        and self._pvat_velocity_reference_at(pvat_reference_started_ns) is None
+                    ):
+                        # Selection and wait_for task scheduling can outlive the
+                        # previous point. Rebuild from the same admitted snapshot
+                        # and IK solution, with the original limits and no I/O.
+                        selected = replace(selected, point=build_pvat_point(
+                            solution_q=selected.metrics.solution_q,
+                            actual_q=snapshot.actual_q,
+                            actual_qd=snapshot.actual_qd,
+                            previous_qd=None,
+                            limits=self._pvat_limits,
+                        ))
+                        reference_rebuilt = True
+                        lifecycle.update(
+                            p=list(selected.point.q), v=list(selected.point.qd),
+                            a=list(selected.point.qdd),
+                            point_inputs=_pvat_point_inputs(snapshot, selected.point),
+                        )
+                    lifecycle["pvat_reference_timing"] = {
+                        "clock": "time.perf_counter_ns" if self._pvat_clock is time.perf_counter_ns else "injected",
+                        "reference_check_ns": pvat_reference_started_ns,
+                        "previous_reference_check_ns": self._last_pvat_clock_started_ns,
+                        "rebuilt_at_sdk_entry": reference_rebuilt,
+                    }
                     if not self._motion_dispatch_is_current(request):
                         return False
                     self._begin_motion_epoch()
@@ -1346,6 +1381,7 @@ class RealLebaiAdapter:
                     )
                 self._previous_sent_qd = selected.point.qd
                 self._last_pvat_started_ns = pvat_started
+                self._last_pvat_clock_started_ns = pvat_reference_started_ns
                 if selected.advances_target:
                     self._last_sent_tcp = selected.target.model_copy(
                         deep=True
@@ -1405,6 +1441,7 @@ class RealLebaiAdapter:
                     self._accepted_target_ref.submission_id if self._accepted_target_ref else None
                 ),
                 "previous_pvat_gap_ms": previous_pvat_gap_ms,
+                "pvat_reference_timing": copy.deepcopy(lifecycle.get("pvat_reference_timing")),
                 "timing_ms": {
                     "snapshot_read": (snapshot_finished_ns - handler_started_ns) / 1_000_000,
                     "snapshot_lock_wait": motion_snapshot.sdk_lock_wait_ms,
@@ -1791,19 +1828,38 @@ class RealLebaiAdapter:
             raise BackendCommandError("ik_failure_persistent")
 
     def _continuous_pvat_velocity(self) -> JointVector | None:
+        return self._pvat_velocity_reference_at(self._pvat_reference_now())
+
+    def _pvat_reference_now(self) -> int | None:
+        # This dedicated local lifetime clock does not replace the VR or stop
+        # clocks, and does not reuse the diagnostic clock-anchor helpers.
+        try:
+            value = self._pvat_clock()
+        except Exception:
+            return None
+        return value if type(value) is int and value >= 0 else None
+
+    def _pvat_velocity_reference_at(self, reference_now_ns: int | None) -> JointVector | None:
         # The controller decelerates when the point stream exceeds its
         # horizon. A previous commanded velocity is then not a valid initial
         # condition: let build_pvat_point use the observed joint velocity.
-        if self._last_pvat_started_ns is None:
+        if (self._last_pvat_started_ns is None
+                or self._last_pvat_clock_started_ns is None
+                or reference_now_ns is None):
             return None
         elapsed_ns = self._clock() - self._last_pvat_started_ns
-        if not 0 <= elapsed_ns < self._pvat_limits.horizon_s * 1_000_000_000:
+        reference_elapsed_ns = reference_now_ns - self._last_pvat_clock_started_ns
+        horizon_ns = self._pvat_limits.horizon_s * 1_000_000_000
+        # Pair timestamps only within their own clocks. Keeping both checks
+        # prevents coarse clock ticks from extending the previous reference.
+        if not (0 <= elapsed_ns < horizon_ns and 0 <= reference_elapsed_ns < horizon_ns):
             return None
         return self._previous_sent_qd
 
     def _reset_pvat_history(self) -> None:
         self._previous_sent_qd = None
         self._last_pvat_started_ns = None
+        self._last_pvat_clock_started_ns = None
         self._last_sent_tcp = None
         self._last_accepted_solution_q = None
         self._accepted_target_command_id = None

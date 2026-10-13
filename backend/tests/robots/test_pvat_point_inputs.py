@@ -36,6 +36,7 @@ async def test_point_reference_matches_existing_horizon_choice(gap_ms):
     try:
         adapter._previous_sent_qd = (.12, *ZERO[1:])
         adapter._last_pvat_started_ns = clock.now_ns()
+        adapter._last_pvat_clock_started_ns = clock.now_ns()
         clock.advance_ms(gap_ms)
         snapshot = replace(adapter._snapshot, captured_ns=clock.now_ns())
         solution = (.024, *snapshot.actual_q[1:])
@@ -78,6 +79,7 @@ async def test_lifecycle_and_sent_capture_inputs_without_additional_reads(previo
     adapter._event_callback = record
     adapter._previous_sent_qd = previous
     adapter._last_pvat_started_ns = None if previous is None else clock.now_ns()
+    adapter._last_pvat_clock_started_ns = None if previous is None else clock.now_ns()
     solution = (.002, *adapter._snapshot.actual_q[1:])
     client.ik_results.append(list(solution))
     # Replace the initially queued zero-displacement solution.
