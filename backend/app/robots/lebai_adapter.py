@@ -264,7 +264,11 @@ class RealLebaiAdapter:
             raise RuntimeError("motion_authority_already_bound")
         self._motion_authority = check
 
-    def _motion_dispatch_is_current(self, request: PvatRequest) -> bool:
+    def _motion_dispatch_is_current(
+        self, request: PvatRequest, *,
+        sdk_outcome: Literal["not_started", "returned"] = "not_started",
+        sdk_request_id: int | None = None,
+    ) -> bool:
         if not self._pump.is_current(request.generation):
             return False
         if self._motion_authority is None:
@@ -276,7 +280,8 @@ class RealLebaiAdapter:
         if not permitted and request.completion is not None:
             request.completion._invalidate()
             request.completion._resolve(
-                "invalidated", sdk_outcome="not_started",
+                "invalidated", sdk_outcome=sdk_outcome,
+                sdk_request_id=sdk_request_id,
                 error="teleop_motion_authority_revoked",
             )
         return permitted
@@ -1274,13 +1279,17 @@ class RealLebaiAdapter:
                     "point_inputs": _pvat_point_inputs(snapshot, selected.point),
                 })
                 self._pvat_request_id_in_flight = self._sdk_request_id
+                sdk_entered = False
 
                 async def send_if_authorized() -> bool:
-                    nonlocal selected, pvat_reference_started_ns
+                    nonlocal selected, pvat_reference_started_ns, sdk_entered
                     # wait_for schedules another task: recheck inside that task,
                     # immediately before SDK entry, with no intervening await.
                     if not self._motion_dispatch_is_current(request):
                         return False
+                    self._check_known_snapshot_fault(client, request.generation)
+                    self._ensure_command_snapshot_fresh(motion_snapshot)
+                    self._ensure_command_snapshot_fresh(snapshot)
                     pvat_reference_started_ns = self._pvat_reference_now()
                     reference_rebuilt = False
                     if (
@@ -1311,7 +1320,13 @@ class RealLebaiAdapter:
                     }
                     if not self._motion_dispatch_is_current(request):
                         return False
+                    # A synchronous rebuild can also consume the snapshot's
+                    # remaining lifetime. Retain the original read's limit.
+                    self._check_known_snapshot_fault(client, request.generation)
+                    self._ensure_command_snapshot_fresh(motion_snapshot)
+                    self._ensure_command_snapshot_fresh(snapshot)
                     self._begin_motion_epoch()
+                    sdk_entered = True
                     await client.move_pvat(
                         list(selected.point.q), list(selected.point.qd),
                         list(selected.point.qdd), selected.point.horizon_s,
@@ -1338,6 +1353,18 @@ class RealLebaiAdapter:
                     if not self._pump.is_current(request.generation):
                         return
                     raise BackendCommandError("sdk_timeout:move_pvat") from None
+                except BackendCommandError as error:
+                    if not sdk_entered:
+                        lifecycle["rpc_outcome"] = "not_started"
+                        lifecycle["revocation_reason"] = str(error)
+                        # Preserve snapshot fault identity so the wrapper uses
+                        # the original stop path after releasing the SDK lock.
+                        raise
+                    lifecycle["rpc_outcome"] = "error"
+                    lifecycle["error_type"] = type(error).__name__
+                    if not self._pump.is_current(request.generation):
+                        return
+                    raise BackendCommandError("sdk_call_failed:move_pvat") from None
                 except Exception as error:
                     lifecycle["rpc_outcome"] = "error"
                     lifecycle["error_type"] = type(error).__name__
@@ -1359,7 +1386,15 @@ class RealLebaiAdapter:
                     (self._clock() - pvat_started) / 1_000_000,
                 )
                 send_finished_ns = self._clock()
-                if not self._pump.is_current(request.generation):
+                if not self._motion_dispatch_is_current(
+                    request, sdk_outcome="returned", sdk_request_id=self._sdk_request_id,
+                ):
+                    lifecycle["invalidated"] = True
+                    lifecycle["revocation_reason"] = (
+                        "pump_generation_revoked"
+                        if not self._pump.is_current(request.generation)
+                        else "teleop_motion_authority_revoked"
+                    )
                     return
                 if selected.pvat_mode == "catch_up":
                     self._constraint = "tracking_lag"
