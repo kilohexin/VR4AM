@@ -41,7 +41,7 @@ def new_report(*, simulation):
     return dict(schema=1, started_utc=datetime.now(UTC).isoformat(), complete=False,
                 runtime='SIMULATION' if simulation else 'LIVE_READONLY',
                 motion_authorized=False, hardware_stop_verified=False,
-                kinematics_consistent=False, connection_factory_entered=False,
+                kinematics_consistent=False, feedback_fk_consistent=False, connection_factory_entered=False,
                 native_sdk_init_entered=False, native_sdk_connect_entered=False,
                 connection_release='standalone_process_exit_required_not_verified',
                 pending_remote_result_unknown=False, calls=[], fk_samples=[],
@@ -207,8 +207,20 @@ async def collect(settings, factory, admit, report):
         report['target'] = target.model_dump(mode='json')
         chain_started = monotonic_ns()
         report['chain_started_ns'] = chain_started
+        if max(map(abs, initial['qdd'])) > settings.control.max_joint_acceleration_radps2:
+            raise SurveyError('survey_initial_acceleration_limit')
+        raw = await calls.call('kinematics_forward', lambda: client.kinematics_forward(list(initial['q'])))
+        fk_origin = pose_from_lebai(raw)
+        report['fk_samples'].append(dict(role='feedback', joints=list(initial['q']),
+            pose=fk_origin.model_dump(mode='json'), feedback_error=_pose_error(fk_origin, origin)))
+        if not _agree(fk_origin, origin):
+            raise SurveyError('survey_fk_feedback_mismatch')
+        report['feedback_fk_consistent'] = True
+        ik_request = dict(pose=pose_to_lebai(target), reference_joint_pose=list(initial['q']))
+        report['ik_request'] = copy.deepcopy(ik_request)
         solution = joint_vector(await calls.call('kinematics_inverse',
-            lambda: client.kinematics_inverse(pose_to_lebai(target), list(initial['q']))), 'survey_ik_solution')
+            lambda: client.kinematics_inverse(copy.deepcopy(ik_request['pose']),
+                                             list(ik_request['reference_joint_pose']))), 'survey_ik_solution')
         if max(abs(q - a) for q, a in zip(solution, initial['q'])) > settings.control.max_joint_step_rad:
             raise SurveyError('survey_ik_joint_step_limit')
         if min(abs(solution[2]), abs(solution[4])) <= math.radians(5):
@@ -226,30 +238,23 @@ async def collect(settings, factory, admit, report):
         base, slope = _controls(np.array(initial['qd']), np.array(initial['qdd']),
                                 np.array(point.q) - np.array(initial['q']), point.horizon_s)
         middle_q = np.array(initial['q']) + np.array([math.comb(5, i) * .5 ** 5 for i in range(6)]) @ (base + slope)
-        fk_origin = None
-        for role, q in (('feedback', initial['q']), ('goal', solution), ('midpoint', middle_q), ('endpoint', point.q)):
+        for role, q in (('goal', solution), ('midpoint', middle_q), ('endpoint', point.q)):
             raw = await calls.call('kinematics_forward', lambda q=q: client.kinematics_forward([float(v) for v in q]))
             pose = pose_from_lebai(raw)
             row = dict(role=role, joints=[float(v) for v in q], pose=pose.model_dump(mode='json'))
             report['fk_samples'].append(row)
-            if role == 'feedback':
-                fk_origin = pose
-                row['feedback_error'] = _pose_error(pose, origin)
-                if not _agree(pose, origin):
-                    raise SurveyError('survey_fk_feedback_mismatch')
-            else:
-                delta = np.array(pose.p) - np.array(fk_origin.p)
-                progress = float(delta[2])
-                cross = float(np.linalg.norm(delta[:2]))
-                row.update(progress_m=progress, cross_m=cross)
-                if (progress < -1e-9 or progress > DISTANCE_M + 1e-6
-                        or cross > max(1e-6, max(0., progress) * math.tan(math.radians(5)))
-                        or _angle(pose.q, fk_origin.q) > ROTATION_TOLERANCE_DEG):
-                    raise SurveyError('survey_fk_direction_mismatch')
-                if role == 'goal' and (not _agree(pose, target) or abs(progress - DISTANCE_M) > max(1e-6, DISTANCE_M * .05)):
-                    raise SurveyError('survey_fk_goal_mismatch')
-                if role == 'endpoint' and progress <= 1e-9:
-                    raise SurveyError('survey_fk_endpoint_no_progress')
+            delta = np.array(pose.p) - np.array(fk_origin.p)
+            progress = float(delta[2])
+            cross = float(np.linalg.norm(delta[:2]))
+            row.update(progress_m=progress, cross_m=cross)
+            if (progress < -1e-9 or progress > DISTANCE_M + 1e-6
+                    or cross > max(1e-6, max(0., progress) * math.tan(math.radians(5)))
+                    or _angle(pose.q, fk_origin.q) > ROTATION_TOLERANCE_DEG):
+                raise SurveyError('survey_fk_direction_mismatch')
+            if role == 'goal' and (not _agree(pose, target) or abs(progress - DISTANCE_M) > max(1e-6, DISTANCE_M * .05)):
+                raise SurveyError('survey_fk_goal_mismatch')
+            if role == 'endpoint' and progress <= 1e-9:
+                raise SurveyError('survey_fk_endpoint_no_progress')
         report['chain_elapsed_ms'] = (monotonic_ns() - chain_started) / 1e6
         report['chain_within_vr_lease'] = 0 <= report['chain_elapsed_ms'] < 100
         report['chain_timing_scope'] = 'IK, construction, four FK and readonly admission checks; not controller execution'

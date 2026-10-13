@@ -237,7 +237,8 @@ async def test_missing_capability_or_infeasible_candidate_ends_queries(settings,
             q[0] = .0002
         client.kinematics_inverse = AsyncMock(return_value=q)
     report = await collect(settings, client)
-    assert not report['complete'] and client.fk_count == 0 and client.write_calls == []
+    assert not report['complete'] and client.fk_count == (0 if change in ('missing_fk', 'acceleration') else 1)
+    assert client.write_calls == []
 
 
 @pytest.mark.parametrize('raw', [None, [], {}, {**ACTUAL_TCP, 'rz': float('nan')}, {**ACTUAL_TCP, 'x': True}])
@@ -314,3 +315,26 @@ async def test_unknown_ambiguous_or_fault_estop_is_still_rejected(settings, raw)
     assert not report['complete'] and report['error'] == 'survey_estop_or_unknown'
     assert client.fk_count == 0 and 'kinematics_inverse' not in client.read_calls
     assert client.write_calls == []
+
+
+async def test_feedback_fk_precedes_ik_and_survives_ik_timeout_as_evidence(settings, monkeypatch):
+    client = SurveyClient()
+    monkeypatch.setattr(survey, 'READ_TIMEOUT_S', .02)
+    async def blocked(pose, q):
+        client.read_calls.append('kinematics_inverse')
+        await asyncio.Event().wait()
+    client.kinematics_inverse = blocked
+    report = await collect(settings, client)
+    assert not report['complete'] and report['error'] == 'survey_query_timeout'
+    assert report['feedback_fk_consistent'] and not report['kinematics_consistent']
+    assert client.fk_count == 1 and client.write_calls == []
+    assert client.read_calls.index('kinematics_forward') < client.read_calls.index('kinematics_inverse')
+    assert [r['role'] for r in report['fk_samples']] == ['feedback']
+
+
+async def test_feedback_fk_mismatch_avoids_ik_query(settings):
+    client = SurveyClient()
+    client.kinematics_forward = AsyncMock(return_value={**ACTUAL_TCP, 'z': .41})
+    report = await collect(settings, client)
+    assert not report['complete'] and not report['feedback_fk_consistent']
+    assert 'kinematics_inverse' not in client.read_calls and client.write_calls == []
