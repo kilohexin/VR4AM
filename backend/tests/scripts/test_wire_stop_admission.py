@@ -32,13 +32,14 @@ def context(tmp_path,monkeypatch):
     config = output/'config-control.yaml'
     config.write_text(yaml.safe_dump(data),encoding='utf-8')
     baseline = dict(reviewed_idle=True,reviewed_empty_filters=True,idle_status_sha256='1'*64,empty_filters_sha256='2'*64)
-    plan = child.capture.prepare(config,output,component_id=3,baseline=baseline)
+    expires = (datetime.now(UTC)+timedelta(minutes=10)).isoformat()
+    plan = child.capture.prepare(config,output,component_id=3,baseline=baseline,expires=expires)
     approved = output/'approved-preview.json'
     approved.write_text(json.dumps(child.capture.preview(plan)),encoding='utf-8')
     args = Namespace(config=config,output=output,component_id=3,tool_baseline_json=json.dumps(baseline),
          expected_config_sha256=plan['config_sha256'],approved_preview=approved,
          approved_preview_sha256=hashlib.sha256(approved.read_bytes()).hexdigest(),
-         authorization_expires_utc=(datetime.now(UTC)+timedelta(minutes=10)).isoformat(),
+         authorization_expires_utc=expires,
          execute_once=True,confirm=child.capture.CONFIRM)
     receipt=dict(config_sha256=plan['config_sha256'],approved_preview_sha256=args.approved_preview_sha256,
                  component_id=3,filter_name='VR4ArmStop_000000000001')

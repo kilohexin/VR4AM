@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import importlib.util
+import importlib.machinery
 import ipaddress
 import json
 import math
@@ -38,10 +39,12 @@ def runtime_hashes():
     paths += [ROOT / 'scripts' / name for name in
               ('readonly_wire_capture.py', 'motion_stop_wire_capture.py', 'real_robot_wire_stop.py',
                'real_robot_smoke.py', 'launch_readonly_wire_capture.ps1', 'local_rpc_connections.py')]
+    paths += [ROOT / '.venv/Lib/site-packages/lebai_sdk' / name
+              for name in ('__init__.py', 'lebai_sdk.pyd')]
     return {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.is_file()}
 
 
-def prepare(config, output, *, component_id, port=3031, baseline=None):
+def prepare(config, output, *, component_id, port=3031, baseline=None, expires=None):
     if type(component_id) is not int or component_id <= 0 or type(port) is not int or port != 3031:
         raise ValueError('one_component_and_verified_port_required')
     config = Path(config).resolve(strict=True)
@@ -63,11 +66,13 @@ def prepare(config, output, *, component_id, port=3031, baseline=None):
         raise ValueError('unique_output_under_repo_tmp_required')
     return dict(config=config, config_bytes=raw, config_sha256=hashlib.sha256(raw).hexdigest(),
                 output=output, ip=ip, component_id=component_id, port=port,
-                baseline=dict(baseline or {}), runtime_hashes=runtime_hashes())
+                baseline=dict(baseline or {}), runtime_hashes=runtime_hashes(),
+                authorization_expires_utc=expires)
 
 
 def preview(plan):
     return dict(mode='motion_stop_wire_offline_preview', action=dict(ACTION),
+                target_ip=plan['ip'], authorization_expires_utc=plan.get('authorization_expires_utc'),
                 capture_output=str(plan['output']), config_sha256=plan['config_sha256'],
                 component_id=plan['component_id'], port=plan['port'], capture_budget_ms=30000,
                 tool_baseline_sha256=hashlib.sha256(json.dumps(plan['baseline'], sort_keys=True).encode()).hexdigest(),
@@ -88,6 +93,8 @@ def validate_approval(plan, approved_preview, approved_preview_sha256, authoriza
     except (ValueError, TypeError):
         raise ValueError('invalid_authorization_expiry') from None
     _base.check_expiry(expires)
+    if authorization_expires_utc != plan.get('authorization_expires_utc'):
+        raise ValueError('authorization_expiry_not_bound')
     raw = Path(approved_preview).read_bytes()
     if (type(approved_preview_sha256) is not str or not re.fullmatch('[a-f0-9]{64}', approved_preview_sha256)
             or hashlib.sha256(raw).hexdigest() != approved_preview_sha256):
@@ -100,6 +107,24 @@ def validate_approval(plan, approved_preview, approved_preview_sha256, authoriza
 def unchanged(plan):
     if plan['config'].read_bytes() != plan['config_bytes'] or runtime_hashes() != plan['runtime_hashes']:
         raise ValueError('inputs_changed_before_execution')
+
+
+def verify_sdk_source():
+    """Resolve installed entry/extension without importing or initializing SDK."""
+    package = (ROOT / '.venv/Lib/site-packages/lebai_sdk').resolve()
+    entry, binary = package / '__init__.py', package / 'lebai_sdk.pyd'
+    if not entry.is_file() or not binary.is_file():
+        raise ValueError('sdk_bound_files_missing')
+    if 'lebai_sdk' in sys.modules or 'lebai_sdk.lebai_sdk' in sys.modules:
+        raise ValueError('sdk_already_loaded_before_admission')
+    spec = importlib.machinery.PathFinder.find_spec('lebai_sdk', sys.path)
+    if (spec is None or spec.origin is None or Path(spec.origin).resolve() != entry
+            or list(spec.submodule_search_locations or ()) != [str(package)]):
+        raise ValueError('sdk_import_source_not_bound')
+    extension = importlib.machinery.PathFinder.find_spec('lebai_sdk.lebai_sdk', [str(package)])
+    if (extension is None or extension.origin is None or Path(extension.origin).resolve() != binary
+            or not isinstance(extension.loader, importlib.machinery.ExtensionFileLoader)):
+        raise ValueError('sdk_import_source_not_bound')
 
 
 def owns_filters(text, plan, filter_name):
@@ -297,7 +322,8 @@ def main(argv=None):
     parser.add_argument('--authorization-expires-utc')
     args = parser.parse_args(argv)
     baseline = json.loads(args.tool_baseline.read_text(encoding='utf-8-sig')) if args.tool_baseline else None
-    plan = prepare(args.config,args.output,component_id=args.component_id,baseline=baseline)
+    plan = prepare(args.config,args.output,component_id=args.component_id,baseline=baseline,
+                   expires=args.authorization_expires_utc)
     if not args.execute:
         print(json.dumps(preview(plan),ensure_ascii=False,indent=2))
         return 0
@@ -305,6 +331,9 @@ def main(argv=None):
         raise ValueError('approved_config_hash_mismatch')
     # Validate before constructing Native, including the expiry and scope bytes.
     validate_approval(plan,args.approved_preview,args.approved_preview_sha256,args.authorization_expires_utc)
+    if Path(sys.executable).resolve() != (ROOT / '.venv/Scripts/python.exe').resolve():
+        raise ValueError('repository_venv_required')
+    verify_sdk_source()
     report = execute(plan,Native(),confirm=args.confirm,approved_preview=args.approved_preview,
                      approved_preview_sha256=args.approved_preview_sha256,authorization_expires_utc=args.authorization_expires_utc)
     print(json.dumps({k:report[k] for k in ('complete','acquisition_complete','hardware_stop_verified',

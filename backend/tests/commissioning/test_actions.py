@@ -58,7 +58,13 @@ async def test_motion_cadence_skips_wait_consumed_by_slow_state_reads(
               for line in p.read_text(encoding="utf-8").splitlines()]
     cycles = [x for x in events if x["kind"] == "smoke_cycle_timing"]
     assert len(cycles) >= 2
-    assert all(x["scheduled_sleep_ms"] == 0 for x in cycles[1:])
+    # Windows timer/read scheduling can yield a measured read below the 20 ms
+    # fixture period even though the fake asks to sleep 25 ms. Check the budget
+    # actually consumed; a shorter read legitimately leaves time to wait.
+    after_slow_reads = [current for previous, current in zip(cycles, cycles[1:])
+                        if previous["state_read_ms"] >= 20]
+    assert after_slow_reads
+    assert all(x["scheduled_sleep_ms"] == 0 for x in after_slow_reads)
     methods = [call[0] for call in client.write_calls]
     assert "stop_sys" not in methods
     first_stop = methods.index("stop_move")

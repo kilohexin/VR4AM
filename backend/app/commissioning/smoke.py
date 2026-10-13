@@ -558,8 +558,12 @@ async def _run_motion_action(
             trigger = 0.0 if action.target == "open" else 1.0
             if before_motion is not None:
                 before_motion()
+            # This explicit single-action diagnostic owns its virtual input.
+            # The command-period wait expired the old receipt; publish current
+            # intent before the guarded call, without extending the VR TTL.
+            latest.publish(_frame(sequence, grip=True, trigger=trigger), clock.now_ns())
+            sequence += 1  # Reserve a distinct release sequence even on failure.
             await control.command_gripper(trigger)
-            sequence += 1
     finally:
         latest.publish(
             _frame(sequence, grip=False, trigger=observed_trigger),

@@ -34,10 +34,10 @@ def candidate(module, tmp_path, monkeypatch):
                       '    max_tcp_angular_acceleration_radps2: 0.1\n    max_tcp_rotation_step_deg: 0.2\n')
     baseline = dict(reviewed_idle=True, reviewed_empty_filters=True,
                     idle_status_sha256=module.digest_text('IDLE'), empty_filters_sha256=module.digest_text('EMPTY'))
-    plan = module.prepare(config, tmp_path / '.tmp/one', component_id=3, baseline=baseline)
+    expires = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
+    plan = module.prepare(config, tmp_path / '.tmp/one', component_id=3, baseline=baseline, expires=expires)
     approved = tmp_path / 'approved.json'
     approved.write_text(json.dumps(module.preview(plan)), encoding='utf-8')
-    expires = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
     plan['approval'] = dict(path=approved, sha256=hashlib.sha256(approved.read_bytes()).hexdigest(), expires=expires)
     return plan
 
@@ -88,7 +88,7 @@ def test_default_preview_has_fixed_scope_and_no_native_or_output(module, candida
     report = json.loads(capsys.readouterr().out)
     assert report['action'] == {'axis': 'z', 'distance_m': .003, 'early_stop_on_motion': True, 'observe_stop_seconds': 2.0}
     assert report['capture_budget_ms'] == 30000 and report['hardware_stop_verified'] is False
-    assert not candidate['output'].exists() and '192.0.2.1' not in json.dumps(report)
+    assert not candidate['output'].exists() and report['target_ip'] == '192.0.2.1'
 
 
 @pytest.mark.parametrize('pin', [None, '0'*64])

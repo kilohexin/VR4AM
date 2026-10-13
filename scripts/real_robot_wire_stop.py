@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import sys
 
 _spec = importlib.util.spec_from_file_location('motion_capture_guard', Path(__file__).with_name('motion_stop_wire_capture.py'))
 capture = importlib.util.module_from_spec(_spec)
@@ -20,7 +21,8 @@ def checked_scope(args):
             or Path(args.approved_preview).resolve() != output/'approved-preview.json'):
         raise ValueError('motion_child_paths_not_bound')
     baseline = json.loads(args.tool_baseline_json)
-    plan = capture.prepare(args.config,output,component_id=args.component_id,baseline=baseline)
+    plan = capture.prepare(args.config,output,component_id=args.component_id,baseline=baseline,
+                           expires=args.authorization_expires_utc)
     if plan['config_sha256'] != args.expected_config_sha256:
         raise ValueError('approved_config_hash_mismatch')
     capture.validate_approval(plan,args.approved_preview,args.approved_preview_sha256,args.authorization_expires_utc)
@@ -62,6 +64,8 @@ async def run_once(args, client_factory=None):
         if current['ip'] != ip:
             raise ValueError('sdk_endpoint_not_approved')
         checked_capture(args,current,before_connection=True)
+        if client_factory is None:
+            capture.verify_sdk_source()  # before native import/init/connect
         # Reserve once before SDK connection; a failed episode cannot be retried.
         with (plan['output']/'motion-admission.json').open('x',encoding='utf-8') as file:
             json.dump(dict(mode='single_guarded_motion_stop_wire',action=dict(capture.ACTION),
@@ -108,6 +112,8 @@ def main(argv=None):
     if not args.execute_once:
         print(json.dumps(capture.preview(checked_scope(args)),ensure_ascii=False,indent=2))
         return 0
+    if Path(sys.executable).resolve() != (capture.ROOT / '.venv/Scripts/python.exe').resolve():
+        raise ValueError('repository_venv_required')
     return asyncio.run(run_once(args))
 
 
