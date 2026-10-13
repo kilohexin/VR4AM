@@ -150,6 +150,9 @@ class _CandidateRejected(BackendCommandError):
 
 
 class RealLebaiAdapter:
+    # Internal commissioning subclass hook, never configurable by VR/API input.
+    _motion_stop_rpc_method = "stop_move"
+
     def __init__(
         self,
         settings: LebaiSettings,
@@ -546,7 +549,7 @@ class RealLebaiAdapter:
 
     def _start_stop_diagnostic_sampling(self, method: str) -> None:
         if (not self._stop_diagnostic_sampling or self._event_callback is None
-                or method != "stop_move" or self._client is None):
+                or method != self._motion_stop_rpc_method or self._client is None):
             return
         old = self._stop_diagnostic_sampler
         if old is not None:
@@ -569,7 +572,7 @@ class RealLebaiAdapter:
         self._gripper_revocation_generation += 1
         diagnostics: dict[str, Any] = {
             "kind": "stop_diagnostics",
-            "stop_policy": "stop_move_only",
+            "stop_policy": self._motion_stop_rpc_method + "_only",
             "episode_id": self._stop_transaction.episode_id,
             "reason": reason.value,
             "initial_fault": self._latched_fault,
@@ -613,7 +616,7 @@ class RealLebaiAdapter:
         }
         diagnostics["rpc_calls"].append(call)
         try:
-            if method in {"stop_move", "stop_sys"}:
+            if method in {"stop_move", "stop_sys", "pause_move"}:
                 assert self._stop_transaction is not None
                 result = await self._stop_transaction.call(method, getattr(client, method), call)
             else:
@@ -636,6 +639,7 @@ class RealLebaiAdapter:
     async def _stop_verified(
         self, reason: StopReason, diagnostics: dict[str, Any],
     ) -> None:
+        method = self._motion_stop_rpc_method
         self._pump.invalidate()
         self._reset_pvat_history()
         self._preflight_ready = False
@@ -645,7 +649,7 @@ class RealLebaiAdapter:
             raise BackendCommandError("robot_disconnected")
         try:
             lock_requested_ns = self._clock()
-            lock_timing = diagnostics["stop_move_lock"] = {
+            lock_timing = diagnostics[method + "_lock"] = {
                 "requested_ns": lock_requested_ns,
                 "acquired_ns": None,
                 "wait_ns": None,
@@ -660,7 +664,7 @@ class RealLebaiAdapter:
                     lock_acquired_ns = self._clock()
                     lock_timing["acquired_ns"] = lock_acquired_ns
                     lock_timing["wait_ns"] = lock_acquired_ns - lock_requested_ns
-                    await self._call_stop_rpc(client, "stop_move", diagnostics)
+                    await self._call_stop_rpc(client, method, diagnostics)
             finally:
                 lock_timing["diagnostic_timing"]["completed_ns"] = sample_performance_ns()
                 if lock_timing["acquired_ns"] is None:
@@ -675,10 +679,10 @@ class RealLebaiAdapter:
             raise
         except TimeoutError:
             await self._fail_unverified_stop(diagnostics=diagnostics)
-            raise BackendCommandError("sdk_timeout:stop_move") from None
+            raise BackendCommandError("sdk_timeout:" + method) from None
         except Exception:
             await self._fail_unverified_stop(diagnostics=diagnostics)
-            raise BackendCommandError("sdk_call_failed:stop_move") from None
+            raise BackendCommandError("sdk_call_failed:" + method) from None
         transaction = self._stop_transaction
         assert transaction is not None
         if transaction.verification_started_ns is None:

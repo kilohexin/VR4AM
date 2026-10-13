@@ -279,6 +279,7 @@ def _frame(
 async def _wait_for_stable_state(
     backend: RobotBackend,
     timeout_s: float,
+    *, settled_state_check: Callable[[RobotBackend, RobotStateMessage], bool] | None = None,
 ) -> RobotStateMessage:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
@@ -290,8 +291,11 @@ async def _wait_for_stable_state(
         now = loop.time()
         # The motion loop and RealLebaiAdapter stop path have already verified
         # the configured joint-velocity stability window.  This post-action
-        # poll additionally requires the controller-reported state to stay idle.
-        if state.robot_state is BackendState.IDLE:
+        # poll additionally requires IDLE by default. A separately admitted
+        # pause comparison checks its original verification anchor instead.
+        settled = (state.robot_state is BackendState.IDLE if settled_state_check is None
+                   else settled_state_check(backend, state))
+        if settled:
             if stable_since is None:
                 stable_since = now
             elif now - stable_since >= 0.3:
@@ -682,6 +686,8 @@ async def run_smoke(
     client_factory: ClientFactory = connect_real_client,
     *, before_motion: Callable[[], None] | None = None,
     before_motion_commit: Callable[[], None] | None = None,
+    backend_builder: Callable[..., RobotBackend] | None = None,
+    settled_state_check: Callable[[RobotBackend, RobotStateMessage], bool] | None = None,
 ) -> SmokeResult:
     if before_motion_commit is not None and before_motion is None:
         raise ValueError("motion_commit_guard_requires_full_guard")
@@ -732,10 +738,11 @@ async def run_smoke(
             "early_stop_on_motion": options.early_stop_on_motion,
         },
     )
+    builder = backend_builder or build_backend
     if options.stop_rpc_diagnostics:
-        backend = build_backend(settings, recorder, client_factory, stop_diagnostic_sampling=True)
+        backend = builder(settings, recorder, client_factory, stop_diagnostic_sampling=True)
     else:
-        backend = build_backend(settings, recorder, client_factory)
+        backend = builder(settings, recorder, client_factory)
     latest = LatestVRFrame()
     clock = MonotonicClock()
     control: RobotControl | None = None
@@ -853,7 +860,9 @@ async def run_smoke(
                 raise RuntimeError(f"smoke_home_failed:{home.reason}")
         else:
             await control.disarm()
-        after = await _wait_for_stable_state(backend, settings.home_timeout_s)
+        after = await _wait_for_stable_state(
+            backend, settings.home_timeout_s, settled_state_check=settled_state_check,
+        )
         requested_displacement: float | None = None
         reached_displacement: float | None = None
         settled_displacement: float | None = None
