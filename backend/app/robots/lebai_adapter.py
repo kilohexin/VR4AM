@@ -195,6 +195,7 @@ class RealLebaiAdapter:
         self._stop_transaction: StopTransaction | None = None
         self._stop_episode_id = 0
         self._gripper_revocation_generation = 0
+        self._gripper_active = 0
         self._sdk_request_id = 0
         self._pvat_request_id_in_flight: int | None = None
         self._sdk_diagnostic_tasks: set[asyncio.Task[None]] = set()
@@ -341,6 +342,8 @@ class RealLebaiAdapter:
         if (self._snapshot_calls.active
                 or any(not task.done() for task in self._snapshot_calls.tasks)):
             raise BackendCommandError("snapshot_read_pending")
+        if self._gripper_active:
+            raise BackendCommandError("gripper_request_pending")
         if self._stop_diagnostic_sampler is not None and self._stop_diagnostic_sampler.unresolved:
             raise BackendCommandError("stop_diagnostic_read_pending")
         if self._stop_transaction is not None:
@@ -492,6 +495,13 @@ class RealLebaiAdapter:
 
     async def set_gripper(self, value: float) -> None:
         self._require_control()
+        self._gripper_active += 1
+        try:
+            await self._set_gripper_owned(value)
+        finally:
+            self._gripper_active -= 1
+
+    async def _set_gripper_owned(self, value: float) -> None:
         gripper_generation = self._gripper_revocation_generation
         client = self._client
         if client is None:
@@ -510,11 +520,12 @@ class RealLebaiAdapter:
                 f"preflight_not_ready:{boundary_fault}"
             )
         try:
-            normalized = min(1.0, max(0.0, float(value)))
-        except (TypeError, ValueError):
+            normalized = float(value)
+        except (TypeError, ValueError, OverflowError):
             raise BackendCommandError("invalid_gripper_command") from None
         if not math.isfinite(normalized):
             raise BackendCommandError("invalid_gripper_command")
+        normalized = min(1.0, max(0.0, normalized))
         gripper = self.settings.gripper
         amplitude = round(
             gripper.open_amplitude_percent
@@ -555,21 +566,53 @@ class RealLebaiAdapter:
 
         async with self._sdk_lock:
             require_dispatch()
+            sdk_entered = False
 
             async def send_if_authorized() -> None:
-                # Recheck inside the task scheduled by wait_for, before SDK entry.
+                nonlocal sdk_entered
+                # Recheck inside the owned task, before SDK entry.
                 require_dispatch()
                 try:
+                    sdk_entered = True
                     await client.set_claw(gripper.max_force_percent, amplitude)
                 except TimeoutError:
                     raise
                 except Exception:
                     raise BackendCommandError("sdk_call_failed:set_claw") from None
 
+            def revoked():
+                try:
+                    self._require_gripper_authority()
+                except GripperCommandRevoked:
+                    return True
+                return (client is not self._client or bool(self._disconnecting)
+                    or self._stop_lock.locked() or not self._preflight_ready
+                    or self._latched_fault is not None
+                    or generation != self._pump.generation
+                    or gripper_generation != self._gripper_revocation_generation)
+
             try:
-                await asyncio.wait_for(send_if_authorized(), timeout=0.20)
+                await self._motion_calls.call('set_claw', send_if_authorized, .20,
+                    revoked=revoked, entered=lambda: sdk_entered)
             except TimeoutError:
+                call = self._motion_calls.last.get('set_claw', {})
+                if (not call.get('entered', True)
+                        and call.get('abandon_reason') == 'authority_revoked'):
+                    raise GripperCommandRevoked('gripper_command_authority_changed') from None
                 raise BackendCommandError("sdk_timeout:set_claw") from None
+            finally:
+                if 'set_claw' in self._motion_calls.unknown_methods:
+                    self._preflight_ready = False
+                    if self._stop_transaction is not None:
+                        self._stop_transaction.confirmed = False
+                    if self._latched_fault != 'stop_incomplete':
+                        self._latched_fault = 'stop_unverified'
+                    self._pump.invalidate()
+                    self._reset_pvat_history()
+                    # Preserve any existing arm-motion stop obligation. The
+                    # arm stop RPC has no verified claw cancellation semantics.
+                self._schedule_sdk_diagnostic(dict(kind='gripper_rpc_ownership',
+                    **self._motion_calls.snapshot()))
 
     async def stop(self, reason: StopReason) -> None:
         self._observer_window.release_all()
@@ -790,7 +833,7 @@ class RealLebaiAdapter:
                         transaction.stable_anchor = stable_anchor
                     elif (now_ns - stable_since_ns >= 300_000_000
                           and (transaction.confirmed or now_ns - started_ns < 500_000_000)):
-                        if 'move_pvat' in self._motion_calls.unknown_methods:
+                        if self._motion_calls.unknown_methods & {'move_pvat', 'set_claw'}:
                             await self._fail_unverified_stop(diagnostics=diagnostics)
                             raise BackendCommandError("stop_unverified")
                         self._motion_accepted = False
