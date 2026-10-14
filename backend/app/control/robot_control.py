@@ -37,6 +37,7 @@ from app.timebase import MonotonicClock
 
 CONTROL_PERIOD_NS = 20_000_000
 CONTROL_DT_S = CONTROL_PERIOD_NS / 1_000_000_000
+TARGET_DT_CAP_NS = 2 * CONTROL_PERIOD_NS
 OVERRUN_NS = 40_000_000
 GRIPPER_PERIOD_NS = 100_000_000
 GRIPPER_MIN_DELTA = 0.02
@@ -148,6 +149,7 @@ class RobotControl:
         home_options: HomeOptions | None = None,
         target_strategy: TargetStrategy | None = None,
         target_lifecycle: TargetLifecycle | None = None,
+        bounded_target_timing: bool = False,
         transactional_settings: PursuitSettings | None = None,
     ) -> None:
         self.backend = backend
@@ -156,6 +158,9 @@ class RobotControl:
         self.recorder = recorder
         self.mapper = mapper if mapper is not None else CoordinateMapper()
         self.limiter = limiter if limiter is not None else SafetyLimiter()
+        if type(bounded_target_timing) is not bool:
+            raise ValueError('bounded_target_timing_must_be_bool')
+        self._bounded_target_timing = bounded_target_timing
         self.target_strategy = target_strategy if target_strategy is not None else DefaultTargetStrategy()
         self.target_lifecycle = target_lifecycle
         if transactional_settings is not None:
@@ -192,6 +197,8 @@ class RobotControl:
         self._consecutive_overruns = 0
         self._deadline_rebase_requested = False
         self._deadline_compensation_ns = 0
+        self._last_target_input_ns: int | None = None
+        self._last_target_step_ns: int | None = None
         self._pending_stop_completion = False
         self._hard_stop_completion = False
         self._completed_stale_stop = False
@@ -1046,6 +1053,8 @@ class RobotControl:
                     self.limiter.set_pose_anchor(state.actual_tcp)
                     self.filter.reset(state.actual_tcp)
                     self.last_target = state.actual_tcp
+                    self._last_target_input_ns = None
+                    self._last_target_step_ns = None
                 self.machine.observe_grip(received.frame.right.grip)
                 if activating and self.target_lifecycle is not None:
                     try:
@@ -1085,6 +1094,7 @@ class RobotControl:
                     raise RuntimeError("active_without_target")
                 generation = self._control_generation
                 previous_target = self.last_target
+                control_dt_s, input_interval_ns, processing_interval_ns = self._target_step_timing(received)
                 raw_requested = self.mapper.target(
                     Pose(p=received.frame.right.p, q=received.frame.right.q)
                 )
@@ -1093,9 +1103,9 @@ class RobotControl:
                 target = None
                 plan = None
                 if not (workspace.constrained and workspace.hold):
-                    requested = self.filter.update(workspace.pose, CONTROL_DT_S)
+                    requested = self.filter.update(workspace.pose, control_dt_s)
                     plan = self.target_strategy.prepare(
-                        previous_target, requested, CONTROL_DT_S, limiter=self.limiter,
+                        previous_target, requested, control_dt_s, limiter=self.limiter,
                     )
                     target = plan.pose
                 await self._record_target_sample(
@@ -1107,6 +1117,9 @@ class RobotControl:
                     filtered=requested,
                     limited=target,
                     dispatch_kind=plan.kind if plan is not None else 'workspace_hold',
+                    control_dt_s=control_dt_s,
+                    input_interval_ns=input_interval_ns,
+                    processing_interval_ns=processing_interval_ns,
                 )
                 # Recording implementations can yield. Do not submit an old
                 # target after a stop, a newer input, or an expired VR frame.
@@ -1117,6 +1130,7 @@ class RobotControl:
                     ):
                         self.filter.reset(self.last_target)
                         self.limiter.reset_motion()
+                        self._last_target_step_ns = self.clock.now_ns()
                     return
                 if workspace.constrained and workspace.hold:
                     self.filter.reset(self.last_target)
@@ -1124,6 +1138,7 @@ class RobotControl:
                     self._set_constraint("workspace_boundary")
                     self.last_seq = received.frame.seq
                     self._last_frame_id = frame_id
+                    self._last_target_step_ns = self.clock.now_ns()
                     return
                 assert plan is not None
                 try:
@@ -1153,6 +1168,8 @@ class RobotControl:
                     else:
                         raise
                     if not self._target_frame_is_current(received, generation):
+                        if generation == self._control_generation:
+                            self._last_target_step_ns = self.clock.now_ns()
                         return
                     self._set_constraint(constraint)
                     self.filter.reset(self.last_target)
@@ -1161,6 +1178,8 @@ class RobotControl:
                     # Dispatch may wait. Never restore a stopped anchor or
                     # consume an old frame after a newer input takes ownership.
                     if not self._target_frame_is_current(received, generation):
+                        if generation == self._control_generation:
+                            self._last_target_step_ns = self.clock.now_ns()
                         return
                     if committed is not None:
                         self.last_target = committed.model_copy(deep=True)
@@ -1168,12 +1187,34 @@ class RobotControl:
                             self._set_constraint("workspace_boundary")
                         else:
                             self._observe_valid_constraint(now_ns)
+                self._last_target_step_ns = self.clock.now_ns()
             self.last_seq = received.frame.seq
             self._last_frame_id = frame_id
         except RecorderUnavailable:
             await self._handle_recording_unavailable()
         except (BackendCommandError, SafetyViolation) as error:
             await self._enter_fault(str(error))
+
+    def _target_step_timing(self, received: ReceivedFrame) -> tuple[float, int | None, int | None]:
+        # Consume each evaluated new input once, even when its target is later
+        # held/rejected/abandoned. Never accumulate a backlog of motion time.
+        # Only server arrival timestamps are comparable; client clocks are not.
+        previous = self._last_target_input_ns
+        now_ns = self.clock.now_ns()
+        processing_interval = (None if self._last_target_step_ns is None
+            else now_ns - self._last_target_step_ns)
+        self._last_target_step_ns = now_ns
+        if previous is None or received.received_ns > previous:
+            self._last_target_input_ns = received.received_ns
+        interval = None if previous is None else received.received_ns - previous
+        # A delayed previous recorder/dispatch must not credit overlapping time.
+        # Retain the nominal 50 Hz floor; only sparse-input steps can grow.
+        elapsed = (CONTROL_PERIOD_NS if interval is None or processing_interval is None
+            else min(interval, processing_interval))
+        step_ns = min(TARGET_DT_CAP_NS, max(CONTROL_PERIOD_NS, elapsed))
+        if not self._bounded_target_timing:
+            step_ns = CONTROL_PERIOD_NS
+        return step_ns / 1_000_000_000, interval, processing_interval
 
     async def _record_target_sample(
         self,
@@ -1186,6 +1227,9 @@ class RobotControl:
         filtered: Pose | None,
         limited: Pose | None,
         dispatch_kind: str = 'candidate',
+        control_dt_s: float = CONTROL_DT_S,
+        input_interval_ns: int | None = None,
+        processing_interval_ns: int | None = None,
     ) -> None:
         now_ns = self.clock.now_ns()
         if (
@@ -1203,7 +1247,12 @@ class RobotControl:
                 "command_id": received.frame.seq,
                 "control_generation": generation,
                 "frame_received_ns": received.received_ns,
-                "control_dt_s": CONTROL_DT_S,
+                "control_dt_s": control_dt_s,
+                "target_input_interval_ns": input_interval_ns,
+                "target_processing_interval_ns": processing_interval_ns,
+                "control_dt_cap_s": (TARGET_DT_CAP_NS / 1_000_000_000
+                    if self._bounded_target_timing else CONTROL_DT_S),
+                "target_timing_policy": ('bounded_server_arrival' if self._bounded_target_timing else 'nominal20'),
                 "dispatch_kind": dispatch_kind,
                 "sample_period_ns": TARGET_SAMPLE_PERIOD_NS,
                 "rate_limited_frames": self._target_sample_rate_limited_frames,
@@ -1644,6 +1693,8 @@ class RobotControl:
 
     def _advance_control_generation(self) -> None:
         self._control_generation += 1
+        self._last_target_input_ns = None
+        self._last_target_step_ns = None
         if self.target_lifecycle is not None:
             try:
                 self.target_lifecycle.on_revoke(self._control_generation)

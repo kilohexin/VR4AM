@@ -262,6 +262,9 @@ async def test_coordinator_with_real_adapter_and_control_authority(outcome):
         target = pose_delta(control.last_target, 0.02, 0.3)
         for seq, q in enumerate([0.04, 0.08, 0.12, 0.16, 0.20, 0.22], 3):
             clock.advance_ms(40)
+            # Direct coordinator exercise still needs fresh VR authority; do
+            # not tick the owner and issue a second automatic target here.
+            publish(latest, clock, seq, True, .1, .4)
             await run.adapter.get_state()
             run.client.ik_results = deque([joints(q)])
             receipt = await coordinator.propose(target, seq, 0.02)
@@ -270,11 +273,13 @@ async def test_coordinator_with_real_adapter_and_control_authority(outcome):
         before = coordinator.snapshot()
         if outcome == 'old_feedback_then_advance':
             clock.advance_ms(40)
+            publish(latest, clock, 98, True, .1, .4)
             await run.adapter.get_state()
             run.client.ik_results = deque([joints(0.26)])
             old = await run.adapter.submit_tcp(target, 98)
             assert (await asyncio.wait_for(old.completion.wait(), 1)).pvat_mode == 'catch_up'
         clock.advance_ms(40)
+        publish(latest, clock, 99, True, .1, .4)
         await run.adapter.get_state()
         run.client.ik_results = deque(joints(q) for q in
             ([0.26] if outcome == 'catch_up' else [0.5, 0.45, 0.4] if outcome == 'rejected' else [0.24]))

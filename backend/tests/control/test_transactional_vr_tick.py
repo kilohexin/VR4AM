@@ -356,9 +356,15 @@ async def test_original_pump_fault_code_survives_transactional_collection(failur
             async def broken_move(*args):
                 raise RuntimeError('injected_sdk_failure')
             r.run.client.move_pvat = broken_move
-        await r.dispatch(q=.24)
+        receipt = await r.dispatch(q=.24)
         expected = 'recording_unavailable' if failure == 'logging' else 'sdk_call_failed:move_pvat'
-        assert r.control._fault == expected
+        assert str(r.run.adapter.pump_fault) == expected
+        if failure == 'sdk':
+            assert receipt.completion.result.error == expected
+            assert r.control._fault == 'stop_unverified'
+            assert not r.run.adapter._stop_transaction.confirmed
+        else:
+            assert r.control._fault == expected
         assert r.control.coordinator.snapshot() == before
         assert r.control.pursuit is None
 
