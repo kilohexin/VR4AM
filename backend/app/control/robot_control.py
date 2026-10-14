@@ -1349,6 +1349,7 @@ class RobotControl:
             if received is None or received.received_ns > server_mono_ns
             else max(0.0, (server_mono_ns - received.received_ns) / 1_000_000)
         )
+        status_message = getattr(self.target_strategy, 'status_message', None)
         return state.model_copy(
             update={
                 "server_mono_ns": server_mono_ns,
@@ -1359,6 +1360,7 @@ class RobotControl:
                 "constraint": self._constraint,
                 "recovery_phase": self._recovery_phase,
                 "translation_scale": self.mapper.translation_scale,
+                "target_control": status_message() if callable(status_message) else None,
             }
         )
 

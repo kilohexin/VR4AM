@@ -12,6 +12,7 @@ from app.control.transactional_settings import PursuitSettings, SegmentedSetting
 from app.robots.base import BackendCommandError
 from app.robots.lebai_adapter import RealLebaiAdapter, _MotionSnapshotFault
 from app.robots.lebai_finite_pvat import build_finite_pvat_candidate
+from app.schemas.messages import TargetControlStatus
 
 
 @dataclass(frozen=True)
@@ -187,3 +188,26 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
             self._segment_fault = 'segment_feedback_expired'
             return SegmentStatus(False, fault=self._segment_fault)
         return SegmentStatus(segment['ready'], segment['target'].model_copy(deep=True), receipt.command)
+
+    def segment_display(self):
+        """Copy cached display facts; never collect a receipt or grant motion."""
+        view = self.read_motion_view()
+        segment = self._segment
+        observed = min(segment['good'], self.settling.settle_samples) if segment else 0
+        if view.latched_fault or view.pump_fault or self._segment_fault:
+            phase = 'fault'
+        elif not self._segment_enabled:
+            phase = 'inactive'
+        elif segment is None:
+            phase = 'ready'
+        elif segment['accepted'] is None:
+            phase = 'awaiting_reply'
+        elif segment['ready']:
+            phase = 'ready'
+        elif self._clock() <= segment['feedback_floor']:
+            phase = 'awaiting_window'
+        else:
+            phase = 'awaiting_feedback'
+        return TargetControlStatus(policy='segmented_experimental', phase=phase,
+            samples_observed=observed, samples_required=self.settling.settle_samples,
+            hardware_verified=False)

@@ -50,6 +50,14 @@ export type BackendState = 'DISCONNECTED' | 'IDLE' | 'MOVING' | 'HOLD' | 'FAULT'
 export type RuntimeBackend = 'SIMULATOR' | 'LEBAI' | 'LEBAI_FAKE';
 export type RealRobotMode = 'readonly' | 'control';
 
+export interface TargetControlStatus {
+  policy: 'segmented_experimental';
+  phase: 'inactive' | 'ready' | 'awaiting_reply' | 'awaiting_window' | 'awaiting_feedback' | 'fault';
+  samples_observed: number;
+  samples_required: number;
+  hardware_verified: false;
+}
+
 export interface RobotStateMessage {
   v: typeof PROTOCOL_VERSION;
   type: 'robot_state';
@@ -69,6 +77,7 @@ export interface RobotStateMessage {
   preflight_ready?: boolean | null;
   preflight_reason?: string | null;
   translation_scale?: number | null;
+  target_control?: TargetControlStatus | null;
 }
 
 export type DiagnosticPayloadValue =
@@ -605,6 +614,15 @@ export function isVRFrame(value: unknown): value is VRFrame {
   );
 }
 
+export function isTargetControlStatus(value: unknown): value is TargetControlStatus {
+  return isRecord(value)
+    && hasExactKeys(value, ['policy','phase','samples_observed','samples_required','hardware_verified'])
+    && value.policy === 'segmented_experimental' && value.hardware_verified === false
+    && isEnumValue(['inactive','ready','awaiting_reply','awaiting_window','awaiting_feedback','fault'], value.phase)
+    && isNonNegativeInteger(value.samples_observed) && isNonNegativeInteger(value.samples_required)
+    && value.samples_required >= 3 && value.samples_observed <= value.samples_required;
+}
+
 export function isRobotStateMessage(value: unknown): value is RobotStateMessage {
   if (
     !isRecord(value) ||
@@ -614,7 +632,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
       [
         'ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase', 'backend',
         'real_robot_mode', 'preflight_ready', 'preflight_reason',
-        'translation_scale',
+        'translation_scale', 'target_control',
       ],
     ) ||
     value.v !== PROTOCOL_VERSION ||
@@ -628,6 +646,9 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
   ) {
     return false;
   }
+
+  if (Object.hasOwn(value,'target_control') && value.target_control !== null
+      && !isTargetControlStatus(value.target_control)) return false;
 
   if (Object.hasOwn(value, 'ack_seq') && !isNullableNonNegativeInteger(value.ack_seq)) return false;
   if (

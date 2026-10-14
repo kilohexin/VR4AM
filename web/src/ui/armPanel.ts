@@ -10,6 +10,7 @@ import {
   type RecoveryPhase,
   type RuntimeBackend,
   type TeleopMode,
+  type TargetControlStatus,
 } from '../protocol/messages';
 import type {XRSessionStatus} from '../xr/session';
 import type {TeleopConnectionStatus} from '../transport/teleopSocket';
@@ -77,6 +78,7 @@ export class ArmPanel {
   private connectionState: ArmConnectionState = 'disconnected';
   private fault: string | null = null;
   private constraint: ConstraintKind | null = null;
+  private segmentedCandidate = false;
   private recoveryPhase: RecoveryPhase | null = null;
   private requestSequence = 0;
   private pendingArmRequestId: string | null = null;
@@ -196,6 +198,11 @@ export class ArmPanel {
       : backend === 'LEBAI_FAKE'
         ? '解锁仿真'
         : '解锁仿真';
+    this.syncButtonState();
+  }
+
+  setTargetControl(status: TargetControlStatus | null): void {
+    this.segmentedCandidate = status?.policy === 'segmented_experimental';
     this.syncButtonState();
   }
 
@@ -366,6 +373,10 @@ export class ArmPanel {
       this.requestDisarm(source);
       return;
     }
+    if (this.segmentedCandidate) {
+      this.requestDisarm(source);
+      return;
+    }
     if (this.pendingHomeRequestId !== null || this.recoveryPhase !== null) return;
     const stopped = this.mode === 'DISARMED' || (!this.armed && this.mode === 'READY');
     if (stopped && this.connected && !this.gripPressed) {
@@ -449,7 +460,7 @@ export class ArmPanel {
   }
 
   private get isFaultRecoverable(): boolean {
-    return this.fault !== null && RECOVERABLE_FAULTS.has(this.fault);
+    return !this.segmentedCandidate && this.fault !== null && RECOVERABLE_FAULTS.has(this.fault);
   }
 
   private syncButtonState(): void {
@@ -522,7 +533,7 @@ export class ArmPanel {
       this.stopButton.disabled = true;
     } else {
       const stopped = this.mode === 'DISARMED' || (!this.armed && this.mode === 'READY');
-      const canRequestHome = stopped && !this.isArmPending && this.connected && !this.gripPressed;
+      const canRequestHome = !this.segmentedCandidate && stopped && !this.isArmPending && this.connected && !this.gripPressed;
       this.stopLabel.textContent = canRequestHome ? '回到 Home' : '停止';
       this.stopButton.disabled = false;
     }

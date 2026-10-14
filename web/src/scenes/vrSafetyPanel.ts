@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import type {Pose, RealRobotMode, RuntimeBackend} from '../protocol/messages';
+import type {Pose, RealRobotMode, RuntimeBackend, TargetControlStatus} from '../protocol/messages';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
-import {isStopFailure, readableConstraint, readableFault} from '../ui/hud';
+import {isStopFailure, readableConstraint, readableFault, readableTargetControl} from '../ui/hud';
 
 const CONTROL_FOOTER = 'A解锁 B停止/Home · 右Grip末端 Trigger夹爪 · 左摇杆平台/按下归零 · 左Grip+摇杆升降' as const;
 
@@ -12,6 +12,7 @@ export interface RobotRuntimeSummary {
   gripper: number | null;
   latencyMs: number | null;
   hardwareVerified: false;
+  targetControl?: TargetControlStatus | null;
 }
 
 const EMPTY_RUNTIME_SUMMARY: RobotRuntimeSummary = {
@@ -26,7 +27,7 @@ const EMPTY_RUNTIME_SUMMARY: RobotRuntimeSummary = {
 export interface VrSafetyPresentation {
   title: string;
   instruction: string;
-  footer: typeof CONTROL_FOOTER;
+  footer: string;
   statusLine: string;
   tone: 'cyan' | 'amber' | 'red' | 'muted';
   shape: 'shield' | 'stop' | 'warning';
@@ -39,7 +40,25 @@ export function describeVrSafety(
   controllerSupported: boolean | null,
   summary: RobotRuntimeSummary = EMPTY_RUNTIME_SUMMARY,
 ): VrSafetyPresentation {
-  return {...describeSafety(state, controllerSupported), statusLine: formatRuntimeSummary(summary)};
+  const core = describeSafety(state, controllerSupported);
+  const target = summary.targetControl;
+  if (target) {
+    core.footer = CONTROL_FOOTER.replace('B停止/Home', 'B停止');
+    if (target.phase === 'fault' && core.tone !== 'red' && !state.fault) {
+      core.title = '分段控制已中止';
+      core.instruction = '保持 Grip 松开，运动状态未确认';
+      core.tone = 'red';
+      core.shape = 'warning';
+    } else if (state.phase === 'active' && core.tone === 'cyan' && !state.fault
+        && target.phase.startsWith('awaiting_')) {
+      core.title = '分段控制';
+      core.instruction = `${readableTargetControl(target)} · 松开 Grip 请求停止`;
+      core.tone = 'amber';
+    }
+  }
+  const statusLine = formatRuntimeSummary(summary)
+    + (target ? ' · 分段候选 · 未真机验收' : '');
+  return {...core, statusLine};
 }
 
 function describeSafety(

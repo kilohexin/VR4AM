@@ -98,3 +98,12 @@ class SegmentedTargetStrategy:
             self.committed_command = status.command
             return TargetUpdate(context.generation, committed=self.pose.model_copy(deep=True))
         return idle
+
+    def status_message(self):
+        """Display hook only: does not call the mutating feedback gate."""
+        status = self.backend.segment_display()
+        if self.fault or status.phase == 'fault':
+            return status.model_copy(update={'phase':'fault'})
+        if self.halted or not self._authorized():
+            return status.model_copy(update={'phase':'inactive'})
+        return status

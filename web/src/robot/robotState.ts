@@ -49,6 +49,7 @@ export class RobotStateBuffer {
 function cloneRobotState(state: RobotStateMessage): RobotStateMessage {
   return {
     ...state,
+    ...(state.target_control ? {target_control: {...state.target_control}} : {}),
     actual_q: [
       state.actual_q[0],
       state.actual_q[1],

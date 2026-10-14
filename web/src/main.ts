@@ -225,6 +225,7 @@ function onRobotState(state: RobotStateMessage): void {
   armPanel.setFault(state.fault ?? null);
   armPanel.setConstraint(constraint);
   armPanel.setRecoveryPhase(recoveryPhase);
+  armPanel.setTargetControl(state.target_control ?? null);
   armPanel.setMode(state.mode);
   xrController.setConstraint(constraint);
   hud.setRobotState({
@@ -234,6 +235,7 @@ function onRobotState(state: RobotStateMessage): void {
     fault: state.fault ?? null,
     constraint,
     recoveryPhase,
+    targetControl: state.target_control ?? null,
   });
   diagnosticsUpdates.onRobotState(state, recordAcknowledgement);
   refreshRehearsalPanel();
@@ -356,6 +358,7 @@ function applyDiagnosticsRuntime(
     gripper: state.gripper,
     latencyMs: latencyView.currentMs,
     hardwareVerified: false,
+    targetControl: state.target_control ?? null,
   });
 }
 

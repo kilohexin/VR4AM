@@ -581,7 +581,23 @@ button {
   padding-left: 18px;
   font-size: 20px;
   font-weight: 500;
-  white-space: nowrap;
+  white-space: normal;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.target-control-row .status-value,
+.target-control-row .status-value > span {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.target-control-row .status-value {
+  padding: 8px 0;
 }
 
 .status-value,

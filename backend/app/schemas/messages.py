@@ -119,6 +119,27 @@ class BackendState(StrEnum):
     FAULT = "FAULT"
 
 
+class TargetControlStatus(StrictMessage):
+    policy: Literal['segmented_experimental']
+    phase: Literal['inactive', 'ready', 'awaiting_reply', 'awaiting_window', 'awaiting_feedback', 'fault']
+    samples_observed: int = Field(ge=0, strict=True)
+    samples_required: int = Field(ge=3, strict=True)
+    hardware_verified: Literal[False]
+
+    @field_validator('hardware_verified', mode='before')
+    @classmethod
+    def require_false_boolean(cls, value):
+        if type(value) is not bool or value:
+            raise ValueError('hardware_verification_not_established')
+        return value
+
+    @model_validator(mode='after')
+    def check_counts(self):
+        if self.samples_observed > self.samples_required:
+            raise ValueError('invalid_target_control_counts')
+        return self
+
+
 class RobotStateMessage(StrictMessage):
     v: Literal[1] = 1
     type: Literal["robot_state"] = "robot_state"
@@ -138,6 +159,7 @@ class RobotStateMessage(StrictMessage):
     preflight_ready: bool | None = None
     preflight_reason: str | None = None
     translation_scale: float | None = Field(default=None, gt=0)
+    target_control: TargetControlStatus | None = None
 
 
 class DiagnosticEvent(StrictMessage):

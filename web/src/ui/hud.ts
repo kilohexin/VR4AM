@@ -5,6 +5,7 @@ import type {
   RecoveryPhase,
   RuntimeBackend,
   TeleopMode,
+  TargetControlStatus,
 } from '../protocol/messages';
 import type {TeleopConnectionStatus} from '../transport/teleopSocket';
 
@@ -21,6 +22,7 @@ export interface RobotHudState {
   fault: string | null;
   constraint: ConstraintKind | null;
   recoveryPhase: RecoveryPhase | null;
+  targetControl?: TargetControlStatus | null;
 }
 
 export class Hud {
@@ -49,6 +51,7 @@ export class Hud {
   private readonly constraintValue: HTMLElement;
   private readonly constraintRow: HTMLElement;
   private readonly sceneNotice: HTMLElement;
+  private readonly targetControlValue: HTMLElement;
   private lastFault: string | null = null;
 
   constructor(root: Element) {
@@ -74,6 +77,7 @@ export class Hud {
             <strong data-field="mode">DISCONNECTED · 未连接</strong>
           </div>
           ${statusRow('robot', '机器人', '<span data-field="backend-state">DISCONNECTED</span>')}
+          ${statusRow('target', '控制方式', '<span data-field="target-control">未确认</span>', 'target-control-row')}
           ${statusRow('link', '连接', '<span data-field="connection">未连接</span>')}
           ${statusRow('target', '追踪', '<span data-field="tracking">无效</span>')}
           <div class="status-row" data-row="grip">
@@ -139,6 +143,7 @@ export class Hud {
     this.constraintValue = requireElement(root, '[data-field="constraint"]');
     this.constraintRow = requireElement(root, '[data-row="constraint"]');
     this.sceneNotice = requireElement(root, '.scene-notice');
+    this.targetControlValue = requireElement(root, '[data-field="target-control"]');
   }
 
   setConnectionStatus(status: TeleopConnectionStatus): void {
@@ -159,6 +164,7 @@ export class Hud {
       this.backendStateValue.dataset.tone = 'muted';
       this.sampleAgeValue.textContent = formatMilliseconds(null);
       this.setLatency(null, null);
+      this.targetControlValue.textContent = '未确认';
       const stopWarning = isStopFailure(this.lastFault);
       this.faultValue.textContent = stopWarning
         ? `上次：${readableFault(this.lastFault)}，等待新的后端状态`
@@ -202,15 +208,19 @@ export class Hud {
   }
 
   setRobotState(state: RobotHudState): void {
+    this.targetControlValue.textContent = state.targetControl
+      ? `分段候选 · 未真机验收 · ${readableTargetControl(state.targetControl)}`
+      : '默认控制';
     this.lastFault = state.fault;
-    const displayMode: TeleopMode = state.fault ? 'FAULT' : state.mode;
+    const displayFault = state.fault ?? (state.targetControl?.phase === 'fault' ? 'segment_control_fault' : null);
+    const displayMode: TeleopMode = displayFault ? 'FAULT' : state.mode;
     this.modeValue.textContent = `${displayMode} · ${modeLabel(displayMode)}`;
     this.modeValue.parentElement?.setAttribute('data-tone', modeTone(displayMode));
     this.backendStateValue.textContent = state.backendState;
     this.backendStateValue.dataset.tone = state.backendState === 'FAULT' ? 'fault' : 'healthy';
     this.sampleAgeValue.textContent = formatMilliseconds(state.sampleAgeMs);
-    this.faultValue.textContent = readableFault(state.fault);
-    this.faultRow.dataset.active = state.fault ? 'true' : 'false';
+    this.faultValue.textContent = readableFault(displayFault);
+    this.faultRow.dataset.active = displayFault ? 'true' : 'false';
     this.constraintValue.textContent = state.recoveryPhase
       ? readableRecoveryPhase(state.recoveryPhase)
       : readableConstraint(state.constraint);
@@ -233,8 +243,8 @@ export class Hud {
   }
 }
 
-function statusRow(iconName: IconName, label: string, value: string): string {
-  return `<div class="status-row">${icon(iconName)}<span class="status-label">${label}</span><span class="status-value">${value}</span></div>`;
+function statusRow(iconName: IconName, label: string, value: string, rowClass = ''): string {
+  return `<div class="status-row${rowClass ? ` ${rowClass}` : ''}">${icon(iconName)}<span class="status-label">${label}</span><span class="status-value">${value}</span></div>`;
 }
 
 function requireElement<T extends HTMLElement = HTMLElement>(root: Element, selector: string): T {
@@ -286,6 +296,15 @@ export function readableFault(fault: string | null): string {
     ik_failure_persistent: '逆解连续失败',
     stop_unverified: '停止状态未确认',
     stop_incomplete: '停止完成未确认',
+    segment_feedback_expired: '本段反馈超时，控制已中止',
+    segment_initial_not_settled: '本段起始反馈不满足准入条件',
+    segment_full_endpoint_infeasible: '本段目标超出短段运动限制',
+    segment_readiness_lost: '分段控制准入条件已失效',
+    segment_authority_revoked: '分段运动权限已撤销',
+    segment_acceptance_failed: '本段接受结果核对失败',
+    segment_acceptance_changed: '本段接受目标已改变',
+    segment_control_fault: '分段控制异常，运动状态未确认',
+    finite_fk_timeout: '运动学核对回复超时',
     invalid_joint_count: '机器人关节数据无效',
     ik_unreachable: '目标不可达',
     ik_singular: '目标接近奇异位形',
@@ -296,6 +315,15 @@ export function readableFault(fault: string | null): string {
     backend_error: '仿真后端错误',
   };
   return labels[fault] ?? '未知仿真故障';
+}
+
+export function readableTargetControl(status: TargetControlStatus): string {
+  return {
+    inactive:'运动权限已关闭', ready:'等待新的手部目标',
+    awaiting_reply:'等待本段回执', awaiting_window:'等待本段时间窗口',
+    awaiting_feedback:`等待本段反馈 ${status.samples_observed}/${status.samples_required}`,
+    fault:'分段控制已中止',
+  }[status.phase];
 }
 
 export function isStopFailure(fault: string | null): boolean {

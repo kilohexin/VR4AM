@@ -1,6 +1,18 @@
 ﻿{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "TargetControlStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy": {"const": "segmented_experimental"},
+        "phase": {"enum": ["inactive", "ready", "awaiting_reply", "awaiting_window", "awaiting_feedback", "fault"]},
+        "samples_observed": {"type": "integer", "minimum": 0},
+        "samples_required": {"type": "integer", "minimum": 3},
+        "hardware_verified": {"const": false, "type": "boolean"}
+      },
+      "required": ["policy", "phase", "samples_observed", "samples_required", "hardware_verified"]
+    },
     "BackendState": {
       "enum": [
         "DISCONNECTED",
@@ -628,6 +640,10 @@
           ],
           "default": null,
           "title": "Translation Scale"
+        },
+        "target_control": {
+          "anyOf": [{"$ref": "#/$defs/TargetControlStatus"}, {"type": "null"}],
+          "default": null
         }
       },
       "required": [
