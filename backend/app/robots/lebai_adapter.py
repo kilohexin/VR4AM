@@ -13,6 +13,7 @@ from scipy.spatial.transform import Rotation
 from app.recording.clock_anchor import sample_performance_ns
 from app.robots.lebai_observer_window import ObserverWindow
 from app.robots.lebai_sdk_lock import SdkLock
+from app.robots.lebai_motion_calls import OwnedMotionCalls
 
 from app.config import TELEOP_SINGULARITY_GUARD_RAD, LebaiSettings
 from app.robots.base import (
@@ -179,6 +180,8 @@ class RealLebaiAdapter:
         self._backend_label = backend_label
         self._client: LebaiClientProtocol | None = None
         self._sdk_lock = SdkLock()
+        self._motion_calls = OwnedMotionCalls()
+        self._motion_write_stop_required = False
         self._observer_window = ObserverWindow(observer_wait_s)
         self._stop_lock = asyncio.Lock()
         self._disconnecting = 0
@@ -320,6 +323,8 @@ class RealLebaiAdapter:
         )
 
     async def connect(self) -> None:
+        if self._motion_calls.unknown_methods:
+            raise BackendCommandError("motion_rpc_result_unknown")
         if self._disconnecting:
             raise BackendCommandError("disconnect_in_progress")
         if self._client is not None:
@@ -368,7 +373,7 @@ class RealLebaiAdapter:
                 try:
                     if (
                         self.settings.mode == "control"
-                        and self._motion_accepted
+                        and (self._motion_accepted or self._motion_write_stop_required)
                         and self._client is not None
                     ):
                         self._ensure_stop_transaction()
@@ -380,6 +385,7 @@ class RealLebaiAdapter:
 
     async def _disconnect_local_resources(self) -> None:
         await self._pump.stop()
+        self._motion_calls.close()
         if self._stop_diagnostic_sampler is not None:
             await self._stop_diagnostic_sampler.close()
         if self._stop_transaction is not None:
@@ -398,6 +404,7 @@ class RealLebaiAdapter:
         self._motion_observation = None
         self._client = None
         self._motion_accepted = False
+        self._motion_write_stop_required = False  # This obligation belongs to the released client.
         self._preflight_ready = False
 
     async def command_tcp(self, target: Pose, command_id: int) -> None:
@@ -487,6 +494,7 @@ class RealLebaiAdapter:
         )
         def require_dispatch() -> None:
             # Check both after lock acquisition and inside the scheduled SDK task.
+            self._require_control()
             self._require_gripper_authority()
             if (
                 self._stop_lock.locked()
@@ -618,7 +626,11 @@ class RealLebaiAdapter:
         try:
             if method in {"stop_move", "stop_sys", "pause_move"}:
                 assert self._stop_transaction is not None
-                result = await self._stop_transaction.call(method, getattr(client, method), call)
+                async def send_stop():
+                    if method == self._motion_stop_rpc_method:
+                        self._motion_write_stop_required = False
+                    return await getattr(client, method)()
+                result = await self._stop_transaction.call(method, send_stop, call)
             else:
                 result = await asyncio.wait_for(getattr(client, method)(), timeout=0.20)
             call["outcome"] = "returned"
@@ -746,7 +758,11 @@ class RealLebaiAdapter:
                         transaction.stable_anchor = stable_anchor
                     elif (now_ns - stable_since_ns >= 300_000_000
                           and (transaction.confirmed or now_ns - started_ns < 500_000_000)):
+                        if 'move_pvat' in self._motion_calls.unknown_methods:
+                            await self._fail_unverified_stop(diagnostics=diagnostics)
+                            raise BackendCommandError("stop_unverified")
                         self._motion_accepted = False
+                        self._motion_write_stop_required = False
                         transaction.confirmed = True
                         return
                 else:
@@ -1046,6 +1062,8 @@ class RealLebaiAdapter:
         reason: str | None = None
         if self._latched_fault is not None:
             reason = self._latched_fault
+        elif self._motion_calls.unknown_methods:
+            reason = "motion_rpc_result_unknown"
         elif snapshot.robot_state is not BackendState.IDLE:
             reason = "robot_not_idle"
         elif snapshot.running_motion is not None:
@@ -1331,6 +1349,7 @@ class RealLebaiAdapter:
                     self._ensure_command_snapshot_fresh(snapshot)
                     self._begin_motion_epoch()
                     sdk_entered = True
+                    self._motion_write_stop_required = True
                     await client.move_pvat(
                         list(selected.point.q), list(selected.point.qd),
                         list(selected.point.qdd), selected.point.horizon_s,
@@ -1339,7 +1358,10 @@ class RealLebaiAdapter:
 
                 try:
                     performance_timing["sdk_await_started_ns"] = sample_performance_ns()
-                    sent = await asyncio.wait_for(send_if_authorized(), timeout=0.06)
+                    sent = await self._await_motion_call(
+                        "move_pvat", send_if_authorized, .06,
+                        generation=request.generation, entered=lambda: sdk_entered,
+                    )
                     if not sent:
                         lifecycle["rpc_outcome"] = "not_started"
                         lifecycle["revocation_reason"] = (
@@ -1782,15 +1804,15 @@ class RealLebaiAdapter:
         target: Pose,
     ) -> JointVector:
         try:
-            solution = await asyncio.wait_for(
-                client.kinematics_inverse(
+            solution = await self._await_motion_call(
+                "kinematics_inverse", lambda: client.kinematics_inverse(
                     pose_to_lebai(target),
                     list(
                         self._last_accepted_solution_q
                         or snapshot.actual_q
                     ),
                 ),
-                timeout=0.20,
+                .20, generation=self._pump.generation,
             )
         except TimeoutError:
             raise BackendCommandError("sdk_timeout:ik") from None
@@ -1799,6 +1821,36 @@ class RealLebaiAdapter:
         if solution is None:
             raise BackendCommandError("ik_unreachable")
         return joint_vector(list(solution), "ik_solution")
+
+    async def _await_motion_call(self, method, operation, timeout_s, *, generation, entered=None):
+        # A trusted bounded proxy can reject before invoking its native client.
+        # Entering that proxy is not itself evidence of a native RPC entry.
+        counter = getattr(self._client, '_native_motion_entry_count', None)
+        if callable(counter):
+            baseline = counter(method)
+            if type(baseline) is not int or baseline < 0:
+                raise BackendCommandError('invalid_motion_entry_evidence')
+            def native_entered():
+                try:
+                    value = counter(method)
+                    return type(value) is not int or value < baseline or value > baseline
+                except Exception:
+                    return True  # Missing evidence never proves non-entry.
+            entered = native_entered
+        def revoked():
+            return (self._disconnecting or self._stop_lock.locked()
+                or self._pump.generation != generation
+                or self._motion_authority is not None and self._motion_authority() is not True)
+        try:
+            return await self._motion_calls.call(method, operation, timeout_s,
+                revoked=revoked, entered=entered)
+        finally:
+            if method in self._motion_calls.unknown_methods:
+                self._preflight_ready = False
+                if method == "move_pvat":
+                    self._latched_fault = "stop_unverified"
+            self._schedule_sdk_diagnostic(dict(kind="motion_rpc_ownership",
+                **self._motion_calls.snapshot()))
 
     def _build_advancing_candidate(
         self,
@@ -2307,8 +2359,12 @@ class RealLebaiAdapter:
             raise BackendCommandError("real_robot_readonly")
         if self._client is None:
             raise BackendCommandError("robot_disconnected")
+        if self._motion_calls.unknown_methods:
+            raise BackendCommandError("motion_rpc_result_unknown")
 
     def _begin_motion_epoch(self) -> None:
+        if self._motion_calls.unknown_methods:
+            raise BackendCommandError("motion_rpc_result_unknown")
         if self._disconnecting:
             raise BackendCommandError("disconnect_in_progress")
         if self._stop_lock.locked():

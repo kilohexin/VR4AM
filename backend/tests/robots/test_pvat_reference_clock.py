@@ -108,19 +108,18 @@ async def test_expired_reference_is_rebuilt_at_sdk_entry_and_recorded_exactly(
     def select_catch_up(snapshot, request):
         return after_selection(original_catch_up(snapshot, request), snapshot)
 
-    original_wait = asyncio.wait_for
+    original_wait = adapter._await_motion_call
 
-    async def advancing_wait(awaitable, timeout):
+    async def advancing_wait(method, operation, timeout_s, **kwargs):
         if (expiry_boundary == "sdk_task"
-                and getattr(getattr(awaitable, "cr_code", None), "co_name", None)
-                == "send_if_authorized"):
+                and method == 'move_pvat'):
             reference[0] += 50_000_000
-        return await original_wait(awaitable, timeout)
+        return await original_wait(method, operation, timeout_s, **kwargs)
 
     adapter._event_callback = record
     monkeypatch.setattr(adapter, "_select_advancing_candidate", select)
     monkeypatch.setattr(adapter, "_build_catch_up_candidate", select_catch_up)
-    monkeypatch.setattr(asyncio, "wait_for", advancing_wait)
+    monkeypatch.setattr(adapter, "_await_motion_call", advancing_wait)
     client.read_calls.clear()
     await adapter._pump.start()
     try:

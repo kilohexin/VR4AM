@@ -344,6 +344,7 @@ async def test_second_ik_uses_previous_accepted_solution_as_seed() -> None:
     await _wait_for_pvat_count(client, 2)
 
     assert client.ik_calls[1][1] == first_solution
+    await _wait_until(lambda: adapter._accepted_target_command_id == 2)
     assert adapter._last_accepted_solution_q == tuple(second_solution)
     await adapter.disconnect()
 
@@ -399,7 +400,9 @@ async def test_failed_pvat_write_does_not_commit_solution_history() -> None:
     assert adapter._last_accepted_solution_q is None
     assert adapter._last_sent_tcp is None
     assert adapter._accepted_target_command_id is None
-    await adapter.disconnect()
+    with pytest.raises(BackendCommandError, match="^stop_unverified$"):
+        await adapter.disconnect()
+    assert [call[0] for call in client.write_calls] == ["stop_move"]
 
 
 @pytest.mark.asyncio
@@ -543,6 +546,7 @@ async def test_real_discontinuous_target_stops_after_three_ik_attempts() -> None
         )
 
         assert len(client.ik_calls) == 3
+        await _wait_until(lambda: adapter.constraint is not None)
         assert adapter.constraint == "motion_continuity_boundary"
         assert adapter.pump_fault is None
         assert "move_pvat" not in [
@@ -604,6 +608,7 @@ async def test_repeated_tracking_lag_never_becomes_persistent_ik_failure() -> No
                 ):
                     await adapter.command_tcp(_target(0.302), command_id)
             await _wait_for_pvat_count(client, command_id - 1)
+            await _wait_until(lambda: adapter._command_id == command_id)
 
         assert adapter.pump_fault is None
         assert adapter._consecutive_ik_failures == 0
@@ -1098,7 +1103,7 @@ async def test_rejected_ik_diagnostic_failure_preserves_soft_constraint() -> Non
 
     await adapter.command_tcp(_target(0.301), command_id=20)
     await _wait_until(lambda: len(client.ik_calls) == 1)
-    await asyncio.sleep(0)
+    await _wait_until(lambda: adapter.constraint is not None)
 
     assert adapter.constraint == "motion_continuity_boundary"
     assert adapter.pump_fault is None
@@ -1359,6 +1364,7 @@ async def test_adapter_forwards_injected_pump_scheduler() -> None:
             == 2
         )
 
+        await _wait_until(lambda: len(pump_sleeps) >= 2)
         assert pump_sleeps[:2] == pytest.approx([0.04, 0.04])
     finally:
         await adapter.disconnect()
@@ -1528,6 +1534,7 @@ async def test_fake_ik_fallback_sends_nearest_feasible_candidate() -> None:
     assert client.ik_calls[-1][0] == pytest.approx(
         pose_to_lebai(_target(0.33))
     )
+    await _wait_until(lambda: len([e for e in events if e.get('kind') == 'pvat_sent']) == 2)
     pvat_events = [event for event in events if event["kind"] == "pvat_sent"]
     assert pvat_events[-1]["recovery_fraction"] == pytest.approx(0.75)
     assert pvat_events[-1]["requested_tcp"] == requested.model_dump()
@@ -1555,6 +1562,7 @@ async def test_stop_clears_fake_fallback_pose_history() -> None:
     await adapter.preflight()
     await adapter.command_tcp(_target(0.34), command_id=2)
     await _wait_until(lambda: len(client.ik_calls) > previous_calls)
+    await _wait_until(lambda: adapter._pump._inflight is None and not adapter._pump.has_pending)
 
     assert len(client.ik_calls) == previous_calls + 1
     assert adapter.pump_fault is None
@@ -2320,3 +2328,4 @@ async def _send_and_wait_for_ik(
             "joint_speed_limit",
         }
     await _wait_until(lambda: len(client.ik_calls) > previous_calls)
+    await _wait_until(lambda: adapter._pump._inflight is None and not adapter._pump.has_pending)

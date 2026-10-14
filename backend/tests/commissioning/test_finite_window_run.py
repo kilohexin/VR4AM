@@ -300,3 +300,15 @@ async def test_final_recorder_interruption_is_preserved(stage, signal):
     assert report['error_type'] == signal.__name__
     assert report['pvat_entries'] == report['stop_entries'] == 1
     assert [c[0] for c in client.write_calls] == ['move_pvat', 'stop_move']
+
+
+async def test_proxy_rejection_before_native_entry_is_not_remote_unknown(monkeypatch):
+    m = module()
+    async def reject(proxy, *args):
+        raise m.AdmissionRejected('scope_rejected_before_native')
+    monkeypatch.setattr(m.FiniteScopeClient, 'move_pvat', reject)
+    report, client = await run()
+    assert report['pvat_entries'] == 0 and report['stop_entries'] == 1
+    assert report['original_stop_confirmed'] and report['stop_confirmed']
+    assert not report['pvat_remote_result_unknown'] and report['latched_fault'] is None
+    assert client.write_calls == [('stop_move',)] and not report['complete']

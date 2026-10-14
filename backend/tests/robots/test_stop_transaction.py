@@ -49,9 +49,10 @@ async def test_stop_records_inflight_pvat_and_sdk_lock_wait_without_extra_writes
         events.append(event)
 
     async def delayed_move(*args):
+        result = await original_move(*args)
         entered.set()
         await release.wait()
-        return await original_move(*args)
+        return result
 
     adapter._event_callback = record
     client.move_pvat = delayed_move
@@ -63,8 +64,8 @@ async def test_stop_records_inflight_pvat_and_sdk_lock_wait_without_extra_writes
         await asyncio.sleep(0)
         assert not stop.done()
         clock.advance_ms(7)
-        release.set()
-        await asyncio.wait_for(stop, 1)
+        with pytest.raises(BackendCommandError, match='^stop_unverified$'):
+            await asyncio.wait_for(stop, 1)
 
         diagnostic = next(e for e in events if e['kind'] == 'stop_diagnostics')
         entry = diagnostic['stop_entry']
@@ -73,7 +74,8 @@ async def test_stop_records_inflight_pvat_and_sdk_lock_wait_without_extra_writes
         assert diagnostic['stop_move_lock']['wait_ns'] >= 7_000_000
         assert diagnostic['stop_move_lock']['acquired_ns'] >= diagnostic['stop_move_lock']['requested_ns']
         assert [call[0] for call in client.write_calls] == ['move_pvat', 'stop_move']
-        assert diagnostic['outcome'] == 'confirmed'
+        assert diagnostic['outcome'] == 'failed'
+        assert adapter._motion_calls.snapshot()['unknown_methods'] == ['move_pvat']
     finally:
         release.set()
         await adapter.disconnect()

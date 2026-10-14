@@ -42,6 +42,10 @@ class FiniteScopeClient(BoundedStopOnlyClient):
         self.pvat_started_ns = self.pvat_horizon_s = None
         self.math_entries = dict(kinematics_inverse=0, kinematics_forward=0)
 
+    def _native_motion_entry_count(self, method):
+        """Trusted proxy evidence: distinguish local rejection from SDK entry."""
+        return self.pvat_entries if method == 'move_pvat' else self.math_entries[method]
+
     async def _math(self, name, limit, args):
         async def invoke():
             self.read_guard()
