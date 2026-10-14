@@ -4,7 +4,7 @@ An SDK return or settled observation is not physical stop certification.
 Each segment retains the 100-ms lease, four FK samples and an 80-ms-or-less
 zero-terminal joint reference. No catch-up, interpolation or queued next move.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 from app.commissioning.finite_diagnostic import FiniteWindowDiagnosticAdapter
@@ -97,7 +97,11 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
         # smaller new request in a fresh owner episode after failure handling.
         if finite.progress_fraction != 1. or finite.point.q != metrics.solution_q:
             raise _MotionSnapshotFault('segment_full_endpoint_infeasible')
-        return super()._build_advancing_candidate(snapshot, target, metrics, fraction)
+        # Retain the legacy joint-step/tracking checks, but reuse this exact
+        # certified finite point instead of asking the diagnostic parent to
+        # calculate the same Bernstein bounds again.
+        selected = RealLebaiAdapter._build_advancing_candidate(self, snapshot, target, metrics, fraction)
+        return replace(selected, point=finite.point)
 
     async def _solve_candidate(self, client, snapshot, target, **kwargs):
         try:

@@ -454,3 +454,25 @@ async def test_planner_uses_actual_shorter_reference_horizon():
         assert client.write_calls[0][4] == .04
     finally:
         await adapter.disconnect()
+
+
+async def test_segment_certifies_finite_joint_window_once_without_skipping_fk(monkeypatch):
+    import app.robots.segmented_adapter as segmented
+    import app.commissioning.finite_diagnostic as diagnostic
+    original=segmented.build_finite_pvat_candidate
+    calls=[]
+    def counted(*args,**kwargs):
+        result=original(*args,**kwargs)
+        calls.append(result)
+        return result
+    monkeypatch.setattr(segmented,'build_finite_pvat_candidate',counted)
+    monkeypatch.setattr(diagnostic,'build_finite_pvat_candidate',counted)
+    adapter,client,_clock,_box,strategy=await rig()
+    try:
+        done=await send(strategy,adapter,_target(.31),1)
+        assert done.sdk_outcome=='returned' and done.error is None
+        assert len(calls)==1
+        assert len(client.fk_calls)==4 and len(client.ik_calls)==1
+        assert client.write_calls==[('move_pvat',list(calls[0].point.q),[0.]*6,[0.]*6,.08)]
+    finally:
+        await adapter.disconnect()
