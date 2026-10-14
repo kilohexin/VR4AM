@@ -46,11 +46,17 @@ def build_recorder(
         "real_robot_mode": settings.lebai.mode,
         "python_version": platform.python_version(),
         "platform": platform.platform(),
-        "target_strategy": ('transactional_experimental'
-                            if settings.transactional_target is not None else 'legacy'),
+        "target_strategy": (
+            'segmented_experimental' if settings.segmented_target is not None
+            else 'transactional_experimental' if settings.transactional_target is not None
+            else 'legacy'
+        ),
     }
     if settings.transactional_target is not None:
         metadata['pursuit_settings'] = asdict(settings.transactional_target)
+    if settings.segmented_target is not None:
+        metadata['segment_settling'] = asdict(settings.segmented_target.settling)
+        metadata['segment_hardware_verified'] = False
     if runtime == "LEBAI_FAKE":
         metadata.update(
             {
@@ -80,6 +86,13 @@ def build_backend(
         raise RuntimeError("missing_lebai_settings")
     if backend_label not in {"LEBAI", "LEBAI_FAKE"}:
         raise RuntimeError("invalid_lebai_backend_label")
+    if settings.segmented_target is not None:
+        if settings.transactional_target is not None or stop_diagnostic_sampling:
+            raise ValueError('conflicting_segmented_backend')
+        from app.robots.segmented_adapter import SegmentedLebaiAdapter
+        return SegmentedLebaiAdapter(settings.lebai,
+            settling=settings.segmented_target.settling, client_factory=client_factory,
+            event_callback=recorder.write_event, backend_label=backend_label)
     return RealLebaiAdapter(
         settings.lebai,
         client_factory=client_factory,
@@ -191,6 +204,7 @@ def create_app(
             mapper=_build_mapper(runtime_settings),
             limiter=_build_limiter(runtime_settings, runtime_backend),
             transactional_settings=runtime_settings.transactional_target,
+            segmented_settings=runtime_settings.segmented_target,
             constraint_clear_ms=runtime_settings.constraint_clear_ms,
             home_options=HomeOptions(
                 max_speed_radps=runtime_settings.home_joint_speed_radps,

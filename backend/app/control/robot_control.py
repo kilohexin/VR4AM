@@ -10,7 +10,7 @@ from app.control.coordinate_mapper import CoordinateMapper
 from app.control.filters import PoseFilter
 from app.control.safety import SafetyLimiter, SafetyViolation, WorkspaceProjection
 from app.control.state_machine import TeleopStateMachine
-from app.control.transactional_settings import PursuitSettings
+from app.control.transactional_settings import PursuitSettings, SegmentedSettings
 from app.control.target_strategy import (
     DefaultTargetStrategy, TargetContext, TargetLifecycle, TargetStrategy, TargetUpdate,
 )
@@ -151,6 +151,7 @@ class RobotControl:
         target_lifecycle: TargetLifecycle | None = None,
         bounded_target_timing: bool = False,
         transactional_settings: PursuitSettings | None = None,
+        segmented_settings: SegmentedSettings | None = None,
     ) -> None:
         self.backend = backend
         self.latest = latest
@@ -163,6 +164,14 @@ class RobotControl:
         self._bounded_target_timing = bounded_target_timing
         self.target_strategy = target_strategy if target_strategy is not None else DefaultTargetStrategy()
         self.target_lifecycle = target_lifecycle
+        if segmented_settings is not None:
+            if (not isinstance(segmented_settings, SegmentedSettings)
+                    or transactional_settings is not None
+                    or target_strategy is not None or target_lifecycle is not None):
+                raise ValueError('conflicting_target_strategy')
+            from app.control.segmented_strategy import SegmentedTargetStrategy
+            strategy = SegmentedTargetStrategy(backend, self.limiter, context=self._target_context)
+            self.target_strategy = self.target_lifecycle = strategy
         if transactional_settings is not None:
             if target_strategy is not None or target_lifecycle is not None:
                 raise ValueError('conflicting_target_strategy')

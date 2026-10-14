@@ -185,14 +185,14 @@ async def test_revocation_during_fk_invalidates_receipt_and_does_not_query_again
 
 async def test_sdk_child_entry_rechecks_audit_lease(monkeypatch):
     adapter, client, clock, _ = await setup()
-    original = asyncio.wait_for
+    original = adapter._await_motion_call
 
-    async def delayed(awaitable, timeout):
-        if getattr(getattr(awaitable, 'cr_code', None), 'co_name', None) == 'send_if_authorized':
+    async def delayed(method, operation, timeout_s, **kwargs):
+        if method == 'move_pvat':
             clock.value = 100_000_000
-        return await original(awaitable, timeout)
+        return await original(method, operation, timeout_s, **kwargs)
 
-    monkeypatch.setattr(asyncio, 'wait_for', delayed)
+    monkeypatch.setattr(adapter, '_await_motion_call', delayed)
     try:
         result = await submit(adapter)
         assert result.sdk_outcome == 'not_started'

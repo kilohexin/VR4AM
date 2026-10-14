@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from app.control.transactional_settings import PursuitSettings, parse_target_strategy
+from app.control.transactional_settings import PursuitSettings, SegmentedSettings, parse_target_strategy
 
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "default.yaml"
@@ -101,6 +101,7 @@ class Settings:
     home_velocity_tolerance_radps: float
     home_stable_ms: int
     transactional_target: PursuitSettings | None = None
+    segmented_target: SegmentedSettings | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":
@@ -115,9 +116,11 @@ class Settings:
             raise RuntimeError("invalid_config:backend")
         lebai = _parse_lebai(payload) if backend == "lebai" else None
         common_payload = payload if backend == "simulator" else _default_payload()
+        strategy = parse_target_strategy(payload, backend=backend,
+            mode=lebai.mode if lebai is not None else None)
         return cls(
-            transactional_target=parse_target_strategy(payload, backend=backend,
-                mode=lebai.mode if lebai is not None else None),
+            transactional_target=strategy if isinstance(strategy, PursuitSettings) else None,
+            segmented_target=strategy if isinstance(strategy, SegmentedSettings) else None,
             backend=backend,
             lebai=lebai,
             control_hz=_positive_int(common_payload, "control_hz"),

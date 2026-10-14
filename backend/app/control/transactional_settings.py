@@ -27,12 +27,39 @@ class PursuitSettings:
             raise ValueError('invalid_pursuit:bounds')
 
 
+@dataclass(frozen=True)
+class SegmentedSettings:
+    settling: PursuitSettings
+
+    def __post_init__(self):
+        if (not isinstance(self.settling, PursuitSettings)
+                or self.settling.settle_samples < 3
+                or self.settling.position_tolerance_rad > .001
+                or self.settling.velocity_tolerance_radps > .002
+                or self.settling.budget_ms > 1000
+                or self.settling.max_observation_age_ms > 100
+                or self.settling.max_observation_gap_ms > 100):
+            raise ValueError('invalid_segment_settling')
+
+
 def parse_target_strategy(payload, *, backend, mode):
     if 'target_strategy' not in payload:
         return None
     selection = payload['target_strategy']
     if isinstance(selection, dict) and selection == {'kind': 'legacy'}:
         return None
+    if isinstance(selection, dict) and selection.get('kind') == 'segmented_experimental':
+        if set(selection) != {'kind', 'settling'}:
+            raise RuntimeError('invalid_config:target_strategy')
+        if backend != 'lebai' or mode != 'control':
+            raise RuntimeError('segmented_requires_lebai_control')
+        params = selection['settling']
+        if not isinstance(params, dict) or set(params) != {f.name for f in fields(PursuitSettings)}:
+            raise RuntimeError('invalid_config:target_strategy:settling')
+        try:
+            return SegmentedSettings(PursuitSettings(**params))
+        except ValueError as error:
+            raise RuntimeError('invalid_config:target_strategy:settling') from error
     if (not isinstance(selection, dict) or set(selection) != {'kind', 'pursuit'}
             or selection['kind'] != 'transactional_experimental'):
         raise RuntimeError('invalid_config:target_strategy')
