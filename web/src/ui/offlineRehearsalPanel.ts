@@ -21,6 +21,7 @@ export interface OfflineRehearsalEligibility {
   constraint: ConstraintKind | null;
   actualTcp: Pose | null;
   xrState: XRSessionStatus['state'];
+  segmentedCandidate?: boolean;
 }
 
 export class OfflineRehearsalPanel {
@@ -87,6 +88,9 @@ export class OfflineRehearsalPanel {
     eligibility: Readonly<OfflineRehearsalEligibility>,
   ): void {
     this.startButton.disabled = snapshot.active || !canStart(eligibility);
+    this.startButton.title = eligibility.segmentedCandidate
+      ? '此模式使用手动分段控制，不提供依赖 Home 的自动演练'
+      : '';
     this.stopButton.disabled = !snapshot.active;
     this.phaseValue.textContent = snapshot.currentPhase ?? snapshot.phase;
     this.stepValue.textContent = snapshot.step ?? '—';
@@ -110,6 +114,7 @@ export class OfflineRehearsalPanel {
 
 function canStart(eligibility: Readonly<OfflineRehearsalEligibility>): boolean {
   return eligibility.connected
+    && !eligibility.segmentedCandidate
     && eligibility.xrState === 'idle'
     && eligibility.runtime === 'LEBAI_FAKE'
     && eligibility.robotRuntime === 'LEBAI_FAKE'

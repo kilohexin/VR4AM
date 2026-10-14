@@ -33,6 +33,15 @@ beforeEach(() => {
 });
 
 describe('OfflineRehearsalPanel', () => {
+  it('disables the Home-based automatic rehearsal in segmented candidate mode', () => {
+    const start=vi.fn();
+    const panel=new OfflineRehearsalPanel(document.querySelector('#panel')!,start,vi.fn());
+    panel.update(idleSnapshot,{...eligible,segmentedCandidate:true});
+    expect(panel.startButton.disabled).toBe(true);
+    expect(panel.startButton.title).toContain('手动分段控制');
+    panel.startButton.click();
+    expect(start).not.toHaveBeenCalled();
+  });
   it('tracks XR ownership transitions and never starts while XR is starting or active', () => {
     const start = vi.fn();
     const panel = new OfflineRehearsalPanel(document.querySelector('#panel')!, start, vi.fn());

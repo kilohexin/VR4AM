@@ -314,11 +314,13 @@ function rehearsalEligibility(): OfflineRehearsalEligibility {
     constraint: latestRobotState?.constraint ?? null,
     actualTcp: latestRobotState?.actual_tcp ?? null,
     xrState,
+    segmentedCandidate: latestRobotState?.target_control?.policy === 'segmented_experimental',
   };
 }
 
 function startRehearsal(): void {
-  if (rehearsalEligibility().xrState !== 'idle') {
+  const eligibility = rehearsalEligibility();
+  if (eligibility.xrState !== 'idle' || eligibility.segmentedCandidate) {
     refreshRehearsalPanel();
     return;
   }
