@@ -47,6 +47,7 @@ class CandidateCoordinator:
         self._pose = anchor.model_copy(deep=True)
         self._version = 0
         self._generation = None
+        self._committed_command = None
         self._pending = None
         self._submitting = False
         self.frozen_reason = None
@@ -63,6 +64,11 @@ class CandidateCoordinator:
     @property
     def pose(self):
         return self._pose.model_copy(deep=True)
+
+    @property
+    def committed_command(self):
+        """Immutable command identity; not physical execution evidence."""
+        return self._committed_command
 
     def _authorized(self):
         return self.authority() == (self.epoch, True)
@@ -111,7 +117,7 @@ class CandidateCoordinator:
         finally:
             self._submitting = False
 
-    def settle(self):
+    def settle(self, *, accepted=None, require_accepted=False):
         if self._pending is None:
             return 'idle'
         draft = self._pending
@@ -125,12 +131,17 @@ class CandidateCoordinator:
         if result is None:
             return 'waiting' if valid else 'waiting_invalidated'
         self._pending = None
+        if (require_accepted and result.pvat_mode == 'advance'
+                and (accepted is None or accepted.command != receipt.command
+                     or accepted.tcp != draft.pose)):
+            self.frozen_reason = self.frozen_reason or 'accepted_target_changed'
         if (valid and not self.frozen_reason and draft.version == self._version
                 and result.command == receipt.command and not result.invalidated
                 and result.outcome == 'sdk_returned' and result.sdk_outcome == 'returned'
                 and result.accepted_command == receipt.command
                 and result.pvat_mode == 'advance' and result.error is None):
             self._candidate, self._pose = draft.candidate, draft.pose
+            self._committed_command = receipt.command
             self._version += 1
             return 'committed'
         self.frozen_reason = self.frozen_reason or (result.pvat_mode or result.outcome)
@@ -151,4 +162,5 @@ class CandidateCoordinator:
         self._version += 1
         self.epoch = epoch
         self._generation = None
+        self._committed_command = None
         self.frozen_reason = None

@@ -119,21 +119,23 @@ async def test_thousand_commits_retain_only_current_receipt():
     import weakref
     import gc
     from app.robots.command_admission import CommandAdmission, CommandCompletion, CommandRef
-    from app.robots.motion_view import MotionView
+    from app.robots.motion_view import AcceptedTarget, MotionView
     from tests.control.test_braking_approach import ORIGIN, pose_delta
 
     class Backend:
+        accepted = None
         async def submit_tcp(self, pose, command_id):
             ref = CommandRef(command_id, 0, command_id)
             done = CommandCompletion(ref)
             done._resolve('sdk_returned', sdk_outcome='returned', accepted_command=ref, pvat_mode='advance')
+            self.accepted = AcceptedTarget(ref, tuple(pose.p), tuple(pose.q), (0.,) * 6)
             return CommandAdmission(ref, None, completion=done)
 
         async def submit_catch_up(self, *args):
             raise AssertionError('unexpected_pursuit')
 
         def read_motion_view(self):
-            return MotionView(0, 0, True, True, None, None, True, False, None, None)
+            return MotionView(0, 0, True, True, None, None, True, False, self.accepted, None)
 
     backend, limits = Backend(), limiter()
     context = TargetContext(1, 0, True, True)

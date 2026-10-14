@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from app.schemas.messages import TeleopMode
+from app.robots.base import BackendCommandError
 from tests.control.catch_up_probe import CatchUpProbe
 from tests.control.candidate_commit_probe import CandidateCoordinator
 from tests.control.elapsed_step_probe import publish
@@ -196,10 +197,30 @@ async def test_real_owner_stop_preempts_inflight_and_pending_pursuit(boundary, p
             assert (await result(pending)).invalidated
             run.client.get_kin_data = read
             release.set()
-            await asyncio.wait_for(task, 2)
+            try:
+                await asyncio.wait_for(task, 2)
+            except BackendCommandError as error:
+                # The legacy stale path can propagate an unverified stop.
+                # It remains a failure; never count it as stop completion.
+                assert phase == 'pvat' and str(error) == 'stop_unverified'
+                assert 'move_pvat' in run.adapter._motion_calls.unknown_methods
             done = await result(receipt)
-            assert done.invalidated
-            assert done.sdk_outcome == ('returned' if phase == 'pvat' else 'not_started')
+            if phase == 'pvat' and done.sdk_outcome == 'timeout':
+                # Bound ownership can revoke the native await before the
+                # owner's stop invalidates the pump. Preserve that failure,
+                # rather than inventing a returned/invalidated SDK outcome.
+                record = run.adapter._motion_calls.snapshot()['calls']['move_pvat']
+                assert done.outcome == 'failed' and done.error == 'sdk_timeout:move_pvat'
+                assert done.accepted_command is None and done.pvat_mode is None
+                assert record['entered'] and record['remote_result_unknown']
+                assert record['abandon_reason'] == 'authority_revoked'
+                assert 'move_pvat' in run.adapter._motion_calls.unknown_methods
+                assert (await control.state_message()).fault == 'stop_unverified'
+                assert not run.adapter._stop_transaction.confirmed
+                assert not (await control.reset_fault()).accepted
+            else:
+                assert done.invalidated
+                assert done.sdk_outcome == ('returned' if phase == 'pvat' else 'not_started')
             assert probe.settle() == 'authority_revoked'
             assert candidate.snapshot() == before
             new_writes = run.client.write_calls[len(writes):]

@@ -45,7 +45,19 @@ class TransactionalTargetStrategy:
         return context.generation, context.active and context.authorized
 
     def _current(self, generation):
-        return self.backend.read_motion_view().is_current(generation)
+        view = self.backend.read_motion_view()
+        return (view.is_current(generation) and view.client_attached
+                and view.preflight_ready and not view.stop_in_progress
+                and view.latched_fault is None and self._history_matches(view))
+
+    def _history_matches(self, view):
+        coordinator = self.coordinator
+        if (coordinator is None or coordinator.pending
+                or coordinator.committed_command is None):
+            return True
+        return (view.accepted is not None
+                and view.accepted.command == coordinator.committed_command
+                and view.accepted.tcp == coordinator.pose)
 
     def on_anchor(self, pose, context):
         if not context.active or not context.authorized or self._authority() != (context.generation, True):
@@ -54,6 +66,8 @@ class TransactionalTargetStrategy:
             self.coordinator = CandidateCoordinator(self.backend, self.limits, pose,
                 authority=self._authority, generation_current=self._current)
         else:
+            if context.generation <= self.coordinator.epoch:
+                raise RuntimeError('new_epoch_required')
             self.coordinator.settle()
             self.coordinator.reanchor(pose)
         self.pursuit = None
@@ -123,8 +137,8 @@ class TransactionalTargetStrategy:
         idle = TargetUpdate(context.generation)
         if self.coordinator is None or self.halted:
             return idle
-        settled = self.coordinator.settle()
-        committed = self.coordinator.pose if settled == 'committed' else None
+        if self._authority() != (context.generation, True):
+            return idle
         view = self.backend.read_motion_view()
         if view.pump_fault is not None and context.active:
             return TargetUpdate(context.generation, fault=view.pump_fault)
@@ -132,6 +146,13 @@ class TransactionalTargetStrategy:
             return idle
         if view.latched_fault is not None:
             return TargetUpdate(context.generation, fault=view.latched_fault)
+        if (not view.client_attached or not view.preflight_ready or view.stop_in_progress
+                or not view.is_current(view.generation) or not self._history_matches(view)):
+            return TargetUpdate(context.generation, fault='candidate_dispatch_failed')
+        # Receipt completion alone cannot promote history after the adapter's
+        # accepted target was replaced or a current fault withdrew readiness.
+        settled = self.coordinator.settle(accepted=view.accepted, require_accepted=True)
+        committed = self.coordinator.pose if settled == 'committed' else None
         if self.pursuit is not None and (
                 not view.client_attached or not view.preflight_ready or view.stop_in_progress
                 or view.accepted is None or view.accepted.command != self.pursuit.accepted
