@@ -2101,11 +2101,13 @@ async def test_gripper_started_before_disconnect_cannot_write_after_reconnect() 
     try:
         await asyncio.wait_for(snapshot_recorded.wait(), 1)
         await asyncio.wait_for(adapter.disconnect(), 1)
-        await asyncio.wait_for(adapter.connect(), 1)
+        with pytest.raises(BackendCommandError, match='^snapshot_read_pending$'):
+            await adapter.connect()
         release_recording.set()
 
-        with pytest.raises(BackendCommandError, match="^preflight_not_ready$"):
+        with pytest.raises(BackendCommandError, match="^snapshot_read_client_changed$"):
             await asyncio.wait_for(gripper, 1)
+        await asyncio.wait_for(adapter.connect(), 1)
         assert "set_claw" not in [call[0] for call in old_client.write_calls]
         assert "set_claw" not in [call[0] for call in new_client.write_calls]
     finally:
@@ -2137,6 +2139,14 @@ async def test_snapshot_timestamp_is_conservative_and_total_read_deadline_is_enf
     client.get_tcp = blocked_get_tcp  # type: ignore[method-assign]
     with pytest.raises(BackendCommandError, match="^robot_state_stale$"):
         await adapter.get_state()
+    # An abandoned native read cannot be made healthy by swapping its method.
+    client.get_tcp = original_get_tcp
+    with pytest.raises(BackendCommandError, match="^snapshot_rpc_result_unknown$"):
+        await adapter.get_state()
+    await adapter.disconnect()
+    # Remaining conservative timestamp cases use an independent fake owner.
+    adapter, client, clock = await _connected_control_adapter()
+    original_get_tcp = client.get_tcp
 
     async def slow_get_tcp() -> dict[str, object]:
         clock.advance_ms(90)

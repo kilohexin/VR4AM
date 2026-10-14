@@ -14,6 +14,7 @@ from app.recording.clock_anchor import sample_performance_ns
 from app.robots.lebai_observer_window import ObserverWindow
 from app.robots.lebai_sdk_lock import SdkLock
 from app.robots.lebai_motion_calls import OwnedMotionCalls
+from app.robots.lebai_snapshot_calls import OwnedSnapshotCalls
 
 from app.config import TELEOP_SINGULARITY_GUARD_RAD, LebaiSettings
 from app.robots.base import (
@@ -120,6 +121,7 @@ class _SnapshotRead:
     generation: int
     sequence: int = 0
     snapshot: LebaiSnapshot | None = None
+    owner: OwnedSnapshotCalls | None = None
 
 
 class _MotionSnapshotFault(BackendCommandError):
@@ -181,6 +183,7 @@ class RealLebaiAdapter:
         self._client: LebaiClientProtocol | None = None
         self._sdk_lock = SdkLock()
         self._motion_calls = OwnedMotionCalls()
+        self._snapshot_calls = OwnedSnapshotCalls()
         self._motion_write_stop_required = False
         self._observer_window = ObserverWindow(observer_wait_s)
         self._stop_lock = asyncio.Lock()
@@ -323,12 +326,17 @@ class RealLebaiAdapter:
         )
 
     async def connect(self) -> None:
+        if self._snapshot_calls.unknown_methods:
+            raise BackendCommandError("snapshot_rpc_result_unknown")
         if self._motion_calls.unknown_methods:
             raise BackendCommandError("motion_rpc_result_unknown")
         if self._disconnecting:
             raise BackendCommandError("disconnect_in_progress")
         if self._client is not None:
             return
+        if (self._snapshot_calls.active
+                or any(not task.done() for task in self._snapshot_calls.tasks)):
+            raise BackendCommandError("snapshot_read_pending")
         if self._stop_diagnostic_sampler is not None and self._stop_diagnostic_sampler.unresolved:
             raise BackendCommandError("stop_diagnostic_read_pending")
         if self._stop_transaction is not None:
@@ -337,24 +345,41 @@ class RealLebaiAdapter:
             # A new connection must never reuse the previous client's requests.
             # Faults remain latched; connecting cannot grant motion permission.
             self._stop_transaction = None
+        if self._snapshot_calls.closed:
+            self._snapshot_calls = OwnedSnapshotCalls()
+        owner = self._snapshot_calls
+        owner.active += 1  # Include the whole connection pipeline and recorder awaits.
+        def revoked():
+            return owner.closed or owner is not self._snapshot_calls or bool(self._disconnecting)
+        def require_current():
+            if revoked():
+                raise BackendCommandError("snapshot_read_client_changed")
         try:
-            client = await asyncio.wait_for(
-                self._client_factory(self.settings.ip),
-                timeout=3.0,
-            )
-        except TimeoutError:
-            raise BackendCommandError("sdk_timeout:connect") from None
-        if not await client.is_connected():
-            raise BackendCommandError("robot_disconnected")
-        self._client = client
-        self._capabilities = detect_capabilities(client)
-        try:
+            try:
+                client = await owner.call('connect', lambda: self._client_factory(self.settings.ip),
+                    3., revoked=revoked)
+            except TimeoutError:
+                raise BackendCommandError("sdk_timeout:connect") from None
+            require_current()
+            try:
+                entry, unknown = self._snapshot_native_evidence(client, 'is_connected')
+                connected = await owner.call('initial_is_connected', client.is_connected,
+                    .2, revoked=revoked, entered=entry, native_result_unknown=unknown)
+            except TimeoutError:
+                raise BackendCommandError("sdk_timeout:is_connected") from None
+            require_current()
+            if not connected:
+                raise BackendCommandError("robot_disconnected")
+            self._client = client
+            self._capabilities = detect_capabilities(client)
             snapshot = await self._read_snapshot(read_purpose="connection")
+            require_current()
             preflight = self._preflight_from_snapshot(snapshot)
             self._preflight_ready = preflight.ready
             if self.settings.mode == "control" and preflight.ready:
                 await self._pump.start()
         except BaseException:
+            owner.close()
             self._client = None
             self._snapshot = None
             self._latest_snapshot_read = None
@@ -362,6 +387,8 @@ class RealLebaiAdapter:
             self._motion_observation = None
             self._preflight_ready = False
             raise
+        finally:
+            owner.active -= 1
 
     async def disconnect(self) -> None:
         self._observer_window.release_all()
@@ -385,6 +412,7 @@ class RealLebaiAdapter:
 
     async def _disconnect_local_resources(self) -> None:
         await self._pump.stop()
+        self._snapshot_calls.close()
         self._motion_calls.close()
         if self._stop_diagnostic_sampler is not None:
             await self._stop_diagnostic_sampler.close()
@@ -1064,6 +1092,8 @@ class RealLebaiAdapter:
             reason = self._latched_fault
         elif self._motion_calls.unknown_methods:
             reason = "motion_rpc_result_unknown"
+        elif self._snapshot_calls.unknown_methods:
+            reason = "snapshot_rpc_result_unknown"
         elif snapshot.robot_state is not BackendState.IDLE:
             reason = "robot_not_idle"
         elif snapshot.running_motion is not None:
@@ -1558,6 +1588,7 @@ class RealLebaiAdapter:
 
     def _remember_snapshot_fault(self, read: _SnapshotRead, fault: str) -> None:
         if (self._pump.running and read.sequence and read.client is self._client
+                and read.owner is self._snapshot_calls
                 and read.generation == self._pump.generation):
             previous = self._snapshot_read_fault
             # Keep the first known fault for this prepared generation. A read
@@ -2017,7 +2048,11 @@ class RealLebaiAdapter:
         read_purpose: str = "unspecified",
         observer_timing: dict[str, object] | None = None,
     ) -> LebaiSnapshot:
-        read = _SnapshotRead(self._client, self._pump.generation)
+        if self._snapshot_calls.unknown_methods:
+            raise BackendCommandError("snapshot_rpc_result_unknown")
+        owner = self._snapshot_calls
+        read = _SnapshotRead(self._client, self._pump.generation, owner=owner)
+        owner.active += 1  # Include lock waiting, decoding and logging, not only RPCs.
         try:
             return await self._read_snapshot_impl(
                 read, emit_kinematics=emit_kinematics,
@@ -2029,6 +2064,8 @@ class RealLebaiAdapter:
                 read, str(error) if isinstance(error, BackendCommandError) else "robot_state_stale",
             )
             raise
+        finally:
+            owner.active -= 1
 
     async def _read_snapshot_impl(
         self, read: _SnapshotRead, *, emit_kinematics: bool,
@@ -2048,6 +2085,9 @@ class RealLebaiAdapter:
         read_requested_ns = self._clock()
         read_generation = self._pump.generation
         async with self._sdk_lock:
+            if (client is not self._client or read.owner is not self._snapshot_calls
+                    or self._snapshot_calls.closed):
+                raise BackendCommandError("snapshot_read_client_changed")
             self._snapshot_read_sequence += 1
             read.sequence = self._snapshot_read_sequence
             self._latest_snapshot_read = read
@@ -2197,6 +2237,8 @@ class RealLebaiAdapter:
             )
         if emit_kinematics:
             await self._emit_kinematics(snapshot)
+        if client is not self._client or read.owner is not self._snapshot_calls or read.owner.closed:
+            raise BackendCommandError("snapshot_read_client_changed")
         return snapshot
 
     async def _timed(
@@ -2218,7 +2260,20 @@ class RealLebaiAdapter:
                     raise BackendCommandError("robot_state_stale")
                 timeout_s = remaining_ns / 1_000_000_000
                 deadline_limited = True
-            result = await asyncio.wait_for(operation(), timeout=timeout_s)
+            owner, client = self._snapshot_calls, self._client
+            if owner.unknown_methods:
+                raise BackendCommandError("snapshot_rpc_result_unknown")
+            entered, unknown = self._snapshot_native_evidence(client, name)
+            try:
+                result = await owner.call(name, operation, timeout_s, entered=entered, native_result_unknown=unknown,
+                    revoked=lambda: owner.closed or owner is not self._snapshot_calls or client is not self._client)
+                if owner.closed or owner is not self._snapshot_calls or client is not self._client:
+                    raise BackendCommandError("snapshot_read_client_changed")
+            finally:
+                if owner.unknown_methods and owner is self._snapshot_calls:
+                    self._preflight_ready = False
+                if owner.unknown_methods or owner.closed:
+                    self._schedule_sdk_diagnostic(dict(kind='snapshot_rpc_ownership', **owner.snapshot()))
             if deadline_ns is not None and self._clock() > deadline_ns:
                 raise BackendCommandError("robot_state_stale")
             return result
@@ -2239,6 +2294,23 @@ class RealLebaiAdapter:
         return _SNAPSHOT_READ_TIMEOUT_NS + int(
             1 / self.settings.control.state_hz * 1_000_000_000
         )
+
+    @staticmethod
+    def _snapshot_native_evidence(client, name):
+        counter = getattr(client, '_native_snapshot_entry_count', None)
+        status = getattr(client, '_native_snapshot_result_unknown', None)
+        entered = None
+        if callable(counter):
+            baseline = counter(name)
+            if type(baseline) is not int or baseline < 0:
+                raise BackendCommandError('invalid_snapshot_entry_evidence')
+            def entered():
+                try:
+                    value = counter(name)
+                    return type(value) is not int or value != baseline
+                except Exception:
+                    return True
+        return entered, (lambda: status(name)) if callable(status) else None
 
     def _runtime_motion_fault(self, snapshot: LebaiSnapshot) -> str | None:
         if snapshot.estop is not None:
@@ -2359,10 +2431,14 @@ class RealLebaiAdapter:
             raise BackendCommandError("real_robot_readonly")
         if self._client is None:
             raise BackendCommandError("robot_disconnected")
+        if self._snapshot_calls.unknown_methods:
+            raise BackendCommandError("snapshot_rpc_result_unknown")
         if self._motion_calls.unknown_methods:
             raise BackendCommandError("motion_rpc_result_unknown")
 
     def _begin_motion_epoch(self) -> None:
+        if self._snapshot_calls.unknown_methods:
+            raise BackendCommandError("snapshot_rpc_result_unknown")
         if self._motion_calls.unknown_methods:
             raise BackendCommandError("motion_rpc_result_unknown")
         if self._disconnecting:

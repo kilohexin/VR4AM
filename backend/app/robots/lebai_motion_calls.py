@@ -13,7 +13,8 @@ class OwnedMotionCalls:
         self.unknown_methods = set()
         self.last = {}
 
-    async def call(self, method, operation, timeout_s, *, revoked, entered=None):
+    async def call(self, method, operation, timeout_s, *, revoked, entered=None, quarantine_errors=True,
+                   native_result_unknown=None):
         if self.unknown_methods:
             raise RuntimeError('motion_rpc_result_unknown')
         loop = asyncio.get_running_loop()
@@ -67,7 +68,15 @@ class OwnedMotionCalls:
             record['outcome'] = ('cancelled' if isinstance(error, asyncio.CancelledError)
                 else 'timeout' if isinstance(error, TimeoutError) else 'error')
             record['entered'] = record['entered'] if entered is None else entered()
-            record['remote_result_unknown'] = record['entered']
+            record['remote_result_unknown'] = record['entered'] and (
+                quarantine_errors or isinstance(error, (TimeoutError, asyncio.CancelledError)) or not task.done())
+            if record['entered'] and native_result_unknown is not None:
+                try:
+                    evidence = native_result_unknown()
+                except Exception:
+                    evidence = True
+                if evidence is not None:
+                    record['remote_result_unknown'] = evidence if type(evidence) is bool else True
             if record['remote_result_unknown']:
                 self.unknown_methods.add(method)
             if not task.done() and not task.cancelling():

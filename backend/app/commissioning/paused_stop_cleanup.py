@@ -31,6 +31,24 @@ class BoundedStopOnlyClient(StopOnlyClient):
         self.read_calls = []
         self.pending_read = None
 
+    def _native_snapshot_entry_count(self, method):
+        """Trusted proxy entry evidence for the adapter's ordinary read methods."""
+        return sum(item['entered'] for item in self.read_calls if item['method'] == method)
+
+    def _native_snapshot_result_unknown(self, method):
+        matching = [item for item in self.read_calls if item['method'] == method]
+        if not matching:
+            return None
+        item = matching[-1]
+        if item['remote_result_unknown']:
+            return True  # Abandonment cannot be cleared by a native late finish.
+        if not item['entered'] or 'native_completed_ns' in item:
+            return False
+        task = self.pending_read
+        # A terminal native read error is not a future late payload; cancellation
+        # and a still-pending call retain uncertainty. Never assert remote cancel.
+        return task is None or not task.done() or task.cancelled()
+
     def read_guard(self):
         self.read_authorize()
         if (self.read_gate_closed or self.owner is None or self.owner.done() or self.owner.cancelling()

@@ -225,10 +225,15 @@ async def test_intervening_read_failure_is_not_erased_by_later_health(failure):
         outcome = await asyncio.gather(observer, return_exceptions=True)
         assert isinstance(outcome[0], BaseException)
         client.get_tcp = original_tcp
-        await adapter.get_state()
+        if failure == 'cancelled':
+            with pytest.raises(BackendCommandError, match='^snapshot_rpc_result_unknown$'):
+                await adapter.get_state()
+            assert adapter._snapshot_read_fault[1] == 'robot_state_stale'
+        else:
+            await adapter.get_state()
         resume.set()
         outcome = await asyncio.gather(motion, return_exceptions=True)
-        assert str(outcome[0]) == ('robot_state_stale' if failure == 'cancelled'
+        assert str(outcome[0]) == ('stop_unverified' if failure == 'cancelled'
                                     else 'sdk_call_failed:get_tcp')
         assert client.ik_calls == []
         assert 'move_pvat' not in [c[0] for c in client.write_calls]
