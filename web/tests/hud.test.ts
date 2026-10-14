@@ -15,6 +15,30 @@ beforeEach(() => {
 });
 
 describe('Chinese simulator HUD', () => {
+  it('shows desktop input instructions by default', () => {
+    new Hud(document.querySelector('#app')!);
+    const hint=document.querySelector('[data-field="input-help"]')!;
+    expect(hint.textContent).toContain('鼠标左键');
+    expect(hint.textContent).toContain('空格');
+    expect(hint.textContent).toContain('滚轮');
+    expect(hint.textContent).not.toContain('左摇杆');
+  });
+
+  it('switches only the hint between desktop, XR transition and active XR', () => {
+    const hud=new Hud(document.querySelector('#app')!);
+    const banner=hud.rehearsalBanner.textContent;
+    const hint=()=>document.querySelector('[data-field="input-help"]')!.textContent;
+    hud.setXRInputState('starting');
+    expect(hint()).toContain('切换中');
+    expect(hint()).not.toContain('拖动');
+    hud.setXRInputState('active');
+    expect(hint()).toContain('右 Grip 建立末端零位');
+    hud.setXRInputState('error');
+    expect(hint()).toContain('鼠标左键');
+    hud.setXRInputState('idle');
+    expect(hint()).toContain('鼠标左键');
+    expect(hud.rehearsalBanner.textContent).toBe(banner);
+  });
   it('labels the age as VR input freshness', () => {
     const root = document.querySelector<HTMLElement>('#app')!;
     new Hud(root);
@@ -22,6 +46,8 @@ describe('Chinese simulator HUD', () => {
     expect(root.textContent).not.toContain('样本年龄');
   });
   it('constrains narrow intrinsic widths and keeps rehearsal actions within one viewport column', () => {
+    const helpRules=styles.slice(styles.indexOf('.help-strip {'),styles.indexOf('.help-strip .line-icon'));
+    expect(helpRules).toMatch(/white-space:\s*normal/);
     const narrowRules = styles.slice(styles.indexOf('@media (max-width: 900px)'));
 
     expect(narrowRules).toMatch(/\.operator-console\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/s);
@@ -50,7 +76,7 @@ describe('Chinese simulator HUD', () => {
     expect(hud.settingsContainer.nextElementSibling).toBe(hud.diagnosticsContainer);
     expect(document.body.textContent).not.toContain('LM3 遥操作仿真');
     expect(document.body.textContent).not.toContain('仅仿真 · SIMULATOR');
-    expect(document.body.textContent).toContain('右 Grip 建立末端零位');
+    expect(document.body.textContent).toContain('鼠标左键');
     expect(document.querySelector('.brand-lockup h1')?.textContent).toBe('LM3 遥操作');
     expect(document.querySelector('.simulator-label')?.textContent).toBe('运行环境未确认');
     expect(document.body.textContent).not.toContain('LEBAI');

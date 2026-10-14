@@ -191,6 +191,7 @@ function sendVRDisarm(): void {
 
 function updateXRStatus(status: XRSessionStatus): void {
   xrState = status.state;
+  hud.setXRInputState(status.state);
   armPanel.setVRStatus(status);
   if (status.state === 'starting') {
     pendingFrames.clear();

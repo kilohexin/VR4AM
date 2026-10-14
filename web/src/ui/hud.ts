@@ -8,6 +8,10 @@ import type {
   TargetControlStatus,
 } from '../protocol/messages';
 import type {TeleopConnectionStatus} from '../transport/teleopSocket';
+import type {XRSessionStatus} from '../xr/session';
+
+const DESKTOP_INPUT_HELP='桌面：解锁后按住鼠标左键拖动画布（Grip）· 滚轮调深度 · 空格控制夹爪（Trigger）· 松开左键停止 · 右键转视角';
+const XR_INPUT_HELP='右 Grip 建立末端零位 · Trigger 控制夹爪 · 左摇杆平移平台 · 左 Grip+摇杆调高度 · 按下左摇杆归零';
 
 export interface ControllerHudState {
   tracking: boolean;
@@ -52,6 +56,7 @@ export class Hud {
   private readonly constraintRow: HTMLElement;
   private readonly sceneNotice: HTMLElement;
   private readonly targetControlValue: HTMLElement;
+  private readonly inputHelpValue: HTMLElement;
   private lastFault: string | null = null;
 
   constructor(root: Element) {
@@ -115,7 +120,7 @@ export class Hud {
       </main>
       <footer class="help-strip">
         ${icon('info')}
-        <span>右 Grip 建立末端零位 · Trigger 控制夹爪 · 左摇杆平移平台 · 左 Grip+摇杆调高度 · 按下左摇杆归零</span>
+        <span data-field="input-help">${DESKTOP_INPUT_HELP}</span>
       </footer>
     `;
 
@@ -144,6 +149,13 @@ export class Hud {
     this.constraintRow = requireElement(root, '[data-row="constraint"]');
     this.sceneNotice = requireElement(root, '.scene-notice');
     this.targetControlValue = requireElement(root, '[data-field="target-control"]');
+    this.inputHelpValue = requireElement(root, '[data-field="input-help"]');
+  }
+
+  setXRInputState(state: XRSessionStatus['state']): void {
+    this.inputHelpValue.textContent = state === 'active' ? XR_INPUT_HELP
+      : state === 'starting' ? 'VR 输入切换中，请保持鼠标左键和手柄 Grip 松开'
+      : DESKTOP_INPUT_HELP;
   }
 
   setConnectionStatus(status: TeleopConnectionStatus): void {
