@@ -5,7 +5,10 @@ Each segment retains the 100-ms lease, four FK samples and an 80-ms-or-less
 zero-terminal joint reference. No catch-up, interpolation or queued next move.
 """
 from dataclasses import dataclass, replace
+import copy
 import math
+import numpy as np
+from scipy.spatial.transform import Rotation
 
 from app.commissioning.finite_diagnostic import FiniteWindowDiagnosticAdapter
 from app.control.transactional_settings import PursuitSettings, SegmentedSettings
@@ -13,6 +16,8 @@ from app.robots.base import BackendCommandError
 from app.robots.lebai_adapter import RealLebaiAdapter, _MotionSnapshotFault
 from app.robots.lebai_finite_pvat import build_finite_pvat_candidate
 from app.schemas.messages import TargetControlStatus
+from app.robots.lebai_finite_pvat import _controls
+from app.robots.tool_spin import tool_spin_angle,check_spin_sample
 
 
 @dataclass(frozen=True)
@@ -24,7 +29,9 @@ class SegmentStatus:
 
 
 class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
-    def __init__(self, settings, *, settling: PursuitSettings, client_factory, **kwargs):
+    def __init__(self, settings, *, settling: PursuitSettings, client_factory, allow_tool_spin=False, **kwargs):
+        if type(allow_tool_spin) is not bool:raise ValueError('invalid_tool_spin_selection')
+        self.supports_tool_spin=allow_tool_spin
         SegmentedSettings(settling)  # Apply the same hard bounds to injection.
         super().__init__(settings, client_factory=client_factory, **kwargs)
         self.settling = settling
@@ -113,6 +120,9 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
             if self._segment is None:
                 raise _MotionSnapshotFault('segment_audit_not_admitted')
             self._segment['origin_q'] = tuple(snapshot.actual_q)
+            angle=(Rotation.from_quat(snapshot.actual_tcp.q).inv()*Rotation.from_quat(target.q)).magnitude()
+            if self.supports_tool_spin and angle>1e-9:
+                return await self._solve_spin_candidate(client,snapshot,target,**kwargs)
             return await super()._solve_candidate(client, snapshot, target, **kwargs)
         except BackendCommandError as error:
             # Original solver wraps constructor failures as candidate errors;
@@ -120,6 +130,46 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
             if str(error).startswith('segment_'):
                 raise _MotionSnapshotFault(str(error)) from None
             raise
+
+    async def _solve_spin_candidate(self,client,snapshot,target,**kwargs):
+        event=dict(kind='finite_tool_spin_audit',outcome='failed',calls=[],started_ns=self._clock(),
+            assessment='reference_samples_only_not_path_or_physics')
+        try:
+            self._guard(client,snapshot)
+            from app.commissioning.finite_diagnostic import _snapshot_signature
+            self._finite_input_signature=_snapshot_signature(snapshot)
+            angle=tool_spin_angle(snapshot.actual_tcp,target)
+            try:
+                selected=await RealLebaiAdapter._solve_candidate(self,client,snapshot,target,**kwargs)
+            except BackendCommandError as error:
+                if str(error).startswith(('finite_','invalid_finite_')):
+                    raise _MotionSnapshotFault(str(error)) from None
+                raise
+            self._guard(client,snapshot)
+            origin=await self._fk(client,snapshot,'feedback',snapshot.actual_q,event['calls'])
+            feedback_angle=(Rotation.from_quat(origin.q).inv()*Rotation.from_quat(snapshot.actual_tcp.q)).magnitude()
+            if math.dist(origin.p,snapshot.actual_tcp.p)>.0001 or feedback_angle>min(math.radians(.001),abs(angle)*.05):
+                raise _MotionSnapshotFault('finite_fk_feedback_mismatch')
+            goal=await self._fk(client,snapshot,'goal',selected.metrics.solution_q,event['calls'])
+            check_spin_sample(origin,goal,angle,complete=True)
+            point=selected.point
+            base,slope=_controls(np.array(snapshot.actual_qd),np.array(snapshot.actual_qdd),
+                np.array(point.q)-np.array(snapshot.actual_q),point.horizon_s)
+            middle_q=np.array(snapshot.actual_q)+np.array([math.comb(5,i)*.5**5 for i in range(6)])@(base+slope)
+            middle=await self._fk(client,snapshot,'midpoint',middle_q,event['calls'])
+            check_spin_sample(origin,middle,angle)
+            endpoint=await self._fk(client,snapshot,'endpoint',point.q,event['calls'])
+            check_spin_sample(origin,endpoint,angle,complete=True)
+            self._guard(client,snapshot)
+            self._finite_ticket=(client,snapshot,_snapshot_signature(snapshot),selected)
+            event.update(outcome='accepted',zero_terminal=True,horizon_s=point.horizon_s,tool_axis='Z',angle_rad=angle)
+            return selected
+        except BaseException as error:
+            event.update(error=str(error),error_type=type(error).__name__)
+            raise
+        finally:
+            event['completed_ns']=self._clock()
+            self._schedule_sdk_diagnostic(copy.deepcopy(event))
 
     def read_segment_status(self):
         view, now = self.read_motion_view(), self._clock()
@@ -146,7 +196,13 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
                 or done.sdk_outcome != 'returned' or done.pvat_mode != 'advance'
                 or done.accepted_command != receipt.command or done.error is not None
                 or view.accepted is None or view.accepted.command != receipt.command
-                or view.accepted.tcp != segment['target']):
+                or view.accepted.position != segment['target'].p
+                # Pose/Fake recovery normalizes quaternions. Equivalent
+                # rotations can therefore differ by a floating-point ULP;
+                # retain exact command/position identity and a 1e-12-rad
+                # representation allowance, separate from motion tolerances.
+                or (Rotation.from_quat(view.accepted.orientation).inv()
+                    * Rotation.from_quat(segment['target'].q)).magnitude() > 1e-12):
             self._segment_fault = 'segment_acceptance_failed'
         elif segment['accepted'] is not None and view.accepted != segment['accepted']:
             self._segment_fault = 'segment_acceptance_changed'
@@ -189,6 +245,12 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
             segment['ready'] = False
             segment['good'] = 0
         if now > segment['deadline']:
+            from dataclasses import asdict
+            self._schedule_sdk_diagnostic(dict(kind='segment_feedback_timeout',now_ns=now,
+                floor_ns=segment['feedback_floor'],deadline_ns=segment['deadline'],
+                last_sample=segment['last_sample'],good=segment['good'],
+                origin_q=segment.get('origin_q'),accepted=asdict(segment['accepted']),
+                sample=asdict(sample) if sample else None))
             self._segment_fault = 'segment_feedback_expired'
             return SegmentStatus(False, fault=self._segment_fault)
         return SegmentStatus(segment['ready'], segment['target'].model_copy(deep=True), receipt.command)
@@ -213,5 +275,6 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
         else:
             phase = 'awaiting_feedback'
         return TargetControlStatus(policy='segmented_experimental', phase=phase,
+            tool_spin_supported=self.supports_tool_spin,
             samples_observed=observed, samples_required=self.settling.settle_samples,
             hardware_verified=False)

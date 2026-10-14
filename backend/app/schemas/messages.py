@@ -120,6 +120,7 @@ class BackendState(StrEnum):
 
 
 class TargetControlStatus(StrictMessage):
+    tool_spin_supported: bool = Field(default=False,strict=True)
     policy: Literal['segmented_experimental']
     phase: Literal['inactive', 'ready', 'awaiting_reply', 'awaiting_window', 'awaiting_feedback', 'fault']
     samples_observed: int = Field(ge=0, strict=True)
@@ -141,6 +142,7 @@ class TargetControlStatus(StrictMessage):
 
 
 class RobotStateMessage(StrictMessage):
+    manual_input_ready: bool = Field(default=False,strict=True)
     v: Literal[1] = 1
     type: Literal["robot_state"] = "robot_state"
     server_mono_ns: int = Field(ge=0)
@@ -227,6 +229,13 @@ def _validate_json_payload(value: object) -> None:
         json.dumps(value, allow_nan=False)
     except (TypeError, ValueError, OverflowError):
         raise ValueError("diagnostic payload must be JSON safe") from None
+
+
+class GripperRequestMessage(StrictMessage):
+    v: Literal[1]
+    type: Literal['gripper_request']
+    request_id: str = Field(min_length=1,max_length=64)
+    value: float = Field(ge=0,le=1,strict=True)
 
 
 class ClientControlMessage(StrictMessage):
@@ -357,6 +366,7 @@ class OfflineRehearsalFinishMessage(StrictMessage):
 
 ClientMessage = (
     VRFrame
+    | GripperRequestMessage
     | SetSimulationScaleMessage
     | ClientControlMessage
     | OfflineRehearsalBeginMessage

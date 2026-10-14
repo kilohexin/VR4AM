@@ -11,8 +11,10 @@ from app.control.robot_control import LatestVRFrame, RobotControl
 from app.diagnostics.session_trace import SessionTrace
 from app.diagnostics.store import DiagnosticsStore
 from app.rehearsal.report import HARDWARE_PENDING, RehearsalReportStore
+from app.robots.base import BackendCommandError
 from app.schemas.messages import (
     ClientMessage,
+    GripperRequestMessage,
     ClientControlMessage,
     OfflineRehearsalBeginMessage,
     OfflineRehearsalFinishMessage,
@@ -123,6 +125,8 @@ def _parse_message(payload: Any) -> ClientMessage:
     message_type = payload.get("type")
     if message_type == "vr_frame":
         return VRFrame.model_validate(payload)
+    if message_type == 'gripper_request':
+        return GripperRequestMessage.model_validate(payload)
     if message_type == "offline_rehearsal_begin":
         return OfflineRehearsalBeginMessage.model_validate(payload)
     if message_type == "offline_rehearsal_phase":
@@ -338,6 +342,23 @@ async def _receive_messages(
         if isinstance(message, VRFrame):
             app.state.latest.publish(message, control.clock.now_ns())
             start_sender.set()
+            continue
+
+        if isinstance(message,GripperRequestMessage):
+            accepted=False
+            reason='not_authorized_or_not_idle'
+            if rehearsal_active is None or not rehearsal_active.is_set():
+                try:
+                    await control.command_gripper(message.value)
+                    accepted=True
+                    reason='sdk_returned_not_physical_completion'
+                except BackendCommandError as error:
+                    await control._enter_fault(str(error))
+                    reason='backend_fault'
+                except RuntimeError:
+                    pass
+            await _send_json(websocket,dict(v=1,type='gripper_result',request_id=message.request_id,
+                accepted=accepted,message=reason),send_lock)
             continue
 
         if isinstance(message, SetSimulationScaleMessage):

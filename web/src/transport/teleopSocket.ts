@@ -1,5 +1,8 @@
 import {
   isArmFeedbackMessage,
+  isGripperResultMessage,
+  type GripperRequestMessage,
+  type GripperResultMessage,
   isConnectionRejectedMessage,
   isDiagnosticsMessage,
   isFaultResetResultMessage,
@@ -59,6 +62,7 @@ export class TeleopSocket {
     private readonly onDiagnostics: (message: DiagnosticsMessage) => void = () => {},
     private readonly onOfflineRehearsalFeedback: (message: OfflineRehearsalFeedbackMessage) => void = () => {},
     private readonly onSimulationScaleResult: (message: SimulationScaleResultMessage) => void = () => {},
+    private readonly onGripperResult: (message: GripperResultMessage) => void = () => {},
   ) {}
 
   connect(): void {
@@ -77,6 +81,11 @@ export class TeleopSocket {
   }
 
   sendControl(message: ClientControlMessage): void {
+    this.send(message);
+  }
+
+  sendGripper(message: GripperRequestMessage): void {
+    if (!Number.isFinite(message.value) || message.value<0 || message.value>1) return;
     this.send(message);
   }
 
@@ -148,6 +157,7 @@ export class TeleopSocket {
         else if (isDiagnosticsMessage(message)) this.onDiagnostics(message);
         else if (isOfflineRehearsalFeedbackMessage(message)) this.onOfflineRehearsalFeedback(message);
         else if (isSimulationScaleResultMessage(message)) this.onSimulationScaleResult(message);
+        else if (isGripperResultMessage(message)) this.onGripperResult(message);
       } catch {
         // Malformed or unsupported messages are ignored at the transport boundary.
       }
@@ -181,7 +191,7 @@ export class TeleopSocket {
     }, delay);
   }
 
-  private send(message: VRFrame | ClientControlMessage | OfflineRehearsalClientMessage | SetSimulationScaleMessage): void {
+  private send(message: VRFrame | ClientControlMessage | OfflineRehearsalClientMessage | SetSimulationScaleMessage | GripperRequestMessage): void {
     if (this.socket?.readyState !== OPEN_READY_STATE) return;
     this.socket.send(JSON.stringify(message));
   }

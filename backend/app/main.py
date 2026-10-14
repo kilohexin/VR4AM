@@ -91,6 +91,7 @@ def build_backend(
             raise ValueError('conflicting_segmented_backend')
         from app.robots.segmented_adapter import SegmentedLebaiAdapter
         return SegmentedLebaiAdapter(settings.lebai,
+            allow_tool_spin=settings.segmented_target.tool_spin,
             settling=settings.segmented_target.settling, client_factory=client_factory,
             event_callback=recorder.write_event, backend_label=backend_label)
     return RealLebaiAdapter(

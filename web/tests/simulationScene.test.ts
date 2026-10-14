@@ -282,6 +282,92 @@ describe('offline controller scene seam', () => {
 });
 
 describe('desktop input release safety', () => {
+  it.each(['input','textarea','select','button','a','editable','nested-button'])
+  ('does not capture Space from an interactive %s', (kind) => {
+    const canvas=document.createElement('canvas');
+    const control=document.createElement(kind==='editable' ? 'div' : kind==='nested-button' ? 'button' : kind);
+    if(kind==='editable')control.setAttribute('contenteditable','true');
+    if(kind==='a')control.setAttribute('href','#');
+    const child=document.createElement('span');
+    control.append(child);
+    document.body.append(canvas,control);
+    const input=new DesktopInputSafety(canvas);
+    input.attach();
+    try {
+      const event=new KeyboardEvent('keydown',{code:'Space',bubbles:true,cancelable:true});
+      (kind==='nested-button' ? child : control).dispatchEvent(event);
+      expect(input.snapshot().trigger).toBe(0);
+      expect(event.defaultPrevented).toBe(false);
+    } finally {input.dispose();canvas.remove();control.remove();}
+  });
+
+  it('clears active desktop input on focus transfer and accepts a fresh canvas gesture', () => {
+    const canvas=document.createElement('canvas');
+    const control=document.createElement('input');
+    document.body.append(canvas,control);
+    const captures=new Set<number>();
+    canvas.setPointerCapture=vi.fn(id=>captures.add(id));
+    canvas.hasPointerCapture=vi.fn(id=>captures.has(id));
+    canvas.releasePointerCapture=vi.fn(id=>captures.delete(id));
+    const input=new DesktopInputSafety(canvas);
+    input.attach();
+    try {
+      canvas.dispatchEvent(pointerEvent('pointerdown',7,0));
+      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space'}));
+      expect(input.snapshot()).toEqual({activePointer:7,grip:true,trigger:1});
+      control.focus();
+      expect(input.snapshot()).toEqual({activePointer:null,grip:false,trigger:0});
+      expect(captures.size).toBe(0);
+      // Window-dispatched events must also respect the actual focused control.
+      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space'}));
+      expect(input.snapshot().trigger).toBe(0);
+      canvas.dispatchEvent(pointerEvent('pointerdown',8,0));
+      expect(document.activeElement).toBe(canvas);
+      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space'}));
+      expect(input.snapshot()).toEqual({activePointer:8,grip:true,trigger:1});
+      // Release wins even if the matching key-up comes from a form control.
+      control.dispatchEvent(new KeyboardEvent('keyup',{code:'Space',bubbles:true}));
+      expect(input.snapshot().trigger).toBe(0);
+    } finally {input.dispose();canvas.remove();control.remove();}
+  });
+
+  it.each([{repeat:true},{isComposing:true},{ctrlKey:true},{altKey:true},{metaKey:true},{shiftKey:true}])
+  ('does not start a claw input for protected keyboard flags %j', (flags) => {
+    const input=new DesktopInputSafety(document.createElement('canvas'));
+    input.attach();
+    try {
+      const event=new KeyboardEvent('keydown',{code:'Space',cancelable:true,...flags});
+      window.dispatchEvent(event);
+      expect(input.snapshot().trigger).toBe(0);
+      expect(event.defaultPrevented).toBe(false);
+    } finally {input.dispose();}
+  });
+
+  it('does not restart a held key after blur until a fresh keydown', () => {
+    const input=new DesktopInputSafety(document.createElement('canvas'));
+    input.attach();
+    try {
+      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space'}));
+      expect(input.snapshot().trigger).toBe(1);
+      window.dispatchEvent(new Event('blur'));
+      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space',repeat:true}));
+      expect(input.snapshot().trigger).toBe(0);
+      window.dispatchEvent(new KeyboardEvent('keyup',{code:'Space'}));
+      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space'}));
+      expect(input.snapshot().trigger).toBe(1);
+    } finally {input.dispose();}
+  });
+
+  it('respects Space already handled by another control', () => {
+    const input=new DesktopInputSafety(document.createElement('canvas'));
+    input.attach();
+    try {
+      const event=new KeyboardEvent('keydown',{code:'Space',cancelable:true});
+      event.preventDefault();
+      window.dispatchEvent(event);
+      expect(input.snapshot().trigger).toBe(0);
+    } finally {input.dispose();}
+  });
   it('does not latch pointer Grip or keyboard Trigger while automation disables manual input', () => {
     const canvas = document.createElement('canvas');
     canvas.setPointerCapture = vi.fn();

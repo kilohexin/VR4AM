@@ -251,7 +251,7 @@ class RobotControl:
             and received.frame.visibility == "visible"
             and (self._last_frame_id is None
                  or received.frame.session_id == self._last_frame_id[0])
-            and (self.mode is TeleopMode.ARMED or received.frame.right.grip)
+            and (self.mode in {TeleopMode.ARMED,TeleopMode.HOLD} or received.frame.right.grip)
         )
 
     @property
@@ -979,7 +979,7 @@ class RobotControl:
                 self._fault is None
                 and not self._loop_failed
                 and not self._shutdown_started
-                and self.machine.mode in {TeleopMode.ARMED, TeleopMode.ACTIVE}
+                and self.machine.mode in {TeleopMode.ARMED, TeleopMode.ACTIVE, TeleopMode.HOLD}
                 and not (self.machine.mode is TeleopMode.ACTIVE and not received.frame.right.grip)
             ):
                 gripper_generation = self._control_generation
@@ -991,7 +991,7 @@ class RobotControl:
                 # A claw RPC can yield before Grip transitions or anchor
                 # capture. Revalidate the input and authority after it returns.
                 if (
-                    self.machine.mode not in {TeleopMode.ARMED, TeleopMode.ACTIVE}
+                    self.machine.mode not in {TeleopMode.ARMED, TeleopMode.ACTIVE, TeleopMode.HOLD}
                     or not self._frame_is_current(received, gripper_generation)
                 ):
                     return
@@ -1361,6 +1361,9 @@ class RobotControl:
                 "recovery_phase": self._recovery_phase,
                 "translation_scale": self.mapper.translation_scale,
                 "target_control": status_message() if callable(status_message) else None,
+                "manual_input_ready": self.machine.mode in {TeleopMode.ARMED,TeleopMode.ACTIVE,TeleopMode.HOLD}
+                    and self._control_generation_is_current(self._control_generation)
+                    and not self._pending_stop_completion and not self._stop_unverified,
             }
         )
 
@@ -1433,7 +1436,7 @@ class RobotControl:
 
     def _gripper_authority_is_current(self, generation: int) -> bool:
         return (
-            self.machine.mode in {TeleopMode.ARMED, TeleopMode.ACTIVE}
+            self.machine.mode in {TeleopMode.ARMED, TeleopMode.ACTIVE, TeleopMode.HOLD}
             and self._control_generation_is_current(generation)
         )
 

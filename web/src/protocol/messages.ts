@@ -51,6 +51,7 @@ export type RuntimeBackend = 'SIMULATOR' | 'LEBAI' | 'LEBAI_FAKE';
 export type RealRobotMode = 'readonly' | 'control';
 
 export interface TargetControlStatus {
+  tool_spin_supported?: boolean;
   policy: 'segmented_experimental';
   phase: 'inactive' | 'ready' | 'awaiting_reply' | 'awaiting_window' | 'awaiting_feedback' | 'fault';
   samples_observed: number;
@@ -59,6 +60,7 @@ export interface TargetControlStatus {
 }
 
 export interface RobotStateMessage {
+  manual_input_ready?: boolean;
   v: typeof PROTOCOL_VERSION;
   type: 'robot_state';
   server_mono_ns: number;
@@ -129,6 +131,28 @@ export interface ClientControlMessage {
   type: ClientControlType;
   request_id: string;
   client_mono_ms?: number | null;
+}
+
+export interface GripperRequestMessage {
+  v: 1;
+  type: 'gripper_request';
+  request_id: string;
+  value: number;
+}
+
+export interface GripperResultMessage {
+  v: 1;
+  type: 'gripper_result';
+  request_id: string;
+  accepted: boolean;
+  message: string;
+}
+
+export function isGripperResultMessage(value: unknown): value is GripperResultMessage {
+  return isRecord(value) && hasExactKeys(value,['v','type','request_id','accepted','message'])
+    && value.v===1 && value.type==='gripper_result' && typeof value.request_id==='string'
+    && codePointLength(value.request_id)>=1 && codePointLength(value.request_id)<=64
+    && typeof value.accepted==='boolean' && typeof value.message==='string';
 }
 
 export interface ArmAckMessage {
@@ -616,7 +640,8 @@ export function isVRFrame(value: unknown): value is VRFrame {
 
 export function isTargetControlStatus(value: unknown): value is TargetControlStatus {
   return isRecord(value)
-    && hasExactKeys(value, ['policy','phase','samples_observed','samples_required','hardware_verified'])
+    && hasExactKeys(value, ['policy','phase','samples_observed','samples_required','hardware_verified'],['tool_spin_supported'])
+    && (!Object.hasOwn(value,'tool_spin_supported') || typeof value.tool_spin_supported==='boolean')
     && value.policy === 'segmented_experimental' && value.hardware_verified === false
     && isEnumValue(['inactive','ready','awaiting_reply','awaiting_window','awaiting_feedback','fault'], value.phase)
     && isNonNegativeInteger(value.samples_observed) && isNonNegativeInteger(value.samples_required)
@@ -632,7 +657,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
       [
         'ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase', 'backend',
         'real_robot_mode', 'preflight_ready', 'preflight_reason',
-        'translation_scale', 'target_control',
+        'translation_scale', 'target_control', 'manual_input_ready',
       ],
     ) ||
     value.v !== PROTOCOL_VERSION ||
@@ -649,6 +674,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
 
   if (Object.hasOwn(value,'target_control') && value.target_control !== null
       && !isTargetControlStatus(value.target_control)) return false;
+  if (Object.hasOwn(value,'manual_input_ready') && typeof value.manual_input_ready!=='boolean') return false;
 
   if (Object.hasOwn(value, 'ack_seq') && !isNullableNonNegativeInteger(value.ack_seq)) return false;
   if (

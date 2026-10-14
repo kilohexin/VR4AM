@@ -93,6 +93,7 @@ export class DesktopInputSafety {
   constructor(private readonly canvas: HTMLCanvasElement) {
     this.ownerDocument = canvas.ownerDocument;
     this.ownerWindow = this.ownerDocument.defaultView ?? window;
+    if (!canvas.hasAttribute('tabindex')) canvas.tabIndex = 0;
   }
 
   attach(): void {
@@ -102,6 +103,7 @@ export class DesktopInputSafety {
     this.ownerWindow.addEventListener('keydown', this.onKeyDown);
     this.ownerWindow.addEventListener('keyup', this.onKeyUp);
     this.ownerDocument.addEventListener('visibilitychange', this.onVisibilityChange);
+    this.ownerDocument.addEventListener('focusin', this.onFocusIn);
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
     this.canvas.addEventListener('pointerup', this.onPointerUp);
     this.canvas.addEventListener('pointercancel', this.onPointerUp);
@@ -116,6 +118,7 @@ export class DesktopInputSafety {
     this.ownerWindow.removeEventListener('keydown', this.onKeyDown);
     this.ownerWindow.removeEventListener('keyup', this.onKeyUp);
     this.ownerDocument.removeEventListener('visibilitychange', this.onVisibilityChange);
+    this.ownerDocument.removeEventListener('focusin', this.onFocusIn);
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
     this.canvas.removeEventListener('pointerup', this.onPointerUp);
     this.canvas.removeEventListener('pointercancel', this.onPointerUp);
@@ -151,6 +154,7 @@ export class DesktopInputSafety {
 
   private readonly onPointerDown = (event: PointerEvent): void => {
     if (!this.enabled || event.button !== 0) return;
+    this.canvas.focus({preventScroll: true});
     this.activePointer = event.pointerId;
     this.grip = true;
     try {
@@ -182,13 +186,29 @@ export class DesktopInputSafety {
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (!this.enabled || event.code !== 'Space') return;
+    if (!this.enabled || event.code !== 'Space' || event.defaultPrevented
+      || event.isComposing || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey
+      || this.interactiveTarget(event)) return;
+    if (event.repeat) {
+      if (this.trigger === 1) event.preventDefault();
+      return;
+    }
     event.preventDefault();
     this.trigger = 1;
   };
 
   private readonly onKeyUp = (event: KeyboardEvent): void => {
     if (event.code === 'Space') this.trigger = 0;
+  };
+
+  private interactiveTarget(event: Event): boolean {
+    return [...event.composedPath(),this.ownerDocument.activeElement].some(target =>
+      target instanceof Element && target.closest(
+        'input,textarea,select,button,a[href],[contenteditable]:not([contenteditable="false"]),[role="button"],[role="textbox"],[role="combobox"],[role="slider"],[role="spinbutton"]'));
+  }
+
+  private readonly onFocusIn = (event: FocusEvent): void => {
+    if (this.interactiveTarget(event)) this.reset();
   };
 }
 

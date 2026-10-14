@@ -18,6 +18,7 @@ import {resolveTeleopSocketUrl} from './transport/socketUrl';
 import {TeleopSocket} from './transport/teleopSocket';
 import {ArmPanel} from './ui/armPanel';
 import {Hud} from './ui/hud';
+import {HoldControlPanel} from './ui/holdControlPanel';
 import {SimulationSettingsPanel} from './ui/simulationSettingsPanel';
 import {LatencyTracker} from './ui/latency';
 import {DiagnosticsPanel, DiagnosticsUpdateCoordinator} from './ui/diagnosticsPanel';
@@ -57,6 +58,10 @@ let scaleRequestSequence = 0;
 let pendingScaleRequestId: string | null = null;
 let latestGrip = false;
 let preferredScaleAttempted = false;
+let holdPanel:HoldControlPanel;
+let lastManualFrame:VRFrame|null=null;
+let desktopSequence=0;
+let lastRobotStateReceivedMs=Number.NEGATIVE_INFINITY;
 
 const socket = new TeleopSocket(
   resolveTeleopSocketUrl(window.location, import.meta.env.VITE_TELEOP_WS_URL),
@@ -84,6 +89,7 @@ const socket = new TeleopSocket(
       scene?.setRuntimeSummary(emptyRuntimeSummary());
     }
     refreshRehearsalPanel();
+    refreshHoldPanel();
   },
   (message) => {
     armPanel?.handleArmFeedback(message);
@@ -108,15 +114,22 @@ const socket = new TeleopSocket(
     settingsPanel?.handleResult(message);
     refreshSettingsPanel();
   },
+  (message)=>holdPanel?.onGripperResult(message),
 );
 
 armPanel = new ArmPanel(
   hud.actionContainer,
-  (message) => socket.sendControl(message),
+  (message) => {if(message.type==='disarm')holdPanel?.cancel();socket.sendControl(message);},
   () => void (xrController.isActive ? xrController.exitVR() : xrController.enterVR()),
   (snapshot) => scene?.setArmSafetyState(snapshot),
 );
 armPanel.setConnectionStatus({state: 'disconnected'});
+holdPanel=new HoldControlPanel(hud.desktopControlContainer,(message)=>socket.sendGripper(message),
+ ()=>performance.now(),()=>{
+  if(connectionState&&lastManualFrame&&xrState!=='active'&&!rehearsalActive)
+   sendFrame({...lastManualFrame,client_mono_ms:performance.now(),
+    visibility:document.visibilityState==='visible'?'visible':'hidden'},'manual');
+ });
 
 scene = new SimulationScene(hud.sceneContainer, {
   stateBuffer,
@@ -192,6 +205,7 @@ function sendVRDisarm(): void {
 function updateXRStatus(status: XRSessionStatus): void {
   xrState = status.state;
   hud.setXRInputState(status.state);
+  refreshHoldPanel();
   armPanel.setVRStatus(status);
   if (status.state === 'starting') {
     pendingFrames.clear();
@@ -208,6 +222,12 @@ function updateXRStatus(status: XRSessionStatus): void {
 }
 
 function sendFrame(frame: VRFrame, source: TeleopFrameSource): void {
+  if(source==='manual'&&holdPanel){
+   lastManualFrame=frame;
+   frame=holdPanel.applyFrame(frame);
+   frame={...frame,seq:desktopSequence++};
+   updateController({tracking:frame.tracking_valid,grip:frame.right.grip,trigger:frame.right.trigger});
+  }
   forwardTeleopFrame(frame, source, rehearsalActive, sendFrameToSocket);
 }
 
@@ -218,6 +238,7 @@ function sendFrameToSocket(frame: VRFrame): void {
 }
 
 function onRobotState(state: RobotStateMessage): void {
+  lastRobotStateReceivedMs=performance.now();
   latestRobotState = structuredClone(state);
   rehearsal.onRobotState(state);
   const constraint = state.constraint ?? null;
@@ -241,6 +262,7 @@ function onRobotState(state: RobotStateMessage): void {
   diagnosticsUpdates.onRobotState(state, recordAcknowledgement);
   refreshRehearsalPanel();
   refreshSettingsPanel();
+  refreshHoldPanel();
 }
 
 function onDiagnostics(diagnostics: DiagnosticsMessage): void {
@@ -252,6 +274,7 @@ function onDiagnostics(diagnostics: DiagnosticsMessage): void {
 
 function renderRehearsalSnapshot(snapshot: OfflineRehearsalSnapshot): void {
   rehearsalActive = snapshot.active;
+  refreshHoldPanel();
   scene.setAutomationActive(snapshot.active);
   armPanel.setAutomationActive(snapshot.active);
   rehearsalPanel.update(snapshot, rehearsalEligibility());
@@ -332,7 +355,12 @@ function disposeForPageExit(): void {
   window.removeEventListener('pagehide', disposeForPageExit);
   window.removeEventListener('beforeunload', disposeForPageExit);
   removeRehearsalVisibilityStop();
+  holdPanel.dispose();
   disposeAppForUnload(rehearsal, xrController, scene, socket);
+}
+
+function refreshHoldPanel():void{
+ holdPanel?.update(latestRobotState,connectionState&&xrState==='idle'&&!rehearsalActive,lastRobotStateReceivedMs);
 }
 
 function recordAcknowledgement(sequence: number | null): void {

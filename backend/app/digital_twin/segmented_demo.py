@@ -30,8 +30,8 @@ def demo_settings():
     control=replace(settings.lebai.control,pvat_horizon_s=.08,pvat_send_hz=25,
         max_tcp_speed_mps=.005,max_tcp_acceleration_mps2=.02,
         max_tcp_step_m=.0002,translation_scale=.2)
-    return replace(settings,lebai=replace(settings.lebai,control=control),
-        segmented_target=SegmentedSettings(PursuitSettings(500,60,60,.001,.002,3)))
+    return replace(settings,lebai=replace(settings.lebai,control=control),rotation_dead_zone_deg=.001,
+        segmented_target=SegmentedSettings(PursuitSettings(500,60,60,.001,.002,3),tool_spin=True))
 
 
 class SegmentedDemoClient(DigitalTwinLebaiClient):

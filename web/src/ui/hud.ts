@@ -10,7 +10,7 @@ import type {
 import type {TeleopConnectionStatus} from '../transport/teleopSocket';
 import type {XRSessionStatus} from '../xr/session';
 
-const DESKTOP_INPUT_HELP='桌面：解锁后按住鼠标左键拖动画布（Grip）· 滚轮调深度 · 空格控制夹爪（Trigger）· 松开左键停止 · 右键转视角';
+const DESKTOP_INPUT_HELP='桌面：鼠标左键长按方向、升降或自转按钮 · 松开停止 · 静止时点击夹爪开合 · 右键转视角';
 const XR_INPUT_HELP='右 Grip 建立末端零位 · Trigger 控制夹爪 · 左摇杆平移平台 · 左 Grip+摇杆调高度 · 按下左摇杆归零';
 
 export interface ControllerHudState {
@@ -36,6 +36,7 @@ export class Hud {
   readonly rehearsalContainer: HTMLElement;
   readonly settingsContainer: HTMLElement;
   readonly diagnosticsContainer: HTMLElement;
+  readonly desktopControlContainer: HTMLElement;
 
   private readonly modeValue: HTMLElement;
   private readonly runtimeIdentityValue: HTMLElement;
@@ -81,6 +82,7 @@ export class Hud {
             ${icon('shield')}
             <strong data-field="mode">DISCONNECTED · 未连接</strong>
           </div>
+          <div class="desktop-control-host"></div>
           ${statusRow('robot', '机器人', '<span data-field="backend-state">DISCONNECTED</span>')}
           ${statusRow('target', '控制方式', '<span data-field="target-control">未确认</span>', 'target-control-row')}
           ${statusRow('link', '连接', '<span data-field="connection">未连接</span>')}
@@ -130,6 +132,7 @@ export class Hud {
     this.rehearsalContainer = requireElement(root, '.offline-rehearsal-rail');
     this.settingsContainer = requireElement(root, '.simulation-settings-rail');
     this.diagnosticsContainer = requireElement(root, '.diagnostics-rail');
+    this.desktopControlContainer = requireElement(root, '.desktop-control-host');
     this.modeValue = requireElement(root, '[data-field="mode"]');
     this.runtimeIdentityValue = requireElement(root, '.simulator-label');
     this.brandHeading = requireElement(root, '.brand-lockup h1');

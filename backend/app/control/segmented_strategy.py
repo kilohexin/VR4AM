@@ -1,6 +1,8 @@
 """Latest-input-only translation policy; no autonomous motion or recovery."""
 import copy
 import math
+import numpy as np
+from scipy.spatial.transform import Rotation
 
 from app.control.target_strategy import TargetPlan, TargetUpdate
 from app.robots.base import BackendCommandError
@@ -58,10 +60,19 @@ class SegmentedTargetStrategy:
         trial.clear()
         trial.set_pose_anchor(self.pose)
         translation = Pose(p=requested.p, q=self.pose.q)
+        if getattr(self.backend,'supports_tool_spin',False) and math.dist(requested.p,self.pose.p)<=1e-9:
+            local=(Rotation.from_quat(self.pose.q).inv()*Rotation.from_quat(requested.q)).as_rotvec()
+            if np.linalg.norm(local[:2])<=1e-7 and abs(local[2])>1e-9:
+                # Plan below the adapter's .1-degree snapshot hard limit:
+                # a settled numerical IK endpoint need not equal the prior
+                # accepted quaternion bit for bit. Hard audits stay unchanged.
+                angle=max(-math.radians(.09),min(math.radians(.09),local[2]))
+                translation=Pose(p=self.pose.p,q=tuple((Rotation.from_quat(self.pose.q)*Rotation.from_rotvec((0,0,angle))).as_quat()))
         point = trial.limit_motion(self.pose, translation, self.backend.segment_duration_s)
         delta = tuple(a-b for a,b in zip(point.p, self.pose.p))
         distance = math.sqrt(sum(v*v for v in delta))
-        if distance <= 1e-9:
+        rotated=(Rotation.from_quat(point.q).inv()*Rotation.from_quat(self.pose.q)).magnitude()>1e-9
+        if distance <= 1e-9 and not rotated:
             return TargetPlan('wait', None)
         if distance > .0002:
             point = Pose(p=tuple(a + v * (.0002/distance) for a,v in zip(self.pose.p,delta)), q=self.pose.q)

@@ -1,10 +1,25 @@
 ﻿{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "GripperRequestMessage": {
+      "type":"object","additionalProperties":false,
+      "properties":{"v":{"const":1},"type":{"const":"gripper_request"},
+        "request_id":{"type":"string","minLength":1,"maxLength":64},
+        "value":{"type":"number","minimum":0,"maximum":1}},
+      "required":["v","type","request_id","value"]
+    },
+    "GripperResultMessage": {
+      "type":"object","additionalProperties":false,
+      "properties":{"v":{"const":1},"type":{"const":"gripper_result"},
+        "request_id":{"type":"string","minLength":1,"maxLength":64},
+        "accepted":{"type":"boolean"},"message":{"type":"string"}},
+      "required":["v","type","request_id","accepted","message"]
+    },
     "TargetControlStatus": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "tool_spin_supported":{"type":"boolean","default":false},
         "policy": {"const": "segmented_experimental"},
         "phase": {"enum": ["inactive", "ready", "awaiting_reply", "awaiting_window", "awaiting_feedback", "fault"]},
         "samples_observed": {"type": "integer", "minimum": 0},
@@ -448,6 +463,7 @@
     "RobotStateMessage": {
       "additionalProperties": false,
       "properties": {
+        "manual_input_ready":{"type":"boolean","default":false},
         "v": {
           "const": 1,
           "default": 1,

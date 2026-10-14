@@ -215,6 +215,16 @@ button {
   background: var(--rail);
 }
 
+.hold-control-panel {padding: 12px 0; border-bottom: 1px solid var(--line);}
+.hold-control-panel h2 {margin: 0 0 8px; font-size: 20px;}
+.hold-control-panel p {font-size: 13px; line-height: 1.5; margin: 8px 0; overflow-wrap: anywhere;}
+.hold-buttons, .claw-buttons {display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px;}
+.claw-buttons {margin-top: 12px;}
+.hold-control-panel button {min-width: 0; padding: 12px 6px; border-radius: 5px; border: 1px solid var(--cyan);
+ color: var(--white); background: #092632; touch-action: none; user-select: none;}
+.hold-control-panel button.is-held {background: var(--cyan); color: #05131b;}
+.hold-control-panel button:disabled {opacity: .4; border-color: var(--line);}
+
 .offline-rehearsal-banner {
   position: fixed;
   top: 0;
