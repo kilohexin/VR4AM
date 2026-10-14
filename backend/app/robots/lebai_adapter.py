@@ -128,6 +128,10 @@ class _MotionSnapshotFault(BackendCommandError):
     """A known read fault; process stopping after releasing the SDK lock."""
 
 
+class _RecoveryRevoked(BackendCommandError):
+    """Recovery authority changed; never stop a replacement connection."""
+
+
 def _pvat_point_inputs(snapshot: LebaiSnapshot, point: PvatPoint) -> dict[str, object]:
     # Saved input evidence only: no new SDK reads, clocks, or planning choices.
     # Each event gets separate lists so recorder mutation cannot cross records.
@@ -918,19 +922,40 @@ class RealLebaiAdapter:
         failure: str,
     ) -> None:
         client = self._client
+        owner = self._snapshot_calls
         if client is None:
             raise BackendCommandError("robot_disconnected")
         if self._pump.has_pending:
             raise BackendCommandError("home_command_pending")
+        sdk_entered = False
+        prior_motion_needs_stop = self._motion_accepted or self._motion_write_stop_required
         self._preflight_ready = False
         self._pump.invalidate()
+        generation = self._pump.generation
+        stop_generation = self._gripper_revocation_generation
         self._reset_pvat_history()
         on_phase("homing")
         lifecycle: dict[str, object] = {}
+        def require_current():
+            if (client is not self._client or owner is not self._snapshot_calls or owner.closed
+                    or self._disconnecting or self._stop_lock.locked()
+                    or generation != self._pump.generation
+                    or stop_generation != self._gripper_revocation_generation):
+                raise _RecoveryRevoked('recovery_request_revoked')
+        async def stop_owned():
+            # Check after taking the stop lock: a disconnect can replace the
+            # client while this request waits for an existing stop transaction.
+            async with self._stop_lock:
+                if (client is not self._client or owner is not self._snapshot_calls
+                        or owner.closed):
+                    return
+                self._observer_window.release_all()
+                self._ensure_stop_transaction()
+                await self._stop_in_transaction(StopReason.HOME)
         try:
             async with self._sdk_lock:
+                require_current()
                 self._begin_motion_epoch()
-                self._motion_accepted = True
                 speed = min(options.max_speed_radps, self.settings.control.max_joint_speed_radps)
                 acceleration = self.settings.control.max_joint_acceleration_radps2
                 self._sdk_request_id += 1
@@ -942,13 +967,21 @@ class RealLebaiAdapter:
                     'evidence_scope': 'local_sdk_call_not_remote_execution',
                 })
                 try:
+                    async def send_recovery_if_current():
+                        nonlocal sdk_entered
+                        require_current()
+                        self._begin_motion_epoch()
+                        sdk_entered = True
+                        self._motion_accepted = True
+                        return await client.movej(list(target_q), acceleration, speed, 0., 0.)
                     motion_id = await asyncio.wait_for(
-                        client.movej(
-                            list(target_q), acceleration, speed, 0., 0.,
-                        ),
+                        send_recovery_if_current(),
                         timeout=0.20,
                     )
                     lifecycle.update(rpc_outcome='returned', motion_id=motion_id)
+                except _RecoveryRevoked:
+                    lifecycle.update(rpc_outcome='not_started', revocation_reason='recovery_request_revoked')
+                    raise
                 except asyncio.CancelledError:
                     lifecycle['rpc_outcome'] = 'cancelled'
                     raise
@@ -961,13 +994,16 @@ class RealLebaiAdapter:
                 finally:
                     lifecycle['completed_ns'] = self._clock()
         except asyncio.CancelledError:
-            await asyncio.shield(self.stop(StopReason.HOME))
+            if sdk_entered or prior_motion_needs_stop:
+                await asyncio.shield(stop_owned())
+            raise
+        except _RecoveryRevoked:
             raise
         except TimeoutError:
-            await self.stop(StopReason.HOME)
+            await stop_owned()
             raise BackendCommandError("sdk_timeout:movej") from None
         except Exception:
-            await self.stop(StopReason.HOME)
+            await stop_owned()
             raise BackendCommandError("sdk_call_failed:movej") from None
         finally:
             # Existing bounded best-effort recording. No logging await before
@@ -978,13 +1014,22 @@ class RealLebaiAdapter:
         stable_since_ns: int | None = None
         stabilizing = False
         while True:
+            require_current()
             snapshot = await self._read_snapshot(read_purpose="joint_move")
+            require_current()
             async with self._sdk_lock:
+                require_current()
                 try:
+                    async def read_recovery_state_if_current():
+                        require_current()
+                        return await client.get_motion_state(motion_id)
                     motion_state = await asyncio.wait_for(
-                        client.get_motion_state(motion_id),
+                        read_recovery_state_if_current(),
                         timeout=0.20,
                     )
+                    require_current()
+                except _RecoveryRevoked:
+                    raise
                 except TimeoutError:
                     raise BackendCommandError(
                         "sdk_timeout:get_motion_state"
@@ -1026,7 +1071,7 @@ class RealLebaiAdapter:
                     stabilizing = False
                     on_phase("homing")
             if now_ns - started_ns >= int(options.timeout_s * 1_000_000_000):
-                await self.stop(StopReason.HOME)
+                await stop_owned()
                 raise BackendCommandError("home_timeout")
             await self._sleep(0.02)
 
