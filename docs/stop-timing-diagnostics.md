@@ -86,3 +86,45 @@ checks or stop deadlines. `state` means a `get_state()` call, which can be
 used by display code **or control decisions**; it does not uniquely identify
 UI polling. A read that fails before producing a snapshot has no successful
 snapshot event. Purpose labels cannot retrospectively fill either gap.
+
+## Finite-window log audit (15 October 2026)
+
+`scripts/analyze_stop_timeline.py SESSION_JSONL` now accepts single finite-window
+sessions without the historical `stop_requested` event. The output identifies
+whether its stop anchor came from that event, `stop_diagnostics.started_ns`, or
+the RPC lifecycle. Multiple explicit episodes or multiple legacy stop requests
+are rejected rather than merged. Missing observation samples produce unknown
+displacement values, while preserving the stop failure evidence.
+
+`finite_motion_evidence` is available only for an unambiguous single native
+PVAT with a matching event clock and the exact input snapshot: requested,
+started and completed read timestamps plus actual q/qd/qdd must match. It
+reports the commanded joint delta, measured TCP/joint differences, and complete
+read windows inside the reference interval. It does not reconstruct controller
+sample times, infer encoder resolution/deadband, or certify physical movement
+or stopping. Nested QPC SDK durations are calculated within their own domain.
+
+For the 13:58 QPC diagnostic, the maximum commanded joint delta was
+0.0001295637 rad. The first **successful** post-entry feedback read began
+498.5103 ms after native PVAT entry; none of its nine successful read windows
+was inside the 80 ms reference interval. Recorded TCP and joint differences
+were zero. This leaves actual execution during that interval unobserved; it
+does not establish that IK failed, that the controller ignored the target, or
+that physical movement did not occur. The stop RPC SDK await remained
+218.3874 ms, beyond the original 200 ms limit, with `stop_unverified` preserved.
+
+Local derived reports and red/green verification records are under
+`.tmp/finite-timeline-20261015/`; raw sessions remain private. Three related
+test files passed 71 targeted cases. Initial review found incomplete baseline
+matching and ambiguous legacy episodes; both were reproduced with failing
+tests, corrected, and reviewed again. This change imports no SDK, creates no
+connections, changes no control policy, and requires no frontend rebuild.
+
+The next execution investigation needs feedback during the reference window,
+with independent ownership and a bound that cannot postpone the original stop.
+That is a new diagnostic scope, not permission to add reads or motions to the
+consumed scope. Increasing the target or accepting a late stop is not justified
+by these records. The vendor describes PVAT as continuous servo motion with a
+minimum 10 ms point and a send interval shorter than its reference time; that
+description is not evidence that this single short reference physically ran.
+See the [official motion reference](https://help.lebai.ltd/en/sdk/motion.html).
