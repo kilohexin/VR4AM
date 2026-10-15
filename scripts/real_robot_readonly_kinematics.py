@@ -19,6 +19,15 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'backend'))
 CONFIRM = 'I_APPROVE_ONE_READONLY_FK_IK_SURVEY_NO_ROBOT_WRITES'
+CONFIRM_JOG = 'I_APPROVE_ONE_READONLY_JOG_JACOBIAN_SURVEY_NO_ROBOT_WRITES'
+SDK_BINARY_SHA256 = 'ad2a68619b25d627593bd5f13f83f17784e7a2c10aa9615db8bd1b681f9fd03b'
+
+
+def profile(plan):
+    value = plan.get('survey', 'fk-ik')
+    if value not in ('fk-ik', 'jog-jacobian'):
+        raise ValueError('unknown_readonly_survey')
+    return value
 
 
 def sha(path):
@@ -53,7 +62,7 @@ def verify_sdk_source():
         raise ValueError('sdk_import_source_not_bound')
 
 
-def prepare(config, output, *, expires=None):
+def prepare(config, output, *, expires=None, survey='fk-ik'):
     from app.config import Settings
     config, output = Path(config).resolve(strict=True), Path(output).resolve()
     raw = config.read_bytes()
@@ -78,12 +87,31 @@ def prepare(config, output, *, expires=None):
             raise ValueError('kinematics_candidate_cap_invalid:' + key)
     if robot.control.pvat_horizon_s < .01:
         raise ValueError('kinematics_candidate_horizon_too_short')
-    return dict(config=config, output=output, settings=robot,
+    profile(dict(survey=survey))
+    return dict(config=config, output=output, settings=robot, survey=survey,
                 config_sha256=hashlib.sha256(raw).hexdigest(), runtime_hashes=runtime_hashes(),
                 authorization_expires_utc=expires)
 
 
 def preview(plan):
+    if profile(plan) == 'jog-jacobian':
+        from app.commissioning.readonly_jog_jacobian import READ_METHODS, MAX_CALLS, PERTURBATION_RAD
+        return dict(schema=1, scope='one_readonly_jog_jacobian_no_robot_writes',mode='readonly',
+            target_ip=plan['settings'].ip,output=str(plan['output']),
+            config_sha256=plan['config_sha256'],runtime_hashes=plan['runtime_hashes'],
+            authorization_expires_utc=plan['authorization_expires_utc'],
+            allowed_queries=list(READ_METHODS),allowed_writes=[],max_connections=1,
+            max_total_calls_including_connect=MAX_CALLS,max_fk_calls=13,max_ik_calls=0,
+            joint_perturbation_rad=PERTURBATION_RAD,perturbations_executed=False,
+            allowed_raw_states=['IDLE','PAUSED'],running_motion_required=0,
+            motion_authorized=False,hardware_stop_verified=False,continuous_control_admitted=False,
+            automatic_retry=False,automatic_resume=False,automatic_reset=False,automatic_stop=False,
+            packet_capture=False,connect_timeout_ms=5000,read_timeout_ms=1000,total_budget_ms=15000,
+            sdk_binary_sha256=SDK_BINARY_SHA256,requires_fresh_onsite_authorization=True,
+            fk_feedback_position_tolerance_m=.0001,fk_rotation_tolerance_deg=.1,
+            maximum_observation_joint_change_rad=.001,
+            completion_means='local_derivative_evidence_not_calibration_motion_or_stop_acceptance',
+            native_connection_release='standalone_process_exit_required_not_verified')
     from app.commissioning.readonly_kinematics import READ_METHODS, MAX_CALLS, computational_distance
     return dict(schema=1, scope='one_readonly_fk_ik_survey_no_robot_writes', mode='readonly',
                 target_ip=plan['settings'].ip, output=str(plan['output']),
@@ -103,7 +131,7 @@ def preview(plan):
 
 
 def check(plan, *, approved, expected_hash, expires, confirm):
-    if confirm != CONFIRM:
+    if confirm != (CONFIRM_JOG if profile(plan) == 'jog-jacobian' else CONFIRM):
         raise ValueError('kinematics_scope_confirmation_required')
     try:
         expiration = datetime.fromisoformat(expires.replace('Z', '+00:00'))
@@ -130,7 +158,10 @@ def check(plan, *, approved, expected_hash, expires, confirm):
 
 
 async def execute(plan, *, approved, expected_hash, expires, confirm, client_factory=None):
-    from app.commissioning.readonly_kinematics import collect, new_report
+    if profile(plan) == 'jog-jacobian':
+        from app.commissioning.readonly_jog_jacobian import collect, new_report
+    else:
+        from app.commissioning.readonly_kinematics import collect, new_report
 
     def admit():
         check(plan, approved=approved, expected_hash=expected_hash, expires=expires, confirm=confirm)
@@ -159,10 +190,23 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
         before_sdk_entry()  # The synchronous local table can consume the lease.
         if client_factory is not None:
             return await client_factory(ip)
+        if profile(plan) == 'jog-jacobian':
+            binary = ROOT / '.venv/Lib/site-packages/lebai_sdk/lebai_sdk.pyd'
+            if (plan['runtime_hashes'].get('.venv/Lib/site-packages/lebai_sdk/lebai_sdk.pyd') != SDK_BINARY_SHA256
+                    or sha(binary) != SDK_BINARY_SHA256):
+                raise ValueError('jog_survey_sdk_binary_mismatch')
         verify_sdk_source()
         before_sdk_entry()
         module = importlib.import_module('lebai_sdk')
         before_sdk_entry()
+        if profile(plan) == 'jog-jacobian':
+            package = (ROOT / '.venv/Lib/site-packages/lebai_sdk').resolve()
+            loaded = sys.modules.get('lebai_sdk.lebai_sdk')
+            if (Path(getattr(module,'__file__','')).resolve() != package/'__init__.py'
+                    or Path(getattr(loaded,'__file__','')).resolve() != package/'lebai_sdk.pyd'
+                    or sha(package/'lebai_sdk.pyd') != SDK_BINARY_SHA256):
+                raise ValueError('jog_survey_loaded_sdk_mismatch')
+            before_sdk_entry()
         report.update(native_sdk_init_entered=True, native_sdk_init_started_ns=monotonic_ns())
         module.init()
         before_sdk_entry()  # Import/init cannot renew or outlive the admitted connection window.
@@ -181,13 +225,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--survey', choices=('fk-ik','jog-jacobian'),default='fk-ik')
     parser.add_argument('--execute-once', action='store_true')
     parser.add_argument('--approved-preview', type=Path)
     parser.add_argument('--approved-preview-sha256')
     parser.add_argument('--authorization-expires-utc')
     parser.add_argument('--confirm')
     args = parser.parse_args(argv)
-    plan = prepare(args.config, args.output, expires=args.authorization_expires_utc)
+    plan = prepare(args.config, args.output, expires=args.authorization_expires_utc,survey=args.survey)
     if not args.execute_once:
         print(json.dumps(preview(plan), indent=2))
         return 0
@@ -200,7 +245,8 @@ def main(argv=None):
         expected_hash=args.approved_preview_sha256, expires=args.authorization_expires_utc, confirm=args.confirm))
     try:
         result = loop.run_until_complete(task)
-        print(json.dumps({key: result[key] for key in ('complete', 'kinematics_consistent', 'motion_authorized',
+        consistency_key = 'jacobian_collected' if args.survey == 'jog-jacobian' else 'kinematics_consistent'
+        print(json.dumps({key: result[key] for key in ('complete', consistency_key, 'motion_authorized',
             'hardware_stop_verified', 'pending_remote_result_unknown')}))
         return 0 if result['complete'] else 2
     except KeyboardInterrupt:

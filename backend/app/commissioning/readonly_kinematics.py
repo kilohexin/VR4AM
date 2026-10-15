@@ -103,7 +103,8 @@ class _Queries:
 
     async def call(self, name, invoke):
         self.guard()
-        if name not in ('connect', *READ_METHODS) or len(self.report['calls']) >= MAX_CALLS:
+        if (name not in ('connect', *getattr(self, '_read_methods', READ_METHODS))
+                or len(self.report['calls']) >= getattr(self, '_call_limit', MAX_CALLS)):
             raise SurveyError('survey_call_budget_or_allowlist')
         if self.pending is not None and not self.pending.done():
             raise SurveyError('survey_read_pending')
