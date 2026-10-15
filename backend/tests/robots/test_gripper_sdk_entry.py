@@ -20,13 +20,19 @@ async def test_claw_scheduled_task_rechecks_adapter_fences(monkeypatch, bound, c
     if bound:
         adapter.bind_gripper_authority(lambda: True)
     original_wait_for = asyncio.wait_for
+    original_call = adapter._motion_calls.call
     intercepted = False
     stopping = None
 
-    async def change_before_entry(awaitable, timeout):
+    async def change_before_entry(method, operation, timeout, **kwargs):
+        async def invoke():
+            await apply_change()
+            return await operation()
+        return await original_call(method, invoke, timeout, **kwargs)
+
+    async def apply_change():
         nonlocal intercepted, stopping
-        code = getattr(awaitable, 'cr_code', None)
-        if timeout == .20 and getattr(code, 'co_name', None) == 'send_if_authorized' and not intercepted:
+        if not intercepted:
             intercepted = True
             if change == 'expired':
                 clock.advance_ms(adapter._command_snapshot_max_age_ns() // 1_000_000 + 1)
@@ -40,9 +46,8 @@ async def test_claw_scheduled_task_rechecks_adapter_fences(monkeypatch, bound, c
                 old = adapter._gripper_revocation_generation
                 stopping = asyncio.create_task(adapter.stop(StopReason.GRIP_RELEASED))
                 await original_wait_for(_wait_until(lambda: adapter._gripper_revocation_generation > old), 1)
-        return await original_wait_for(awaitable, timeout)
 
-    monkeypatch.setattr(asyncio, 'wait_for', change_before_entry)
+    monkeypatch.setattr(adapter._motion_calls, 'call', change_before_entry)
     try:
         result = (await asyncio.gather(adapter.set_gripper(.5), return_exceptions=True))[0]
         assert intercepted
@@ -66,16 +71,17 @@ async def test_claw_scheduled_task_rechecks_adapter_fences(monkeypatch, bound, c
 async def test_claw_scheduled_healthy_entry_has_no_extra_reads(monkeypatch, advance_ms):
     adapter, client, clock = await _connected_control_adapter()
     original_wait_for = asyncio.wait_for
+    original_call = adapter._motion_calls.call
     intercepted = False
 
-    async def advance_before_entry(awaitable, timeout):
+    async def advance_before_entry(method, operation, timeout, **kwargs):
         nonlocal intercepted
-        if timeout == .20 and getattr(getattr(awaitable, 'cr_code', None), 'co_name', None) == 'send_if_authorized':
+        if method == 'set_claw':
             intercepted = True
             clock.advance_ms(advance_ms)
-        return await original_wait_for(awaitable, timeout)
+        return await original_call(method, operation, timeout, **kwargs)
 
-    monkeypatch.setattr(asyncio, 'wait_for', advance_before_entry)
+    monkeypatch.setattr(adapter._motion_calls, 'call', advance_before_entry)
     client.read_calls.clear()
     try:
         await adapter.set_gripper(.5)

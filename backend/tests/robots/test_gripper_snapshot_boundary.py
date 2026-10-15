@@ -122,6 +122,12 @@ async def test_read_failure_then_health_cannot_authorize_claw(failure):
             observer.cancel()
             await asyncio.gather(observer, return_exceptions=True)
             client.get_tcp, client.kin_data = original_tcp, original_kin
+        if failure == "cancelled":
+            with pytest.raises(BackendCommandError, match="snapshot_rpc_result_unknown"):
+                await adapter.get_state()
+            assert adapter._snapshot_calls.unknown_methods == {"get_tcp"}
+            await assert_rejected(adapter, client, task, release, "snapshot_rpc_result_unknown")
+            return
         await adapter.get_state()
         source = {
             "sdk_error": "sdk_call_failed:get_tcp",

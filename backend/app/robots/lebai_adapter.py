@@ -159,6 +159,8 @@ class _CandidateRejected(BackendCommandError):
 class RealLebaiAdapter:
     # Internal commissioning subclass hook, never configurable by VR/API input.
     _motion_stop_rpc_method = "stop_move"
+    _stop_blocking_motion_methods = frozenset({'move_pvat', 'set_claw'})
+    _immediate_stop_latch_methods = frozenset({'move_pvat'})
 
     def __init__(
         self,
@@ -833,7 +835,7 @@ class RealLebaiAdapter:
                         transaction.stable_anchor = stable_anchor
                     elif (now_ns - stable_since_ns >= 300_000_000
                           and (transaction.confirmed or now_ns - started_ns < 500_000_000)):
-                        if self._motion_calls.unknown_methods & {'move_pvat', 'set_claw'}:
+                        if self._motion_calls.unknown_methods & self._stop_blocking_motion_methods:
                             await self._fail_unverified_stop(diagnostics=diagnostics)
                             raise BackendCommandError("stop_unverified")
                         self._motion_accepted = False
@@ -1966,7 +1968,7 @@ class RealLebaiAdapter:
         finally:
             if method in self._motion_calls.unknown_methods:
                 self._preflight_ready = False
-                if method == "move_pvat":
+                if method in self._immediate_stop_latch_methods:
                     self._latched_fault = "stop_unverified"
             self._schedule_sdk_diagnostic(dict(kind="motion_rpc_ownership",
                 **self._motion_calls.snapshot()))
