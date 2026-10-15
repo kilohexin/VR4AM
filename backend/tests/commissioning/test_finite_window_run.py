@@ -191,6 +191,189 @@ async def test_parallel_scope_uses_exactly_four_fk_and_original_stop():
     assert [c[0] for c in client.write_calls]==['move_pvat','stop_move']
 
 
+async def test_parallel_motion_snapshot_keeps_connection_first_and_motion_id_dependency(monkeypatch):
+    m=module();client=ZClient();clock=FakeClock();started=set();finished=set();release=asyncio.Event()
+    client.running_motion=7
+    motion_queries=[]
+    active=False
+    original_fields=m.FiniteWindowDiagnosticAdapter._read_snapshot_fields
+    async def fields(adapter,*args,**kwargs):
+        nonlocal active
+        active=kwargs['read_purpose']=='motion'
+        return await original_fields(adapter,*args,**kwargs)
+    monkeypatch.setattr(m.FiniteWindowDiagnosticAdapter,'_read_snapshot_fields',fields)
+    names=['get_robot_state','get_estop_reason','get_kin_data','get_tcp','get_claw','get_running_motion']
+    for name in names:
+        original=getattr(client,name)
+        async def read(*args,_name=name,_original=original):
+            if active:
+                started.add(_name)
+                if len(started)==6:release.set()
+                await release.wait();finished.add(_name)
+            return await _original(*args)
+        setattr(client,name,read)
+    original_motion=client.get_motion_state
+    async def motion(mid):
+        if active:
+            assert len(finished)==6
+            motion_queries.append(mid)
+        return await original_motion(mid)
+    client.get_motion_state=motion
+    settings=control_settings();settings=replace(settings,control=replace(settings.control,
+        max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    report=await asyncio.wait_for(m.run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep,parallel_fk_audit=True,parallel_motion_reads=True),1.)
+    assert report['complete'] and report['parallel_motion_reads']
+    assert len(started)==6 and report['math_entries']==dict(kinematics_inverse=1,kinematics_forward=4)
+    assert not report['owned_snapshot_pending_at_exit']
+    assert motion_queries==[7]
+
+
+def snapshot_proxy(client):
+    proxy=module().FiniteScopeClient(client,lambda *_:None,lambda:None,lambda:None,
+        asyncio.current_task(),lambda:1,parallel_motion_reads=True)
+    proxy.raw_estop_clear=True
+    return proxy
+
+
+async def test_parallel_snapshot_group_cannot_be_reused_by_inherited_context():
+    client=ZClient();proxy=snapshot_proxy(client);release=asyncio.Event()
+    async def later():await release.wait();return await proxy.get_kin_data()
+    with proxy._parallel_snapshot_scope(lambda:None):task=asyncio.create_task(later())
+    release.set()
+    with pytest.raises(module().AdmissionRejected,match='group_revoked'):await task
+    assert proxy._native_snapshot_entry_count('get_kin_data')==0
+
+
+async def test_parallel_snapshot_actual_entry_rechecks_expiry(monkeypatch):
+    client=ZClient();proxy=snapshot_proxy(client);allowed=True;create=asyncio.create_task
+    def guard():
+        if not allowed:raise module().AdmissionRejected('finite_scope_expired')
+    def schedule(coro,**kwargs):
+        nonlocal allowed
+        if kwargs.get('name')=='paused-cleanup-get_kin_data':allowed=False
+        return create(coro,**kwargs)
+    monkeypatch.setattr(asyncio,'create_task',schedule)
+    with proxy._parallel_snapshot_scope(guard):
+        with pytest.raises(module().AdmissionRejected):await proxy.get_kin_data()
+    assert proxy._native_snapshot_entry_count('get_kin_data')==0
+
+
+async def test_snapshot_duplicate_method_and_math_inside_group_are_rejected():
+    for method in ['get_kin_data','kinematics_inverse']:
+        proxy=snapshot_proxy(ZClient())
+        with proxy._parallel_snapshot_scope(lambda:None):
+            if method=='get_kin_data':await proxy.get_kin_data()
+            with pytest.raises(module().AdmissionRejected):
+                if method=='get_kin_data':await proxy.get_kin_data()
+                else:await proxy.kinematics_inverse({},[0.]*6)
+        assert proxy.read_gate_closed
+
+
+async def test_parallel_snapshot_pending_native_evidence_is_not_parent_completed_read():
+    client=ZClient();proxy=snapshot_proxy(client);started=asyncio.Event();release=asyncio.Event()
+    original=client.get_kin_data
+    async def stubborn():
+        started.set()
+        while not release.is_set():
+            try:await release.wait()
+            except asyncio.CancelledError:pass
+        return await original()
+    client.get_kin_data=stubborn
+    with proxy._parallel_snapshot_scope(lambda:None):
+        await proxy.is_connected()
+        task=asyncio.create_task(proxy.get_kin_data())
+        try:
+            await started.wait()
+            assert proxy.pending_read.done()
+            assert proxy._native_snapshot_entry_count('get_kin_data')==1
+            assert proxy._native_snapshot_result_unknown('get_kin_data') is True
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):await task
+            assert proxy._native_snapshot_result_unknown('get_kin_data') is True
+        finally:
+            release.set();await proxy.snapshot_read_owners['get_kin_data'].pending_read
+    assert proxy.read_gate_closed and proxy.read_remote_result_unknown
+    with pytest.raises(module().AdmissionRejected):proxy.require_clear_read_gate()
+
+
+@pytest.mark.parametrize('method',['get_robot_state','get_estop_reason','get_kin_data',
+    'get_tcp','get_claw','get_running_motion'])
+async def test_each_parallel_snapshot_failure_blocks_all_math_and_pvat(monkeypatch,method):
+    m=module();client=ZClient();clock=FakeClock();active=False
+    fields=m.FiniteWindowDiagnosticAdapter._read_snapshot_fields
+    async def wrapped(adapter,*args,**kw):
+        nonlocal active
+        active=kw['read_purpose']=='motion'
+        try:return await fields(adapter,*args,**kw)
+        finally:active=False
+    monkeypatch.setattr(m.FiniteWindowDiagnosticAdapter,'_read_snapshot_fields',wrapped)
+    original=getattr(client,method)
+    async def fail(*args):
+        if active:raise RuntimeError('injected_snapshot_failure')
+        return await original(*args)
+    setattr(client,method,fail)
+    settings=control_settings();settings=replace(settings,control=replace(settings.control,
+        max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    report=await m.run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep,parallel_fk_audit=True,parallel_motion_reads=True)
+    assert not report['complete'] and report['pvat_entries']==0 and report['stop_entries']==1
+    assert report['math_entries']==dict(kinematics_inverse=0,kinematics_forward=0)
+    assert client.write_calls==[('stop_move',)]
+
+
+async def test_parallel_snapshot_outer_timeout_retains_unknown_and_never_publishes_late_snapshot(monkeypatch):
+    m=module();client=ZClient();clock=FakeClock();active=False;published=[]
+    release=asyncio.Event();started=asyncio.Event();finished=asyncio.Event();report={}
+    fields=m.FiniteWindowDiagnosticAdapter._read_snapshot_fields
+    before=m.FiniteWindowDiagnosticAdapter._before_snapshot_install
+    async def wrapped(adapter,*args,**kw):
+        nonlocal active
+        active=kw['read_purpose']=='motion'
+        try:return await fields(adapter,*args,**kw)
+        finally:active=False
+    def install(adapter,snapshot,read):
+        if snapshot.read_purpose=='motion':published.append(snapshot)
+        return before(adapter,snapshot,read)
+    monkeypatch.setattr(m.FiniteWindowDiagnosticAdapter,'_read_snapshot_fields',wrapped)
+    monkeypatch.setattr(m.FiniteWindowDiagnosticAdapter,'_before_snapshot_install',install)
+    original=client.get_kin_data
+    async def stubborn():
+        if active:
+            started.set()
+            while not release.is_set():
+                try:await release.wait()
+                except asyncio.CancelledError:pass
+            finished.set()
+        return await original()
+    client.get_kin_data=stubborn
+    settings=control_settings();settings=replace(settings,control=replace(settings.control,
+        max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    task=asyncio.create_task(m.run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep,parallel_fk_audit=True,parallel_motion_reads=True,report=report))
+    try:
+        await asyncio.wait_for(asyncio.shield(task),.8)
+        assert started.is_set() and not published
+        assert report['pvat_entries']==0 and report['stop_entries']==1
+        assert report['owned_snapshot_pending_at_exit'] and report['read_remote_result_unknown']
+        assert 'get_kin_data' in report['snapshot_rpc_ownership']['unknown_methods']
+        assert report['math_entries']==dict(kinematics_inverse=0,kinematics_forward=0)
+        frozen=repr(report);release.set();await asyncio.wait_for(finished.wait(),.2);await asyncio.sleep(0)
+        assert repr(report)==frozen and not published
+    finally:
+        release.set();await asyncio.gather(task,return_exceptions=True)
+
+
+@pytest.mark.parametrize('bad',[1,'yes',None])
+async def test_parallel_snapshot_requires_boolean_before_connection(bad):
+    with pytest.raises(TypeError):snapshot_proxy_with_option=module().FiniteScopeClient(
+        ZClient(),lambda *_:None,lambda:None,lambda:None,asyncio.current_task(),lambda:1,
+        parallel_motion_reads=bad)
+
+
 async def test_parallel_fk_shared_native_quota_and_original_deadline():
     client=ZClient();proxy=parallel_proxy(client);deadline=proxy.read_deadline_ns
     for _ in range(4):await proxy._kinematics_forward_guarded([0.]*6,lambda:None)

@@ -6,6 +6,8 @@ cancellation; this never permits another motion or a stop_sys escalation.
 """
 import asyncio
 import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 import math
 import time
 
@@ -41,12 +43,19 @@ def validate_ready_tolerance(value):
 class FiniteScopeClient(BoundedStopOnlyClient):
     READS = BoundedStopOnlyClient.READS | {'kinematics_inverse', 'kinematics_forward'}
 
-    def __init__(self, native, motion_permission, stop_permission, hot, owner, clock, *, parallel_fk=False):
+    def __init__(self, native, motion_permission, stop_permission, hot, owner, clock, *, parallel_fk=False,
+                 parallel_motion_reads=False):
         if type(parallel_fk) is not bool:
             raise TypeError('finite_parallel_fk_requires_boolean')
+        if type(parallel_motion_reads) is not bool:
+            raise TypeError('finite_parallel_snapshot_requires_boolean')
         super().__init__(native, stop_permission, hot, owner)
         self.parallel_fk = parallel_fk
         self.fk_read_owners = []
+        self.parallel_motion_reads = parallel_motion_reads
+        self.snapshot_read_owners = {}
+        self._snapshot_context = ContextVar('finite_snapshot_group', default=None)
+        self._active_snapshot_group = None
         self.motion_permission, self.clock = motion_permission, clock
         self.pvat_entries = 0
         self.pvat_attempted = False
@@ -61,13 +70,107 @@ class FiniteScopeClient(BoundedStopOnlyClient):
         return any(child.pending_read is not None and not child.pending_read.done()
                    for child in self.fk_read_owners)
 
+    def _snapshot_read_pending(self):
+        return any(child.pending_read is not None and not child.pending_read.done()
+                   for child in self.snapshot_read_owners.values())
+
+    def _native_snapshot_entry_count(self, method):
+        children=list(self.snapshot_read_owners.values())
+        owned_ids={id(getattr(child,'native_item',None)) for child in children}
+        return (sum(item['entered'] for item in self.read_calls
+                    if item['method']==method and id(item) not in owned_ids)
+                + sum(child.native_entries for child in children if child.method==method))
+
+    def _native_snapshot_result_unknown(self, method):
+        child=self.snapshot_read_owners.get(method)
+        matching=[item for item in self.read_calls if item['method']==method]
+        if child is not None and matching and matching[-1] is getattr(child,'native_item',None):
+            item=matching[-1];task=child.pending_read
+            if item['remote_result_unknown'] or child.read_remote_result_unknown:return True
+            if not child.native_entries:return False
+            return task is None or not task.done() or task.cancelled()
+        return super()._native_snapshot_result_unknown(method)
+
+    def read_guard(self):
+        super().read_guard()
+        group=self._snapshot_context.get()
+        if group is not None:
+            if group is not self._active_snapshot_group or not group['active']:
+                raise AdmissionRejected('finite_scope_snapshot_group_revoked')
+            group['guard']()
+
+    @contextmanager
+    def _parallel_snapshot_scope(self, guard):
+        self.require_clear_read_gate();guard()
+        if (not self.parallel_motion_reads or self._active_snapshot_group is not None
+                or self.snapshot_read_owners or self.pending_read is not None and not self.pending_read.done()):
+            raise AdmissionRejected('finite_scope_snapshot_group_not_admitted')
+        group=dict(active=True,guard=guard,used=set())
+        self._active_snapshot_group=group;token=self._snapshot_context.set(group)
+        try:yield
+        finally:
+            group['active']=False;self._active_snapshot_group=None;self._snapshot_context.reset(token)
+
+    async def _snapshot_read(self, name, invoke, group):
+        self.read_guard()
+        if (name in group['used'] or self._fk_read_pending()
+                or self.pending_read is not None and not self.pending_read.done()):
+            self.read_gate_closed=True
+            raise AdmissionRejected('finite_scope_snapshot_duplicate_or_pending')
+        group['used'].add(name)
+        def authorize():
+            self.read_guard()
+            if self._active_snapshot_group is not group or not group['active']:
+                raise AdmissionRejected('finite_scope_snapshot_group_revoked')
+            if self.pending_read is not None and not self.pending_read.done():
+                raise AdmissionRejected('finite_scope_parent_read_pending')
+        child=_SnapshotReadOwner(self.client,lambda:None,authorize,self.owner)
+        child.method=name;child.native_entries=0;child.native_item=None
+        child.read_deadline_ns=self.read_deadline_ns;child.read_calls=self.read_calls
+        self.snapshot_read_owners[name]=child
+        async def native():
+            child.native_item=next(item for item in reversed(self.read_calls) if item['method']==name)
+            authorize()
+            child.native_entries+=1
+            return await invoke()
+        try:
+            value=await child.read(name,native)
+            if name=='get_estop_reason':self.raw_estop_clear=child.raw_estop_clear
+            return value
+        except BaseException:
+            self.read_gate_closed=True
+            raise
+        finally:
+            self.read_gate_closed|=child.read_gate_closed
+            self.read_remote_result_unknown|=child.read_remote_result_unknown
+
     async def read(self, name, invoke):
+        group=self._snapshot_context.get()
+        if group is not None and name in _SnapshotReadOwner.READS:
+            return await self._snapshot_read(name,invoke,group)
+        if group is not None:
+            self.read_guard()
+            if name not in {'is_connected','get_motion_state'} or name in group['used']:
+                self.read_gate_closed=True
+                raise AdmissionRejected('finite_scope_snapshot_method_not_admitted')
+            group['used'].add(name)
+        elif self._active_snapshot_group is not None:
+            self.read_gate_closed=True
+            raise AdmissionRejected('finite_scope_snapshot_foreign_read')
+        if self._snapshot_read_pending():
+            self.read_gate_closed=True
+            raise AdmissionRejected('finite_scope_snapshot_read_pending')
         if self._fk_read_pending():
             self.read_gate_closed = True
             raise AdmissionRejected('finite_scope_fk_read_pending')
         return await super().read(name, invoke)
 
     def require_clear_read_gate(self):
+        if (self._active_snapshot_group is not None or self._snapshot_read_pending()
+                or any(child.read_gate_closed or child.read_remote_result_unknown
+                for child in self.snapshot_read_owners.values())):
+            self.read_gate_closed=True
+            raise AdmissionRejected('finite_scope_snapshot_read_not_clear')
         if (self._fk_read_pending() or any(child.read_gate_closed or child.read_remote_result_unknown
                 for child in self.fk_read_owners)):
             self.read_gate_closed = True
@@ -78,7 +181,8 @@ class FiniteScopeClient(BoundedStopOnlyClient):
         if not self.parallel_fk or not callable(guard):
             raise AdmissionRejected('finite_scope_parallel_fk_not_admitted')
         self.read_guard(); guard()
-        if (self.pending_read is not None and not self.pending_read.done()
+        if (self._snapshot_read_pending() or self._active_snapshot_group is not None
+                or self.pending_read is not None and not self.pending_read.done()
                 or len(self.fk_read_owners) >= 4 or sum(
                     child.pending_read is not None and not child.pending_read.done()
                     for child in self.fk_read_owners) >= 3):
@@ -183,6 +287,11 @@ class _ForwardReadOwner(BoundedStopOnlyClient):
     READS = frozenset({'kinematics_forward'})
 
 
+class _SnapshotReadOwner(BoundedStopOnlyClient):
+    READS = frozenset({'get_robot_state','get_estop_reason','get_kin_data',
+                      'get_tcp','get_claw','get_running_motion'})
+
+
 def _rest(sample, now_ns):
     validate_idle_sample(sample, now_ns)
     acceleration = sample.get('actual_qdd')
@@ -193,9 +302,12 @@ def _rest(sample, now_ns):
 
 async def run_window(settings, recorder, client_factory, authorization_check, hot_check,
                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, write_check=None,
-                     parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD):
+                     parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
+                     parallel_motion_reads=False):
     if type(parallel_fk_audit) is not bool:
         raise TypeError('finite_parallel_fk_requires_boolean')
+    if type(parallel_motion_reads) is not bool:
+        raise TypeError('finite_parallel_snapshot_requires_boolean')
     ready_joint_tolerance_rad=validate_ready_tolerance(ready_joint_tolerance_rad)
     if not all(callable(v) for v in (client_factory, authorization_check, hot_check)):
         raise TypeError('finite_scope_explicit_callbacks_required')
@@ -210,7 +322,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         local_resources_released=False, process_exit_required=True, pvat_remote_result_unknown=False,
         full_endpoint_required=full_endpoint_required, full_endpoint_feasible=False,
         target_distance_m=distance_m, parallel_fk_audit=parallel_fk_audit,
-        ready_joint_tolerance_rad=ready_joint_tolerance_rad)
+        ready_joint_tolerance_rad=ready_joint_tolerance_rad,parallel_motion_reads=parallel_motion_reads)
     owner = asyncio.current_task()
     proxy = adapter = anchor = None
     cleanup_deadline = None
@@ -282,7 +394,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                    ('move_pvat', 'stop_move', 'kinematics_inverse', 'kinematics_forward')):
             raise AdmissionRejected('finite_scope_capability_missing')
         proxy = FiniteScopeClient(native, motion_permission, stop_permission, hot, owner, clock,
-                                 parallel_fk=parallel_fk_audit)
+                                 parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads)
         return proxy
 
     try:
@@ -291,7 +403,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         await recorder.start()
         adapter = FiniteWindowDiagnosticAdapter(settings, client_factory=factory, clock=clock,
                                                sleep=sleep, event_callback=recorder.write_event,
-                                               parallel_fk=parallel_fk_audit)
+                                               parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads)
         await adapter.connect()
         _callback(authorization_check)  # Full hashes remain outside the 100 ms motion lease.
         preflight = await adapter.preflight()
@@ -354,6 +466,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                 report['cleanup_errors'].append(type(error).__name__)
                 if primary_error is None or isinstance(error, INTERRUPTIONS): primary_error = error
             report['local_resources_released'] = adapter._client is None and not adapter._pump.running
+            report['snapshot_rpc_ownership'] = adapter._snapshot_calls.snapshot()
             if proxy is not None and proxy.pvat_remote_result_unknown:
                 adapter._latched_fault='stop_unverified'
             report['latched_fault'] = adapter.read_motion_view().latched_fault
@@ -368,6 +481,8 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                 pvat_remote_result_unknown=proxy.pvat_remote_result_unknown, pvat_call=copy.deepcopy(proxy.pvat_call),
                 local_motion_rejection=proxy.local_motion_rejection,
                 owned_fk_pending_at_exit=proxy._fk_read_pending(),
+                owned_snapshot_pending_at_exit=proxy._snapshot_read_pending(),
+                snapshot_read_gate_closed=any(child.read_gate_closed for child in proxy.snapshot_read_owners.values()),
                 fk_read_gate_closed=any(child.read_gate_closed for child in proxy.fk_read_owners),
                 owned_pvat_pending_at_exit=proxy.pending_pvat is not None and not proxy.pending_pvat.done())
         report['interrupted'] = isinstance(primary_error, INTERRUPTIONS)

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import replace
 import math
 
@@ -45,13 +46,17 @@ def _snapshot_signature(snapshot):
 
 
 class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
-    def __init__(self, settings, *, client_factory, parallel_fk=False, **kwargs):
+    def __init__(self, settings, *, client_factory, parallel_fk=False, parallel_motion_reads=False, **kwargs):
         if settings.mode != 'control':
             raise ValueError('finite_diagnostic_requires_control_mode')
         if type(parallel_fk) is not bool:
             raise TypeError('finite_parallel_fk_requires_boolean')
+        if type(parallel_motion_reads) is not bool:
+            raise TypeError('finite_parallel_snapshot_requires_boolean')
         super().__init__(settings, client_factory=client_factory, **kwargs)
         self.parallel_fk = parallel_fk
+        self.parallel_motion_reads = parallel_motion_reads
+        self._finite_snapshot_wrappers = set()
         self._finite_submitted = False
         self._finite_entered = False
         self._finite_lease = None
@@ -65,7 +70,7 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
         self._finite_shutdown_attempted = False
 
     async def connect(self):
-        if self._finite_pending_fks or self._finite_fk_wrappers:
+        if self._finite_pending_fks or self._finite_fk_wrappers or self._finite_snapshot_wrappers:
             raise BackendCommandError('finite_fk_read_pending')
         if self._finite_fk_failed:
             raise BackendCommandError('finite_fk_audit_failed')
@@ -124,7 +129,7 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
             self._finite_input_signature = None
 
     async def disconnect(self):
-        for pending in tuple(self._finite_pending_fks | self._finite_fk_wrappers):
+        for pending in tuple(self._finite_pending_fks | self._finite_fk_wrappers | self._finite_snapshot_wrappers):
             if not pending.done() and not pending.cancelling():
                 pending.cancel()
         # A read ignoring local cancellation remains owned by this instance.
@@ -138,7 +143,7 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
         finally:
             await super().disconnect()
 
-    def _guard(self, client, snapshot):
+    def _guard_request(self, client):
         request = self._finite_context
         lease = self._finite_lease
         if request is None or lease is None or request.reference != lease[0]:
@@ -153,10 +158,60 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
             raise _MotionSnapshotFault('finite_request_changed')
         if not 0 <= self._clock() - lease[1] < _LEASE_NS:
             raise _MotionSnapshotFault('finite_diagnostic_expired')
+        if client is not self._client:
+            raise _MotionSnapshotFault('finite_read_client_changed')
         self._check_known_snapshot_fault(client, request.generation)
+
+    def _guard(self, client, snapshot):
+        self._guard_request(client)
         self._ensure_command_snapshot_fresh(snapshot)
         if self._finite_input_signature is not None and _snapshot_signature(snapshot) != self._finite_input_signature:
             raise _MotionSnapshotFault('finite_audit_input_changed')
+
+    async def _read_snapshot_impl(self, read, **kwargs):
+        if not self.parallel_motion_reads or kwargs['read_purpose'] != 'motion':
+            return await super()._read_snapshot_impl(read, **kwargs)
+        client = self._client
+        self._guard_request(client)
+        scope = getattr(client, '_parallel_snapshot_scope', None)
+        with scope(lambda: self._guard_request(client)) if callable(scope) else nullcontext():
+            return await super()._read_snapshot_impl(read, **kwargs)
+
+    def _before_snapshot_install(self, snapshot, read):
+        if self.parallel_motion_reads and snapshot.read_purpose == 'motion':
+            self._guard_request(read.client)
+            self._ensure_command_snapshot_fresh(snapshot)
+            if read.owner is not self._snapshot_calls or read.owner.closed:
+                raise _MotionSnapshotFault('finite_read_client_changed')
+
+    async def _read_snapshot_fields(self, client, latencies, deadline_ns, **kwargs):
+        if not self.parallel_motion_reads or kwargs['read_purpose'] != 'motion':
+            return await super()._read_snapshot_fields(client, latencies, deadline_ns, **kwargs)
+        self._guard_request(client)
+        async def query(name):
+            self._guard_request(client)
+            value = await self._timed(name, getattr(client, name), latencies, deadline_ns=deadline_ns)
+            if name == 'get_kin_data' and kwargs['include_raw_kinematics'] and isinstance(value, Mapping):
+                return value, copy.deepcopy(dict(value))
+            return value, None
+        tasks = [asyncio.create_task(query(name), name='finite-snapshot-' + name) for name in
+            ('get_robot_state', 'get_estop_reason', 'get_kin_data', 'get_tcp', 'get_claw', 'get_running_motion')]
+        self._finite_snapshot_wrappers.update(tasks)
+        def completed(done):
+            self._finite_snapshot_wrappers.discard(done)
+            if not done.cancelled(): done.exception()
+        for task in tasks: task.add_done_callback(completed)
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in tasks:
+                if task.done() and (task.cancelled() or task.exception() is not None):task.result()
+            results = [task.result() for task in tasks]
+            self._guard_request(client)
+            return dict(values=[item[0] for item in results], raw_kinematics=results[2][1])
+        except BaseException:
+            for task in tasks:
+                if not task.done() and not task.cancelling():task.cancel()
+            raise
 
     async def _select_advancing_candidate(self, client, snapshot, request, *, diagnostic_events):
         # One IK attempt; no interpolated recovery or automatic catch-up in

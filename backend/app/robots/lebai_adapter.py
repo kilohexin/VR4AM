@@ -2191,47 +2191,10 @@ class RealLebaiAdapter:
             )
             if not connected:
                 raise BackendCommandError("robot_disconnected")
-            raw_state = await self._timed(
-                "get_robot_state",
-                client.get_robot_state,
-                latencies,
-                deadline_ns=deadline_ns,
-            )
-            raw_estop = await self._timed(
-                "get_estop_reason",
-                client.get_estop_reason,
-                latencies,
-                deadline_ns=deadline_ns,
-            )
-            raw_kin = await self._timed(
-                "get_kin_data",
-                client.get_kin_data,
-                latencies,
-                deadline_ns=deadline_ns,
-            )
-            # Capture the already-returned payload before another SDK await.
-            # Diagnostic tail only: no extra RPC and no inferred missing fields.
-            raw_kinematics = (copy.deepcopy(dict(raw_kin))
-                              if include_raw_kinematics and isinstance(raw_kin, Mapping)
-                              else None)
-            raw_tcp = await self._timed(
-                "get_tcp",
-                client.get_tcp,
-                latencies,
-                deadline_ns=deadline_ns,
-            )
-            raw_claw = await self._timed(
-                "get_claw",
-                client.get_claw,
-                latencies,
-                deadline_ns=deadline_ns,
-            )
-            raw_running = await self._timed(
-                "get_running_motion",
-                client.get_running_motion,
-                latencies,
-                deadline_ns=deadline_ns,
-            )
+            fields = await self._read_snapshot_fields(client, latencies, deadline_ns,
+                read_purpose=read_purpose, include_raw_kinematics=include_raw_kinematics)
+            raw_state, raw_estop, raw_kin, raw_tcp, raw_claw, raw_running = fields['values']
+            raw_kinematics = fields['raw_kinematics']
             robot_state = map_robot_state(raw_state)
             running_motion = _running_motion(raw_running)
             motion_state = None
@@ -2307,6 +2270,7 @@ class RealLebaiAdapter:
             motion_state=motion_state,
             diagnostic_timing=performance_timing,
         )
+        self._before_snapshot_install(snapshot, read)
         self._snapshot = snapshot
         read.snapshot = snapshot
         fault = self._runtime_motion_fault(snapshot)
@@ -2328,6 +2292,21 @@ class RealLebaiAdapter:
         if client is not self._client or read.owner is not self._snapshot_calls or read.owner.closed:
             raise BackendCommandError("snapshot_read_client_changed")
         return snapshot
+
+    def _before_snapshot_install(self, snapshot, read):
+        pass
+
+    async def _read_snapshot_fields(self, client, latencies, deadline_ns, *,
+                                    read_purpose, include_raw_kinematics):
+        values = []
+        raw_kinematics = None
+        for name in ('get_robot_state', 'get_estop_reason', 'get_kin_data',
+                     'get_tcp', 'get_claw', 'get_running_motion'):
+            value = await self._timed(name, getattr(client, name), latencies, deadline_ns=deadline_ns)
+            values.append(value)
+            if name == 'get_kin_data' and include_raw_kinematics and isinstance(value, Mapping):
+                raw_kinematics = copy.deepcopy(dict(value))
+        return dict(values=values, raw_kinematics=raw_kinematics)
 
     async def _timed(
         self,

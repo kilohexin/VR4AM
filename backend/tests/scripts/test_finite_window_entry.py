@@ -112,6 +112,38 @@ async def test_larger_ready_tolerance_cannot_reuse_strict_approval(context):
     factory.assert_not_called()
 
 
+def test_parallel_motion_reads_are_explicit_and_bound_to_preview(context,monkeypatch,capsys):
+    entry,plan,_,_=context()
+    new=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],
+        parallel_motion_reads=True)
+    assert entry.preview(plan)['parallel_motion_reads'] is False
+    assert entry.preview(new)['parallel_motion_reads'] is True
+    monkeypatch.setattr(entry,'execute',AsyncMock(side_effect=AssertionError('no execution')))
+    assert entry.main(['--config',str(plan['config']),'--output',str(plan['output']),
+        '--parallel-motion-reads'])==0
+    value=json.loads(capsys.readouterr().out)
+    assert value['snapshot_order']=='connected_then_parallel_six_then_dependent_motion_state'
+    assert value['motion_ttl_ms']==100 and value['parallel_motion_reads']
+
+
+async def test_parallel_motion_reads_cannot_use_old_approval(context):
+    entry,plan,kw,_=context();factory=AsyncMock()
+    new=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],
+        parallel_motion_reads=True)
+    with pytest.raises(ValueError):await entry.execute(new,**kw,client_factory=factory)
+    factory.assert_not_called()
+
+
+async def test_parallel_snapshot_and_fk_fake_entry_completes_once(context):
+    entry,plan,kw,_=context()
+    new=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],
+        parallel_motion_reads=True,parallel_fk_audit=True,ready_joint_tolerance_rad=.001)
+    kw['approved'].write_text(json.dumps(entry.preview(new)))
+    kw['expected_hash']=entry.sha(kw['approved'])
+    r=await entry.execute(new,**kw,client_factory=AsyncMock(return_value=ZClient()))
+    assert r['complete'] and r['parallel_motion_reads'] and r['parallel_fk_audit']
+
+
 @pytest.mark.parametrize('bad',[dict(confirm='yes'),dict(approved=None),dict(expected_hash='b'*64),dict(expires=None),dict(expires='2000-01-01T00:00:00Z')])
 async def test_bad_scope_cannot_connect_or_create_output(context,bad):
     entry,plan,kw,_=context();factory=AsyncMock()
