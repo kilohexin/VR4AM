@@ -305,7 +305,7 @@ describe('offline controller scene seam', () => {
     expect(quaternion.toArray()).toEqual([0, 0, 0, 1]);
   });
 
-  it('returns a copied immutable-shaped scene observation', () => {
+  it('returns a copied controller observation without retired grasp props', () => {
     const controller: OfflineControllerSample = {
       position: [0.1, 0.2, 0.3], quaternion: [0, 0, 0, 1],
       grip: true, trigger: 1, trackingValid: true,
@@ -329,16 +329,16 @@ describe('offline controller scene seam', () => {
 
     const snapshot = SimulationScene.prototype.getOfflineSceneSnapshot.call(scene as never);
     snapshot.controller?.position.splice(0, 1, 9);
-    snapshot.blocks[0].position.splice(0, 1, 9);
+    expect(snapshot.blocks).toEqual([]);
 
     expect(controller.position).toEqual([0.1, 0.2, 0.3]);
-    expect(scene.graspController.snapshot).toHaveBeenCalledOnce();
+    expect(scene.graspController.snapshot).not.toHaveBeenCalled();
     expect(SimulationScene.prototype.getOfflineSceneSnapshot.call(scene as never)).toEqual({
       controller,
-      carriedBlockId: 'block-orange',
-      blocks: [{id: 'block-orange', position: [0.18, 0.025, -0.32], sizeM: 0.06}],
+      carriedBlockId: null,
+      blocks: [],
       invalidOverlap: false,
-      workspace: scene.offlineWorkspace,
+      workspace: null,
     });
   });
 
@@ -363,11 +363,13 @@ describe('offline controller scene seam', () => {
 });
 
 describe('scene connection and model lifetime helpers', () => {
-  it('hides simulated grasp props for real robot state and restores them for Fake', () => {
+  it('keeps retired grasp props absent across real and Fake state changes', () => {
     const blocks = createGraspBlocks();
     const platform = new THREE.Group();
     const rehearsalSupport = new THREE.Group();
     const rehearsalPlacementMarker = new THREE.Group();
+    for (const {object} of blocks) object.visible = false;
+    platform.visible = rehearsalSupport.visible = rehearsalPlacementMarker.visible = false;
     const scene = {
       options: {stateBuffer: {push: vi.fn()}},
       clockAnchor: {update: vi.fn()},
@@ -389,8 +391,19 @@ describe('scene connection and model lifetime helpers', () => {
     SimulationScene.prototype.applyRobotState.call(scene as never, {
       backend: 'LEBAI_FAKE', server_mono_ns: 2,
     } as RobotStateMessage);
-    expect(blocks.every(({object}) => object.visible)).toBe(true);
-    expect(platform.visible).toBe(true);
+    expect(blocks.every(({object}) => !object.visible)).toBe(true);
+    expect(platform.visible).toBe(false);
+    expect(scene.options.stateBuffer.push).toHaveBeenCalledTimes(2);
+    expect(scene.clockAnchor.update).toHaveBeenCalledTimes(2);
+  });
+
+  it('cannot recreate props through the removed rehearsal workspace entry', () => {
+    const root = new THREE.Group();
+    const scene = {robotVisualRoot: root};
+    const pose: Pose = {p: [0, 0, 0], q: [0, 0, 0, 1]};
+    expect(() => SimulationScene.prototype.configureFakeRehearsalWorkspace.call(scene as never, pose, pose))
+      .toThrow('feature_removed');
+    expect(root.children).toEqual([]);
   });
 
   it('clears the server clock anchor at connection boundaries', () => {
@@ -430,7 +443,7 @@ describe('scene connection and model lifetime helpers', () => {
 });
 
 describe('XR render-loop handoff', () => {
-  it('feeds authoritative TCP and gripper state to grasping together', () => {
+  it('updates robot joints and gripper without running animated grasping', () => {
     const actualTcp = {
       p: [0.2, 0.3, -0.1] as [number, number, number],
       q: [0, 0, 0, 1] as [number, number, number, number],
@@ -465,7 +478,9 @@ describe('XR render-loop handoff', () => {
       updateScene(this: typeof scene, nowMs: number): void;
     }).updateScene.call(scene, 10);
 
-    expect(updateGrasp).toHaveBeenCalledWith(actualTcp, 0.72);
+    expect(updateGrasp).not.toHaveBeenCalled();
+    expect(scene.robotModel.setJointAngles).toHaveBeenCalledWith([0, 0, 0, 0, 0, 0], 'LEBAI_FAKE');
+    expect(scene.robotModel.setGripper).toHaveBeenCalledWith(0.72);
   });
 
   it('keeps lights and grid in the fixed scene while placing robot visuals under the height root', () => {

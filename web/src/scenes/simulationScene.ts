@@ -19,10 +19,7 @@ import type {ArmSafetySnapshot} from '../ui/armPanel';
 import type {XRPresentationSample} from '../xr/session';
 import {ControllerHints} from './controllerHints';
 import {DesktopOrbitCamera} from './desktopOrbitCamera';
-import {
-  type GraspBlock,
-  KinematicGraspController,
-} from './kinematicGraspController';
+import type {GraspBlock} from './kinematicGraspController';
 import {WorkspacePlacementController} from './workspacePlacementController';
 import {type RobotRuntimeSummary, VrSafetyPanel} from './vrSafetyPanel';
 import {
@@ -117,13 +114,8 @@ export class SimulationScene {
   private readonly robotVisualRoot = new THREE.Group();
   private readonly grid = new THREE.GridHelper(4, 40, 0x1f839f, 0x183245);
   private readonly targetMarker = new THREE.Group();
-  private readonly graspBlocks = createGraspBlocks();
-  private readonly graspWorkbench = createGraspWorkbench();
-  private readonly rehearsalSupport = createRehearsalSupport();
-  private readonly rehearsalPlacementMarker = createRehearsalPlacementMarker();
   private sessionId = createSessionId();
   private robotModel: RobotModel | null = null;
-  private graspController: KinematicGraspController | null = null;
   private animationHandle: number | null = null;
   private sequence = 0;
   private lastFrameMs = Number.NEGATIVE_INFINITY;
@@ -160,7 +152,6 @@ export class SimulationScene {
   };
   private started = false;
   private automationActive = false;
-  private offlineWorkspace: OfflineSceneSnapshot['workspace'] = null;
 
   constructor(
     private readonly container: HTMLElement,
@@ -183,21 +174,6 @@ export class SimulationScene {
     this.robotVisualRoot.name = 'robot-visual-root';
     this.scene.add(this.robotVisualRoot);
     this.createEnvironment();
-    this.robotVisualRoot.add(
-      ...this.graspBlocks.map(({object}) => object),
-    );
-    this.robotVisualRoot.add(this.graspWorkbench);
-    this.robotVisualRoot.add(this.rehearsalSupport);
-    this.robotVisualRoot.add(this.rehearsalPlacementMarker);
-    setGraspPropVisibility(
-      this.graspBlocks, this.graspWorkbench, this.rehearsalSupport,
-      this.rehearsalPlacementMarker, null, this.offlineWorkspace,
-    );
-    this.graspController = new KinematicGraspController({
-      visualRoot: this.robotVisualRoot,
-      blocks: this.graspBlocks,
-      ...GRASP_WORKBENCH_SURFACE,
-    });
     this.createTargetMarker();
     this.controllerHints = new ControllerHints(this.scene);
     this.controllerHints.setVisible(false);
@@ -218,19 +194,11 @@ export class SimulationScene {
   applyRobotState(state: RobotStateMessage): void {
     this.options.stateBuffer.push(state);
     this.clockAnchor.update(state.server_mono_ns, performance.now());
-    setGraspPropVisibility(
-      this.graspBlocks, this.graspWorkbench, this.rehearsalSupport,
-      this.rehearsalPlacementMarker, state.backend, this.offlineWorkspace,
-    );
   }
 
   resetConnection(): void {
     this.options.stateBuffer.reset();
     this.clockAnchor.reset();
-    setGraspPropVisibility(
-      this.graspBlocks, this.graspWorkbench, this.rehearsalSupport,
-      this.rehearsalPlacementMarker, null, this.offlineWorkspace,
-    );
   }
 
   setOfflineController(sample: OfflineControllerSample | null): void {
@@ -251,55 +219,23 @@ export class SimulationScene {
   }
 
   getOfflineSceneSnapshot(): OfflineSceneSnapshot {
-    const grasp = this.graspController?.snapshot() ?? {
-      carriedBlockId: null,
-      blocks: this.graspBlocks.map((block) => ({
-        id: block.id,
-        position: block.object.position.toArray() as Vec3,
-        sizeM: block.sizeM,
-      })),
-      invalidOverlap: false,
-    };
     return copyOfflineSceneSnapshot({
       controller: this.offlineController === null
         ? null
         : copyOfflineControllerSample(this.offlineController),
-      ...grasp,
-      workspace: this.offlineWorkspace,
+      carriedBlockId: null,
+      blocks: [],
+      invalidOverlap: false,
+      workspace: null,
     });
   }
 
-  configureFakeRehearsalWorkspace(limiterAnchor: Pose, taskAnchor: Pose): void {
-    const layout = fakeRehearsalWorkspaceLayout(limiterAnchor, taskAnchor);
-    const orange = this.graspBlocks.find(({id}) => id === 'block-orange');
-    if (!orange || !this.graspController) throw new Error('offline_workspace_unavailable');
-    orange.object.position.fromArray(layout.pickBlockCenter);
-    orange.object.quaternion.identity();
-    orange.object.updateMatrix();
-    orange.object.updateMatrixWorld(true);
-    this.rehearsalSupport.visible = true;
-    this.rehearsalSupport.position.fromArray(layout.supportCenter);
-    this.rehearsalSupport.scale.set(layout.supportWidthM, 0.02, 0.10);
-    this.rehearsalPlacementMarker.visible = true;
-    this.rehearsalPlacementMarker.position.set(
-      layout.placementTarget[0],
-      layout.supportTopY + 0.001,
-      layout.placementTarget[2],
-    );
-    this.graspController.setTableTopY(layout.supportTopY);
-    this.offlineWorkspace = {
-      limiterAnchor: [...limiterAnchor.p],
-      taskAnchor: [...taskAnchor.p],
-      placementTarget: [...layout.placementTarget],
-      liftM: FAKE_REHEARSAL_WORKSPACE.liftM,
-    };
+  configureFakeRehearsalWorkspace(_limiterAnchor: Pose, _taskAnchor: Pose): void {
+    throw new Error('feature_removed');
   }
 
   resetOfflineScene(): void {
-    this.graspController?.reset();
-    this.rehearsalSupport.visible = false;
-    this.rehearsalPlacementMarker.visible = false;
-    this.offlineWorkspace = null;
+    // Compatibility for retired rehearsal callers; no grasp props exist.
   }
 
   setArmSafetyState(snapshot: ArmSafetySnapshot): void {
@@ -423,12 +359,6 @@ export class SimulationScene {
         this.robotModel.setJointAngles(sample.state.actual_q, sample.state.backend);
         this.robotModel.setGripper(sample.state.gripper);
         this.robotVisualRoot.updateMatrixWorld(true);
-        if (sample.state.backend !== 'LEBAI') {
-          this.graspController?.update(
-            sample.state.actual_tcp,
-            sample.state.gripper,
-          );
-        }
       }
     }
 
@@ -558,21 +488,8 @@ function createSessionId(): string {
   return `desktop-${token}`;
 }
 
-function setGraspPropVisibility(
-  blocks: readonly GraspBlock[],
-  platform: THREE.Object3D,
-  rehearsalSupport: THREE.Object3D,
-  rehearsalPlacementMarker: THREE.Object3D,
-  backend: RobotStateMessage['backend'] | null,
-  offlineWorkspace: OfflineSceneSnapshot['workspace'],
-): void {
-  const showSimulationProps = backend !== null && backend !== 'LEBAI';
-  for (const {object} of blocks) object.visible = showSimulationProps;
-  platform.visible = showSimulationProps;
-  rehearsalSupport.visible = showSimulationProps && offlineWorkspace !== null;
-  rehearsalPlacementMarker.visible = showSimulationProps && offlineWorkspace !== null;
-}
-
+// Legacy geometry helpers remain for historical isolated algorithm tests only.
+// The live SimulationScene never constructs these props or animated grasping.
 export function createGraspBlocks(): GraspBlock[] {
   const definitions = [
     ['block-orange', 0xff8a3d, [-0.05, -0.23]],
@@ -668,28 +585,6 @@ export function fakeRehearsalWorkspaceLayout(
     supportTopY,
     supportWidthM: Math.abs(pickBlockCenter[0] - placementTarget[0]) + 0.10,
   };
-}
-
-function createRehearsalSupport(): THREE.Mesh {
-  const support = new THREE.Mesh(
-    new THREE.BoxGeometry(1, 1, 1),
-    new THREE.MeshStandardMaterial({color: 0x203746, metalness: 0.25, roughness: 0.65}),
-  );
-  support.name = 'offline-rehearsal-support';
-  support.visible = false;
-  support.receiveShadow = true;
-  return support;
-}
-
-function createRehearsalPlacementMarker(): THREE.Mesh {
-  const marker = new THREE.Mesh(
-    new THREE.RingGeometry(0.038, 0.044, 32),
-    new THREE.MeshBasicMaterial({color: 0x58d68d, side: THREE.DoubleSide}),
-  );
-  marker.name = 'offline-rehearsal-placement-target';
-  marker.rotation.x = -Math.PI / 2;
-  marker.visible = false;
-  return marker;
 }
 
 export function modelLoadErrorMessage(_error: unknown): string {
