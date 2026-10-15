@@ -30,7 +30,7 @@ def _pose_matches(p, q, expected_p, expected_q, position_m, rotation_deg):
 
 
 @dataclass(frozen=True)
-class ModelJogRegionGuard:
+class _ModelRegionGuardCore:
     settings: LebaiSettings
     limits: NativeJogLimits
     config_sha256: str
@@ -43,7 +43,7 @@ class ModelJogRegionGuard:
     _assessment_json: str = field(init=False, repr=False)
 
     def __post_init__(self):
-        if (type(self.settings) is not LebaiSettings or self.settings.ip != '127.0.0.1'
+        if (type(self.settings) is not LebaiSettings
                 or self.settings.mode != 'control' or type(self.limits) is not NativeJogLimits
                 or type(self.tool) is not MdhTool):
             raise ValueError('native_jog_region_injected_loopback_required')
@@ -109,3 +109,11 @@ class ModelJogRegionGuard:
             if not _pose_matches(pose.p, pose.q, model[:3, 3],
                     Rotation.from_matrix(model[:3, :3]).as_quat(), .0001, .1):
                 raise ValueError('native_jog_region_feedback_mismatch')
+
+
+@dataclass(frozen=True)
+class ModelJogRegionGuard(_ModelRegionGuardCore):
+    def __post_init__(self):
+        if self.settings.ip != '127.0.0.1':
+            raise ValueError('native_jog_region_injected_loopback_required')
+        super().__post_init__()
