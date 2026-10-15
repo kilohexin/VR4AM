@@ -10,7 +10,7 @@
 
 **Spec:** [已认可的 speedl 架构](../specs/2026-10-15-native-cartesian-jog-design.md) 第 5 节；算法依据为[本轮区域推导](../../native-cartesian-jog-region-derivation-2026-10-15.md)。这是单次真机阶段之前的模型子任务，未包含真实执行入口或现场验收。
 
-**执行状态：** 待用户审阅本计划；沿用用户已经选择的当前会话直接实施方式。本文件不授权任何机器人连接或写操作。
+**执行状态：** 用户已审阅并认可，由当前会话直接实施，离线模块及验证已完成（78 项新增合成测试，相关回归 468 passed）；结果见上述推导文档的实现章节。本文件不授权任何机器人连接或写操作。
 
 ## Global Constraints
 
@@ -47,19 +47,19 @@ q 为六个普通有限数值；radius/offset 为六分量列表或元组。复�
 
 ## Task 1: 区域预测模块与定向验收
 
-- [ ] **RED — 基本行为：** 在新测试文件使用既有合成 Q/TOOL，不复制现场数据。`test_region_covers_sampled_directions_and_curvature` 对至少 64 角点、轴向/斜向速度和加速度，用现有独立基本变换或数值 J/Jdot 对照，断言没有超过预测 V/A；明确采样本身不是证明。
-- [ ] **RED — 必要拒绝：** 参数化非法 q/r/e/速度/加速度/时长、零半径、e 达到半径、超大半径、奇异参考点、非收缩区域。输入拒绝不产生任何权限对象。
-- [ ] **RED — 反例保护：** `test_curvature_survives_near_zero_cartesian_acceleration`，非零速度时输出 A 仍大于仅含 b·a 的初始参考；`test_reference_can_leave_region_despite_low_rates`，放宽比较限值也不改变 e+Vt 越界结果；`test_model_success_never_admits_hardware`，模型通过仍四个固定 false；`test_excess_reported_without_clipping`，比较限值设为很小，输出明确不满足且输入未被裁剪。
-- [ ] **运行 RED：** `.venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_region.py -q -p no:cacheprovider`。保存本机 XML，确认失败由缺少新模块或行为造成。
-- [ ] **GREEN：** 按上面接口和推导实现最小模块；曲率项使用区域 V 计算，不用参考点单一 qd 替代。优先 `np.linalg.solve`，普通双精度计算如实标注未定向舍入。实现输入/输出复制和错误原因；不改旧接口。
-- [ ] **定向回归：** 执行下列完整命令，预期全部通过；保存 JUnit、检查所有失败，不运行全后端。
+- [x] **RED — 基本行为：** 在新测试文件使用既有合成 Q/TOOL，不复制现场数据。`test_region_covers_sampled_directions_and_curvature` 对至少 64 角点、轴向/斜向速度和加速度，用现有独立基本变换或数值 J/Jdot 对照，断言没有超过预测 V/A；明确采样本身不是证明。
+- [x] **RED — 必要拒绝：** 参数化非法 q/r/e/速度/加速度/时长、零半径、e 达到半径、超大半径、奇异参考点、非收缩区域。输入拒绝不产生任何权限对象。
+- [x] **RED — 反例保护：** `test_curvature_survives_near_zero_cartesian_acceleration`，非零速度时输出 A 仍大于仅含 b·a 的初始参考；`test_reference_can_leave_region_despite_low_rates`，放宽比较限值也不改变 e+Vt 越界结果；`test_model_success_never_admits_hardware`，模型通过仍四个固定 false；`test_excess_reported_without_clipping`，比较限值设为很小，输出明确不满足且输入未被裁剪。
+- [x] **运行 RED：** `.venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_region.py -q -p no:cacheprovider`。保存本机 XML，确认失败由缺少新模块或行为造成。
+- [x] **GREEN：** 按上面接口和推导实现最小模块；曲率项使用区域 V 计算，不用参考点单一 qd 替代。优先 `np.linalg.solve`，普通双精度计算如实标注未定向舍入。实现输入/输出复制和错误原因；不改旧接口。
+- [x] **定向回归：** 执行下列完整命令，预期全部通过；保存 JUnit、检查所有失败，不运行全后端。
 
 ```powershell
 .venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_region.py backend/tests/commissioning/test_native_jog_mdh.py backend/tests/commissioning/test_native_jog_packet.py backend/tests/commissioning/test_native_jog_candidate.py backend/tests/commissioning/test_readonly_jog_jacobian.py backend/tests/commissioning/test_readonly_kinematics.py backend/tests/scripts/test_native_jog_loopback_probe.py backend/tests/scripts/test_readonly_jog_jacobian_entry.py backend/tests/scripts/test_readonly_kinematics_entry.py backend/tests/robots/test_stop_transaction.py backend/tests/robots/test_motion_call_ownership.py backend/tests/robots/test_gripper_call_ownership.py backend/tests/robots/test_gripper_sdk_entry.py backend/tests/robots/test_gripper_snapshot_boundary.py -q -p no:cacheprovider --junitxml=.tmp/native-jog-region-design-20261015/targeted-final.xml
 ```
-- [ ] **冻结回放：** 仅在本机将本次冻结只读结果传入新函数，核对与原型峰值约 0.0388040 rad/s、0.160208 rad/s² 一致；记录来源和输出哈希，源姿态不提交。该回放不连接真机。
-- [ ] **构建与作者复核：** `.venv/Scripts/python.exe scripts/run_segmented_demo.py --build-only --node C:/Users/Kilo/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node.exe`，随后 `.venv/Scripts/python.exe scripts/run_segmented_demo.py --check`，预期退出码均为 0；构建不会启动服务。核对旧入口仍隔离、结果不提供运动权限，保留独立审查未执行的限制。用户原未跟踪文档 SHA256 应为 `c023cb2ed8528c277632a320190c7d540fe7c35a3a5f6224fbeb2835e4a2c59f`。
-- [ ] **提交与报告：** `git diff --check` 后只提交新模块、合成测试和文档，不推送。将本任务标完成，报告实际测试数、冻结回放结果及尚缺的控制器/制动证据。此任务完成不等于 speedl 单次真机入口或网页控制已经完成。
+- [x] **冻结回放：** 仅在本机将本次冻结只读结果传入新函数，核对与原型峰值约 0.0388040 rad/s、0.160208 rad/s² 一致；记录来源和输出哈希，源姿态不提交。该回放不连接真机。
+- [x] **构建与作者复核：** `.venv/Scripts/python.exe scripts/run_segmented_demo.py --build-only --node C:/Users/Kilo/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node.exe`，随后 `.venv/Scripts/python.exe scripts/run_segmented_demo.py --check`，预期退出码均为 0；构建不会启动服务。核对旧入口仍隔离、结果不提供运动权限，保留独立审查未执行的限制。用户原未跟踪文档 SHA256 应为 `c023cb2ed8528c277632a320190c7d540fe7c35a3a5f6224fbeb2835e4a2c59f`。
+- [x] **提交与报告：** `git diff --check` 后只提交新模块、合成测试和文档，不推送。将本任务标完成，报告实际测试数、冻结回放结果及尚缺的控制器/制动证据。此任务完成不等于 speedl 单次真机入口或网页控制已经完成。
 
 ## Self-review and Next Gate
 
