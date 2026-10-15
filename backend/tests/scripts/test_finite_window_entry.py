@@ -183,6 +183,19 @@ async def test_runtime_metadata_change_during_math_blocks_native_pvat(context):
     assert client.write_calls==[('stop_move',)]
 
 
+async def test_source_change_between_queue_admission_and_native_child_is_rejected(context,monkeypatch):
+    import asyncio
+    entry,plan,kw,code=context();create=asyncio.create_task
+    def schedule(coro,**kwargs):
+        if kwargs.get('name')=='scoped-native-pvat':code.write_text('changed at native scheduling\n')
+        return create(coro,**kwargs)
+    monkeypatch.setattr(asyncio,'create_task',schedule)
+    client=ZClient();r=await entry.execute(plan,**kw,client_factory=AsyncMock(return_value=client))
+    assert r['pvat_entries']==0 and r['stop_entries']==1
+    assert r['local_motion_rejection']=='finite_scope_loaded_runtime_metadata_changed'
+    assert client.write_calls==[('stop_move',)]
+
+
 async def test_full_runtime_hashes_are_not_repeated_inside_math_to_pvat_lease(context,monkeypatch):
     entry,plan,kw,_=context();client=ZClient();original_hashes=entry.runtime_hashes
     def guarded():

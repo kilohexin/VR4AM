@@ -16,7 +16,7 @@ from app.commissioning.idle_stop_baseline import AdmissionRejected, validate_idl
 from app.commissioning.paused_stop_cleanup import BoundedStopOnlyClient, _cached_sample, _geometry
 from app.commissioning.stop_observation import observe_after_stop
 from app.commissioning.readonly_kinematics import computational_distance
-from app.robots.base import StopReason
+from app.robots.base import StopReason, BackendCommandError
 from app.schemas.messages import Pose
 
 CLEANUP_STOP_S = 5.
@@ -44,7 +44,9 @@ class FiniteScopeClient(BoundedStopOnlyClient):
     READS = BoundedStopOnlyClient.READS | {'kinematics_inverse', 'kinematics_forward'}
 
     def __init__(self, native, motion_permission, stop_permission, hot, owner, clock, *, parallel_fk=False,
-                 parallel_motion_reads=False):
+                 parallel_motion_reads=False, native_write_check=None):
+        if native_write_check is not None and not callable(native_write_check):
+            raise TypeError('finite_scope_write_check_required')
         if type(parallel_fk) is not bool:
             raise TypeError('finite_parallel_fk_requires_boolean')
         if type(parallel_motion_reads) is not bool:
@@ -65,6 +67,7 @@ class FiniteScopeClient(BoundedStopOnlyClient):
         self.pvat_started_ns = self.pvat_horizon_s = None
         self.math_entries = dict(kinematics_inverse=0, kinematics_forward=0)
         self.local_motion_rejection = None
+        self.native_write_check = native_write_check
 
     def _fk_read_pending(self):
         return any(child.pending_read is not None and not child.pending_read.done()
@@ -211,12 +214,16 @@ class FiniteScopeClient(BoundedStopOnlyClient):
             self.read_remote_result_unknown |= child.read_remote_result_unknown
             self.read_gate_closed |= child.read_gate_closed
 
-    def _motion_permission(self, *args):
+    def _motion_permission(self, *args, native=False):
         try:
+            if native and self.native_write_check is not None:
+                _callback(self.native_write_check)
             self.motion_permission(*args)
-        except (AdmissionRejected, ValueError) as error:
+        except (AdmissionRejected, ValueError, BackendCommandError) as error:
             reason=str(error)
             self.local_motion_rejection=(reason if reason.startswith(('idle_baseline_','finite_scope_'))
+                or reason in {'finite_diagnostic_expired','finite_request_changed','finite_audit_input_changed',
+                              'finite_motion_authority_changed','finite_read_client_changed'}
                 else 'local_admission_rejected')
             raise
 
@@ -250,7 +257,7 @@ class FiniteScopeClient(BoundedStopOnlyClient):
         deadline = time.monotonic_ns() + 60_000_000
         item = self.pvat_call = dict(entered=False, outcome='not_started', remote_result_unknown=False)
         async def invoke():
-            self._motion_permission(*args)  # This scheduled child is the actual native boundary.
+            self._motion_permission(*args,native=True)  # Full source check at the actual native boundary.
             if time.monotonic_ns() >= deadline:
                 raise AdmissionRejected('finite_scope_pvat_expired_before_native_entry')
             self.pvat_entries += 1
@@ -346,7 +353,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
             raise AdmissionRejected('finite_scope_cleanup_stop_not_admitted')
 
     def motion_permission(p, v, a, t):
-        _callback(write_check if write_check is not None else hot_check)
+        _callback(hot_check)
         hot()
         stop_permission()
         if cleanup_deadline - clock() < 1_000_000_000 or proxy.sdk_stop_entries:
@@ -394,7 +401,8 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                    ('move_pvat', 'stop_move', 'kinematics_inverse', 'kinematics_forward')):
             raise AdmissionRejected('finite_scope_capability_missing')
         proxy = FiniteScopeClient(native, motion_permission, stop_permission, hot, owner, clock,
-                                 parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads)
+                                 parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads,
+                                 native_write_check=write_check)
         return proxy
 
     try:

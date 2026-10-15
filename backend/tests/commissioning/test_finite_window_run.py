@@ -141,6 +141,51 @@ async def test_pre_native_refusal_records_local_reason_without_sdk_entry():
     assert proxy.pvat_entries==0 and native.write_calls==[]
 
 
+async def test_expensive_source_check_runs_once_at_actual_native_entry():
+    m=module();native=ZClient();checks=[]
+    def source():
+        assert proxy.pvat_entries==0
+        checks.append('source')
+    proxy=m.FiniteScopeClient(native,lambda *_:None,lambda:None,lambda:None,
+        asyncio.current_task(),lambda:1,native_write_check=source)
+    proxy._motion_permission([0.]*6,[0.]*6,[0.]*6,.08)
+    assert checks==[]
+    await proxy.move_pvat([0.]*6,[0.]*6,[0.]*6,.08)
+    assert checks==['source'] and proxy.pvat_entries==1
+
+
+async def test_native_source_check_refusal_cannot_enter_sdk():
+    m=module();native=ZClient()
+    def source():raise ValueError('finite_scope_loaded_runtime_metadata_changed')
+    proxy=m.FiniteScopeClient(native,lambda *_:None,lambda:None,lambda:None,
+        asyncio.current_task(),lambda:1,native_write_check=source)
+    with pytest.raises(ValueError):await proxy.move_pvat([0.]*6,[0.]*6,[0.]*6,.08)
+    assert proxy.pvat_attempted and proxy.pvat_entries==0 and native.write_calls==[]
+    assert proxy.local_motion_rejection=='finite_scope_loaded_runtime_metadata_changed'
+    assert not proxy.pvat_remote_result_unknown
+
+
+@pytest.mark.parametrize('scan_ms,expected_entries',[(8,1),(12,0)])
+async def test_one_final_scan_keeps_original_100ms_gate(monkeypatch,scan_ms,expected_entries):
+    m=module();clock=FakeClock();scans=[];advanced=False
+    begin=m.FiniteWindowDiagnosticAdapter._begin_motion_epoch
+    def epoch(adapter):
+        nonlocal advanced
+        begin(adapter)
+        if not advanced:clock.advance_ms(88);advanced=True
+    monkeypatch.setattr(m.FiniteWindowDiagnosticAdapter,'_begin_motion_epoch',epoch)
+    def source():scans.append(True);clock.advance_ms(scan_ms)
+    client=ZClient();settings=control_settings()
+    settings=replace(settings,control=replace(settings.control,max_joint_speed_radps=.05,
+        max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    r=await m.run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep,write_check=source)
+    assert len(scans)==1 and r['pvat_entries']==expected_entries
+    assert r['stop_entries']==1
+    if not expected_entries:assert r['local_motion_rejection']=='idle_baseline_sample_not_current'
+
+
 def parallel_proxy(native):
     return module().FiniteScopeClient(native,lambda *_:None,lambda:None,lambda:None,
         asyncio.current_task(),lambda:1,parallel_fk=True)
