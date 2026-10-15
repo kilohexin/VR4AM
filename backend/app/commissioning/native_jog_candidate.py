@@ -9,6 +9,7 @@ from app.commissioning.native_jog_packet import NativeJogLimits, validate_packet
 from app.robots.base import BackendCommandError
 from app.robots.lebai_adapter import RealLebaiAdapter
 from app.robots.lebai_motion_calls import OwnedMotionCalls
+from app.commissioning.native_jog_model_guard import ModelJogRegionGuard
 
 
 class NativeJogCandidateAdapter(RealLebaiAdapter):
@@ -16,10 +17,14 @@ class NativeJogCandidateAdapter(RealLebaiAdapter):
     _immediate_stop_latch_methods = RealLebaiAdapter._immediate_stop_latch_methods | {'speedl'}
 
     def __init__(self, settings, *, limits: NativeJogLimits, config_sha256: str,
-                 client_factory, clock, sleep, event_callback):
+                 client_factory, clock, sleep, event_callback, model_region_guard=None):
         if settings.ip != '127.0.0.1' or not callable(client_factory):
             raise ValueError('explicit injected IPv4 loopback factory required')
         _sha(config_sha256)
+        if model_region_guard is not None:
+            if type(model_region_guard) is not ModelJogRegionGuard:
+                raise ValueError('explicit model region guard required')
+            model_region_guard.require_binding(settings, limits, config_sha256)
         if (type(limits) is not NativeJogLimits
                 or limits.max_speed_mps > settings.control.max_tcp_speed_mps
                 or limits.max_acceleration_mps2 > settings.control.max_tcp_acceleration_mps2
@@ -39,6 +44,7 @@ class NativeJogCandidateAdapter(RealLebaiAdapter):
         self.native_jog_entries = 0
         self._jog_authorize = None
         self._jog_revoked = False
+        self._model_region_guard = self._bound_model_region_guard = model_region_guard
         # Feed this candidate's own permission into the existing bounded owner,
         # including while native work is pending. This binding is permanent.
         self.bind_motion_authority(self._submission_authorized)
@@ -57,7 +63,14 @@ class NativeJogCandidateAdapter(RealLebaiAdapter):
     async def connect(self):
         if self.settings is not self._jog_settings or self.settings.ip != '127.0.0.1':
             raise BackendCommandError('loopback_configuration_changed')
+        self._require_model_binding()
         await super().connect()
+
+    def _require_model_binding(self):
+        if self._model_region_guard is not self._bound_model_region_guard:
+            raise BackendCommandError('native_jog_region_guard_changed')
+        if self._model_region_guard is not None:
+            self._model_region_guard.require_binding(self.settings, self._jog_limits, self._jog_sha)
 
     async def submit_jog(self, packet, *, authorize: Callable[[], None]) -> int:
         if self._jog_consumed:
@@ -79,6 +92,7 @@ class NativeJogCandidateAdapter(RealLebaiAdapter):
                 raise BackendCommandError('native_jog_authority_revoked')
             if self.settings is not self._jog_settings:
                 raise BackendCommandError('loopback_configuration_changed')
+            self._require_model_binding()
             self._check_submission_ready()
             if (client is not self._client or generation != self._pump.generation
                     or not self._pump.is_current(generation) or self._stop_lock.locked()
@@ -95,6 +109,13 @@ class NativeJogCandidateAdapter(RealLebaiAdapter):
             validate_packet(packet, limits=self._jog_limits, actual_p=snapshot.actual_tcp.p,
                 snapshot_ns=snapshot.captured_ns, now_ns=self._clock(),
                 generation=generation, config_sha256=self._jog_sha)
+            if self._model_region_guard is not None:
+                self._model_region_guard.validate(packet, snapshot, settings=self.settings,
+                    limits=self._jog_limits, config_sha256=self._jog_sha)
+                # Local model work cannot renew the input or snapshot lease.
+                validate_packet(packet, limits=self._jog_limits, actual_p=snapshot.actual_tcp.p,
+                    snapshot_ns=snapshot.captured_ns, now_ns=self._clock(),
+                    generation=generation, config_sha256=self._jog_sha)
 
         require_current()
         async with self._sdk_lock:
