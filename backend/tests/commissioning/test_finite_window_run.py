@@ -287,6 +287,43 @@ async def test_prelease_age_starts_at_call_return_before_later_validation(monkey
     finally:await adapter.disconnect()
 
 
+async def test_early_sleep_wakeup_cannot_issue_stop_before_finite_reference_end():
+    m=module();client=ZClient();clock=FakeClock();entered=None;early=True;stop_times=[]
+    move=client.move_pvat;stop=client.stop_move
+    async def motion(*args):
+        nonlocal entered
+        entered=clock.now_ns();return await move(*args)
+    async def stopped():
+        stop_times.append(clock.now_ns())
+        return await stop()
+    async def sleep(seconds):
+        nonlocal early
+        if entered is not None and early and seconds>=.04:
+            early=False;await clock.sleep(seconds-.015)
+        else:await clock.sleep(seconds)
+    client.move_pvat=motion;client.stop_move=stopped
+    settings=control_settings();settings=replace(settings,control=replace(settings.control,
+        max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    r=await m.run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=sleep)
+    assert r['complete'] and not early and len(stop_times)==1
+    assert stop_times[0]-entered>=80_000_000
+
+
+async def test_qpc_deadline_clock_propagates_to_snapshot_and_fk_children():
+    import time
+    m=module();clock=lambda:time.perf_counter_ns()+10**18
+    proxy=m.FiniteScopeClient(ZClient(),lambda *_:None,lambda:None,lambda:None,
+        asyncio.current_task(),lambda:0,parallel_fk=True,parallel_motion_reads=True,deadline_clock=clock)
+    proxy.raw_estop_clear=True
+    with proxy._parallel_snapshot_scope(lambda:None):await proxy.get_kin_data()
+    await proxy._kinematics_forward_guarded([0.]*6,lambda:None)
+    children=list(proxy.snapshot_read_owners.values())+proxy.fk_read_owners
+    assert all(child.deadline_clock is clock and child.read_deadline_ns==proxy.read_deadline_ns for child in children)
+    assert all(item['started_ns']>10**18 for item in proxy.read_calls)
+
+
 def parallel_proxy(native):
     return module().FiniteScopeClient(native,lambda *_:None,lambda:None,lambda:None,
         asyncio.current_task(),lambda:1,parallel_fk=True)

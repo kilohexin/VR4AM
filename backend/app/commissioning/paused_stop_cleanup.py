@@ -21,10 +21,12 @@ MAX_READ_ENTRIES = 512
 class BoundedStopOnlyClient(StopOnlyClient):
     """Own native read tasks; a local timeout never means remote cancellation."""
 
-    def __init__(self, client, permission, read_authorize, owner):
+    def __init__(self, client, permission, read_authorize, owner, *, deadline_clock=None):
+        if deadline_clock is not None and not callable(deadline_clock):raise TypeError('read_deadline_clock_required')
         super().__init__(client, permission)
+        self.deadline_clock=deadline_clock if deadline_clock is not None else lambda:time.monotonic_ns()
         self.read_authorize, self.owner = read_authorize, owner
-        self.read_deadline_ns = time.monotonic_ns() + int(READ_BUDGET_S * 1e9)
+        self.read_deadline_ns = self.deadline_clock() + int(READ_BUDGET_S * 1e9)
         self.read_gate_closed = False
         self.read_remote_result_unknown = False
         self.raw_estop_clear = False
@@ -52,7 +54,7 @@ class BoundedStopOnlyClient(StopOnlyClient):
     def read_guard(self):
         self.read_authorize()
         if (self.read_gate_closed or self.owner is None or self.owner.done() or self.owner.cancelling()
-                or time.monotonic_ns() >= self.read_deadline_ns):
+                or self.deadline_clock() >= self.read_deadline_ns):
             raise AdmissionRejected('paused_cleanup_read_permission_revoked')
 
     def __getattr__(self, name):
@@ -75,19 +77,19 @@ class BoundedStopOnlyClient(StopOnlyClient):
                 or self.pending_read is not None and not self.pending_read.done()):
             self.read_gate_closed = True
             raise AdmissionRejected('paused_cleanup_read_budget_or_pending')
-        item = dict(method=name, started_ns=time.monotonic_ns(), entered=False,
+        item = dict(method=name, started_ns=self.deadline_clock(), entered=False,
                     outcome='not_started', remote_result_unknown=False)
         self.read_calls.append(item)
         deadline = min(self.read_deadline_ns, item['started_ns'] + int(READ_TIMEOUT_S * 1e9))
 
         async def query():
             self.read_guard()
-            if time.monotonic_ns() >= deadline:
+            if self.deadline_clock() >= deadline:
                 raise AdmissionRejected('paused_cleanup_read_expired_before_entry')
             item['entered'] = True
             # Wrapping the await supports SDK Futures as well as coroutines.
             raw = await invoke()
-            return raw, time.monotonic_ns()
+            return raw, self.deadline_clock()
 
         task = self.pending_read = asyncio.create_task(query(), name='paused-cleanup-' + name)
         def consume(done):
@@ -95,14 +97,14 @@ class BoundedStopOnlyClient(StopOnlyClient):
                 done.exception()
         task.add_done_callback(consume)
         try:
-            done, _ = await asyncio.wait({task}, timeout=max(0., (deadline - time.monotonic_ns()) / 1e9))
+            done, _ = await asyncio.wait({task}, timeout=max(0., (deadline - self.deadline_clock()) / 1e9))
             if not done:
                 item['outcome'] = 'timeout'
                 raise AdmissionRejected('paused_cleanup_read_timeout')
             raw, completed = task.result()
             item['native_completed_ns'] = completed
             self.read_guard()
-            if completed >= deadline or time.monotonic_ns() >= deadline:
+            if completed >= deadline or self.deadline_clock() >= deadline:
                 item['outcome'] = 'late_return'
                 raise AdmissionRejected('paused_cleanup_read_late_return')
             if name == 'get_estop_reason':
@@ -124,7 +126,7 @@ class BoundedStopOnlyClient(StopOnlyClient):
                 task.cancel()  # Do not await cancellation acknowledgment or a late payload.
             raise
         finally:
-            item['completed_ns'] = time.monotonic_ns()
+            item['completed_ns'] = self.deadline_clock()
 
     def require_clear_read_gate(self):
         self.read_guard()

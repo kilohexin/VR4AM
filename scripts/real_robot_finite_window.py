@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from time import monotonic_ns
+from time import monotonic_ns, perf_counter_ns
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'backend'))
@@ -38,7 +38,7 @@ def existing_rpc_connections():
 
 
 def prepare(config, output, *, expires=None, parallel_fk_audit=False, ready_joint_tolerance_rad=.0001,
-            parallel_motion_reads=False,prelease_feedback_fk=False):
+            parallel_motion_reads=False,prelease_feedback_fk=False,qpc_timing=False):
     from app.commissioning.finite_window_run import validate_ready_tolerance
     if type(parallel_fk_audit) is not bool:
         raise TypeError('finite_parallel_fk_requires_boolean')
@@ -46,10 +46,12 @@ def prepare(config, output, *, expires=None, parallel_fk_audit=False, ready_join
         raise TypeError('finite_parallel_snapshot_requires_boolean')
     if type(prelease_feedback_fk) is not bool or prelease_feedback_fk and not parallel_fk_audit:
         raise TypeError('finite_prelease_feedback_requires_parallel_fk_boolean')
+    if type(qpc_timing) is not bool:raise TypeError('qpc_timing_requires_boolean')
     plan = helper.prepare(config, output, expires=expires)
     plan['parallel_fk_audit'] = parallel_fk_audit
     plan['parallel_motion_reads'] = parallel_motion_reads
     plan['prelease_feedback_fk'] = prelease_feedback_fk
+    plan['qpc_timing'] = qpc_timing
     plan['ready_joint_tolerance_rad'] = validate_ready_tolerance(ready_joint_tolerance_rad)
     if not .01 <= plan['settings'].control.pvat_horizon_s <= .08:
         raise ValueError('finite_window_horizon_invalid')
@@ -70,6 +72,10 @@ def preview(plan):
         parallel_fk_audit=plan['parallel_fk_audit'],
         parallel_motion_reads=plan['parallel_motion_reads'],
         prelease_feedback_fk=plan['prelease_feedback_fk'],
+        qpc_timing=plan['qpc_timing'],
+        event_clock='time.perf_counter_ns' if plan['qpc_timing'] else 'time.monotonic_ns',
+        event_clock_anchor='performance_anchor' if plan['qpc_timing'] else 'clock_anchor',
+        connector_clock='time.monotonic_ns',
         prelease_feedback_max_age_ms=100 if plan['prelease_feedback_fk'] else None,
         prelease_feedback_requires_exact_motion_inputs=True if plan['prelease_feedback_fk'] else None,
         snapshot_order='connected_then_parallel_six_then_dependent_motion_state' if plan['parallel_motion_reads'] else 'serial',
@@ -158,6 +164,10 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
     from app.commissioning.finite_window_run import run_window
     from app.commissioning.readonly_kinematics import _Queries, new_report
     from app.recording.commissioning import CommissioningRecorder
+    if plan['qpc_timing']:
+        from app.commissioning.qpc_event_loop import QpcEventLoop
+        if not isinstance(asyncio.get_running_loop(),QpcEventLoop):
+            raise ValueError('qpc_event_loop_required')
     inputs = Inputs(plan, approved, expected_hash, expires, confirm)
     inputs.cold()
     if existing_rpc_connections() != 0: raise ValueError('existing_rpc_connections')
@@ -170,7 +180,9 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
     calls = _Queries(inputs.cold, connector)
     calls.deadline = monotonic_ns() + 3_000_000_000
     connection_used = False
-    report = dict(runtime='SIMULATION' if client_factory is not None else 'LIVE_FINITE_DIAGNOSTIC')
+    report = dict(runtime='SIMULATION' if client_factory is not None else 'LIVE_FINITE_DIAGNOSTIC',
+        event_clock=preview(plan)['event_clock'],event_clock_anchor=preview(plan)['event_clock_anchor'],
+        connector_clock='time.monotonic_ns')
     recorder = CommissioningRecorder(output / 'sessions', metadata=dict(workflow='single_finite_window', **report))
 
     async def factory(ip):
@@ -194,7 +206,9 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
                          write_check=inputs.write, report=report, parallel_fk_audit=plan['parallel_fk_audit'],
                          ready_joint_tolerance_rad=plan['ready_joint_tolerance_rad'],
                          parallel_motion_reads=plan['parallel_motion_reads'],
-                         prelease_feedback_fk=plan['prelease_feedback_fk'])
+                         prelease_feedback_fk=plan['prelease_feedback_fk'],
+                         clock=perf_counter_ns if plan['qpc_timing'] else monotonic_ns,
+                         deadline_clock=perf_counter_ns if plan['qpc_timing'] else monotonic_ns)
     finally:
         calls.closed = True
         connector['pending_remote_result_unknown'] = any(c['remote_result_unknown'] for c in connector['calls'])
@@ -210,16 +224,21 @@ def main(argv=None):
     parser.add_argument('--parallel-fk-audit', action='store_true')
     parser.add_argument('--parallel-motion-reads', action='store_true')
     parser.add_argument('--prelease-feedback-fk', action='store_true')
+    parser.add_argument('--qpc-timing', action='store_true')
     parser.add_argument('--ready-joint-tolerance-rad', type=float, default=.0001)
     parser.add_argument('--approved-preview-sha256'); parser.add_argument('--authorization-expires-utc'); parser.add_argument('--confirm')
     args = parser.parse_args(argv)
     plan = prepare(args.config, args.output, expires=args.authorization_expires_utc,
                    parallel_fk_audit=args.parallel_fk_audit, ready_joint_tolerance_rad=args.ready_joint_tolerance_rad,
-                   parallel_motion_reads=args.parallel_motion_reads,prelease_feedback_fk=args.prelease_feedback_fk)
+                   parallel_motion_reads=args.parallel_motion_reads,prelease_feedback_fk=args.prelease_feedback_fk,
+                   qpc_timing=args.qpc_timing)
     if not args.execute_once:
         print(json.dumps(preview(plan), indent=2)); return 0
     if Path(sys.executable).resolve() != (ROOT / '.venv/Scripts/python.exe').resolve(): raise ValueError('repository_venv_required')
-    loop = asyncio.new_event_loop()
+    if plan['qpc_timing']:
+        from app.commissioning.qpc_event_loop import new_qpc_loop
+        loop=new_qpc_loop()
+    else:loop = asyncio.new_event_loop()
     task = loop.create_task(execute(plan, approved=args.approved_preview, expected_hash=args.approved_preview_sha256,
         expires=args.authorization_expires_utc, confirm=args.confirm))
     try:

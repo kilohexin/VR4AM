@@ -44,14 +44,14 @@ class FiniteScopeClient(BoundedStopOnlyClient):
     READS = BoundedStopOnlyClient.READS | {'kinematics_inverse', 'kinematics_forward'}
 
     def __init__(self, native, motion_permission, stop_permission, hot, owner, clock, *, parallel_fk=False,
-                 parallel_motion_reads=False, native_write_check=None):
+                 parallel_motion_reads=False, native_write_check=None,deadline_clock=None):
         if native_write_check is not None and not callable(native_write_check):
             raise TypeError('finite_scope_write_check_required')
         if type(parallel_fk) is not bool:
             raise TypeError('finite_parallel_fk_requires_boolean')
         if type(parallel_motion_reads) is not bool:
             raise TypeError('finite_parallel_snapshot_requires_boolean')
-        super().__init__(native, stop_permission, hot, owner)
+        super().__init__(native, stop_permission, hot, owner,deadline_clock=deadline_clock)
         self.parallel_fk = parallel_fk
         self.fk_read_owners = []
         self.parallel_motion_reads = parallel_motion_reads
@@ -127,7 +127,7 @@ class FiniteScopeClient(BoundedStopOnlyClient):
                 raise AdmissionRejected('finite_scope_snapshot_group_revoked')
             if self.pending_read is not None and not self.pending_read.done():
                 raise AdmissionRejected('finite_scope_parent_read_pending')
-        child=_SnapshotReadOwner(self.client,lambda:None,authorize,self.owner)
+        child=_SnapshotReadOwner(self.client,lambda:None,authorize,self.owner,deadline_clock=self.deadline_clock)
         child.method=name;child.native_entries=0;child.native_item=None
         child.read_deadline_ns=self.read_deadline_ns;child.read_calls=self.read_calls
         self.snapshot_read_owners[name]=child
@@ -195,7 +195,7 @@ class FiniteScopeClient(BoundedStopOnlyClient):
             self.read_guard(); guard()
             if self.pending_read is not None and not self.pending_read.done():
                 raise AdmissionRejected('finite_scope_parent_read_pending')
-        child = _ForwardReadOwner(self.client, lambda: None, authorize, self.owner)
+        child = _ForwardReadOwner(self.client, lambda: None, authorize, self.owner,deadline_clock=self.deadline_clock)
         child.read_deadline_ns = self.read_deadline_ns
         child.read_calls = self.read_calls
         self.fk_read_owners.append(child)
@@ -254,11 +254,12 @@ class FiniteScopeClient(BoundedStopOnlyClient):
         self._motion_permission(p, v, a, t)
         self.pvat_attempted = True
         args = (list(p), list(v), list(a), t)
-        deadline = time.monotonic_ns() + 60_000_000
-        item = self.pvat_call = dict(entered=False, outcome='not_started', remote_result_unknown=False)
+        deadline = self.deadline_clock() + 60_000_000
+        item = self.pvat_call = dict(entered=False, outcome='not_started', remote_result_unknown=False,
+            deadline_ns=deadline,deadline_clock=getattr(self.deadline_clock,'__name__','injected'))
         async def invoke():
             self._motion_permission(*args,native=True)  # Full source check at the actual native boundary.
-            if time.monotonic_ns() >= deadline:
+            if self.deadline_clock() >= deadline:
                 raise AdmissionRejected('finite_scope_pvat_expired_before_native_entry')
             self.pvat_entries += 1
             self.pvat_started_ns, self.pvat_horizon_s = self.clock(), t
@@ -269,12 +270,12 @@ class FiniteScopeClient(BoundedStopOnlyClient):
             if not done.cancelled(): done.exception()
         task.add_done_callback(consume)
         try:
-            done, _ = await asyncio.wait({task}, timeout=max(0.,(deadline-time.monotonic_ns())/1e9))
+            done, _ = await asyncio.wait({task}, timeout=max(0.,(deadline-self.deadline_clock())/1e9))
             if not done:
                 item['outcome']='timeout'
                 raise TimeoutError
             result=task.result()
-            if time.monotonic_ns() >= deadline:
+            if self.deadline_clock() >= deadline:
                 item['outcome']='late_return'
                 raise TimeoutError
             item['outcome']='returned'
@@ -310,7 +311,7 @@ def _rest(sample, now_ns):
 async def run_window(settings, recorder, client_factory, authorization_check, hot_check,
                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, write_check=None,
                      parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
-                     parallel_motion_reads=False,prelease_feedback_fk=False):
+                     parallel_motion_reads=False,prelease_feedback_fk=False,deadline_clock=None):
     if type(parallel_fk_audit) is not bool:
         raise TypeError('finite_parallel_fk_requires_boolean')
     if type(parallel_motion_reads) is not bool:
@@ -405,7 +406,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
             raise AdmissionRejected('finite_scope_capability_missing')
         proxy = FiniteScopeClient(native, motion_permission, stop_permission, hot, owner, clock,
                                  parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads,
-                                 native_write_check=write_check)
+                                 native_write_check=write_check,deadline_clock=deadline_clock)
         return proxy
 
     try:
@@ -445,8 +446,9 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         outcome = await asyncio.wait_for(receipt.completion.wait(), 1.)
         report.update(command_sdk_outcome=outcome.sdk_outcome, command_error=outcome.error)
         if proxy.pvat_entries and outcome.sdk_outcome == 'returned':
-            remaining = (proxy.pvat_started_ns + int(proxy.pvat_horizon_s * 1e9) - clock()) / 1e9
-            if remaining > 0: await sleep(remaining)
+            reference_end=proxy.pvat_started_ns+int(proxy.pvat_horizon_s*1e9)
+            while (remaining:=(reference_end-clock())/1e9)>0:
+                await sleep(max(.000001,remaining))
         try:
             await adapter.stop(StopReason.SHUTDOWN)
         except BaseException as error:

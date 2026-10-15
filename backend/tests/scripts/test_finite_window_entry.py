@@ -157,6 +157,32 @@ async def test_prelease_feedback_is_bound_and_old_approval_cannot_enable_it(cont
     assert r['complete'] and r['math_entries']==dict(kinematics_inverse=1,kinematics_forward=4)
 
 
+async def test_qpc_mode_is_bound_and_wrong_loop_refuses_before_connection(context):
+    entry,plan,kw,_=context();factory=AsyncMock()
+    new=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],qpc_timing=True)
+    assert entry.preview(new)['qpc_timing'] and not entry.preview(plan)['qpc_timing']
+    kw['approved'].write_text(json.dumps(entry.preview(new)));kw['expected_hash']=entry.sha(kw['approved'])
+    with pytest.raises(ValueError,match='qpc_event_loop_required'):
+        await entry.execute(new,**kw,client_factory=factory)
+    factory.assert_not_called();assert not plan['output'].exists()
+
+
+def test_qpc_fake_execution_keeps_original_limits_and_marks_clock_domain(context):
+    from app.commissioning.qpc_event_loop import new_qpc_loop
+    entry,plan,kw,_=context();client=ZClient()
+    new=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],qpc_timing=True,
+        parallel_fk_audit=True,parallel_motion_reads=True,prelease_feedback_fk=True)
+    kw['approved'].write_text(json.dumps(entry.preview(new)));kw['expected_hash']=entry.sha(kw['approved'])
+    loop=new_qpc_loop()
+    try:r=loop.run_until_complete(entry.execute(new,**kw,client_factory=AsyncMock(return_value=client)))
+    finally:loop.close()
+    assert r['complete'] and r['event_clock']=='time.perf_counter_ns'
+    assert r['pvat_call']['deadline_clock']=='perf_counter_ns'
+    assert entry.preview(new)['motion_ttl_ms']==100 and entry.preview(new)['stop_rpc_timeout_ms']==200
+    events=[json.loads(line) for line in next((plan['output']/'sessions').rglob('session.jsonl')).read_text().splitlines()]
+    assert events[0]['metadata']['event_clock_anchor']=='performance_anchor'
+
+
 @pytest.mark.parametrize('bad',[dict(confirm='yes'),dict(approved=None),dict(expected_hash='b'*64),dict(expires=None),dict(expires='2000-01-01T00:00:00Z')])
 async def test_bad_scope_cannot_connect_or_create_output(context,bad):
     entry,plan,kw,_=context();factory=AsyncMock()
