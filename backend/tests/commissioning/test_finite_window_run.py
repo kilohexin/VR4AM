@@ -102,6 +102,34 @@ async def test_small_window_rejects_a_changed_ready_pose_before_admission():
     assert result['pvat_entries']==0 and client.write_calls==[]
 
 
+@pytest.mark.parametrize('tolerance,admitted',[(.0001,False),(.001,True)])
+async def test_two_feedback_ticks_need_explicit_ready_tolerance(tolerance,admitted):
+    settings=control_settings();client=ZClient();clock=FakeClock()
+    settings=replace(settings,control=replace(settings.control,max_joint_speed_radps=.05,
+        max_joint_acceleration_radps2=.2,max_tcp_step_m=.00005),
+        teleop_ready_q=tuple(client.kin_data['actual_joint_pose']))
+    client.kin_data['actual_joint_pose'][4]-=.0001917475984856143
+    async def factory(_ip):return client
+    report=await module().run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep,ready_joint_tolerance_rad=tolerance)
+    assert report['scope_admitted'] is admitted
+    assert report['ready_max_joint_delta_rad']==pytest.approx(.0001917475984856143)
+    if admitted:assert report['complete']
+    else:
+        assert report['primary_rejection']=='finite_scope_ready_pose_changed'
+        assert client.write_calls==[] and report['pvat_entries']==0
+
+
+@pytest.mark.parametrize('bad',[0,.00001,.00101,float('nan'),True,'0.001'])
+async def test_ready_tolerance_range_rejected_before_connection(bad):
+    calls=[]
+    async def factory(_ip):calls.append(True)
+    with pytest.raises((TypeError,ValueError)):
+        await module().run_window(control_settings(),Recorder(),factory,lambda:None,lambda:None,
+            ready_joint_tolerance_rad=bad)
+    assert calls==[]
+
+
 async def test_pre_native_refusal_records_local_reason_without_sdk_entry():
     m=module();native=ZClient()
     def deny(*_args):raise m.AdmissionRejected('idle_baseline_sample_not_current')

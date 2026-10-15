@@ -92,6 +92,26 @@ async def test_parallel_approved_fake_entry_executes_once(context):
     assert result['math_entries']['kinematics_forward']==4
 
 
+def test_ready_tolerance_explicitly_bound_to_preview_and_cli(context,monkeypatch,capsys):
+    entry,plan,_,_=context()
+    candidate=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],
+        ready_joint_tolerance_rad=.001)
+    assert entry.preview(plan)['ready_joint_tolerance_rad']==.0001
+    assert entry.preview(candidate)['ready_joint_tolerance_rad']==.001
+    monkeypatch.setattr(entry,'execute',AsyncMock(side_effect=AssertionError('no execution')))
+    assert entry.main(['--config',str(plan['config']),'--output',str(plan['output']),
+        '--ready-joint-tolerance-rad','0.001'])==0
+    assert json.loads(capsys.readouterr().out)['ready_joint_tolerance_rad']==.001
+
+
+async def test_larger_ready_tolerance_cannot_reuse_strict_approval(context):
+    entry,plan,kw,_=context();factory=AsyncMock()
+    candidate=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],
+        ready_joint_tolerance_rad=.001)
+    with pytest.raises(ValueError):await entry.execute(candidate,**kw,client_factory=factory)
+    factory.assert_not_called()
+
+
 @pytest.mark.parametrize('bad',[dict(confirm='yes'),dict(approved=None),dict(expected_hash='b'*64),dict(expires=None),dict(expires='2000-01-01T00:00:00Z')])
 async def test_bad_scope_cannot_connect_or_create_output(context,bad):
     entry,plan,kw,_=context();factory=AsyncMock()

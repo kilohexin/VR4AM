@@ -37,11 +37,13 @@ def existing_rpc_connections():
     return helper.existing_rpc_connections()
 
 
-def prepare(config, output, *, expires=None, parallel_fk_audit=False):
+def prepare(config, output, *, expires=None, parallel_fk_audit=False, ready_joint_tolerance_rad=.0001):
+    from app.commissioning.finite_window_run import validate_ready_tolerance
     if type(parallel_fk_audit) is not bool:
         raise TypeError('finite_parallel_fk_requires_boolean')
     plan = helper.prepare(config, output, expires=expires)
     plan['parallel_fk_audit'] = parallel_fk_audit
+    plan['ready_joint_tolerance_rad'] = validate_ready_tolerance(ready_joint_tolerance_rad)
     if not .01 <= plan['settings'].control.pvat_horizon_s <= .08:
         raise ValueError('finite_window_horizon_invalid')
     plan['runtime_hashes'] = runtime_hashes()
@@ -59,8 +61,9 @@ def preview(plan):
         allowed_writes=['move_pvat', 'stop_move'], target=dict(axis='z', distance_m=distance_m, rotation=False),
         requires_full_endpoint=distance_m<DISTANCE_M,
         parallel_fk_audit=plan['parallel_fk_audit'],
+        ready_joint_tolerance_rad=plan['ready_joint_tolerance_rad'],
         fk_order='feedback_then_parallel_goal_midpoint_endpoint' if plan['parallel_fk_audit'] else 'serial',
-        required_ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD if distance_m<DISTANCE_M else None,
+        required_ready_joint_tolerance_rad=plan['ready_joint_tolerance_rad'] if distance_m<DISTANCE_M else None,
         requires_raw_idle=True, requires_zero_actual_qd_qdd=True, zero_terminal_velocity_acceleration=True,
         motion_ttl_ms=100, native_pvat_await_timeout_ms=60, stop_rpc_timeout_ms=200,
         stop_stable_ms=300, stop_verification_ms=500, readonly_tail_s=2.,
@@ -176,7 +179,8 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
 
     try:
         await run_window(plan['settings'], recorder, factory, inputs.cold, inputs.hot,
-                         write_check=inputs.write, report=report, parallel_fk_audit=plan['parallel_fk_audit'])
+                         write_check=inputs.write, report=report, parallel_fk_audit=plan['parallel_fk_audit'],
+                         ready_joint_tolerance_rad=plan['ready_joint_tolerance_rad'])
     finally:
         calls.closed = True
         connector['pending_remote_result_unknown'] = any(c['remote_result_unknown'] for c in connector['calls'])
@@ -190,10 +194,11 @@ def main(argv=None):
     parser.add_argument('--config', required=True, type=Path); parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--execute-once', action='store_true'); parser.add_argument('--approved-preview', type=Path)
     parser.add_argument('--parallel-fk-audit', action='store_true')
+    parser.add_argument('--ready-joint-tolerance-rad', type=float, default=.0001)
     parser.add_argument('--approved-preview-sha256'); parser.add_argument('--authorization-expires-utc'); parser.add_argument('--confirm')
     args = parser.parse_args(argv)
     plan = prepare(args.config, args.output, expires=args.authorization_expires_utc,
-                   parallel_fk_audit=args.parallel_fk_audit)
+                   parallel_fk_audit=args.parallel_fk_audit, ready_joint_tolerance_rad=args.ready_joint_tolerance_rad)
     if not args.execute_once:
         print(json.dumps(preview(plan), indent=2)); return 0
     if Path(sys.executable).resolve() != (ROOT / '.venv/Scripts/python.exe').resolve(): raise ValueError('repository_venv_required')

@@ -20,6 +20,7 @@ from app.schemas.messages import Pose
 CLEANUP_STOP_S = 5.
 DISTANCE_M = .0002
 READY_Q_TOLERANCE_RAD = .0001
+MAX_READY_Q_TOLERANCE_RAD = .001
 INTERRUPTIONS = (asyncio.CancelledError, KeyboardInterrupt, SystemExit)
 
 
@@ -28,6 +29,13 @@ def _callback(callback):
     if value is not None:
         if asyncio.iscoroutine(value): value.close()
         raise AdmissionRejected('finite_scope_invalid_authorization_result')
+
+
+def validate_ready_tolerance(value):
+    if (type(value) not in (int,float) or not math.isfinite(value)
+            or not READY_Q_TOLERANCE_RAD <= value <= MAX_READY_Q_TOLERANCE_RAD):
+        raise ValueError('finite_scope_ready_tolerance_invalid')
+    return float(value)
 
 
 class FiniteScopeClient(BoundedStopOnlyClient):
@@ -185,9 +193,10 @@ def _rest(sample, now_ns):
 
 async def run_window(settings, recorder, client_factory, authorization_check, hot_check,
                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, write_check=None,
-                     parallel_fk_audit=False):
+                     parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD):
     if type(parallel_fk_audit) is not bool:
         raise TypeError('finite_parallel_fk_requires_boolean')
+    ready_joint_tolerance_rad=validate_ready_tolerance(ready_joint_tolerance_rad)
     if not all(callable(v) for v in (client_factory, authorization_check, hot_check)):
         raise TypeError('finite_scope_explicit_callbacks_required')
     if write_check is not None and not callable(write_check): raise TypeError('finite_scope_write_check_required')
@@ -200,7 +209,8 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         read_remote_result_unknown=False, read_calls=[], native_connection_release_verified=False,
         local_resources_released=False, process_exit_required=True, pvat_remote_result_unknown=False,
         full_endpoint_required=full_endpoint_required, full_endpoint_feasible=False,
-        target_distance_m=distance_m, parallel_fk_audit=parallel_fk_audit)
+        target_distance_m=distance_m, parallel_fk_audit=parallel_fk_audit,
+        ready_joint_tolerance_rad=ready_joint_tolerance_rad)
     owner = asyncio.current_task()
     proxy = adapter = anchor = None
     cleanup_deadline = None
@@ -208,9 +218,11 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
     primary_error = None
 
     def ready_pose(sample):
-        if full_endpoint_required and max(abs(a-b) for a,b in
-                zip(sample['actual_q'],settings.teleop_ready_q))>READY_Q_TOLERANCE_RAD:
-            raise AdmissionRejected('finite_scope_ready_pose_changed')
+        if full_endpoint_required:
+            delta=max(abs(a-b) for a,b in zip(sample['actual_q'],settings.teleop_ready_q))
+            report['ready_max_joint_delta_rad']=delta
+            if delta>ready_joint_tolerance_rad:
+                raise AdmissionRejected('finite_scope_ready_pose_changed')
 
     def hot():
         _callback(hot_check)
@@ -359,7 +371,11 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                 fk_read_gate_closed=any(child.read_gate_closed for child in proxy.fk_read_owners),
                 owned_pvat_pending_at_exit=proxy.pending_pvat is not None and not proxy.pending_pvat.done())
         report['interrupted'] = isinstance(primary_error, INTERRUPTIONS)
-        if primary_error is not None: report['error_type'] = type(primary_error).__name__
+        if primary_error is not None:
+            report['error_type'] = type(primary_error).__name__
+            reason=str(primary_error)
+            report['primary_rejection']=(reason if isinstance(primary_error,(AdmissionRejected,ValueError))
+                and reason.startswith(('finite_scope_','idle_baseline_','paused_cleanup_')) else None)
         report['complete'] = (primary_error is None and not report['cleanup_errors'] and report.get('command_sdk_outcome') == 'returned'
             and report['pvat_entries'] == report['stop_entries'] == 1 and report['stop_confirmed']
             and report['latched_fault'] is None and report['tail_complete'] and report['displacement_consistent'])
