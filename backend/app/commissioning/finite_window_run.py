@@ -310,11 +310,13 @@ def _rest(sample, now_ns):
 async def run_window(settings, recorder, client_factory, authorization_check, hot_check,
                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, write_check=None,
                      parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
-                     parallel_motion_reads=False):
+                     parallel_motion_reads=False,prelease_feedback_fk=False):
     if type(parallel_fk_audit) is not bool:
         raise TypeError('finite_parallel_fk_requires_boolean')
     if type(parallel_motion_reads) is not bool:
         raise TypeError('finite_parallel_snapshot_requires_boolean')
+    if type(prelease_feedback_fk) is not bool or prelease_feedback_fk and not parallel_fk_audit:
+        raise TypeError('finite_prelease_feedback_requires_parallel_fk_boolean')
     ready_joint_tolerance_rad=validate_ready_tolerance(ready_joint_tolerance_rad)
     if not all(callable(v) for v in (client_factory, authorization_check, hot_check)):
         raise TypeError('finite_scope_explicit_callbacks_required')
@@ -329,7 +331,8 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         local_resources_released=False, process_exit_required=True, pvat_remote_result_unknown=False,
         full_endpoint_required=full_endpoint_required, full_endpoint_feasible=False,
         target_distance_m=distance_m, parallel_fk_audit=parallel_fk_audit,
-        ready_joint_tolerance_rad=ready_joint_tolerance_rad,parallel_motion_reads=parallel_motion_reads)
+        ready_joint_tolerance_rad=ready_joint_tolerance_rad,parallel_motion_reads=parallel_motion_reads,
+        prelease_feedback_fk=prelease_feedback_fk)
     owner = asyncio.current_task()
     proxy = adapter = anchor = None
     cleanup_deadline = None
@@ -411,7 +414,8 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         await recorder.start()
         adapter = FiniteWindowDiagnosticAdapter(settings, client_factory=factory, clock=clock,
                                                sleep=sleep, event_callback=recorder.write_event,
-                                               parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads)
+                                               parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads,
+                                               prelease_feedback_fk=prelease_feedback_fk)
         await adapter.connect()
         _callback(authorization_check)  # Full hashes remain outside the 100 ms motion lease.
         preflight = await adapter.preflight()
@@ -425,6 +429,14 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         sample = await adapter.read_stop_observation()
         proxy.require_clear_read_gate()
         _rest(sample, clock()); ready_pose(sample); _geometry(adapter); validate_position_continuity(sample, anchor)
+        if prelease_feedback_fk:
+            snapshot=adapter._snapshot
+            def prepare_guard():
+                hot();proxy.require_clear_read_gate() if not proxy._fk_read_pending() else proxy.read_guard()
+                if adapter._client is not proxy or adapter._snapshot is not snapshot:
+                    raise AdmissionRejected('finite_scope_feedback_input_changed')
+                _rest(sample,clock());ready_pose(sample);_geometry(adapter)
+            await adapter.prepare_feedback(snapshot,prepare_guard)
         admitted = report['scope_admitted'] = True
         cleanup_deadline = clock() + int(CLEANUP_STOP_S * 1e9)
         origin = Pose.model_validate(sample['actual_tcp'])

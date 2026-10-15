@@ -22,6 +22,7 @@ from app.robots.base import BackendCommandError, StopReason
 from app.robots.lebai_adapter import RealLebaiAdapter, _MotionSnapshotFault
 from app.robots.lebai_codec import pose_from_lebai
 from app.robots.lebai_finite_pvat import build_finite_pvat_candidate, _controls
+from app.schemas.messages import Pose
 
 _LEASE_NS = 100_000_000
 _MAX_TRANSLATION_M = .0002
@@ -46,16 +47,26 @@ def _snapshot_signature(snapshot):
 
 
 class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
-    def __init__(self, settings, *, client_factory, parallel_fk=False, parallel_motion_reads=False, **kwargs):
+    def __init__(self, settings, *, client_factory, parallel_fk=False, parallel_motion_reads=False,
+                 prelease_feedback_fk=False, **kwargs):
         if settings.mode != 'control':
             raise ValueError('finite_diagnostic_requires_control_mode')
         if type(parallel_fk) is not bool:
             raise TypeError('finite_parallel_fk_requires_boolean')
         if type(parallel_motion_reads) is not bool:
             raise TypeError('finite_parallel_snapshot_requires_boolean')
+        if type(prelease_feedback_fk) is not bool:
+            raise TypeError('finite_prelease_feedback_requires_boolean')
+        if prelease_feedback_fk and not parallel_fk:
+            raise TypeError('finite_prelease_feedback_requires_parallel_fk_boolean')
         super().__init__(settings, client_factory=client_factory, **kwargs)
         self.parallel_fk = parallel_fk
         self.parallel_motion_reads = parallel_motion_reads
+        self.prelease_feedback_fk = prelease_feedback_fk
+        self._prelease_feedback = None
+        self._prelease_command = None
+        self._feedback_prepare_epoch = 0
+        self._feedback_prepare_started = False
         self._finite_snapshot_wrappers = set()
         self._finite_submitted = False
         self._finite_entered = False
@@ -127,8 +138,16 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
             self._finite_context = None
             self._finite_ticket = None
             self._finite_input_signature = None
+            self._prelease_feedback = None
+
+    async def stop(self, *args, **kwargs):
+        self._feedback_prepare_epoch += 1
+        self._prelease_feedback = None
+        return await super().stop(*args, **kwargs)
 
     async def disconnect(self):
+        self._feedback_prepare_epoch += 1
+        self._prelease_feedback = None
         for pending in tuple(self._finite_pending_fks | self._finite_fk_wrappers | self._finite_snapshot_wrappers):
             if not pending.done() and not pending.cancelling():
                 pending.cancel()
@@ -167,6 +186,41 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
         self._ensure_command_snapshot_fresh(snapshot)
         if self._finite_input_signature is not None and _snapshot_signature(snapshot) != self._finite_input_signature:
             raise _MotionSnapshotFault('finite_audit_input_changed')
+        if self.prelease_feedback_fk:self._prepared_feedback(client,snapshot)
+
+    async def prepare_feedback(self, snapshot, guard):
+        if not self.prelease_feedback_fk or self._finite_submitted or self._feedback_prepare_started:
+            raise _MotionSnapshotFault('finite_feedback_preparation_not_admitted')
+        self._feedback_prepare_started=True
+        epoch,owner,generation=(self._feedback_prepare_epoch,self._snapshot_calls,self._pump.generation)
+        signature=_snapshot_signature(snapshot)[3:]
+        client=self._client;calls=[]
+        origin=await self._fk(client,snapshot,'feedback',snapshot.actual_q,calls,guard=guard)
+        guard()
+        if (epoch!=self._feedback_prepare_epoch or owner is not self._snapshot_calls
+                or generation!=self._pump.generation or client is not self._client
+                or signature!=_snapshot_signature(snapshot)[3:]):
+            raise _MotionSnapshotFault('finite_feedback_preparation_revoked')
+        if (math.dist(origin.p,snapshot.actual_tcp.p)>_FK_POSITION_TOLERANCE_M
+                or _angle(origin.q,snapshot.actual_tcp.q)>_FK_ROTATION_TOLERANCE_DEG):
+            raise _MotionSnapshotFault('finite_fk_feedback_mismatch')
+        self._prelease_feedback=(client,signature,(origin.p,origin.q),
+                                calls[0]['sdk_await_completed_ns'],copy.deepcopy(calls[0]),owner,generation)
+        self._schedule_sdk_diagnostic(dict(kind='finite_feedback_prelease',calls=copy.deepcopy(calls),
+            assessment='mathematical_result_only_not_current_health_or_motion_permission'))
+
+    def _prepared_feedback(self, client, snapshot):
+        cached=self._prelease_feedback
+        if (cached is None or cached[0] is not client or cached[1]!=_snapshot_signature(snapshot)[3:]
+                or cached[5] is not self._snapshot_calls or cached[6]!=self._pump.generation
+                or not 0<=self._clock()-cached[3]<_LEASE_NS):
+            raise _MotionSnapshotFault('finite_prelease_feedback_not_current')
+        request=self._finite_context
+        if request is None:raise _MotionSnapshotFault('finite_prelease_feedback_not_admitted')
+        if self._prelease_command is None:self._prelease_command=request.reference
+        if self._prelease_command!=request.reference:
+            raise _MotionSnapshotFault('finite_prelease_feedback_already_used')
+        return cached
 
     async def _read_snapshot_impl(self, read, **kwargs):
         if not self.parallel_motion_reads or kwargs['read_purpose'] != 'motion':
@@ -225,8 +279,9 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
             snapshot.actual_qd, snapshot.actual_qdd, self._pvat_limits)
         return replace(selected, point=finite.point)
 
-    async def _fk(self, client, snapshot, role, joints, calls):
-        self._guard(client, snapshot)
+    async def _fk(self, client, snapshot, role, joints, calls, *, guard=None):
+        check=guard if guard is not None else lambda:self._guard(client,snapshot)
+        check()
         if self._finite_fk_failed:
             raise _MotionSnapshotFault('finite_fk_audit_failed')
         limit = 3 if self.parallel_fk and role in ('goal', 'midpoint', 'endpoint') else 1
@@ -240,7 +295,7 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
             # A scheduled read task is another SDK boundary. Recheck here,
             # before calling the method, and support any returned Awaitable.
             try:
-                self._guard(client, snapshot)
+                check()
             except BaseException:
                 call['outcome'] = 'not_started'
                 raise
@@ -249,7 +304,7 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
                 values = [float(q) for q in joints]
                 guarded = getattr(client, '_kinematics_forward_guarded', None)
                 if self.parallel_fk and callable(guarded):
-                    return await guarded(values, lambda: self._guard(client, snapshot))
+                    return await guarded(values, check)
                 return await client.kinematics_forward(values)
             finally:
                 call['sdk_await_completed_ns'] = self._clock()
@@ -272,7 +327,7 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
                 raise TimeoutError
             raw = task.result()
             call['outcome'] = 'returned'
-            self._guard(client, snapshot)
+            check()
             if not isinstance(raw, Mapping):
                 raise _MotionSnapshotFault('finite_fk_invalid_payload')
             try:
@@ -341,7 +396,12 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
                     raise _MotionSnapshotFault(str(error)) from None
                 raise
             self._guard(client, snapshot)
-            origin = await self._fk(client, snapshot, 'feedback', snapshot.actual_q, event['calls'])
+            if self.prelease_feedback_fk:
+                cached=self._prepared_feedback(client,snapshot)
+                origin=Pose(p=cached[2][0],q=cached[2][1])
+                event['calls'].append(dict(copy.deepcopy(cached[4]),reused_from_prelease=True))
+            else:
+                origin = await self._fk(client, snapshot, 'feedback', snapshot.actual_q, event['calls'])
             if (math.dist(origin.p, snapshot.actual_tcp.p) > _FK_POSITION_TOLERANCE_M
                     or _angle(origin.q, snapshot.actual_tcp.q) > _FK_ROTATION_TOLERANCE_DEG):
                 raise _MotionSnapshotFault('finite_fk_feedback_mismatch')

@@ -38,15 +38,18 @@ def existing_rpc_connections():
 
 
 def prepare(config, output, *, expires=None, parallel_fk_audit=False, ready_joint_tolerance_rad=.0001,
-            parallel_motion_reads=False):
+            parallel_motion_reads=False,prelease_feedback_fk=False):
     from app.commissioning.finite_window_run import validate_ready_tolerance
     if type(parallel_fk_audit) is not bool:
         raise TypeError('finite_parallel_fk_requires_boolean')
     if type(parallel_motion_reads) is not bool:
         raise TypeError('finite_parallel_snapshot_requires_boolean')
+    if type(prelease_feedback_fk) is not bool or prelease_feedback_fk and not parallel_fk_audit:
+        raise TypeError('finite_prelease_feedback_requires_parallel_fk_boolean')
     plan = helper.prepare(config, output, expires=expires)
     plan['parallel_fk_audit'] = parallel_fk_audit
     plan['parallel_motion_reads'] = parallel_motion_reads
+    plan['prelease_feedback_fk'] = prelease_feedback_fk
     plan['ready_joint_tolerance_rad'] = validate_ready_tolerance(ready_joint_tolerance_rad)
     if not .01 <= plan['settings'].control.pvat_horizon_s <= .08:
         raise ValueError('finite_window_horizon_invalid')
@@ -66,6 +69,9 @@ def preview(plan):
         requires_full_endpoint=distance_m<DISTANCE_M,
         parallel_fk_audit=plan['parallel_fk_audit'],
         parallel_motion_reads=plan['parallel_motion_reads'],
+        prelease_feedback_fk=plan['prelease_feedback_fk'],
+        prelease_feedback_max_age_ms=100 if plan['prelease_feedback_fk'] else None,
+        prelease_feedback_requires_exact_motion_inputs=True if plan['prelease_feedback_fk'] else None,
         snapshot_order='connected_then_parallel_six_then_dependent_motion_state' if plan['parallel_motion_reads'] else 'serial',
         ready_joint_tolerance_rad=plan['ready_joint_tolerance_rad'],
         fk_order='feedback_then_parallel_goal_midpoint_endpoint' if plan['parallel_fk_audit'] else 'serial',
@@ -187,7 +193,8 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
         await run_window(plan['settings'], recorder, factory, inputs.cold, inputs.hot,
                          write_check=inputs.write, report=report, parallel_fk_audit=plan['parallel_fk_audit'],
                          ready_joint_tolerance_rad=plan['ready_joint_tolerance_rad'],
-                         parallel_motion_reads=plan['parallel_motion_reads'])
+                         parallel_motion_reads=plan['parallel_motion_reads'],
+                         prelease_feedback_fk=plan['prelease_feedback_fk'])
     finally:
         calls.closed = True
         connector['pending_remote_result_unknown'] = any(c['remote_result_unknown'] for c in connector['calls'])
@@ -202,12 +209,13 @@ def main(argv=None):
     parser.add_argument('--execute-once', action='store_true'); parser.add_argument('--approved-preview', type=Path)
     parser.add_argument('--parallel-fk-audit', action='store_true')
     parser.add_argument('--parallel-motion-reads', action='store_true')
+    parser.add_argument('--prelease-feedback-fk', action='store_true')
     parser.add_argument('--ready-joint-tolerance-rad', type=float, default=.0001)
     parser.add_argument('--approved-preview-sha256'); parser.add_argument('--authorization-expires-utc'); parser.add_argument('--confirm')
     args = parser.parse_args(argv)
     plan = prepare(args.config, args.output, expires=args.authorization_expires_utc,
                    parallel_fk_audit=args.parallel_fk_audit, ready_joint_tolerance_rad=args.ready_joint_tolerance_rad,
-                   parallel_motion_reads=args.parallel_motion_reads)
+                   parallel_motion_reads=args.parallel_motion_reads,prelease_feedback_fk=args.prelease_feedback_fk)
     if not args.execute_once:
         print(json.dumps(preview(plan), indent=2)); return 0
     if Path(sys.executable).resolve() != (ROOT / '.venv/Scripts/python.exe').resolve(): raise ValueError('repository_venv_required')

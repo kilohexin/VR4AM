@@ -144,6 +144,19 @@ async def test_parallel_snapshot_and_fk_fake_entry_completes_once(context):
     assert r['complete'] and r['parallel_motion_reads'] and r['parallel_fk_audit']
 
 
+async def test_prelease_feedback_is_bound_and_old_approval_cannot_enable_it(context):
+    entry,plan,kw,_=context();factory=AsyncMock()
+    new=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],
+        parallel_fk_audit=True,parallel_motion_reads=True,prelease_feedback_fk=True)
+    assert entry.preview(new)['prelease_feedback_fk']
+    assert not entry.preview(plan)['prelease_feedback_fk']
+    with pytest.raises(ValueError):await entry.execute(new,**kw,client_factory=factory)
+    factory.assert_not_called()
+    kw['approved'].write_text(json.dumps(entry.preview(new)));kw['expected_hash']=entry.sha(kw['approved'])
+    r=await entry.execute(new,**kw,client_factory=AsyncMock(return_value=ZClient()))
+    assert r['complete'] and r['math_entries']==dict(kinematics_inverse=1,kinematics_forward=4)
+
+
 @pytest.mark.parametrize('bad',[dict(confirm='yes'),dict(approved=None),dict(expected_hash='b'*64),dict(expires=None),dict(expires='2000-01-01T00:00:00Z')])
 async def test_bad_scope_cannot_connect_or_create_output(context,bad):
     entry,plan,kw,_=context();factory=AsyncMock()

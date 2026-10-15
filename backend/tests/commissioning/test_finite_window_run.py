@@ -186,6 +186,107 @@ async def test_one_final_scan_keeps_original_100ms_gate(monkeypatch,scan_ms,expe
     if not expected_entries:assert r['local_motion_rejection']=='idle_baseline_sample_not_current'
 
 
+async def test_prelease_feedback_uses_four_native_fk_with_new_motion_snapshot():
+    m=module();client=ZClient();clock=FakeClock();settings=control_settings()
+    settings=replace(settings,control=replace(settings.control,max_joint_speed_radps=.05,
+        max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    r=await m.run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep,parallel_fk_audit=True,parallel_motion_reads=True,
+        prelease_feedback_fk=True)
+    assert r['complete'] and r['math_entries']==dict(kinematics_inverse=1,kinematics_forward=4)
+    calls=r['read_calls'];fk=next(i for i,c in enumerate(calls) if c['method']=='kinematics_forward')
+    ik=next(i for i,c in enumerate(calls) if c['method']=='kinematics_inverse')
+    assert any(c['method']=='get_kin_data' for c in calls[fk+1:ik])
+    assert r['prelease_feedback_fk']
+
+
+@pytest.mark.parametrize('change',['q','qd','qdd','tcp','rotation','tool','tool_rotation','expired','future','generation'])
+async def test_prelease_feedback_never_survives_changed_or_expired_inputs(monkeypatch,change):
+    m=module();client=ZClient();clock=FakeClock();original=m.FiniteWindowDiagnosticAdapter.prepare_feedback
+    async def altered(adapter,*args,**kw):
+        await original(adapter,*args,**kw)
+        if change=='q':client.kin_data['actual_joint_pose'][4]+=1e-9
+        elif change=='qd':client.kin_data['actual_joint_speed'][4]+=1e-9
+        elif change=='qdd':client.kin_data['actual_joint_acc'][4]+=1e-9
+        elif change=='tcp':client.kin_data['actual_tcp_pose']['x']+=1e-9
+        elif change=='rotation':client.kin_data['actual_tcp_pose']['rz']+=1e-9
+        elif change=='tool':client.tcp['x']+=1e-9
+        elif change=='tool_rotation':client.tcp['rz']+=1e-9
+        elif change=='expired':clock.advance_ms(100)
+        else:
+            data=list(adapter._prelease_feedback)
+            data[3 if change=='future' else 6]+=1
+            adapter._prelease_feedback=tuple(data)
+    monkeypatch.setattr(m.FiniteWindowDiagnosticAdapter,'prepare_feedback',altered)
+    settings=control_settings();settings=replace(settings,control=replace(settings.control,
+        max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    r=await m.run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep,parallel_fk_audit=True,parallel_motion_reads=True,
+        prelease_feedback_fk=True)
+    assert r['pvat_entries']==0 and r['math_entries']==dict(kinematics_inverse=0,kinematics_forward=1)
+
+
+async def test_prelease_stubborn_fk_is_owned_without_motion_or_retry():
+    m=module();client=ZClient();clock=FakeClock();release=asyncio.Event();finished=asyncio.Event();report={}
+    original=client.kinematics_forward
+    async def stubborn(q):
+        result=await original(q)
+        while not release.is_set():
+            try:await release.wait()
+            except asyncio.CancelledError:pass
+        finished.set();return result
+    client.kinematics_forward=stubborn
+    settings=control_settings();settings=replace(settings,control=replace(settings.control,
+        max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    task=asyncio.create_task(m.run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep,parallel_fk_audit=True,parallel_motion_reads=True,
+        prelease_feedback_fk=True,report=report))
+    try:
+        await asyncio.wait_for(asyncio.shield(task),.4)
+        assert not report['scope_admitted'] and report['pvat_entries']==report['stop_entries']==0
+        assert report['owned_fk_pending_at_exit'] and report['read_remote_result_unknown']
+        assert report['math_entries']==dict(kinematics_inverse=0,kinematics_forward=1)
+        assert client.write_calls==[]
+        frozen=repr(report);release.set();await asyncio.wait_for(finished.wait(),.2);await asyncio.sleep(0)
+        assert repr(report)==frozen
+    finally:release.set();await asyncio.gather(task,return_exceptions=True)
+
+
+async def test_stop_during_prelease_fk_cannot_install_result_after_revocation():
+    m=module();client=ZClient();clock=FakeClock();started=asyncio.Event();release=asyncio.Event()
+    original=client.kinematics_forward
+    async def blocked(q):started.set();await release.wait();return await original(q)
+    client.kinematics_forward=blocked
+    async def factory(_ip):return client
+    adapter=m.FiniteWindowDiagnosticAdapter(control_settings(),client_factory=factory,
+        clock=clock.now_ns,sleep=clock.sleep,parallel_fk=True,prelease_feedback_fk=True)
+    await adapter.connect();await adapter.preflight()
+    task=asyncio.create_task(adapter.prepare_feedback(adapter._snapshot,lambda:None))
+    try:
+        await started.wait();await adapter.stop(m.StopReason.SHUTDOWN);release.set()
+        with pytest.raises(Exception,match='finite_feedback_preparation_revoked'):await task
+        assert adapter._prelease_feedback is None
+    finally:release.set();await asyncio.gather(task,return_exceptions=True);await adapter.disconnect()
+
+
+async def test_prelease_age_starts_at_call_return_before_later_validation(monkeypatch):
+    m=module();client=ZClient();clock=FakeClock()
+    async def factory(_ip):return client
+    adapter=m.FiniteWindowDiagnosticAdapter(control_settings(),client_factory=factory,
+        clock=clock.now_ns,sleep=clock.sleep,parallel_fk=True,prelease_feedback_fk=True)
+    await adapter.connect();await adapter.preflight();original=adapter._fk
+    async def delay(*args,**kw):
+        value=await original(*args,**kw);clock.advance_ms(5);return value
+    monkeypatch.setattr(adapter,'_fk',delay)
+    try:
+        await adapter.prepare_feedback(adapter._snapshot,lambda:None)
+        assert adapter._prelease_feedback[3]==0 and clock.now_ns()==5_000_000
+    finally:await adapter.disconnect()
+
+
 def parallel_proxy(native):
     return module().FiniteScopeClient(native,lambda *_:None,lambda:None,lambda:None,
         asyncio.current_task(),lambda:1,parallel_fk=True)
