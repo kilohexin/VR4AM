@@ -138,7 +138,7 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
             return await super()._read_snapshot_impl(read, **kwargs)
         self._site_scope.hot()
         group = getattr(self._client, '_parallel_snapshot_scope', None)
-        with group(self._site_scope.hot) if callable(group) else nullcontext():
+        with group(self._site_scope._binding) if callable(group) else nullcontext():
             return await super()._read_snapshot_impl(read, **kwargs)
 
     def _before_snapshot_install(self, snapshot, read):
@@ -150,7 +150,7 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
         if kwargs['read_purpose'] != 'motion':
             return await super()._read_snapshot_fields(client, latencies, deadline_ns, **kwargs)
         async def query(name):
-            self._site_scope.hot()
+            self._site_scope._binding()
             value = await self._timed(name, getattr(client, name), latencies, deadline_ns=deadline_ns)
             return value, (copy.deepcopy(dict(value)) if name == 'get_kin_data'
                 and kwargs['include_raw_kinematics'] and isinstance(value, Mapping) else None)

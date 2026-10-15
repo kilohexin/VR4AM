@@ -9,17 +9,19 @@ from app.commissioning.native_jog_packet import plan_jog
 from app.commissioning.finite_motion_observation import MotionObservation, MotionReference
 from app.commissioning.idle_stop_baseline import AdmissionRejected, validate_idle_sample, validate_position_continuity
 from app.commissioning.paused_stop_cleanup import _cached_sample, _geometry
-from app.commissioning.readonly_kinematics import _agree
+from app.commissioning.readonly_kinematics import _agree, _pose_error
 from app.robots.lebai_codec import pose_from_lebai
 from app.robots.base import StopReason
 
 
 async def _bounded(awaitable, seconds):
+    deadline=time.perf_counter_ns()+round(max(0.,seconds)*1e9)
     task = asyncio.create_task(awaitable)
     task.add_done_callback(lambda done:None if done.cancelled() else done.exception())
     try:
         done, _ = await asyncio.wait({task}, timeout=max(0., seconds))
-        if not done: raise AdmissionRejected('native_jog_operation_timeout')
+        if not done or time.perf_counter_ns()>=deadline:
+            raise AdmissionRejected('native_jog_operation_timeout')
         return task.result()
     finally:
         if not task.done() and not task.cancelling(): task.cancel()
@@ -30,7 +32,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
     if type(scope) is not SiteJogScope or not callable(client_factory):
         raise ValueError('native_jog_explicit_scope_and_factory_required')
     report = {} if report is None else report
-    report.update(complete=False, mode='SIMULATION', hardware_verified=False,
+    report.update(complete=False, mode=report.get('runtime','SIMULATION'), hardware_verified=False,
         joint_bounds_verified=False, braking_verified=False, continuous_control_admitted=False,
         stop_confirmed=False, original_stop_confirmed=False, latched_fault=None,
         speedl_entries=0, stop_entries=0, fk_entries=0, velocity_factor_entries=0,
@@ -42,6 +44,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
     proxy = adapter = observer = None
     used = closed = stop_attempted = False
     packet = snapshot = None
+    fk_completed = None
     primary = None
     interruption = None
 
@@ -63,6 +66,8 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         validate_packet(packet, limits=scope.limits, actual_p=snapshot.actual_tcp.p,
             snapshot_ns=snapshot.captured_ns, now_ns=clock(), generation=adapter._pump.generation,
             config_sha256=scope.config_sha256)
+        if fk_completed is None or not 0 <= clock()-fk_completed < 100_000_000:
+            raise AdmissionRejected('native_jog_feedback_fk_expired_before_entry')
 
     async def factory(ip):
         nonlocal used, proxy
@@ -106,6 +111,10 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         fk = pose_from_lebai(await proxy.kinematics_forward(list(old.actual_q)))
         fk_completed = clock()
         snapshot = await adapter._read_snapshot(read_purpose='motion')
+        report['feedback_fk'] = dict(age_ms=(clock()-fk_completed)/1e6,
+            q_identical=tuple(snapshot.actual_q)==tuple(old.actual_q),
+            tool_identical=snapshot.tcp_setting==old.tcp_setting,
+            **_pose_error(fk,snapshot.actual_tcp))
         if (tuple(snapshot.actual_q) != tuple(old.actual_q)
                 or snapshot.tcp_setting != old.tcp_setting
                 or not 0 <= clock()-fk_completed < 100_000_000
@@ -145,10 +154,16 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
             tail_ok = True
             tail_samples = 0
             try:
+                tail_anchor = _cached_sample(adapter) if adapter._snapshot is not None else None
                 while clock() < tail_end:
                     proxy.read_deadline_ns = min(proxy.read_deadline_ns,tail_end)
                     sample = await _bounded(adapter.read_stop_observation(),min(.2,(tail_end-clock())/1e9))
                     proxy.require_clear_read_gate()
+                    checked=copy.deepcopy(sample)
+                    if checked['latched_fault'] in ('stop_unverified','stop_incomplete'):
+                        checked['latched_fault']=None  # Diagnostic validation cannot clear the adapter latch.
+                    validate_idle_sample(checked,clock());_geometry(adapter)
+                    if tail_anchor is not None:validate_position_continuity(sample,tail_anchor)
                     tail_samples += 1
                     await recorder.write_event(dict(kind='native_jog_tail',sample=sample),clock())
                     await sleep(min(.2,max(0.,(tail_end-clock())/1e9)))
@@ -168,12 +183,15 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         closed = True
         if proxy is not None:
             proxy.read_gate_closed = True
+            native_reads=copy.deepcopy(proxy.native_reads)
+            for row in native_reads:
+                if row['outcome']=='entered':row['remote_result_unknown']=True
             report.update(speedl_entries=proxy.speedl_entries,stop_entries=proxy.sdk_stop_entries,
                 speedl_started_ns=proxy.speedl_started_ns, speedl_call=copy.deepcopy(proxy.speedl_call),
                 speedl_remote_result_unknown=proxy.speedl_remote_result_unknown,
                 fk_entries=proxy.special_entries['kinematics_forward'],
                 velocity_factor_entries=proxy.special_entries['get_velocity_factor'],read_entries=proxy.read_entries,
-                read_calls=copy.deepcopy(proxy.read_calls),native_reads=copy.deepcopy(proxy.native_reads),
+                read_calls=copy.deepcopy(proxy.read_calls),native_reads=native_reads,
                 read_remote_result_unknown=proxy.read_remote_result_unknown,
                 stop_started_ns=proxy.native_started_ns, stop_completed_ns=proxy.native_completed_ns)
         if observer is not None: report['motion_observation'] = observer.snapshot()

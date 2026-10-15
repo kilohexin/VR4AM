@@ -112,3 +112,45 @@ async def test_fk_budget_is_one_and_parallel_foreign_read_closes_gate():
     assert p.special_entries['kinematics_forward']==1
 
 
+async def test_tail_motion_cannot_be_reported_as_complete():
+    s,c=setup();old=c.get_kin_data;stopped=None
+    async def read():
+        nonlocal stopped
+        if any(row[0]=='stop_move' for row in c.write_calls):
+            if stopped is None:stopped=time.perf_counter_ns()
+            if time.perf_counter_ns()-stopped>400_000_000:
+                c.robot_state='MOVING'
+        return await old()
+    c.get_kin_data=read
+    r,_=await run(s,c)
+    assert not r['complete'] and not r['tail_complete']
+
+
+async def test_hot_check_cannot_cross_total_deadline_then_enter_native_read():
+    from tests.robots.test_lebai_adapter_control import FakeClock
+    clock=FakeClock()
+    def hot():clock.advance_ms(21_000.)
+    s,c=setup(hot_check=hot)
+    p=SiteJogClient(c,s,owner=asyncio.current_task(),clock=clock.now_ns,
+        motion_permission=lambda:None,stop_permission=lambda:None)
+    with pytest.raises(Exception,match='read_permission_revoked'):await p.client.get_robot_state()
+    assert p.read_entries==0 and not c.read_calls
+
+
+async def test_fk_age_is_rechecked_after_native_write_identity_checks():
+    from tests.robots.test_lebai_adapter_control import FakeClock
+    clock=FakeClock();fk_done=False;advanced=False
+    def hot():
+        nonlocal advanced
+        if fk_done and not advanced:clock.advance_ms(50);advanced=True
+    def write():clock.advance_ms(60)
+    s,c=setup(hot_check=hot,write_check=write);old=c.kinematics_forward
+    async def fk(q):
+        nonlocal fk_done
+        value=await old(q);fk_done=True;return value
+    c.kinematics_forward=fk
+    async def factory(ip):return c
+    r=await run_site_window(s,Recorder(),factory,clock=clock.now_ns,sleep=clock.sleep)
+    assert r['speedl_entries']==r['stop_entries']==0 and not c.write_calls
+
+

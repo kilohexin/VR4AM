@@ -22,6 +22,8 @@ class _ReadSurface:
         async def invoke(*args, **kwargs):
             p = self.__proxy
             p.read_guard()
+            if not p.speedl_entries: p._jog_scope.hot()
+            p.read_guard()  # Local authorization work cannot extend the total deadline.
             if name not in p.READS:
                 raise AdmissionRejected('native_jog_write_forbidden')
             if p.read_entries >= 256:
@@ -67,7 +69,7 @@ class SiteJogClient(FiniteScopeClient):
         self.speedl_attempted = False
         def read_permission():
             # Read-only cleanup uses the reserved total budget after native entry.
-            if not self.speedl_entries: scope.hot()
+            if not self.speedl_entries: scope._binding()
         super().__init__(_ReadSurface(native,self), motion_permission, stop_permission,
             read_permission, owner, clock, parallel_motion_reads=True, deadline_clock=clock)
         self.read_deadline_ns = clock()+20_000_000_000
