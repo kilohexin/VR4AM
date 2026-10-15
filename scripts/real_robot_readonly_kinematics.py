@@ -191,10 +191,11 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
         if client_factory is not None:
             return await client_factory(ip)
         if profile(plan) == 'jog-jacobian':
+            from app.commissioning.readonly_kinematics import SurveyError
             binary = ROOT / '.venv/Lib/site-packages/lebai_sdk/lebai_sdk.pyd'
             if (plan['runtime_hashes'].get('.venv/Lib/site-packages/lebai_sdk/lebai_sdk.pyd') != SDK_BINARY_SHA256
                     or sha(binary) != SDK_BINARY_SHA256):
-                raise ValueError('jog_survey_sdk_binary_mismatch')
+                raise SurveyError('jog_survey_sdk_binary_mismatch')
         verify_sdk_source()
         before_sdk_entry()
         module = importlib.import_module('lebai_sdk')
@@ -205,7 +206,7 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
             if (Path(getattr(module,'__file__','')).resolve() != package/'__init__.py'
                     or Path(getattr(loaded,'__file__','')).resolve() != package/'lebai_sdk.pyd'
                     or sha(package/'lebai_sdk.pyd') != SDK_BINARY_SHA256):
-                raise ValueError('jog_survey_loaded_sdk_mismatch')
+                raise SurveyError('jog_survey_loaded_sdk_mismatch')
             before_sdk_entry()
         report.update(native_sdk_init_entered=True, native_sdk_init_started_ns=monotonic_ns())
         module.init()

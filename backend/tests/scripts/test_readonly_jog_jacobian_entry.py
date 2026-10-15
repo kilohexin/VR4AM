@@ -60,6 +60,7 @@ async def test_wrong_sdk_identity_rejected_before_native_import(context,monkeypa
     monkeypatch.setattr(entry.importlib,'import_module',forbidden)
     r=await entry.execute(plan,**kwargs)
     assert not r['complete'] and not r['native_sdk_init_entered'] and not r['native_sdk_connect_entered']
+    assert r['error']=='jog_survey_sdk_binary_mismatch'
 
 
 @pytest.mark.parametrize('change',['expired','config','runtime','rpc'])
@@ -95,6 +96,7 @@ async def test_native_loaded_identity_checked_before_init_and_fake_path_works(co
     r=await entry.execute(plan,**kwargs)
     if wrong_loaded:
         assert not r['complete'] and not initialized
+        assert r['error']=='jog_survey_loaded_sdk_mismatch'
         module.connect.assert_not_called()
     else:
         assert r['complete'] and initialized==[True]

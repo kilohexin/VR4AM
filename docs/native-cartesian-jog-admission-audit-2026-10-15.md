@@ -77,3 +77,5 @@
 | `implemented-model-replay.json`，新模块回放 | `9f8854932f0df9ba62df5e69b19a4dba236f4cdc2fb8910d8abbd869ba4da973` |
 
 模块回放与独立理论分析一致。`mdh-red.xml`、`mdh-green.xml` 和 `targeted-final.xml` 保留完整测试记录。操作者原未跟踪文档保持不变。
+
+后续已实现固定 27 次调用的六轴 FK 只读入口，并通过 Fake 与原生 SDK 自有回环；尚未连接真机。见[入口结果与待授权范围](readonly-jog-jacobian-entry-2026-10-15.md)。
