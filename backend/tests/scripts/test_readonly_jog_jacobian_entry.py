@@ -21,12 +21,29 @@ def test_profile_preview_has_exact_readonly_budget(context,monkeypatch,capsys):
     monkeypatch.setattr(entry,'execute',AsyncMock(side_effect=AssertionError('preview only')))
     assert entry.main(['--config',str(old['config']),'--output',str(old['output']),'--survey','jog-jacobian'])==0
     value=json.loads(capsys.readouterr().out)
-    assert value['max_total_calls_including_connect']==27
+    assert value['max_total_calls_including_connect']==29
+    assert value['max_motion_state_calls']==2
+    assert value['running_motion_policy']=='zero_or_positive_u32_with_explicit_FINISHED'
+    assert 'get_motion_state' in value['allowed_queries']
     assert value['max_fk_calls']==13 and value['max_ik_calls']==0
     assert value['joint_perturbation_rad']==.001
     assert value['allowed_writes']==[] and 'get_velocity_factor' in value['allowed_queries']
     assert 'kinematics_inverse' not in value['allowed_queries']
     assert not old['output'].exists()
+
+
+async def test_prior_zero_only_preview_cannot_authorize_expanded_reads(context):
+    entry,plan,kwargs=jog_context(context);factory=AsyncMock()
+    old_preview=entry.preview(plan)
+    old_preview.update(max_total_calls_including_connect=27,running_motion_required=0)
+    old_preview.pop('running_motion_policy',None);old_preview.pop('max_motion_state_calls',None)
+    old_preview['allowed_queries']=[v for v in old_preview['allowed_queries'] if v!='get_motion_state']
+    kwargs['approved'].write_text(json.dumps(old_preview))
+    kwargs['expected_hash']=entry.sha(kwargs['approved'])
+    with pytest.raises(ValueError,match='kinematics_scope_or_hash_changed'):
+        await entry.execute(plan,**kwargs,client_factory=factory)
+    assert not plan['output'].exists()
+    factory.assert_not_called()
 
 
 async def test_old_confirmation_cannot_authorize_jog_profile(context):

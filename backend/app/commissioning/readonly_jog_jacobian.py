@@ -1,6 +1,6 @@
 """Fixed six-joint FK survey; perturbations are query inputs, never targets.
 
-One connection, 13 FK, zero IK or writes, at most 27 calls in 15 seconds.
+One connection, 13 FK, zero IK or writes, at most 29 calls in 15 seconds.
 Uses the existing bounded query owner and permanent unknown-result evidence.
 No result grants motion, joint bounds, calibration or braking acceptance.
 """
@@ -19,8 +19,8 @@ from app.robots.lebai_codec import joint_vector, pose_from_lebai
 from app.schemas.messages import Pose
 
 READ_METHODS = ('is_connected', 'get_robot_state', 'get_estop_reason',
-    'get_running_motion', 'get_kin_data', 'get_tcp', 'get_velocity_factor', 'kinematics_forward')
-MAX_CALLS = 27
+    'get_running_motion', 'get_motion_state', 'get_kin_data', 'get_tcp', 'get_velocity_factor', 'kinematics_forward')
+MAX_CALLS = 29  # 27 base calls, plus at most one retained-ID query per observation.
 PERTURBATION_RAD = .001
 
 
@@ -45,14 +45,19 @@ def new_report(*, simulation):
 
 
 async def _observe(client, calls, settings):
-    async def read(name):
-        return await calls.call(name, getattr(client, name))
+    async def read(name, *args):
+        return await calls.call(name, lambda: getattr(client, name)(*args))
     state = base._state(await read('get_robot_state'))
     if not base._explicit_clear_estop(await read('get_estop_reason')):
         raise base.SurveyError('jog_survey_estop_or_unknown')
     running = await read('get_running_motion')
-    if type(running) is not int or running != 0:
-        raise base.SurveyError('jog_survey_running_motion_not_zero')
+    if type(running) is not int or not 0 <= running <= 0xffffffff:
+        raise base.SurveyError('jog_survey_invalid_running_motion')
+    motion_state = None
+    if running != 0:
+        motion_state = await read('get_motion_state', running)
+        if type(motion_state) is not str or motion_state != 'FINISHED':
+            raise base.SurveyError('jog_survey_running_motion_not_finished')
     raw = await read('get_kin_data')
     if not isinstance(raw, dict):
         raise base.SurveyError('jog_survey_invalid_kinematics')
@@ -71,7 +76,8 @@ async def _observe(client, calls, settings):
     factor = await read('get_velocity_factor')
     if type(factor) is not int or not 0 <= factor <= 100:
         raise base.SurveyError('jog_survey_invalid_velocity_factor')
-    return dict(state=state, q=list(q), qd=list(qd), qdd=list(qdd),
+    return dict(state=state, running_motion=running, motion_state=motion_state,
+        q=list(q), qd=list(qd), qdd=list(qdd),
         tcp=actual.model_dump(mode='json'), tcp_setting=tool.model_dump(mode='json'), velocity_factor=factor)
 
 
@@ -135,7 +141,8 @@ async def collect(settings, factory, admit, report):
                 report['feedback_fk_consistent'] = True
         final = report['final'] = await _observe(client,calls,settings)
         tool_error = base._pose_error(Pose.model_validate(initial['tcp_setting']),Pose.model_validate(final['tcp_setting']))
-        if (initial['state'] != final['state'] or initial['velocity_factor'] != final['velocity_factor']
+        if (initial['state'] != final['state'] or initial['running_motion'] != final['running_motion']
+                or initial['velocity_factor'] != final['velocity_factor']
                 or max(abs(a-b) for a,b in zip(initial['q'],final['q'])) > .001
                 or not base._agree(Pose.model_validate(initial['tcp']),Pose.model_validate(final['tcp']))
                 or tool_error['position_m'] > 1e-9 or tool_error['rotation_deg'] > 1e-6):

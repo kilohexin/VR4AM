@@ -1,4 +1,4 @@
-"""Fixed 27-call survey against an injected synthetic client only."""
+"""Bounded read-only survey against an injected synthetic client only."""
 import asyncio
 import copy
 from dataclasses import replace
@@ -74,7 +74,7 @@ async def test_bad_initial_observation_has_no_fk_or_cleanup_writes(settings,dama
     c=JacobianClient()
     if damage=='moving':c.robot_state='MOVING'
     elif damage=='estop':c.estop_reason=4
-    elif damage=='running':c.running_motion=12
+    elif damage=='running':c.running_motion=12;c.motion_state='RUNNING'
     elif damage=='unknown_running':c.running_motion=None
     elif damage=='speed':c.kin_data['actual_joint_speed'][0]=.00001
     elif damage=='tcp':c.tcp['z']+=.002
@@ -84,6 +84,64 @@ async def test_bad_initial_observation_has_no_fk_or_cleanup_writes(settings,dama
     else:c.kin_data['actual_joint_pose'][0]=settings.soft_joint_max_rad[0]-settings.joint_limit_margin_rad-.0005
     r=await collect(settings,c)
     assert not r['complete'] and not c.fk_inputs and c.write_calls==[]
+
+
+async def test_retained_finished_id_is_queried_twice_within_29_calls(settings):
+    c=JacobianClient();c.running_motion=503;queried=[]
+    async def status(motion_id):
+        queried.append(motion_id)
+        return 'FINISHED'
+    c.get_motion_state=status
+    r=await collect(settings,c)
+    assert r['complete'] and r['jacobian_collected']
+    assert queried==[503,503] and len(r['calls'])==29
+    assert r['initial']['running_motion']==r['final']['running_motion']==503
+    assert r['initial']['motion_state']==r['final']['motion_state']=='FINISHED'
+    assert len(c.fk_inputs)==13 and c.write_calls==[]
+    assert not r['hardware_stop_verified'] and not r['continuous_control_admitted']
+
+
+@pytest.mark.parametrize('value',['RUNNING','WAITING','PAUSED','UNKNOWN',None,True,2])
+async def test_retained_id_requires_explicit_finished_before_any_fk(settings,value):
+    c=JacobianClient();c.running_motion=503;c.motion_state=value
+    r=await collect(settings,c)
+    assert r['error']=='jog_survey_running_motion_not_finished'
+    assert not r['complete'] and not c.fk_inputs and c.write_calls==[]
+    assert [row['method'] for row in r['calls']][-1]=='get_motion_state'
+
+
+@pytest.mark.parametrize('value',[-1,True,'503',None,2**32])
+async def test_invalid_motion_id_never_enters_motion_state_query(settings,value):
+    c=JacobianClient();c.running_motion=value
+    r=await collect(settings,c)
+    assert r['error']=='jog_survey_invalid_running_motion'
+    assert not c.fk_inputs and c.write_calls==[]
+    assert not any(row['method']=='get_motion_state' for row in r['calls'])
+
+
+async def test_finished_motion_id_change_during_survey_cannot_certify_data(settings):
+    c=JacobianClient();c.running_motion=503;old=c.kinematics_forward
+    async def change(q):
+        value=await old(q)
+        if len(c.fk_inputs)==13:c.running_motion=504
+        return value
+    c.kinematics_forward=change
+    r=await collect(settings,c)
+    assert not r['complete'] and not r['jacobian_collected']
+    assert r['error']=='jog_survey_observation_changed'
+    assert len(c.fk_inputs)==13 and len(r['calls'])==29 and c.write_calls==[]
+
+
+async def test_retained_id_cannot_become_running_after_fk(settings):
+    c=JacobianClient();c.running_motion=503;old=c.kinematics_forward
+    async def change(q):
+        value=await old(q)
+        if len(c.fk_inputs)==13:c.motion_state='RUNNING'
+        return value
+    c.kinematics_forward=change
+    r=await collect(settings,c)
+    assert not r['complete'] and r['error']=='jog_survey_running_motion_not_finished'
+    assert len(c.fk_inputs)==13 and c.write_calls==[]
 
 
 async def test_feedback_fk_mismatch_ends_after_single_query(settings):
@@ -122,9 +180,10 @@ async def test_authority_revocation_before_later_fk_stops_without_retry(settings
     assert not r['complete'] and len(c.fk_inputs)==1 and c.write_calls==[]
 
 
-@pytest.mark.parametrize('method',['is_connected','get_velocity_factor','kinematics_forward'])
+@pytest.mark.parametrize('method',['is_connected','get_velocity_factor','kinematics_forward','get_motion_state'])
 async def test_timeout_stubborn_read_never_waits_for_remote_cancel(settings,monkeypatch,method):
     c=JacobianClient();release=asyncio.Event()
+    if method=='get_motion_state':c.running_motion=503
     async def stuck(*args):
         try:await release.wait()
         except asyncio.CancelledError:await release.wait()
@@ -141,6 +200,22 @@ async def test_timeout_stubborn_read_never_waits_for_remote_cancel(settings,monk
         assert c.write_calls==[]
     finally:
         release.set();await asyncio.sleep(0)
+
+
+async def test_revocation_after_retained_id_prevents_motion_state_entry(settings):
+    c=JacobianClient();allowed=True;entered=[]
+    async def running():
+        nonlocal allowed
+        allowed=False
+        return 503
+    async def status(motion_id):
+        entered.append(motion_id)
+        return 'FINISHED'
+    def admit():
+        if not allowed:raise ValueError('revoked')
+    c.get_running_motion=running;c.get_motion_state=status
+    r=await collect(settings,c,admit=admit)
+    assert not r['complete'] and not entered and not c.fk_inputs and c.write_calls==[]
 
 
 async def test_control_mode_refused_before_connection(settings):
