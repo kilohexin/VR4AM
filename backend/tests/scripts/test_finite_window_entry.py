@@ -48,6 +48,50 @@ def test_default_preview_reserves_nothing_and_has_one_window_cleanup_contract(co
     assert value['motion_ttl_ms']==100 and not plan['output'].exists()
 
 
+def test_smaller_step_is_bound_in_the_motion_scope(context):
+    entry,plan,_,_=context()
+    data=yaml.safe_load(plan['config'].read_text())
+    data['real_robot']['control']['max_tcp_step_m']=.00005
+    plan['config'].write_text(yaml.safe_dump(data))
+    new=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'])
+    preview=entry.preview(new)
+    assert preview['target']['distance_m']==.00005
+    assert preview['requires_full_endpoint'] is True
+
+
+def test_parallel_fk_opt_in_is_bound_to_preview_and_cli(context,monkeypatch,capsys):
+    entry,plan,_,_=context()
+    candidate=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],
+        parallel_fk_audit=True)
+    assert entry.preview(plan)['parallel_fk_audit'] is False
+    assert entry.preview(candidate)['parallel_fk_audit'] is True
+    monkeypatch.setattr(entry,'execute',AsyncMock(side_effect=AssertionError('no execution')))
+    assert entry.main(['--config',str(plan['config']),'--output',str(plan['output']),
+        '--parallel-fk-audit'])==0
+    value=json.loads(capsys.readouterr().out)
+    assert value['parallel_fk_audit'] and value['fk_order']=='feedback_then_parallel_goal_midpoint_endpoint'
+    assert value['max_fk_entries']==4 and value['motion_ttl_ms']==100
+
+
+async def test_parallel_plan_cannot_reuse_serial_approval(context):
+    entry,plan,kw,_=context();factory=AsyncMock()
+    candidate=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],
+        parallel_fk_audit=True)
+    with pytest.raises(ValueError):await entry.execute(candidate,**kw,client_factory=factory)
+    factory.assert_not_called()
+
+
+async def test_parallel_approved_fake_entry_executes_once(context):
+    entry,plan,kw,_=context()
+    candidate=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],
+        parallel_fk_audit=True)
+    kw['approved'].write_text(json.dumps(entry.preview(candidate)))
+    kw['expected_hash']=entry.sha(kw['approved'])
+    result=await entry.execute(candidate,**kw,client_factory=AsyncMock(return_value=ZClient()))
+    assert result['complete'] and result['parallel_fk_audit']
+    assert result['math_entries']['kinematics_forward']==4
+
+
 @pytest.mark.parametrize('bad',[dict(confirm='yes'),dict(approved=None),dict(expected_hash='b'*64),dict(expires=None),dict(expires='2000-01-01T00:00:00Z')])
 async def test_bad_scope_cannot_connect_or_create_output(context,bad):
     entry,plan,kw,_=context();factory=AsyncMock()

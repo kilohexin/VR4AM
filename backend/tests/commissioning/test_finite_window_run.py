@@ -60,6 +60,210 @@ async def test_one_scoped_packet_has_zero_terminal_and_one_stop():
     assert not result['hardware_verified'] and not result['motion_authorized']
 
 
+async def test_small_configured_window_requires_the_full_endpoint():
+    settings=control_settings()
+    settings=replace(settings,control=replace(settings.control,max_joint_speed_radps=.05,
+        max_joint_acceleration_radps2=.2,max_tcp_step_m=.00005))
+    client,clock=ZClient(),FakeClock()
+    settings=replace(settings,teleop_ready_q=tuple(client.kin_data['actual_joint_pose']))
+    async def factory(_ip):return client
+    result=await module().run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep)
+    assert result['complete'] and result['full_endpoint_required'] and result['full_endpoint_feasible']
+    assert client.ik_calls[0][0]['z']==pytest.approx(.40005)
+    assert client.kin_data['actual_tcp_pose']['z']==pytest.approx(.40005)
+    assert result['pvat_entries']==result['stop_entries']==1
+
+
+async def test_small_window_rejects_a_partial_endpoint_before_native_entry():
+    settings=control_settings()
+    settings=replace(settings,control=replace(settings.control,max_joint_speed_radps=.05,
+        max_joint_acceleration_radps2=.001,max_tcp_step_m=.00005))
+    client,clock=ZClient(),FakeClock()
+    settings=replace(settings,teleop_ready_q=tuple(client.kin_data['actual_joint_pose']))
+    async def factory(_ip):return client
+    result=await module().run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep)
+    assert not result['complete'] and result['full_endpoint_required']
+    assert not result['full_endpoint_feasible']
+    assert result['pvat_entries']==0
+    assert client.write_calls==[('stop_move',)]
+
+
+async def test_small_window_rejects_a_changed_ready_pose_before_admission():
+    settings=control_settings()
+    settings=replace(settings,control=replace(settings.control,max_joint_speed_radps=.05,
+        max_joint_acceleration_radps2=.2,max_tcp_step_m=.00005))
+    client,clock=ZClient(),FakeClock()
+    async def factory(_ip):return client
+    result=await module().run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep)
+    assert not result['complete'] and not result['scope_admitted']
+    assert result['pvat_entries']==0 and client.write_calls==[]
+
+
+async def test_pre_native_refusal_records_local_reason_without_sdk_entry():
+    m=module();native=ZClient()
+    def deny(*_args):raise m.AdmissionRejected('idle_baseline_sample_not_current')
+    proxy=m.FiniteScopeClient(native,deny,lambda:None,lambda:None,
+        asyncio.current_task(),lambda:1)
+    with pytest.raises(m.AdmissionRejected):
+        await proxy.move_pvat([0.]*6,[0.]*6,[0.]*6,.08)
+    assert proxy.local_motion_rejection=='idle_baseline_sample_not_current'
+    assert proxy.pvat_entries==0 and native.write_calls==[]
+
+
+def parallel_proxy(native):
+    return module().FiniteScopeClient(native,lambda *_:None,lambda:None,lambda:None,
+        asyncio.current_task(),lambda:1,parallel_fk=True)
+
+
+async def test_parallel_scoped_reads_share_quota_deadline_and_block_ordinary_reads():
+    client=ZClient();proxy=parallel_proxy(client);started=asyncio.Event();release=asyncio.Event()
+    original=client.kinematics_forward
+    async def blocked(q):
+        started.set();await release.wait();return await original(q)
+    client.kinematics_forward=blocked
+    task=asyncio.create_task(proxy._kinematics_forward_guarded([0.]*6,lambda:None))
+    try:
+        await started.wait()
+        assert proxy.fk_read_owners[0].read_deadline_ns==proxy.read_deadline_ns
+        with pytest.raises(module().AdmissionRejected):await proxy.is_connected()
+        release.set()
+        with pytest.raises(module().AdmissionRejected):await task
+        assert proxy.read_gate_closed and not client.write_calls
+    finally:
+        release.set();await asyncio.gather(task,return_exceptions=True)
+
+
+async def test_parallel_native_boundary_rechecks_guard_after_scheduling(monkeypatch):
+    client=ZClient();proxy=parallel_proxy(client);allowed=True;original=asyncio.create_task
+    def create(coro,**kwargs):
+        nonlocal allowed
+        if kwargs.get('name')=='paused-cleanup-kinematics_forward':allowed=False
+        return original(coro,**kwargs)
+    def guard():
+        if not allowed:raise module().AdmissionRejected('finite_scope_revoked')
+    monkeypatch.setattr(asyncio,'create_task',create)
+    with pytest.raises(module().AdmissionRejected):
+        await proxy._kinematics_forward_guarded([0.]*6,guard)
+    assert client.fk_calls==[] and proxy.math_entries['kinematics_forward']==0
+
+
+async def test_parallel_scope_uses_exactly_four_fk_and_original_stop():
+    client=ZClient();clock=FakeClock();settings=control_settings()
+    settings=replace(settings,control=replace(settings.control,max_joint_speed_radps=.05,
+        max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    report=await module().run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep,parallel_fk_audit=True)
+    assert report['complete'] and report['parallel_fk_audit'] is True
+    assert report['math_entries']==dict(kinematics_inverse=1,kinematics_forward=4)
+    assert not report['owned_fk_pending_at_exit']
+    assert [c[0] for c in client.write_calls]==['move_pvat','stop_move']
+
+
+async def test_parallel_fk_shared_native_quota_and_original_deadline():
+    client=ZClient();proxy=parallel_proxy(client);deadline=proxy.read_deadline_ns
+    for _ in range(4):await proxy._kinematics_forward_guarded([0.]*6,lambda:None)
+    assert len(client.fk_calls)==4 and all(c.read_deadline_ns==deadline for c in proxy.fk_read_owners)
+    with pytest.raises(module().AdmissionRejected):
+        await proxy._kinematics_forward_guarded([0.]*6,lambda:None)
+    assert len(client.fk_calls)==4 and proxy.read_gate_closed
+
+
+async def test_parallel_fk_rejects_pending_parent_read():
+    client=ZClient();proxy=parallel_proxy(client);started=asyncio.Event();release=asyncio.Event()
+    async def pending():started.set();await release.wait();return True
+    task=asyncio.create_task(proxy.read('is_connected',pending))
+    try:
+        await started.wait()
+        with pytest.raises(module().AdmissionRejected):
+            await proxy._kinematics_forward_guarded([0.]*6,lambda:None)
+        assert not client.fk_calls
+    finally:
+        release.set();await asyncio.gather(task,return_exceptions=True)
+
+
+async def test_parallel_stubborn_native_read_stays_owned_and_late_success_cannot_reopen():
+    client=ZClient();proxy=parallel_proxy(client);started=asyncio.Event();release=asyncio.Event()
+    async def stubborn(q):
+        started.set()
+        while not release.is_set():
+            try:await release.wait()
+            except asyncio.CancelledError:pass
+        return ACTUAL_TCP
+    client.kinematics_forward=stubborn
+    task=asyncio.create_task(proxy._kinematics_forward_guarded([0.]*6,lambda:None))
+    try:
+        await started.wait();task.cancel()
+        with pytest.raises(asyncio.CancelledError):await task
+        assert proxy._fk_read_pending() and proxy.read_remote_result_unknown and proxy.read_gate_closed
+        with pytest.raises(module().AdmissionRejected):proxy.require_clear_read_gate()
+        release.set();await proxy.fk_read_owners[0].pending_read
+        assert proxy.read_remote_result_unknown and proxy.read_gate_closed
+        with pytest.raises(module().AdmissionRejected):await proxy.is_connected()
+        assert client.write_calls==[]
+    finally:
+        release.set();await asyncio.gather(task,return_exceptions=True)
+
+
+async def test_parallel_scoped_triplet_timeout_freezes_owned_native_unknown_report():
+    client=ZClient();clock=FakeClock();report={};release=asyncio.Event();finished=asyncio.Event()
+    original=client.kinematics_forward
+    async def stubborn(q):
+        result=await original(q)
+        if len(client.fk_calls)==3:
+            while not release.is_set():
+                try:await release.wait()
+                except asyncio.CancelledError:pass
+            finished.set()
+        return result
+    client.kinematics_forward=stubborn
+    settings=control_settings()
+    settings=replace(settings,control=replace(settings.control,max_joint_speed_radps=.05,
+        max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    task=asyncio.create_task(module().run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+        clock=clock.now_ns,sleep=clock.sleep,parallel_fk_audit=True,report=report))
+    try:
+        await asyncio.wait_for(asyncio.shield(task),.8)
+        assert report['pvat_entries']==0 and report['stop_entries']==1
+        assert not report['complete'] and report['owned_fk_pending_at_exit']
+        assert report['read_remote_result_unknown'] and report['fk_read_gate_closed']
+        assert client.write_calls==[('stop_move',)]
+        frozen=repr(report);release.set();await asyncio.wait_for(finished.wait(),.2)
+        await asyncio.sleep(0)
+        assert repr(report)==frozen
+    finally:
+        release.set();await asyncio.gather(task,return_exceptions=True)
+
+
+@pytest.mark.parametrize('bad',[1,'yes',None])
+async def test_parallel_option_requires_boolean(bad):
+    client=ZClient()
+    with pytest.raises(TypeError):
+        module().FiniteScopeClient(client,lambda *_:None,lambda:None,lambda:None,
+            asyncio.current_task(),lambda:1,parallel_fk=bad)
+
+
+async def test_local_checks_crossing_snapshot_age_keep_the_original_rejection(monkeypatch):
+    m=module();clock=FakeClock();active=False;delayed=False
+    original=m.FiniteWindowDiagnosticAdapter._begin_motion_epoch
+    def begin(adapter):
+        nonlocal active
+        original(adapter);clock.advance_ms(94);active=True
+    def hot():
+        nonlocal delayed
+        if active and not delayed:clock.advance_ms(15);delayed=True
+    monkeypatch.setattr(m.FiniteWindowDiagnosticAdapter,'_begin_motion_epoch',begin)
+    result,client=await run(clock=clock,hot=hot)
+    assert result['pvat_entries']==0 and result['stop_confirmed']
+    assert result['motion_sample_age_ms']==109.
+    assert result['local_motion_rejection']=='idle_baseline_sample_not_current'
+    assert client.write_calls==[('stop_move',)]
+
+
 @pytest.mark.parametrize('kind', ['paused', 'speed', 'acceleration', 'ambiguous_estop', 'bad_tcp'])
 async def test_initial_rejection_has_no_robot_writes(kind):
     client = ZClient()

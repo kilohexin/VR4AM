@@ -45,10 +45,13 @@ def _snapshot_signature(snapshot):
 
 
 class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
-    def __init__(self, settings, *, client_factory, **kwargs):
+    def __init__(self, settings, *, client_factory, parallel_fk=False, **kwargs):
         if settings.mode != 'control':
             raise ValueError('finite_diagnostic_requires_control_mode')
+        if type(parallel_fk) is not bool:
+            raise TypeError('finite_parallel_fk_requires_boolean')
         super().__init__(settings, client_factory=client_factory, **kwargs)
+        self.parallel_fk = parallel_fk
         self._finite_submitted = False
         self._finite_entered = False
         self._finite_lease = None
@@ -56,11 +59,16 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
         self._finite_ticket = None
         self._finite_input_signature = None
         self._finite_pending_fk = None
+        self._finite_pending_fks = set()
+        self._finite_fk_wrappers = set()
+        self._finite_fk_failed = False
         self._finite_shutdown_attempted = False
 
     async def connect(self):
-        if self._finite_pending_fk is not None and not self._finite_pending_fk.done():
+        if self._finite_pending_fks or self._finite_fk_wrappers:
             raise BackendCommandError('finite_fk_read_pending')
+        if self._finite_fk_failed:
+            raise BackendCommandError('finite_fk_audit_failed')
         if self._finite_submitted and self._client is None:
             raise BackendCommandError('finite_single_attempt_consumed')
         await super().connect()
@@ -116,9 +124,9 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
             self._finite_input_signature = None
 
     async def disconnect(self):
-        pending = self._finite_pending_fk
-        if pending is not None and not pending.done() and not pending.cancelling():
-            pending.cancel()
+        for pending in tuple(self._finite_pending_fks | self._finite_fk_wrappers):
+            if not pending.done() and not pending.cancelling():
+                pending.cancel()
         # A read ignoring local cancellation remains owned by this instance.
         # Do not await it, reuse it for motion, or claim remote cancellation.
         try:
@@ -164,7 +172,10 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
 
     async def _fk(self, client, snapshot, role, joints, calls):
         self._guard(client, snapshot)
-        if self._finite_pending_fk is not None and not self._finite_pending_fk.done():
+        if self._finite_fk_failed:
+            raise _MotionSnapshotFault('finite_fk_audit_failed')
+        limit = 3 if self.parallel_fk and role in ('goal', 'midpoint', 'endpoint') else 1
+        if len(self._finite_pending_fks) >= limit:
             raise _MotionSnapshotFault('finite_fk_read_pending')
         call = dict(role=role, method='kinematics_forward', started_ns=self._clock(),
                     outcome='started', entered=False, remote_result_unknown=False)
@@ -180,16 +191,21 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
                 raise
             call.update(entered=True, sdk_await_started_ns=self._clock())
             try:
-                return await client.kinematics_forward([float(q) for q in joints])
+                values = [float(q) for q in joints]
+                guarded = getattr(client, '_kinematics_forward_guarded', None)
+                if self.parallel_fk and callable(guarded):
+                    return await guarded(values, lambda: self._guard(client, snapshot))
+                return await client.kinematics_forward(values)
             finally:
                 call['sdk_await_completed_ns'] = self._clock()
 
         task = asyncio.create_task(query(), name='finite-forward-kinematics')
         self._finite_pending_fk = task
+        self._finite_pending_fks.add(task)
 
         def completed(done):
-            if self._finite_pending_fk is done:
-                self._finite_pending_fk = None
+            self._finite_pending_fks.discard(done)
+            self._finite_pending_fk = next(iter(self._finite_pending_fks), None)
             if not done.cancelled():
                 done.exception()
 
@@ -224,8 +240,35 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
         finally:
             call['completed_ns'] = self._clock()
 
+    async def _fk_triplet(self, client, snapshot, samples, calls):
+        if self._finite_pending_fks or self._finite_fk_wrappers:
+            raise _MotionSnapshotFault('finite_fk_read_pending')
+        tasks = [asyncio.create_task(self._fk(client, snapshot, role, joints, calls),
+                    name='finite-fk-' + role) for role, joints in samples]
+        self._finite_fk_wrappers.update(tasks)
+        def completed(done):
+            self._finite_fk_wrappers.discard(done)
+            if not done.cancelled():
+                done.exception()
+        for task in tasks:
+            task.add_done_callback(completed)
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            # Inspect every completed failure before obtaining ordered results.
+            for task in tasks:
+                if task.done() and (task.cancelled() or task.exception() is not None):
+                    task.result()
+            return tuple(task.result() for task in tasks)
+        except BaseException:
+            self._finite_fk_failed = True
+            for task in tasks:
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+            raise
+
     async def _solve_candidate(self, client, snapshot, target, **kwargs):
         event = dict(kind='finite_candidate_audit', outcome='failed', calls=[],
+                     parallel_fk=self.parallel_fk,
                      assessment='reference_samples_only_not_path_or_physics',
                      command=self._finite_context.reference.__dict__ if self._finite_context else None,
                      started_ns=self._clock())
@@ -247,7 +290,16 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
             if (math.dist(origin.p, snapshot.actual_tcp.p) > _FK_POSITION_TOLERANCE_M
                     or _angle(origin.q, snapshot.actual_tcp.q) > _FK_ROTATION_TOLERANCE_DEG):
                 raise _MotionSnapshotFault('finite_fk_feedback_mismatch')
-            goal = await self._fk(client, snapshot, 'goal', selected.metrics.solution_q, event['calls'])
+            point = selected.point
+            base, slope = _controls(np.array(snapshot.actual_qd), np.array(snapshot.actual_qdd),
+                                    np.array(point.q) - np.array(snapshot.actual_q), point.horizon_s)
+            middle_q = np.array(snapshot.actual_q) + np.array(
+                [math.comb(5, i) * .5 ** 5 for i in range(6)]) @ (base + slope)
+            if self.parallel_fk:
+                goal, middle, endpoint = await self._fk_triplet(client, snapshot,
+                    [('goal', selected.metrics.solution_q), ('midpoint', middle_q), ('endpoint', point.q)], event['calls'])
+            else:
+                goal = await self._fk(client, snapshot, 'goal', selected.metrics.solution_q, event['calls'])
             if (math.dist(goal.p, target.p) > _FK_POSITION_TOLERANCE_M
                     or _angle(goal.q, target.q) > _FK_ROTATION_TOLERANCE_DEG):
                 raise _MotionSnapshotFault('finite_fk_goal_mismatch')
@@ -267,15 +319,11 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
             full_progress = check_direction(goal, 'goal')
             if abs(full_progress - distance) > max(1e-6, distance * .05):
                 raise _MotionSnapshotFault('finite_fk_goal_progress_mismatch')
-            point = selected.point
-            base, slope = _controls(np.array(snapshot.actual_qd), np.array(snapshot.actual_qdd),
-                                    np.array(point.q) - np.array(snapshot.actual_q), point.horizon_s)
-            controls = base + slope
-            middle_q = np.array(snapshot.actual_q) + np.array(
-                [math.comb(5, i) * .5 ** 5 for i in range(6)]) @ controls
-            middle = await self._fk(client, snapshot, 'midpoint', middle_q, event['calls'])
+            if not self.parallel_fk:
+                middle = await self._fk(client, snapshot, 'midpoint', middle_q, event['calls'])
             check_direction(middle, 'midpoint')
-            endpoint = await self._fk(client, snapshot, 'endpoint', point.q, event['calls'])
+            if not self.parallel_fk:
+                endpoint = await self._fk(client, snapshot, 'endpoint', point.q, event['calls'])
             if check_direction(endpoint, 'endpoint') <= 1e-9:
                 raise _MotionSnapshotFault('finite_fk_endpoint_no_progress')
             self._guard(client, snapshot)
@@ -295,6 +343,8 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
             raise _MotionSnapshotFault('finite_sdk_entry_not_admitted')
         client, snapshot, signature, selected = ticket
         self._guard(client, snapshot)
+        if self._finite_fk_failed or any(not task.done() for task in self._finite_pending_fks | self._finite_fk_wrappers):
+            raise _MotionSnapshotFault('finite_fk_read_pending')
         if (_snapshot_signature(snapshot) != signature or selected.point.reference_source != 'observed_velocity'
                 or selected.point.qd != (0.,) * 6 or selected.point.qdd != (0.,) * 6):
             raise _MotionSnapshotFault('finite_audit_ticket_changed')

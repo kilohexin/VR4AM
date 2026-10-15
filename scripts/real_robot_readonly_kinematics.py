@@ -84,14 +84,14 @@ def prepare(config, output, *, expires=None):
 
 
 def preview(plan):
-    from app.commissioning.readonly_kinematics import READ_METHODS, MAX_CALLS
+    from app.commissioning.readonly_kinematics import READ_METHODS, MAX_CALLS, computational_distance
     return dict(schema=1, scope='one_readonly_fk_ik_survey_no_robot_writes', mode='readonly',
                 target_ip=plan['settings'].ip, output=str(plan['output']),
                 config_sha256=plan['config_sha256'], runtime_hashes=plan['runtime_hashes'],
                 authorization_expires_utc=plan['authorization_expires_utc'],
                 allowed_queries=list(READ_METHODS), allowed_writes=[], max_connections=1,
                 max_total_calls_including_connect=MAX_CALLS, max_fk_calls=4, max_ik_calls=1,
-                computational_target=dict(axis='z', distance_m=.0002, executed=False),
+                computational_target=dict(axis='z', distance_m=computational_distance(plan['settings']), executed=False),
                 allowed_raw_states=['IDLE', 'PAUSED'], motion_authorized=False,
                 hardware_stop_verified=False, automatic_retry=False, automatic_resume=False,
                 automatic_reset=False, automatic_stop=False, packet_capture=False,

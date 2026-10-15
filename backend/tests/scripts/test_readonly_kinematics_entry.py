@@ -45,6 +45,15 @@ def test_preview_never_executes_or_reserves_output(context, monkeypatch, capsys)
     assert not plan['output'].exists()
 
 
+def test_preview_binds_a_smaller_configured_computational_target(context):
+    entry,plan,_=context
+    data=yaml.safe_load(plan['config'].read_text())
+    data['real_robot']['control']['max_tcp_step_m']=.00005
+    plan['config'].write_text(yaml.safe_dump(data))
+    new=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'])
+    assert entry.preview(new)['computational_target']==dict(axis='z',distance_m=.00005,executed=False)
+
+
 @pytest.mark.parametrize('change', [
     {'confirm': 'yes'}, {'approved': None}, {'expected_hash': 'b' * 64},
     {'expires': '2000-01-01T00:00:00Z'}, {'expires': '2099-01-01T00:00:00Z'},

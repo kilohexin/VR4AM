@@ -1,4 +1,4 @@
-"""Preview by default; separately scoped single +Z 0.2 mm finite window.
+"""Preview by default; separately scoped single +Z finite window up to 0.2 mm.
 
 All full SHA checks run before submission. The already loaded runtime's pinned
 file identity/metadata is checked at PVAT entry; this is not a fresh byte hash
@@ -37,8 +37,11 @@ def existing_rpc_connections():
     return helper.existing_rpc_connections()
 
 
-def prepare(config, output, *, expires=None):
+def prepare(config, output, *, expires=None, parallel_fk_audit=False):
+    if type(parallel_fk_audit) is not bool:
+        raise TypeError('finite_parallel_fk_requires_boolean')
     plan = helper.prepare(config, output, expires=expires)
+    plan['parallel_fk_audit'] = parallel_fk_audit
     if not .01 <= plan['settings'].control.pvat_horizon_s <= .08:
         raise ValueError('finite_window_horizon_invalid')
     plan['runtime_hashes'] = runtime_hashes()
@@ -46,12 +49,18 @@ def prepare(config, output, *, expires=None):
 
 
 def preview(plan):
-    from app.commissioning.finite_window_run import CLEANUP_STOP_S, DISTANCE_M, FiniteScopeClient
+    from app.commissioning.finite_window_run import CLEANUP_STOP_S, DISTANCE_M, READY_Q_TOLERANCE_RAD, FiniteScopeClient
+    from app.commissioning.readonly_kinematics import computational_distance
+    distance_m=computational_distance(plan['settings'])
     return dict(schema=1, scope='one_finite_z_window_and_reserved_cleanup_stop', target_ip=plan['settings'].ip,
         output=str(plan['output']), config_sha256=plan['config_sha256'], runtime_hashes=plan['runtime_hashes'],
         authorization_expires_utc=plan['authorization_expires_utc'], max_connections=1, max_pvat_entries=1,
         max_stop_entries=1, max_ik_entries=1, max_fk_entries=4, allowed_queries=sorted(FiniteScopeClient.READS),
-        allowed_writes=['move_pvat', 'stop_move'], target=dict(axis='z', distance_m=DISTANCE_M, rotation=False),
+        allowed_writes=['move_pvat', 'stop_move'], target=dict(axis='z', distance_m=distance_m, rotation=False),
+        requires_full_endpoint=distance_m<DISTANCE_M,
+        parallel_fk_audit=plan['parallel_fk_audit'],
+        fk_order='feedback_then_parallel_goal_midpoint_endpoint' if plan['parallel_fk_audit'] else 'serial',
+        required_ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD if distance_m<DISTANCE_M else None,
         requires_raw_idle=True, requires_zero_actual_qd_qdd=True, zero_terminal_velocity_acceleration=True,
         motion_ttl_ms=100, native_pvat_await_timeout_ms=60, stop_rpc_timeout_ms=200,
         stop_stable_ms=300, stop_verification_ms=500, readonly_tail_s=2.,
@@ -167,7 +176,7 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
 
     try:
         await run_window(plan['settings'], recorder, factory, inputs.cold, inputs.hot,
-                         write_check=inputs.write, report=report)
+                         write_check=inputs.write, report=report, parallel_fk_audit=plan['parallel_fk_audit'])
     finally:
         calls.closed = True
         connector['pending_remote_result_unknown'] = any(c['remote_result_unknown'] for c in connector['calls'])
@@ -180,9 +189,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, type=Path); parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--execute-once', action='store_true'); parser.add_argument('--approved-preview', type=Path)
+    parser.add_argument('--parallel-fk-audit', action='store_true')
     parser.add_argument('--approved-preview-sha256'); parser.add_argument('--authorization-expires-utc'); parser.add_argument('--confirm')
     args = parser.parse_args(argv)
-    plan = prepare(args.config, args.output, expires=args.authorization_expires_utc)
+    plan = prepare(args.config, args.output, expires=args.authorization_expires_utc,
+                   parallel_fk_audit=args.parallel_fk_audit)
     if not args.execute_once:
         print(json.dumps(preview(plan), indent=2)); return 0
     if Path(sys.executable).resolve() != (ROOT / '.venv/Scripts/python.exe').resolve(): raise ValueError('repository_venv_required')

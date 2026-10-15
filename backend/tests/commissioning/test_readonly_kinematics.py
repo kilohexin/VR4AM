@@ -97,6 +97,15 @@ async def test_partial_reference_is_not_full_segment_admission(settings):
     assert report['motion_authorized'] is False
 
 
+async def test_smaller_configured_step_is_used_for_the_readonly_computation(settings):
+    settings=replace(settings,control=replace(settings.control,max_tcp_step_m=.00005))
+    client=SurveyClient();report=await collect(settings,client)
+    assert report['complete'] and report['candidate_full_endpoint_feasible']
+    assert report['target']['p'][2] == pytest.approx(.40005)
+    assert client.read_calls.count('kinematics_inverse')==1
+    assert client.fk_count==4 and client.write_calls==[]
+
+
 @pytest.mark.parametrize('state', ['MOVING', 'STOP', 'HOLD', True, None])
 async def test_other_states_end_queries_without_stop(settings, state):
     client = SurveyClient()

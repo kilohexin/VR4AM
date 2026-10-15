@@ -32,7 +32,7 @@ class AuditClient(FakeLebaiClient):
         return result
 
 
-async def setup(client=None, normal=False):
+async def setup(client=None, normal=False, parallel=False):
     client = client or AuditClient()
     clock = FakeClock()
     settings = control_settings()
@@ -46,11 +46,96 @@ async def setup(client=None, normal=False):
     adapter = (RealLebaiAdapter if normal else FiniteWindowDiagnosticAdapter)(
         settings, client_factory=AsyncMock(return_value=client), clock=clock.now_ns,
         pvat_clock=clock.now_ns, sleep=clock.sleep, event_callback=record,
+        **({} if normal else {'parallel_fk': parallel}),
     )
     await adapter.connect()
     assert (await adapter.preflight()).ready
     client.read_calls.clear()
     return adapter, client, clock, events
+
+
+async def test_opt_in_parallel_triplet_keeps_feedback_first_and_blocks_write_until_all_return():
+    client=AuditClient();ready=asyncio.Event();release=asyncio.Event();active=0
+    async def block(count,pose):
+        nonlocal active
+        if count==1:return pose
+        active+=1
+        if active==3:ready.set()
+        await release.wait()
+        return pose
+    client.fk_hook=block
+    adapter,_,_,_=await setup(client,parallel=True)
+    task=asyncio.create_task(submit(adapter))
+    try:
+        await asyncio.wait_for(ready.wait(),1)
+        assert len(client.fk_calls)==4 and client.write_calls==[]
+        release.set();result=await task
+        assert result.sdk_outcome=='returned' and len(client.write_calls)==1
+    finally:
+        release.set();await asyncio.gather(task,return_exceptions=True);await adapter.disconnect()
+
+
+@pytest.mark.parametrize('wrong',[2,3,4])
+async def test_parallel_triplet_checks_every_returned_pose_before_write(wrong):
+    client=AuditClient()
+    async def change(count,pose):
+        await asyncio.sleep(0)
+        return {**pose,'y':pose['y']+.01} if count==wrong else pose
+    client.fk_hook=change
+    adapter,_,_,_=await setup(client,parallel=True)
+    try:
+        result=await submit(adapter)
+        assert result.sdk_outcome=='not_started'
+        assert not any(c[0]=='move_pvat' for c in client.write_calls)
+    finally:await adapter.disconnect()
+
+
+async def test_parallel_unknown_read_stays_owned_and_prevents_reconnect(monkeypatch):
+    import app.commissioning.finite_diagnostic as module
+    monkeypatch.setattr(module,'_FK_TIMEOUT_S',.02)
+    client=AuditClient();started=asyncio.Event();release=asyncio.Event()
+    async def stubborn(count,pose):
+        if count!=3:return pose
+        started.set()
+        while not release.is_set():
+            try:await release.wait()
+            except asyncio.CancelledError:pass
+        return pose
+    client.fk_hook=stubborn
+    adapter,_,_,_=await setup(client,parallel=True)
+    try:
+        result=await submit(adapter)
+        assert started.is_set() and result.sdk_outcome=='not_started'
+        assert any(not t.done() for t in adapter._finite_pending_fks)
+        with pytest.raises(BackendCommandError,match='finite_fk_read_pending'):await adapter.connect()
+        assert not any(c[0]=='move_pvat' for c in client.write_calls)
+    finally:
+        release.set()
+        await _wait_until(lambda:not adapter._finite_pending_fks)
+        await adapter.disconnect()
+
+
+@pytest.mark.parametrize('role',[2,3,4])
+@pytest.mark.parametrize('kind',['malformed','error','expired','revoked'])
+async def test_each_parallel_role_failure_prevents_motion(role,kind):
+    client=AuditClient();adapter,_,clock,_=await setup(client,parallel=True)
+    allowed=True
+    adapter.bind_motion_authority(lambda:allowed)
+    async def fail(count,pose):
+        nonlocal allowed
+        if count==role:
+            if kind=='malformed':return {'bad':'payload'}
+            if kind=='error':raise RuntimeError('injected')
+            if kind=='expired':clock.value=100_000_000
+            if kind=='revoked':allowed=False
+        await asyncio.sleep(0)
+        return pose
+    client.fk_hook=fail
+    try:
+        result=await submit(adapter)
+        assert result.sdk_outcome=='not_started'
+        assert not any(c[0]=='move_pvat' for c in client.write_calls)
+    finally:await adapter.disconnect()
 
 
 async def submit(adapter):

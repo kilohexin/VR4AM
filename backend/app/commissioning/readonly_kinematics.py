@@ -37,6 +37,14 @@ class SurveyError(ValueError):
     """Only locally defined reason strings, never vendor exception messages."""
 
 
+def computational_distance(settings):
+    """Honor a smaller configured step; never enlarge the original 0.2 mm survey."""
+    step=settings.control.max_tcp_step_m
+    if type(step) not in (int,float) or not math.isfinite(step) or step<=0:
+        raise ValueError('survey_invalid_computational_step')
+    return min(DISTANCE_M,float(step))
+
+
 def new_report(*, simulation):
     return dict(schema=1, started_utc=datetime.now(UTC).isoformat(), complete=False,
                 runtime='SIMULATION' if simulation else 'LIVE_READONLY',
@@ -227,13 +235,14 @@ async def collect(settings, factory, admit, report):
         raise ValueError('kinematics_survey_requires_readonly')
     calls = _Queries(admit, report)
     try:
+        distance_m=computational_distance(settings)
         client = await calls.call('connect', lambda: factory(settings.ip))
         if any(not callable(getattr(client, name, None)) for name in READ_METHODS):
             raise SurveyError('survey_capability_missing')
         initial = report['initial'] = await _observe(client, calls, settings)
         origin = Pose.model_validate(initial['tcp'])
         position = list(origin.p)
-        position[2] += DISTANCE_M
+        position[2] += distance_m
         target = Pose(p=tuple(position), q=origin.q)
         report['target'] = target.model_dump(mode='json')
         chain_started = monotonic_ns()
@@ -280,11 +289,11 @@ async def collect(settings, factory, admit, report):
             progress = float(delta[2])
             cross = float(np.linalg.norm(delta[:2]))
             row.update(progress_m=progress, cross_m=cross)
-            if (progress < -1e-9 or progress > DISTANCE_M + 1e-6
+            if (progress < -1e-9 or progress > distance_m + 1e-6
                     or cross > max(1e-6, max(0., progress) * math.tan(math.radians(5)))
                     or _angle(pose.q, fk_origin.q) > ROTATION_TOLERANCE_DEG):
                 raise SurveyError('survey_fk_direction_mismatch')
-            if role == 'goal' and (not _agree(pose, target) or abs(progress - DISTANCE_M) > max(1e-6, DISTANCE_M * .05)):
+            if role == 'goal' and (not _agree(pose, target) or abs(progress - distance_m) > max(1e-6, distance_m * .05)):
                 raise SurveyError('survey_fk_goal_mismatch')
             if role == 'endpoint' and progress <= 1e-9:
                 raise SurveyError('survey_fk_endpoint_no_progress')
