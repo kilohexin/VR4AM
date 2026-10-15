@@ -59,6 +59,21 @@ def test_smaller_step_is_bound_in_the_motion_scope(context):
     assert preview['requires_full_endpoint'] is True
 
 
+def test_motion_observation_requires_qpc_and_is_bound_to_preview(context,monkeypatch,capsys):
+    entry,plan,_,_=context()
+    with pytest.raises(ValueError,match='observation_requires_qpc'):
+        entry.prepare(plan['config'],plan['output'],observe_motion=True)
+    candidate=entry.prepare(plan['config'],plan['output'],qpc_timing=True,observe_motion=True)
+    assert entry.preview(plan)['motion_observation']['enabled'] is False
+    assert entry.preview(candidate)['motion_observation']==dict(enabled=True,
+        max_get_kin_data_entries=1,timeout_ms=50,sample_offset_fraction=.5,wait_before_stop=False,
+        updates_motion_snapshot=False)
+    monkeypatch.setattr(entry,'execute',AsyncMock(side_effect=AssertionError('no execution')))
+    assert entry.main(['--config',str(plan['config']),'--output',str(plan['output']),
+                       '--qpc-timing','--observe-motion'])==0
+    assert json.loads(capsys.readouterr().out)['motion_observation']['enabled'] is True
+
+
 def test_parallel_fk_opt_in_is_bound_to_preview_and_cli(context,monkeypatch,capsys):
     entry,plan,_,_=context()
     candidate=entry.prepare(plan['config'],plan['output'],expires=plan['authorization_expires_utc'],

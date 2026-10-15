@@ -141,3 +141,18 @@ def test_unidentified_legacy_stop_requests_are_not_merged(tmp_path):
     events=[dict(kind='stop_requested',server_mono_ns=t) for t in (100,200)]
     with pytest.raises(ValueError,match='Multiple stop episodes'):
         audit.analyze(write_session(tmp_path,events))
+
+
+@pytest.mark.parametrize('clock,outcome,end,count',[
+    ('time.perf_counter_ns','returned',120_000_000,1),
+    ('time.monotonic_ns','returned',120_000_000,0),
+    ('time.perf_counter_ns','error',120_000_000,0),
+    ('time.perf_counter_ns','returned',190_000_000,0)])
+def test_owned_motion_sample_uses_actual_window_and_clock(tmp_path,clock,outcome,end,count):
+    events=finite_events()
+    events[-1]['motion_observation']=dict(event_clock=clock,outcome=outcome,
+        read_requested_ns=110_000_000,read_completed_ns=end,within_reference=True,
+        sample=dict(actual_q=[.0001,0.,0.,0.,0.,0.],actual_tcp={'p':[0.,0.,.40004]}))
+    evidence=audit.analyze(write_session(tmp_path,events))['finite_motion_evidence']
+    assert evidence['within_reference_samples']==count
+    assert evidence['physical_motion_verified'] is False

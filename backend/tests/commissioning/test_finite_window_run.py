@@ -60,6 +60,87 @@ async def test_one_scoped_packet_has_zero_terminal_and_one_stop():
     assert not result['hardware_verified'] and not result['motion_authorized']
 
 
+@pytest.mark.parametrize('stubborn',[False,True])
+async def test_motion_observer_never_waits_before_original_stop(stubborn):
+    import time
+    client=ZClient();release=asyncio.Event();stop_seen=asyncio.Event();observed=[]
+    original_read=client.get_kin_data;original_stop=client.stop_move
+    async def read():
+        if client.write_calls and not stop_seen.is_set():
+            observed.append(time.perf_counter_ns())
+            if stubborn:
+                while not release.is_set():
+                    try:await release.wait()
+                    except asyncio.CancelledError:pass
+        return await original_read()
+    async def stop():
+        assert not release.is_set()
+        stop_seen.set()
+        return await original_stop()
+    client.get_kin_data=read;client.stop_move=stop
+    settings=control_settings()
+    settings=replace(settings,control=replace(settings.control,
+        max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    try:
+        result=await module().run_window(settings,Recorder(),factory,lambda:None,lambda:None,
+            clock=time.perf_counter_ns,deadline_clock=time.perf_counter_ns,observe_motion=True)
+        assert stop_seen.is_set() and len(observed)==1
+        assert observed[0]-result['pvat_call']['native_started_ns']>=40_000_000
+        assert result['pvat_entries']==result['stop_entries']==1
+        observation=result['motion_observation']
+        assert observation['native_entries']==1 and not observation['physical_motion_verified']
+        if stubborn:
+            assert observation['remote_result_unknown']
+            assert observation['sample'] is None
+            assert not result['stop_confirmed'] and result['latched_fault']=='stop_unverified'
+        else:
+            assert observation['outcome']=='returned' and observation['within_reference']
+            assert result['complete']
+    finally:
+        release.set()
+        for _ in range(10):await asyncio.sleep(0)
+
+
+async def test_motion_observation_requires_one_clock_before_connect():
+    async def forbidden(_ip):pytest.fail('must refuse before connecting')
+    with pytest.raises(ValueError,match='observation_requires_one_clock'):
+        await module().run_window(control_settings(),Recorder(),forbidden,lambda:None,
+            lambda:None,observe_motion=True,clock=lambda:1,deadline_clock=lambda:2)
+
+
+async def test_owner_cancel_during_observation_still_owns_single_stop():
+    import time
+    client=ZClient();entered=asyncio.Event();release=asyncio.Event();report={}
+    original_read=client.get_kin_data
+    async def read():
+        if client.write_calls and not any(c[0]=='stop_move' for c in client.write_calls):
+            entered.set()
+            while not release.is_set():
+                try:await release.wait()
+                except asyncio.CancelledError:pass
+        return await original_read()
+    client.get_kin_data=read
+    settings=control_settings()
+    settings=replace(settings,control=replace(settings.control,
+        max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2))
+    async def factory(_ip):return client
+    task=asyncio.create_task(module().run_window(settings,Recorder(),factory,
+        lambda:None,lambda:None,clock=time.perf_counter_ns,deadline_clock=time.perf_counter_ns,
+        observe_motion=True,report=report))
+    try:
+        await asyncio.wait_for(entered.wait(),1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):await asyncio.wait_for(task,1)
+        assert [c[0] for c in client.write_calls]==['move_pvat','stop_move']
+        assert report['motion_observation']['remote_result_unknown']
+        assert report['motion_observation']['sample'] is None
+        assert report['latched_fault']=='stop_unverified'
+    finally:
+        release.set()
+        for _ in range(10):await asyncio.sleep(0)
+
+
 async def test_small_configured_window_requires_the_full_endpoint():
     settings=control_settings()
     settings=replace(settings,control=replace(settings.control,max_joint_speed_radps=.05,

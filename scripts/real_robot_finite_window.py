@@ -38,7 +38,7 @@ def existing_rpc_connections():
 
 
 def prepare(config, output, *, expires=None, parallel_fk_audit=False, ready_joint_tolerance_rad=.0001,
-            parallel_motion_reads=False,prelease_feedback_fk=False,qpc_timing=False):
+            parallel_motion_reads=False,prelease_feedback_fk=False,qpc_timing=False,observe_motion=False):
     from app.commissioning.finite_window_run import validate_ready_tolerance
     if type(parallel_fk_audit) is not bool:
         raise TypeError('finite_parallel_fk_requires_boolean')
@@ -47,11 +47,14 @@ def prepare(config, output, *, expires=None, parallel_fk_audit=False, ready_join
     if type(prelease_feedback_fk) is not bool or prelease_feedback_fk and not parallel_fk_audit:
         raise TypeError('finite_prelease_feedback_requires_parallel_fk_boolean')
     if type(qpc_timing) is not bool:raise TypeError('qpc_timing_requires_boolean')
+    if type(observe_motion) is not bool:raise TypeError('finite_motion_observation_requires_boolean')
+    if observe_motion and not qpc_timing:raise ValueError('finite_motion_observation_requires_qpc')
     plan = helper.prepare(config, output, expires=expires)
     plan['parallel_fk_audit'] = parallel_fk_audit
     plan['parallel_motion_reads'] = parallel_motion_reads
     plan['prelease_feedback_fk'] = prelease_feedback_fk
     plan['qpc_timing'] = qpc_timing
+    plan['observe_motion'] = observe_motion
     plan['ready_joint_tolerance_rad'] = validate_ready_tolerance(ready_joint_tolerance_rad)
     if not .01 <= plan['settings'].control.pvat_horizon_s <= .08:
         raise ValueError('finite_window_horizon_invalid')
@@ -73,6 +76,8 @@ def preview(plan):
         parallel_motion_reads=plan['parallel_motion_reads'],
         prelease_feedback_fk=plan['prelease_feedback_fk'],
         qpc_timing=plan['qpc_timing'],
+        motion_observation=dict(enabled=plan['observe_motion'],max_get_kin_data_entries=1,
+            timeout_ms=50,sample_offset_fraction=.5,wait_before_stop=False,updates_motion_snapshot=False),
         event_clock='time.perf_counter_ns' if plan['qpc_timing'] else 'time.monotonic_ns',
         event_clock_anchor='performance_anchor' if plan['qpc_timing'] else 'clock_anchor',
         connector_clock='time.monotonic_ns',
@@ -207,6 +212,7 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
                          ready_joint_tolerance_rad=plan['ready_joint_tolerance_rad'],
                          parallel_motion_reads=plan['parallel_motion_reads'],
                          prelease_feedback_fk=plan['prelease_feedback_fk'],
+                         observe_motion=plan['observe_motion'],
                          clock=perf_counter_ns if plan['qpc_timing'] else monotonic_ns,
                          deadline_clock=perf_counter_ns if plan['qpc_timing'] else monotonic_ns)
     finally:
@@ -225,13 +231,14 @@ def main(argv=None):
     parser.add_argument('--parallel-motion-reads', action='store_true')
     parser.add_argument('--prelease-feedback-fk', action='store_true')
     parser.add_argument('--qpc-timing', action='store_true')
+    parser.add_argument('--observe-motion', action='store_true')
     parser.add_argument('--ready-joint-tolerance-rad', type=float, default=.0001)
     parser.add_argument('--approved-preview-sha256'); parser.add_argument('--authorization-expires-utc'); parser.add_argument('--confirm')
     args = parser.parse_args(argv)
     plan = prepare(args.config, args.output, expires=args.authorization_expires_utc,
                    parallel_fk_audit=args.parallel_fk_audit, ready_joint_tolerance_rad=args.ready_joint_tolerance_rad,
                    parallel_motion_reads=args.parallel_motion_reads,prelease_feedback_fk=args.prelease_feedback_fk,
-                   qpc_timing=args.qpc_timing)
+                   qpc_timing=args.qpc_timing,observe_motion=args.observe_motion)
     if not args.execute_once:
         print(json.dumps(preview(plan), indent=2)); return 0
     if Path(sys.executable).resolve() != (ROOT / '.venv/Scripts/python.exe').resolve(): raise ValueError('repository_venv_required')

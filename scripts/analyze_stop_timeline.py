@@ -68,6 +68,14 @@ def finite_motion_evidence(events):
         if (native_start<=begin<=end and vector(state.get('actual_q'),6)
                 and vector(state.get('actual_tcp',{}).get('p'),3)):
             samples.append((begin,end,state))
+    observation=result.get('motion_observation',{})
+    if observation.get('outcome')=='returned' and observation.get('event_clock')==clock:
+        begin,end=observation.get('read_requested_ns'),observation.get('read_completed_ns')
+        state=observation.get('sample')
+        if (type(begin) is int and type(end) is int and native_start<=begin<=end
+                and isinstance(state,dict) and vector(state.get('actual_q'),6)
+                and vector(state.get('actual_tcp',{}).get('p'),3)):
+            samples.append((begin,end,state))
     samples.sort(key=lambda row:row[0])
     origin=baseline['actual_tcp']['p']
     evidence.update(assessment='recorded_feedback_only',event_clock=clock,

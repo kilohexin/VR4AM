@@ -16,6 +16,7 @@ from app.commissioning.idle_stop_baseline import AdmissionRejected, validate_idl
 from app.commissioning.paused_stop_cleanup import BoundedStopOnlyClient, _cached_sample, _geometry
 from app.commissioning.stop_observation import observe_after_stop
 from app.commissioning.readonly_kinematics import computational_distance
+from app.commissioning.finite_motion_observation import MotionObservation
 from app.robots.base import StopReason, BackendCommandError
 from app.schemas.messages import Pose
 
@@ -68,6 +69,14 @@ class FiniteScopeClient(BoundedStopOnlyClient):
         self.math_entries = dict(kinematics_inverse=0, kinematics_forward=0)
         self.local_motion_rejection = None
         self.native_write_check = native_write_check
+        self.motion_observation = None
+
+    def _observation_read_gate(self):
+        observation = self.motion_observation
+        if observation is not None and observation.blocks_reads:
+            self.read_gate_closed = True
+            self.read_remote_result_unknown |= observation.read_owner.read_remote_result_unknown
+            raise AdmissionRejected('finite_scope_motion_observation_not_clear')
 
     def _fk_read_pending(self):
         return any(child.pending_read is not None and not child.pending_read.done()
@@ -148,6 +157,7 @@ class FiniteScopeClient(BoundedStopOnlyClient):
             self.read_remote_result_unknown|=child.read_remote_result_unknown
 
     async def read(self, name, invoke):
+        self._observation_read_gate()
         group=self._snapshot_context.get()
         if group is not None and name in _SnapshotReadOwner.READS:
             return await self._snapshot_read(name,invoke,group)
@@ -169,6 +179,7 @@ class FiniteScopeClient(BoundedStopOnlyClient):
         return await super().read(name, invoke)
 
     def require_clear_read_gate(self):
+        self._observation_read_gate()
         if (self._active_snapshot_group is not None or self._snapshot_read_pending()
                 or any(child.read_gate_closed or child.read_remote_result_unknown
                 for child in self.snapshot_read_owners.values())):
@@ -311,7 +322,12 @@ def _rest(sample, now_ns):
 async def run_window(settings, recorder, client_factory, authorization_check, hot_check,
                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, write_check=None,
                      parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
-                     parallel_motion_reads=False,prelease_feedback_fk=False,deadline_clock=None):
+                     parallel_motion_reads=False,prelease_feedback_fk=False,deadline_clock=None,
+                     observe_motion=False):
+    if type(observe_motion) is not bool:
+        raise TypeError('finite_motion_observation_requires_boolean')
+    if observe_motion and deadline_clock != clock:
+        raise ValueError('finite_motion_observation_requires_one_clock')
     if type(parallel_fk_audit) is not bool:
         raise TypeError('finite_parallel_fk_requires_boolean')
     if type(parallel_motion_reads) is not bool:
@@ -333,7 +349,9 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         full_endpoint_required=full_endpoint_required, full_endpoint_feasible=False,
         target_distance_m=distance_m, parallel_fk_audit=parallel_fk_audit,
         ready_joint_tolerance_rad=ready_joint_tolerance_rad,parallel_motion_reads=parallel_motion_reads,
-        prelease_feedback_fk=prelease_feedback_fk)
+        prelease_feedback_fk=prelease_feedback_fk,
+        motion_observation=dict(enabled=observe_motion,outcome='not_started',native_entries=0,
+                                sample=None,physical_motion_verified=False))
     owner = asyncio.current_task()
     proxy = adapter = anchor = None
     cleanup_deadline = None
@@ -447,8 +465,15 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         report.update(command_sdk_outcome=outcome.sdk_outcome, command_error=outcome.error)
         if proxy.pvat_entries and outcome.sdk_outcome == 'returned':
             reference_end=proxy.pvat_started_ns+int(proxy.pvat_horizon_s*1e9)
-            while (remaining:=(reference_end-clock())/1e9)>0:
-                await sleep(max(.000001,remaining))
+            if observe_motion:
+                proxy.motion_observation=MotionObservation(proxy)
+                proxy.motion_observation.start()
+            try:
+                while (remaining:=(reference_end-clock())/1e9)>0:
+                    await sleep(max(.000001,remaining))
+            finally:
+                if proxy.motion_observation is not None:
+                    proxy.motion_observation.revoke()  # No await before the original stop.
         try:
             await adapter.stop(StopReason.SHUTDOWN)
         except BaseException as error:
@@ -482,6 +507,8 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
     except BaseException as error:
         primary_error = error
     finally:
+        if proxy is not None and proxy.motion_observation is not None:
+            proxy.motion_observation.revoke()
         if adapter is not None:
             try: await adapter.disconnect()
             except BaseException as error:
@@ -497,6 +524,9 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         closed = True
         if proxy is not None:
             proxy.read_gate_closed = True
+            if proxy.motion_observation is not None:
+                report['motion_observation']=proxy.motion_observation.snapshot()
+                proxy.read_remote_result_unknown |= report['motion_observation']['remote_result_unknown']
             report.update(pvat_entries=proxy.pvat_entries, stop_entries=proxy.sdk_stop_entries,
                 math_entries=copy.deepcopy(proxy.math_entries), read_calls=copy.deepcopy(proxy.read_calls),
                 read_remote_result_unknown=proxy.read_remote_result_unknown,
@@ -515,7 +545,9 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                 and reason.startswith(('finite_scope_','idle_baseline_','paused_cleanup_')) else None)
         report['complete'] = (primary_error is None and not report['cleanup_errors'] and report.get('command_sdk_outcome') == 'returned'
             and report['pvat_entries'] == report['stop_entries'] == 1 and report['stop_confirmed']
-            and report['latched_fault'] is None and report['tail_complete'] and report['displacement_consistent'])
+            and report['latched_fault'] is None and report['tail_complete'] and report['displacement_consistent']
+            and (not observe_motion or report['motion_observation'].get('outcome')=='returned'
+                 and report['motion_observation'].get('within_reference') is True))
         try: await recorder.write_critical_event('finite_scope_result', report, clock())
         except BaseException as error:
             report['complete'] = False; report['cleanup_errors'].append(type(error).__name__)
