@@ -1,6 +1,6 @@
 # Native Cartesian Jog Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (recommended for this plan) or superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (recommended for this plan) or superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 完成默认隔离的speedl单次离线候选和固定本机回环协议验证，为新的真机范围提供可审查实现。
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** 仓库Python 3.12、asyncio独立QPC事件循环、pytest、现有websockets及固定SHA的乐白SDK；不升级或安装依赖。
 
-**Spec:** [已认可设计](../specs/2026-10-15-native-cartesian-jog-design.md)，用户已批准书面设计；本计划待审阅及选择执行方式。
+**Spec:** [已认可设计](../specs/2026-10-15-native-cartesian-jog-design.md)，用户已批准设计和本计划，选择当前会话由主代理直接实施、最后独立复核。阶段结果见 [离线交付记录](../../native-cartesian-jog-offline-2026-10-15.md)。
 
 ## Global Constraints
 
@@ -51,11 +51,11 @@
 
 同时提供`validate_packet(packet, *, limits, actual_p, snapshot_ns, now_ns, generation, config_sha256) -> None`，供后续锁前/native入口使用当前实际位置重新校验；不能重建或修改包的expires_ns。strength只接受有限数值0–1，越界/bool拒绝，非零direction归一化后乘力度与上限。
 
-- [ ] **1. RED:** 写`test_diagonal_speed_is_norm_limited`：方向(1,1,0)、力度1、速度上限0.005，断言速度模≤0.005、x=y；`test_positive_duration_is_explicit`参数化0/None/-0.01/True/NaN/Inf/0.009/0.081均拒绝，0.01/0.08接受。
-- [ ] **2. RED:** 写`test_no_motion_for_zero_intent`、`test_expired_or_future_inputs_rejected`（快照/输入时间未来、年龄≥100 ms、输入自身过期、bool身份拒绝）、`test_sdk_arguments_do_not_alias_packet`、`test_nominal_box_includes_explicit_reserve`。期限为`min(input_expires_ns, now_ns+100_000_000)`，不反复生成新期限；SHA严格64位小写十六进制。
-- [ ] **3. 验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_packet.py -q -p no:cacheprovider`；预期缺少接口导致失败，保存XML到本机新目录。
-- [ ] **4. GREEN:** 实现上述接口，先校验结构/时长再处理中立输入，包acceleration取limits.max_acceleration_mps2。名义区检查覆盖当前点到`actual_p + velocity*t`线段两端及各轴显式reserve；命名/输出说明仅是规划检查，不生成`hardware_verified=True`或物理停止距离承诺。限值正数、各轴min<max，reserve非负有限，包字段不保留调用者可变列表。
-- [ ] **5. 验证/提交:** 同一命令全部通过，`git diff --check`；仅提交本任务模块和测试，提交说明`feat: add immutable finite Cartesian jog packets`。
+- [x] **1. RED:** 写`test_diagonal_speed_is_norm_limited`：方向(1,1,0)、力度1、速度上限0.005，断言速度模≤0.005、x=y；`test_positive_duration_is_explicit`参数化0/None/-0.01/True/NaN/Inf/0.009/0.081均拒绝，0.01/0.08接受。
+- [x] **2. RED:** 写`test_no_motion_for_zero_intent`、`test_expired_or_future_inputs_rejected`（快照/输入时间未来、年龄≥100 ms、输入自身过期、bool身份拒绝）、`test_sdk_arguments_do_not_alias_packet`、`test_nominal_box_includes_explicit_reserve`。期限为`min(input_expires_ns, now_ns+100_000_000)`，不反复生成新期限；SHA严格64位小写十六进制。
+- [x] **3. 验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_packet.py -q -p no:cacheprovider`；预期缺少接口导致失败，保存XML到本机新目录。
+- [x] **4. GREEN:** 实现上述接口，先校验结构/时长再处理中立输入，包acceleration取limits.max_acceleration_mps2。名义区检查覆盖当前点到`actual_p + velocity*t`线段两端及各轴显式reserve；命名/输出说明仅是规划检查，不生成`hardware_verified=True`或物理停止距离承诺。限值正数、各轴min<max，reserve非负有限，包字段不保留调用者可变列表。
+- [x] **5. 验证/提交:** 同一命令全部通过，`git diff --check`；仅提交本任务模块和测试，提交说明`feat: add immutable finite Cartesian jog packets`。
 
 ## Task 2: 单次Fake候选、原停止与未知结果隔离
 
@@ -63,23 +63,23 @@
 
 在`RealLebaiAdapter`抽取`_stop_blocking_motion_methods=frozenset({'move_pvat','set_claw'})`与`_immediate_stop_latch_methods=frozenset({'move_pvat'})`两个类属性，替换对应硬编码，保持旧语义。新子类分别增加speedl；复用`_await_motion_call`、`SdkLock`、原停止事务，禁止另写停止算法。
 
-- [ ] **1. RED:** 写`test_injected_once_speedl_uses_original_stop`：Fake client扩展异步speedl，显式127.0.0.1，原preflight通过；speedl仅一次，返回正整数motion ID；随后唯一原stop_move及原稳定验证。记录SIMULATION，真实连接数0，禁止PVAT/Home/夹爪等其它写入。
-- [ ] **2. RED:** 写`test_nonloopback_factory_refused_before_connect`、`test_authority_revoked_while_waiting_lock_has_zero_native_entry`、`test_packet_expires_at_native_boundary`、`test_unknown_speedl_blocks_motion_and_stop_confirmation`、`test_cancel_does_not_wait_for_stubborn_native`、`test_invalid_or_late_motion_id_cannot_restore_owner`、`test_old_pvat_and_gripper_unknown_policy_unchanged`。含bool/负数/非整数ID拒绝及未入native的本地拒绝不误报远端执行。
-- [ ] **3. 验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_candidate.py -q -p no:cacheprovider`，预期缺少候选类而失败。
-- [ ] **4. GREEN:** 提交时消费唯一机会，检查原控制预检、IDLE、新鲜实际快照、连接/代次/输入序号/固定期限与配置身份。将本次快照实例、read owner/序列和完成时间绑定到提交；native入口要求来源仍一致且无新增已知故障。锁前和native入口都调用authorize（必须正常返回None），并用任务1的validate_packet对绑定快照、当前generation和构造时SHA复查；不可重基期限。只有实际调用speedl前才计数并设置原`_motion_write_stop_required`；用entered回调区分本地拒绝。60 ms等待由原所有权管理；在operation内部验证返回ID，无效ID作为已进入native后的错误隔离。停止、撤权、断连不等待原生取消确认，不能因晚到ID重新解锁。
-- [ ] **5. 验证/提交:** 运行新两个测试文件，加`backend/tests/robots/test_stop_transaction.py`、`backend/tests/robots/test_motion_call_ownership.py`、`backend/tests/robots/test_gripper_call_ownership.py`、`backend/tests/robots/test_gripper_sdk_entry.py`与`backend/tests/robots/test_gripper_snapshot_boundary.py`。仅受影响文件通过后提交`feat: isolate native Cartesian jog ownership behind loopback candidate`。
+- [x] **1. RED:** 写`test_injected_once_speedl_uses_original_stop`：Fake client扩展异步speedl，显式127.0.0.1，原preflight通过；speedl仅一次，返回正整数motion ID；随后唯一原stop_move及原稳定验证。记录SIMULATION，真实连接数0，禁止PVAT/Home/夹爪等其它写入。
+- [x] **2. RED:** 写`test_nonloopback_factory_refused_before_connect`、`test_authority_revoked_while_waiting_lock_has_zero_native_entry`、`test_packet_expires_at_native_boundary`、`test_unknown_speedl_blocks_motion_and_stop_confirmation`、`test_cancel_does_not_wait_for_stubborn_native`、`test_invalid_or_late_motion_id_cannot_restore_owner`、`test_old_pvat_and_gripper_unknown_policy_unchanged`。含bool/负数/非整数ID拒绝及未入native的本地拒绝不误报远端执行。
+- [x] **3. 验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_candidate.py -q -p no:cacheprovider`，预期缺少候选类而失败。
+- [x] **4. GREEN:** 提交时消费唯一机会，检查原控制预检、IDLE、新鲜实际快照、连接/代次/输入序号/固定期限与配置身份。将本次快照实例、read owner/序列和完成时间绑定到提交；native入口要求来源仍一致且无新增已知故障。锁前和native入口都调用authorize（必须正常返回None），并用任务1的validate_packet对绑定快照、当前generation和构造时SHA复查；不可重基期限。只有实际调用speedl前才计数并设置原`_motion_write_stop_required`；用entered回调区分本地拒绝。60 ms等待由原所有权管理；在operation内部验证返回ID，无效ID作为已进入native后的错误隔离。停止、撤权、断连不等待原生取消确认，不能因晚到ID重新解锁。
+- [x] **5. 验证/提交:** 运行新两个测试文件，加`backend/tests/robots/test_stop_transaction.py`、`backend/tests/robots/test_motion_call_ownership.py`、`backend/tests/robots/test_gripper_call_ownership.py`、`backend/tests/robots/test_gripper_sdk_entry.py`与`backend/tests/robots/test_gripper_snapshot_boundary.py`。仅受影响文件通过后提交`feat: isolate native Cartesian jog ownership behind loopback candidate`。
 
 ## Task 3: 固定本机SDK协议回环及阶段交付
 
 **Interfaces:** 新脚本仅有`--output PATH`与`--repeats {1,2,3}`（默认1）；不提供IP、配置、端口、任意RPC或真实执行选项。`owned_port(addresses) -> int`只接受唯一IPv4字面127.0.0.1监听，端口只能来自`serve(...,'127.0.0.1',0)`。`async run_matrix(repeats: int) -> dict`在独立QPC循环下运行任务2适配器与原生SDK，配置与状态由本地合成，不读取现场控制配置。
 
-- [ ] **1. RED:** 写输出存在/目录冲突在SDK初始化前拒绝、非法CLI地址无输出、非本机/多监听拒绝、SDK二进制SHA错误拒绝测试。先核对仓库venv中既有二进制SHA `ad2a68619b25d627593bd5f13f83f17784e7a2c10aa9615db8bd1b681f9fd03b`，导入后再核对加载路径/同一SHA，随后才init；发行元数据缺失须如实记录，可调用本地version()记录原生版本，不能把缺失当0.3.13或悄悄导入其它SDK。
-- [ ] **2. RED:** 为本地peer写JSON-RPC白名单、请求ID唯一、speedl参数/显式正t/零旋转/基座帧校验，独立依据[官方运动文档](https://help.lebai.ltd/en/sdk/motion.html)与[v0.3.13封装](https://raw.githubusercontent.com/lebai-robotics/lebai-sdk.rs/v0.3.13/src/lib.rs)锁定协议fixture。仅允许speed_line、stop_move及原预检/停止读取；拒绝其它写入，不根据实测请求自行放宽白名单。
-- [ ] **3. 验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/scripts/test_native_jog_loopback_probe.py -q -p no:cacheprovider`，预期脚本尚未实现而失败。
-- [ ] **4. GREEN:** 实现脚本与peer，复用现有`application_stop_loopback_probe`已定义的合成状态/运动学字段和关闭流程；不改变旧peer。逐项运行立即正常、speedl迟到100 ms、无效ID、RPC错误、stop迟到250 ms五种案例。每种最多一次speedl和一次需要的原stop，不自动重试；拒绝前未进native的案例零运动写入。peer关闭、wait_disconnect及原生/包装任务归属均有输出；超时/晚返不称远端已取消。
-- [ ] **5. 原生回环:** `.venv/Scripts/python.exe scripts/native_jog_loopback_probe.py --output .tmp/native-jog-20261015/loopback-unique.json --repeats 1`。每次选择不存在的输出路径；禁止重写旧输出。预期标注`offline_only=true`、`hardware_verified=false`、`real_robot_connections=0`，正常案例原停止通过；错误/迟到案例保留相应未知和未通过结果。这些失败案例是预期边界结果，不合并成真机验收。
-- [ ] **6. 最终验证/交付:** 定向运行三个新测试文件及任务2引用的真实既有回归文件，保存JUnit与所有早期失败记录；若改动backend/app，重建并`--check`现有演示包。将实际来源、SDK身份、参数、案例结果、日志/包哈希固定在`.tmp`，校验操作者原未跟踪文档未变。写`docs/native-cartesian-jog-offline-2026-10-15.md`，明确本计划仅完成离线阶段，关节约束/制动余量/真实限时和停止行为仍未知，持续模式返回`native_jog_joint_bounds_unverified`。
-- [ ] **7. 提交/复核:** 提交本任务脚本、测试及结果说明，排除SDK、原始输出和现场配置。进行一次独立整段代码复核，修复重要问题并定向回归，记录最终提交和本机冻结一致性，不推送。
+- [x] **1. RED:** 写输出存在/目录冲突在SDK初始化前拒绝、非法CLI地址无输出、非本机/多监听拒绝、SDK二进制SHA错误拒绝测试。先核对仓库venv中既有二进制SHA `ad2a68619b25d627593bd5f13f83f17784e7a2c10aa9615db8bd1b681f9fd03b`，导入后再核对加载路径/同一SHA，随后才init；发行元数据缺失须如实记录，可调用本地version()记录原生版本，不能把缺失当0.3.13或悄悄导入其它SDK。
+- [x] **2. RED:** 为本地peer写JSON-RPC白名单、请求ID唯一、speedl参数/显式正t/零旋转/基座帧校验，独立依据[官方运动文档](https://help.lebai.ltd/en/sdk/motion.html)与[v0.3.13封装](https://raw.githubusercontent.com/lebai-robotics/lebai-sdk.rs/v0.3.13/src/lib.rs)锁定协议fixture。仅允许speed_line、stop_move及原预检/停止读取；拒绝其它写入，不根据实测请求自行放宽白名单。
+- [x] **3. 验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/scripts/test_native_jog_loopback_probe.py -q -p no:cacheprovider`，预期脚本尚未实现而失败。
+- [x] **4. GREEN:** 实现脚本与peer，复用现有`application_stop_loopback_probe`已定义的合成状态/运动学字段和关闭流程；不改变旧peer。逐项运行立即正常、speedl迟到100 ms、无效ID、RPC错误、stop迟到250 ms五种案例。每种最多一次speedl和一次需要的原stop，不自动重试；拒绝前未进native的案例零运动写入。peer关闭、wait_disconnect及原生/包装任务归属均有输出；超时/晚返不称远端已取消。
+- [x] **5. 原生回环:** `.venv/Scripts/python.exe scripts/native_jog_loopback_probe.py --output .tmp/native-jog-20261015/loopback-unique.json --repeats 1`。每次选择不存在的输出路径；禁止重写旧输出。预期标注`offline_only=true`、`hardware_verified=false`、`real_robot_connections=0`，正常案例原停止通过；错误/迟到案例保留相应未知和未通过结果。这些失败案例是预期边界结果，不合并成真机验收。
+- [x] **6. 最终验证/交付:** 定向运行三个新测试文件及任务2引用的真实既有回归文件，保存JUnit与所有早期失败记录；若改动backend/app，重建并`--check`现有演示包。将实际来源、SDK身份、参数、案例结果、日志/包哈希固定在`.tmp`，校验操作者原未跟踪文档未变。写`docs/native-cartesian-jog-offline-2026-10-15.md`，明确本计划仅完成离线阶段，关节约束/制动余量/真实限时和停止行为仍未知，持续模式返回`native_jog_joint_bounds_unverified`。
+- [x] **7. 提交/复核:** 提交本任务脚本、测试及结果说明，排除SDK、原始输出和现场配置。进行一次独立整段代码复核，修复重要问题并定向回归，记录最终提交和本机冻结一致性，不推送。
 
 ## Scope Coverage and Next Gate
 

@@ -181,3 +181,47 @@ async def test_other_write_routes_are_disabled():
 def test_old_pvat_and_gripper_unknown_policy_unchanged():
     assert RealLebaiAdapter._stop_blocking_motion_methods == {'move_pvat','set_claw'}
     assert RealLebaiAdapter._immediate_stop_latch_methods == {'move_pvat'}
+
+
+@pytest.mark.parametrize('race',['stubborn','before_return','after_operation'])
+async def test_submission_authority_revocation_survives_native_completion(race):
+    a,c,_,p = await connected()
+    entered,release = asyncio.Event(),asyncio.Event()
+    allowed=True
+    def revoke():
+        nonlocal allowed
+        allowed=False
+    def authorize():
+        if not allowed:raise BackendCommandError('input_revoked')
+    async def speedl(*args):
+        entered.set()
+        if race=='after_operation':
+            asyncio.get_running_loop().call_soon(revoke)
+        else:
+            try:await release.wait()
+            except asyncio.CancelledError:await release.wait()
+        return 7
+    c.speedl=speedl
+    task=asyncio.create_task(a.submit_jog(p,authorize=authorize))
+    try:
+        await asyncio.wait_for(entered.wait(),1)
+        if race!='after_operation':revoke()
+        if race=='before_return':release.set()
+        if race=='stubborn':
+            # Prompt local abandonment, rather than waiting for the 60ms
+            # deadline or a native cancellation acknowledgement.
+            done,_=await asyncio.wait({task},timeout=.04)
+            assert task in done
+        result=(await asyncio.gather(task,return_exceptions=True))[0]
+        assert isinstance(result,BackendCommandError)
+        assert a._motion_calls.unknown_methods=={'speedl'}
+        assert a._latched_fault=='stop_unverified'
+        release.set()
+        await asyncio.sleep(.01)
+        assert a._motion_calls.unknown_methods=={'speedl'}
+        with pytest.raises(BackendCommandError):await a.stop(StopReason.GRIP_RELEASED)
+        assert not a._stop_transaction.confirmed
+    finally:
+        release.set()
+        await asyncio.gather(task,return_exceptions=True)
+        await cleanup(a)

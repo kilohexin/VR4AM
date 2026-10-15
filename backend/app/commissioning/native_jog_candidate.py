@@ -8,6 +8,7 @@ from collections.abc import Callable
 from app.commissioning.native_jog_packet import NativeJogLimits, validate_packet, _sha
 from app.robots.base import BackendCommandError
 from app.robots.lebai_adapter import RealLebaiAdapter
+from app.robots.lebai_motion_calls import OwnedMotionCalls
 
 
 class NativeJogCandidateAdapter(RealLebaiAdapter):
@@ -28,11 +29,30 @@ class NativeJogCandidateAdapter(RealLebaiAdapter):
             raise ValueError('candidate limits exceed configured limits')
         super().__init__(settings, client_factory=client_factory, clock=clock,
             pvat_clock=clock, sleep=sleep, event_callback=event_callback, backend_label='LEBAI_FAKE')
+        # Strict result publication is opt-in here; retain legacy PVAT/claw
+        # classification when a completed RPC races the start of a stop.
+        self._motion_calls = OwnedMotionCalls(verify_completion_authority=True)
         self._jog_settings = settings
         self._jog_limits = limits
         self._jog_sha = config_sha256
         self._jog_consumed = False
         self.native_jog_entries = 0
+        self._jog_authorize = None
+        self._jog_revoked = False
+        # Feed this candidate's own permission into the existing bounded owner,
+        # including while native work is pending. This binding is permanent.
+        self.bind_motion_authority(self._submission_authorized)
+
+    def _submission_authorized(self):
+        if self._jog_revoked:
+            return False
+        try:
+            valid = callable(self._jog_authorize) and self._jog_authorize() is None
+        except Exception:
+            valid = False
+        if not valid:
+            self._jog_revoked = True
+        return valid
 
     async def connect(self):
         if self.settings is not self._jog_settings or self.settings.ip != '127.0.0.1':
@@ -43,6 +63,7 @@ class NativeJogCandidateAdapter(RealLebaiAdapter):
         if self._jog_consumed:
             raise BackendCommandError('native_jog_submission_consumed')
         self._jog_consumed = True  # Rejection, cancellation and failure all consume it.
+        self._jog_authorize = authorize
         self._check_submission_ready()
         self._begin_motion_epoch()
         client, snapshot = self._client, self._snapshot
@@ -54,8 +75,8 @@ class NativeJogCandidateAdapter(RealLebaiAdapter):
         entered = False
 
         def require_current():
-            if not callable(authorize) or authorize() is not None:
-                raise BackendCommandError('native_jog_authority_invalid')
+            if not self._submission_authorized():
+                raise BackendCommandError('native_jog_authority_revoked')
             if self.settings is not self._jog_settings:
                 raise BackendCommandError('loopback_configuration_changed')
             self._check_submission_ready()

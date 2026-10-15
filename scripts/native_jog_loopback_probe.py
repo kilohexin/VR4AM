@@ -142,6 +142,30 @@ def _sdk_identity():
         distribution_version=distribution,native_version=sdk.version())
 
 
+def assert_case_outcome(result):
+    case=result['case']
+    if case not in CASES:raise RuntimeError('unknown case')
+    expected_ok=case=='immediate'
+    jog,stop=result['jog'],result['stop']
+    expected_jog_error={'speedl_late_100ms':'sdk_timeout:speedl',
+        'invalid_id':'invalid_native_jog_motion_id','rpc_error':'sdk_call_failed:speedl'}.get(case)
+    unknown=result['ownership']['unknown_methods']
+    if expected_jog_error is None:
+        valid_jog=(jog.get('outcome')=='returned' and type(jog.get('value')) is int
+            and jog['value']==7 and unknown==[])
+    else:
+        valid_jog=(jog.get('outcome')=='error' and jog.get('error')==expected_jog_error
+            and unknown==['speedl'])
+    expected_stop_error=(None if expected_ok else 'sdk_timeout:stop_move'
+        if case=='stop_late_250ms' else 'stop_unverified')
+    valid_stop=(stop.get('outcome')==('returned' if expected_ok else 'error')
+        and stop.get('error')==expected_stop_error)
+    if (not valid_jog or not valid_stop or result['confirmed']!=expected_ok
+            or result['preflight_ready']!=expected_ok
+            or result['latched_fault']!=(None if expected_ok else 'stop_unverified')):
+        raise RuntimeError('unexpected case ownership/stop outcome: '+case)
+
+
 async def _one_case(sdk,case):
     from websockets.asyncio.server import serve
     peer=NativeJogPeer(case)
@@ -181,14 +205,7 @@ async def _one_case(sdk,case):
                 latched_fault=adapter._latched_fault,preflight_ready=preflight.ready,
                 ownership=before,native_entries=adapter.native_jog_entries,
                 listener=dict(host=HOST,port=port),rpc_records=peer.records,events=events)
-            expected_ok=case=='immediate'
-            if (result['confirmed']!=expected_ok or (expected_ok and
-                    (jog.get('value')!=7 or stop['outcome']!='returned' or result['latched_fault'] is not None))
-                    or (not expected_ok and (result['latched_fault']!='stop_unverified' or preflight.ready))):
-                raise RuntimeError('unexpected case ownership/stop outcome: '+case)
-            if (case in {'speedl_late_100ms','invalid_id','rpc_error'}
-                    and before['unknown_methods']!=['speedl']):
-                raise RuntimeError('unknown speedl result was cleared')
+            assert_case_outcome(result)
             try:await adapter.disconnect()
             except BackendCommandError:pass
             result['ownership_after_disconnect']=adapter._motion_calls.snapshot()

@@ -8,10 +8,11 @@ import copy
 
 
 class OwnedMotionCalls:
-    def __init__(self):
+    def __init__(self, *, verify_completion_authority=False):
         self.tasks = set()
         self.unknown_methods = set()
         self.last = {}
+        self._verify_completion_authority = verify_completion_authority
 
     async def call(self, method, operation, timeout_s, *, revoked, entered=None, quarantine_errors=True,
                    native_result_unknown=None):
@@ -58,6 +59,11 @@ class OwnedMotionCalls:
             result = task.result()
             if loop.time() >= deadline:
                 record['abandon_reason'] = 'deadline'
+                raise TimeoutError
+            # Completion may have raced revocation after the last pending
+            # check. Publish no successful result for a revoked owner.
+            if self._verify_completion_authority and revoked():
+                record['abandon_reason'] = 'authority_revoked'
                 raise TimeoutError
             record['outcome'] = 'returned'
             return result

@@ -98,3 +98,17 @@ async def test_peer_rejects_duplicate_rpc_ids():
         assert len(peer.records)==1
         assert peer.errors==['duplicate RPC id']
         await peer.close()
+
+
+@pytest.mark.parametrize('change',['jog_failed','wrong_id','speedl_unknown','wrong_stop_error'])
+def test_delayed_stop_case_cannot_mask_a_failed_jog(change):
+    result=dict(case='stop_late_250ms',jog=dict(outcome='returned',value=7),
+        stop=dict(outcome='error',error='sdk_timeout:stop_move'),confirmed=False,
+        latched_fault='stop_unverified',preflight_ready=False,
+        ownership=dict(unknown_methods=[]))
+    probe.assert_case_outcome(result)
+    if change=='jog_failed':result['jog']=dict(outcome='error',error='sdk_timeout:speedl')
+    elif change=='wrong_id':result['jog']['value']=8
+    elif change=='speedl_unknown':result['ownership']['unknown_methods']=['speedl']
+    else:result['stop']['error']='stop_unverified'
+    with pytest.raises(RuntimeError):probe.assert_case_outcome(result)
