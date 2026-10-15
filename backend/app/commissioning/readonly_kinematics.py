@@ -46,7 +46,38 @@ def new_report(*, simulation):
                 connection_release='standalone_process_exit_required_not_verified',
                 pending_remote_result_unknown=False, calls=[], fk_samples=[],
                 assessment='reference_samples_only_not_path_or_physics',
-                chain_within_vr_lease=False)
+                chain_within_vr_lease=False, candidate_full_endpoint_feasible=False,
+                chain_timing_breakdown=None)
+
+
+def chain_timing_breakdown(report):
+    """Describe diagnostic wall time without treating it as production admission.
+
+    SDK await intervals include transport/controller waiting, not SDK CPU alone.
+    Zero intervals may be below the host clock's resolution. Local admission
+    hashing/scheduling and result handling remain in the full wall-time check.
+    """
+    start,elapsed=report.get('chain_started_ns'),report.get('chain_elapsed_ms')
+    if (type(start) is not int or type(elapsed) not in (int,float)
+            or not math.isfinite(elapsed) or elapsed<0):
+        return None
+    end=start+elapsed*1e6
+    rows=[r for r in report.get('calls',[]) if r.get('method') in ('kinematics_forward','kinematics_inverse')]
+    if not rows:return None
+    pre=sdk=post=0
+    for row in rows:
+        times=[row.get(k) for k in ('started_ns','sdk_await_started_ns','sdk_await_completed_ns','completed_ns')]
+        if any(type(t) is not int for t in times):return None
+        a,b,c,d=times
+        if not start<=a<=b<=c<=d<=end:return None
+        pre+=b-a;sdk+=c-b;post+=d-c
+    outside=elapsed-(pre+sdk+post)/1e6
+    if outside < -1e-6:return None
+    return dict(diagnostic_wall_ms=elapsed,sdk_call_samples=len(rows),sdk_await_sum_ms=sdk/1e6,
+        pre_sdk_ms=pre/1e6,post_sdk_ms=post/1e6,outside_queries_ms=max(0.,outside),
+        production_lease_verified=False,
+        scope='diagnostic_timestamps_not_production_lease_or_controller_execution',
+        clock_caveat='zero_intervals_may_be_below_host_clock_resolution')
 
 
 class _Queries:
@@ -235,6 +266,8 @@ async def collect(settings, factory, admit, report):
         point = candidate.point
         report['candidate'] = json.loads(json.dumps(asdict(point)))
         report['progress_fraction'] = candidate.progress_fraction
+        report['candidate_full_endpoint_feasible'] = (
+            candidate.progress_fraction == 1. and tuple(point.q) == tuple(solution))
         base, slope = _controls(np.array(initial['qd']), np.array(initial['qdd']),
                                 np.array(point.q) - np.array(initial['q']), point.horizon_s)
         middle_q = np.array(initial['q']) + np.array([math.comb(5, i) * .5 ** 5 for i in range(6)]) @ (base + slope)
@@ -281,5 +314,6 @@ async def collect(settings, factory, admit, report):
         report['pending_remote_result_unknown'] = any(x['remote_result_unknown'] for x in report['calls'])
         # The task owns its lifecycle locally; late data cannot rewrite saved or returned evidence.
         report['calls'] = copy.deepcopy(report['calls'])
+        report['chain_timing_breakdown'] = chain_timing_breakdown(report)
         report['completed_utc'] = datetime.now(UTC).isoformat()
     return report

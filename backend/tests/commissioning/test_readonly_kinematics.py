@@ -57,8 +57,44 @@ async def test_fixed_readonly_survey_has_no_writes_or_motion_verdict(settings, s
     assert len([x for x in client.read_calls if x == 'get_kin_data']) == 2
     assert report['candidate']['qd'] == [0.] * 6
     assert report['candidate']['qdd'] == [0.] * 6
+    assert report['candidate_full_endpoint_feasible'] == (report['progress_fraction'] == 1.)
     assert report['target']['p'][2] == pytest.approx(.4002)
     assert [x['role'] for x in report['fk_samples']] == ['feedback', 'goal', 'midpoint', 'endpoint']
+
+
+def test_timing_breakdown_separates_sdk_await_from_diagnostic_checks():
+    report=dict(chain_started_ns=100_000_000,chain_elapsed_ms=400.,calls=[
+        dict(method='kinematics_forward',started_ns=110_000_000,sdk_await_started_ns=150_000_000,
+             sdk_await_completed_ns=160_000_000,completed_ns=180_000_000),
+        dict(method='kinematics_inverse',started_ns=200_000_000,sdk_await_started_ns=240_000_000,
+             sdk_await_completed_ns=250_000_000,completed_ns=280_000_000)])
+    result=survey.chain_timing_breakdown(report)
+    assert result['diagnostic_wall_ms']==400.
+    assert result['sdk_await_sum_ms']==20.
+    assert result['pre_sdk_ms']==80.
+    assert result['post_sdk_ms']==50.
+    assert result['outside_queries_ms']==250.
+    assert result['sdk_call_samples']==2
+    assert result['production_lease_verified'] is False
+
+
+@pytest.mark.parametrize('damage',['no_chain','missing_return','reversed'])
+def test_incomplete_timing_is_not_reported_as_zero_sdk_latency(damage):
+    report=dict(chain_started_ns=100,chain_elapsed_ms=1.,calls=[dict(method='kinematics_forward',
+        started_ns=100,sdk_await_started_ns=200,sdk_await_completed_ns=300,completed_ns=400)])
+    if damage=='no_chain':report.pop('chain_elapsed_ms')
+    if damage=='missing_return':report['calls'][0].pop('sdk_await_completed_ns')
+    if damage=='reversed':report['calls'][0]['sdk_await_completed_ns']=150
+    assert survey.chain_timing_breakdown(report) is None
+
+
+async def test_partial_reference_is_not_full_segment_admission(settings):
+    settings=replace(settings,control=replace(settings.control,max_joint_acceleration_radps2=.001))
+    report=await collect(settings,SurveyClient())
+    assert report['complete'] and report['kinematics_consistent']
+    assert report['progress_fraction']<1.
+    assert report['candidate_full_endpoint_feasible'] is False
+    assert report['motion_authorized'] is False
 
 
 @pytest.mark.parametrize('state', ['MOVING', 'STOP', 'HOLD', True, None])
