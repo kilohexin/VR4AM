@@ -8,6 +8,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from app.control.robot_control import LatestVRFrame, RobotControl
+from app.api.operator_jobs import OperatorJobs
 from app.diagnostics.session_trace import SessionTrace
 from app.diagnostics.store import DiagnosticsStore
 from app.rehearsal.report import HARDWARE_PENDING, RehearsalReportStore
@@ -15,6 +16,7 @@ from app.robots.base import BackendCommandError
 from app.schemas.messages import (
     ClientMessage,
     GripperRequestMessage,
+    GripperCancelMessage,
     ClientControlMessage,
     OfflineRehearsalBeginMessage,
     OfflineRehearsalFinishMessage,
@@ -127,6 +129,8 @@ def _parse_message(payload: Any) -> ClientMessage:
         return VRFrame.model_validate(payload)
     if message_type == 'gripper_request':
         return GripperRequestMessage.model_validate(payload)
+    if message_type == 'gripper_cancel':
+        return GripperCancelMessage.model_validate(payload)
     if message_type == "offline_rehearsal_begin":
         return OfflineRehearsalBeginMessage.model_validate(payload)
     if message_type == "offline_rehearsal_phase":
@@ -186,36 +190,15 @@ async def _handle_rehearsal_message(
     send_lock: asyncio.Lock,
     rehearsal_active: asyncio.Event | None = None,
 ) -> None:
+    if isinstance(message, OfflineRehearsalBeginMessage):
+        await _send_json(websocket,dict(v=1,type='offline_rehearsal_begin_result',
+            request_id=message.request_id,accepted=False,reason='feature_removed'),send_lock)
+        return
+
+    # Historical report finishing/reading remains available; no new automated
+    # rehearsal can acquire a control owner through the retired entry.
     store: RehearsalReportStore = websocket.app.state.offline_rehearsal_store
     state, diagnostics = await _rehearsal_snapshot(websocket, control)
-    if isinstance(message, OfflineRehearsalBeginMessage):
-        try:
-            result = await store.begin(
-                owner_token,
-                message.plan_version,
-                state,
-                diagnostics,
-            )
-        except Exception as error:
-            payload = {
-                "v": 1,
-                "type": "offline_rehearsal_begin_result",
-                "request_id": message.request_id,
-                "accepted": False,
-                "reason": _rehearsal_reject_reason("begin", error),
-            }
-        else:
-            if rehearsal_active is not None:
-                rehearsal_active.set()
-            payload = {
-                "v": 1,
-                "type": "offline_rehearsal_begin_result",
-                "request_id": message.request_id,
-                "accepted": True,
-                "run_id": result.run_id,
-            }
-        await _send_json(websocket, payload, send_lock)
-        return
 
     if isinstance(message, OfflineRehearsalPhaseMessage):
         phase_result = message.model_dump(
@@ -322,14 +305,37 @@ async def _receive_messages(
     send_lock: asyncio.Lock,
     owner_token: object | None = None,
     rehearsal_active: asyncio.Event | None = None,
+    rehearsal_messages=None,
+) -> None:
+    async def send(payload):
+        await _send_json(websocket,payload,send_lock)
+    jobs=OperatorJobs(control,send,allowed=lambda: rehearsal_active is None or not rehearsal_active.is_set())
+    try:
+        await _receive_operator_messages(websocket,control,start_sender,send_lock,
+            owner_token,rehearsal_active,rehearsal_messages,jobs)
+    finally:
+        with anyio.CancelScope(shield=True):
+            await jobs.close()
+
+
+async def _receive_operator_messages(
+    websocket: WebSocket,
+    control: RobotControl,
+    start_sender: asyncio.Event,
+    send_lock: asyncio.Lock,
+    owner_token: object | None = None,
+    rehearsal_active: asyncio.Event | None = None,
     rehearsal_messages: asyncio.Queue[
         OfflineRehearsalBeginMessage
         | OfflineRehearsalPhaseMessage
         | OfflineRehearsalFinishMessage
     ] | None = None,
+    jobs: OperatorJobs | None = None,
 ) -> None:
     app = websocket.app
+    assert jobs is not None
     while True:
+        jobs.check_error()
         try:
             payload = await websocket.receive_json()
             message = _parse_message(payload)
@@ -345,20 +351,11 @@ async def _receive_messages(
             continue
 
         if isinstance(message,GripperRequestMessage):
-            accepted=False
-            reason='not_authorized_or_not_idle'
-            if rehearsal_active is None or not rehearsal_active.is_set():
-                try:
-                    await control.command_gripper(message.value)
-                    accepted=True
-                    reason='sdk_returned_not_physical_completion'
-                except BackendCommandError as error:
-                    await control._enter_fault(str(error))
-                    reason='backend_fault'
-                except RuntimeError:
-                    pass
-            await _send_json(websocket,dict(v=1,type='gripper_result',request_id=message.request_id,
-                accepted=accepted,message=reason),send_lock)
+            await jobs.gripper(message)
+            continue
+
+        if isinstance(message,GripperCancelMessage):
+            jobs.cancel_gripper(message.request_id)
             continue
 
         if isinstance(message, SetSimulationScaleMessage):
@@ -416,6 +413,9 @@ async def _receive_messages(
             )
             start_sender.set()
         elif message.type == "arm_request":
+            if getattr(control,'_prepare_on_arm',False):
+                await jobs.arm(message)
+                continue
             try:
                 await control.arm()
             except RuntimeError:
@@ -436,6 +436,7 @@ async def _receive_messages(
                     send_lock,
                 )
         elif message.type == "disarm":
+            jobs.cancel_gripper()
             await control.disarm()
             await _send_json(
                 websocket,

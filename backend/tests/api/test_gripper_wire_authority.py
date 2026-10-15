@@ -131,18 +131,21 @@ async def test_claw_sdk_task_rechecks_release_before_entry(monkeypatch, strategy
         before = list(r.fake.write_calls)
         sent, sent_ns = r.control._last_gripper_sent, r.control._last_gripper_sent_ns
         original_wait_for = asyncio.wait_for
+        original_call = r.adapter._motion_calls.call
         intercepted = False
 
-        async def revoke_before_entry(awaitable, timeout):
+        async def revoke_before_entry(method, operation, timeout, **kwargs):
             nonlocal intercepted
-            code = getattr(awaitable, 'cr_code', None)
-            if timeout == 0.20 and getattr(code, 'co_name', None) == 'send_if_authorized' and not intercepted:
+            if method == 'set_claw' and not intercepted:
                 intercepted = True
-                await send_frame(r, grip=False)
-                await send_frame(r, grip=True)
-            return await original_wait_for(awaitable, timeout)
+                original = operation
+                async def operation():
+                    await send_frame(r, grip=False)
+                    await send_frame(r, grip=True)
+                    return await original()
+            return await original_call(method, operation, timeout, **kwargs)
 
-        monkeypatch.setattr(asyncio, 'wait_for', revoke_before_entry)
+        monkeypatch.setattr(r.adapter._motion_calls, 'call', revoke_before_entry)
         r.clock.advance_ms(100)
         await send_frame(r, trigger=0.8)
         await original_wait_for(r.control.tick(), 1)
@@ -205,7 +208,8 @@ async def test_claw_sdk_failure_is_not_swallowed_as_authority_revocation(monkeyp
         await send_frame(r, trigger=0.8)
         await r.control.tick()
         assert entered.is_set()
-        assert (await r.state())['fault'] == 'sdk_call_failed:set_claw'
+        assert (await r.state())['fault'] == 'stop_unverified'
+        assert r.adapter._motion_calls.unknown_methods == {'set_claw'}
         assert r.control._last_gripper_sent == 0.5
 
 

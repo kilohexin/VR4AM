@@ -492,7 +492,9 @@ export class ArmPanel {
         : this.eligible
           ? 'ready'
           : 'locked';
-    this.armLabel.textContent = this.armFeedback
+    this.armLabel.textContent = this.isArmPending && this.recoveryPhase
+      ? this.recoveryPhase === 'homing' ? '正在前往准备位' : this.recoveryPhase === 'stabilizing' ? '正在确认到位' : '正在准备'
+      : this.armFeedback
       ? '解锁被拒绝'
       : this.isArmPending
         ? '正在解锁'

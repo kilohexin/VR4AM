@@ -224,6 +224,31 @@ button {
  color: var(--white); background: #092632; touch-action: none; user-select: none;}
 .hold-control-panel button.is-held {background: var(--cyan); color: #05131b;}
 .hold-control-panel button:disabled {opacity: .4; border-color: var(--line);}
+.joystick-layout {display: grid; grid-template-columns: minmax(180px,1fr) 112px; gap: 12px; align-items: center;}
+.joystick-section {display: grid; grid-template-columns: 22px minmax(120px,156px) 22px; grid-template-rows: 22px auto 22px; justify-content: center; align-items: center; text-align: center;}
+.joystick-axis {font-size: 12px; color: var(--cyan); white-space: nowrap;}
+.axis-north {grid-column: 2; grid-row: 1;} .axis-south {grid-column: 2; grid-row: 3;}
+.axis-west {grid-column: 1; grid-row: 2;} .axis-east {grid-column: 3; grid-row: 2;}
+.hold-control-panel .xy-joystick {position: relative; grid-column: 2; grid-row: 2; width: 100%; aspect-ratio: 1;
+  padding: 0; border-radius: 50%; touch-action: none; user-select: none; background: #102d3b; overflow: hidden;}
+.joystick-cross {position: absolute; inset: 14%; border: 1px solid #285364; border-radius: 50%; pointer-events: none;}
+.joystick-cross::before,.joystick-cross::after {content: ''; position: absolute; background: #285364;}
+.joystick-cross::before {left: 50%; top: -20%; width: 1px; height: 140%;}
+.joystick-cross::after {left: -20%; top: 50%; height: 1px; width: 140%;}
+.joystick-knob {position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; border-radius: 50%;
+  transform: translate(-50%,-50%); border: 2px solid #86efff; background: #1e9bb7; pointer-events: none;}
+.axis-controls {display: grid; gap: 7px; text-align: center;}
+.axis-controls > span {font-size: 12px; color: #a9bdc7;}
+.hold-control-panel .axis-controls button {padding: 10px 3px; touch-action: none;}
+.spin-buttons {display: grid; grid-template-columns: 1fr 1fr; gap: 6px;}
+.hold-control-panel .spin-buttons button {font-size: 23px; line-height: 24px;}
+.progressive-claw {margin-top: 10px; border-top: 1px solid var(--line); padding-top: 12px;}
+.progressive-claw h3 {display: flex; justify-content: space-between; margin: 0 0 9px; font-size: 15px; font-weight: 500;}
+.progressive-claw h3 strong {font-variant-numeric: tabular-nums; color: var(--cyan);}
+.claw-opening-track {height: 7px; border-radius: 4px; background: #243946; overflow: hidden;}
+.claw-opening-track span {display: block; height: 100%; width: 0; background: var(--cyan);}
+.claw-buttons button {touch-action: none; user-select: none;}
+@media (max-width: 380px) {.joystick-layout {grid-template-columns: minmax(158px,1fr) 96px; gap: 8px;}}
 
 .offline-rehearsal-banner {
   position: fixed;

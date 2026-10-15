@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 from app.control.coordinate_mapper import CoordinateMapper
 from app.control.filters import PoseFilter
@@ -152,11 +152,19 @@ class RobotControl:
         bounded_target_timing: bool = False,
         transactional_settings: PursuitSettings | None = None,
         segmented_settings: SegmentedSettings | None = None,
+        prepare_on_arm: bool = False,
     ) -> None:
         self.backend = backend
         self.latest = latest
         self.clock = clock
         self.recorder = recorder
+        if type(prepare_on_arm) is not bool:
+            raise ValueError('invalid_prepare_on_arm')
+        if prepare_on_arm and getattr(backend, 'supports_prepare_on_arm', False) is not True:
+            raise ValueError('prepare_on_arm_not_supported')
+        self._prepare_on_arm = prepare_on_arm
+        self._preparation_episode: RecoveryEpisode | None = None
+        self._explicit_gripper_current: Callable[[], bool] | None = None
         self.mapper = mapper if mapper is not None else CoordinateMapper()
         self.limiter = limiter if limiter is not None else SafetyLimiter()
         if type(bounded_target_timing) is not bool:
@@ -243,6 +251,8 @@ class RobotControl:
     def _has_gripper_dispatch_authority(self) -> bool:
         received = self.latest.snapshot()
         return (
+            self._explicit_gripper_request_is_current()
+            and
             received is not None
             and self._gripper_authority_is_current(self.control_generation)
             and self._frame_is_current(received, self.control_generation)
@@ -353,17 +363,29 @@ class RobotControl:
             self._task = asyncio.create_task(self.run())
 
     async def arm(self) -> None:
+        if self._prepare_on_arm:
+            if self._recovery_lock.locked():
+                raise RuntimeError('arm_blocked_by_recovery')
+            async with self._recovery_lock:
+                await self._prepare_and_arm()
+            return
+        await self._arm_without_prepare()
+
+    async def _arm_without_prepare(self, *, ensure_prepared: Callable[[], None] | None = None) -> None:
         if self._shutdown_started:
             raise RuntimeError("control_shutdown")
         if self._loop_failed:
             raise RuntimeError("control_faulted")
         if self._fault is not None:
             raise RuntimeError("arm_blocked_by_fault")
-        if self._recovery_lock.locked():
+        if self._recovery_lock.locked() and ensure_prepared is None:
             raise RuntimeError("arm_blocked_by_recovery")
         generation, mode = self._control_generation, self.machine.mode
 
         def ensure_current() -> None:
+            if ensure_prepared is not None:
+                ensure_prepared()
+                return
             if (
                 self.machine.mode is not mode
                 or not self._control_generation_is_current(generation)
@@ -405,6 +427,99 @@ class RobotControl:
         # Connecting only observes the gripper; it does not issue a command.
         # Make the first authorized delta eligible immediately after Arm.
         self._last_gripper_sent_ns = None
+
+    def _preparation_is_current(self, episode: RecoveryEpisode) -> bool:
+        received = self.latest.snapshot()
+        return (
+            not self._recovery_episode_changed(episode)
+            and self.machine.mode is TeleopMode.READY
+            and self._fault is None and not self._loop_failed
+            and not self._shutdown_started and not self._disconnecting
+            and not self._disarm_in_progress and not self._grip_stop_in_progress
+            and not self._target_lifecycle_failed
+            and self.latest.grip_release_count == self._observed_grip_release_count
+            and received is not None
+            and 0 <= self.clock.now_ns() - received.received_ns < VR_FRAME_STALE_MS * 1_000_000
+            and received.frame.tracking_valid and received.frame.visibility == 'visible'
+            and not received.frame.right.grip
+        )
+
+    async def _prepare_and_arm(self) -> None:
+        # Only an explicit Unlock enters this path. Connection and reconnect
+        # never prepare. The original recovery owns joint writes and stopping.
+        episode = self._recovery_episode()
+        if not self.machine.can_arm or not self._preparation_is_current(episode):
+            raise RuntimeError('arm_prepare_requires_fresh_grip_release')
+        self._recovery_phase = 'stopping'
+        motion_started = False
+        try:
+            await self._stop_backend(StopReason.HOME)
+            expected = RecoveryEpisode(episode.control_generation + 1, episode.session_id)
+            if not self._preparation_is_current(expected):
+                raise RuntimeError('arm_authority_changed')
+            episode = expected
+            self._preparation_episode = episode
+
+            def ensure_current() -> None:
+                if not self._preparation_is_current(episode):
+                    raise RuntimeError('arm_authority_changed')
+
+            idle_rejection = await self._wait_for_home_idle()
+            ensure_current()
+            if idle_rejection is not None:
+                raise RuntimeError('arm_prepare_failed:not_stopped')
+            preflight = await self.backend.preflight()
+            ensure_current()
+            recorded = await self._record_critical('preflight_result', {
+                'ready': preflight.ready, 'reason': preflight.reason,
+                'robot_state': preflight.robot_state.value,
+                'tcp_matches': preflight.tcp_matches,
+                'capabilities': list(preflight.capabilities),
+            })
+            if not recorded:
+                self._latch_recording_fault()
+                raise RuntimeError('arm_prepare_failed:recording_unavailable')
+            ensure_current()
+            if not preflight.ready and preflight.reason != 'singular_configuration':
+                raise RuntimeError(f'arm_prepare_failed:{preflight.reason}')
+
+            def on_phase(phase: HomePhase) -> None:
+                # Original Real.prepare invokes homing synchronously after
+                # capturing backend generations and before taking the SDK lock.
+                # This prevents a control revoke during its snapshot read from
+                # being adopted as a new recovery generation.
+                ensure_current()
+                self._recovery_phase = phase
+
+            motion_started = True
+            await self.backend.prepare(self.home_options, on_phase)
+            ensure_current()
+            self.mapper.clear()
+            self.filter.clear()
+            self.limiter.clear()
+            self.last_target = None
+            self._clear_constraint()
+            received = self.latest.snapshot()
+            assert received is not None
+            self._last_frame_id = (received.frame.session_id, received.frame.seq)
+            # Recheck ordinary teleoperation preflight after arrival; the
+            # recovery's singularity exception grants no joystick authority.
+            await self._arm_without_prepare(ensure_prepared=ensure_current)
+        except asyncio.CancelledError:
+            if motion_started:
+                await self._stop_failed_home_motion()
+            self._lock_after_home_failure()
+            raise
+        except Exception as error:
+            if motion_started:
+                await self._stop_failed_home_motion()
+            self._lock_after_home_failure()
+            if isinstance(error, RuntimeError) and str(error).startswith('arm_'):
+                raise
+            raise RuntimeError('arm_prepare_failed') from error
+        finally:
+            self._preparation_episode = None
+            self._recovery_phase = None
 
     async def disarm(self) -> None:
         if self.machine.mode in {TeleopMode.STALE, TeleopMode.FAULT}:
@@ -795,6 +910,15 @@ class RobotControl:
             raise
 
     async def tick(self) -> None:
+        if self._disconnecting or self._disarm_in_progress or self._grip_stop_in_progress:
+            return
+        episode = self._preparation_episode
+        if episode is not None and not self._preparation_is_current(episode):
+            # Recovery normally suppresses control ticks. Preparation still
+            # needs the original 100-ms input lease and immediate stop revoke.
+            self._preparation_episode = None
+            await self.disarm()
+            return
         if (self._disconnecting or self._disarm_in_progress
                 or self._recovery_lock.locked() or self._grip_stop_in_progress):
             return
@@ -1396,7 +1520,25 @@ class RobotControl:
             self.machine.stop_complete()
             self._advance_control_generation()
 
-    async def command_gripper(self, value: float) -> None:
+    async def command_gripper(self, value: float, *, is_current: Callable[[], bool] | None = None) -> None:
+        if self._explicit_gripper_current is not None:
+            raise RuntimeError('gripper_command_busy')
+        self._explicit_gripper_current = is_current or (lambda: True)
+        try:
+            await self._command_gripper(value)
+        finally:
+            self._explicit_gripper_current = None
+
+    def _explicit_gripper_request_is_current(self) -> bool:
+        callback = self._explicit_gripper_current
+        if callback is None:
+            return True
+        try:
+            return callback() is True
+        except Exception:
+            return False
+
+    async def _command_gripper(self, value: float) -> None:
         generation = self._control_generation
         if not self._gripper_authority_is_current(generation):
             raise RuntimeError("gripper_command_requires_armed")
@@ -1424,6 +1566,8 @@ class RobotControl:
             )
         if not await self._try_set_gripper(value):
             raise RuntimeError("gripper_command_authority_changed")
+        if not self._gripper_authority_is_current(generation):
+            raise RuntimeError("gripper_command_authority_changed")
         self._last_gripper_sent = value
         self._last_gripper_sent_ns = self.clock.now_ns()
 
@@ -1436,6 +1580,8 @@ class RobotControl:
 
     def _gripper_authority_is_current(self, generation: int) -> bool:
         return (
+            self._explicit_gripper_request_is_current()
+            and
             self.machine.mode in {TeleopMode.ARMED, TeleopMode.ACTIVE, TeleopMode.HOLD}
             and self._control_generation_is_current(generation)
         )

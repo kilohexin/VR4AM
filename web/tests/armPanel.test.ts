@@ -11,6 +11,13 @@ async function flushSafetyChange(): Promise<void> {
 }
 
 describe('ArmPanel simulator safety', () => {
+  it('shows work-ready preparation and keeps stop available during unlock',()=>{
+    const panel=new ArmPanel(document.querySelector('#panel')!,vi.fn());
+    panel.setConnectionStatus({state:'connected'});panel.setMode('READY');panel.observeGrip(false);
+    expect(panel.requestArm()).toBe(true);panel.setRecoveryPhase('homing');
+    expect(panel.armButton.textContent).toContain('准备位');
+    expect(panel.armButton.disabled).toBe(true);expect(panel.stopButton.disabled).toBe(false);
+  });
   it('keeps the active VR exit action available before automation owns control', () => {
     const toggleVR = vi.fn();
     const panel = new ArmPanel(document.querySelector('#panel')!, vi.fn(), toggleVR);

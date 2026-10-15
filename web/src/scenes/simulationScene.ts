@@ -36,11 +36,15 @@ import {
 const FRAME_INTERVAL_MS = 1_000 / 60;
 const DESKTOP_CONTROLLER_POSITION: Vec3 = [0.56, 0.42, 0.18];
 const DESKTOP_CONTROLLER_QUATERNION: Quat = [0, 0, 0, 1];
-const GRASP_PLATFORM_TOP_Y = 0.53;
-const GRASP_PLATFORM_CENTER_X = -0.17;
-const GRASP_PLATFORM_CENTER_Z = -0.12;
-const GRASP_PLATFORM_HALF_WIDTH = 0.19;
-const GRASP_PLATFORM_HALF_DEPTH = 0.20;
+const DESK_TOP_Y = -0.005;
+// The visual worktop, initial block contact and kinematic release bounds share one surface.
+export const GRASP_WORKBENCH_SURFACE = {
+  tableTopY: 0.53,
+  tableCenterX: -0.17,
+  tableCenterZ: -0.12,
+  tableHalfWidth: 0.19,
+  tableHalfDepth: 0.20,
+} as const;
 
 export interface VRFrameInput {
   sessionId: string;
@@ -73,143 +77,6 @@ export function createVRFrame(input: VRFrameInput): VRFrame {
   };
   if (input.headQ) frame.head_q = [...input.headQ];
   return frame;
-}
-
-export interface DesktopInputSnapshot {
-  activePointer: number | null;
-  grip: boolean;
-  trigger: number;
-}
-
-export class DesktopInputSafety {
-  private activePointer: number | null = null;
-  private grip = false;
-  private trigger = 0;
-  private attached = false;
-  private enabled = true;
-  private readonly ownerWindow: Window;
-  private readonly ownerDocument: Document;
-
-  constructor(private readonly canvas: HTMLCanvasElement) {
-    this.ownerDocument = canvas.ownerDocument;
-    this.ownerWindow = this.ownerDocument.defaultView ?? window;
-    if (!canvas.hasAttribute('tabindex')) canvas.tabIndex = 0;
-  }
-
-  attach(): void {
-    if (this.attached) return;
-    this.attached = true;
-    this.ownerWindow.addEventListener('blur', this.onInterrupted);
-    this.ownerWindow.addEventListener('keydown', this.onKeyDown);
-    this.ownerWindow.addEventListener('keyup', this.onKeyUp);
-    this.ownerDocument.addEventListener('visibilitychange', this.onVisibilityChange);
-    this.ownerDocument.addEventListener('focusin', this.onFocusIn);
-    this.canvas.addEventListener('pointerdown', this.onPointerDown);
-    this.canvas.addEventListener('pointerup', this.onPointerUp);
-    this.canvas.addEventListener('pointercancel', this.onPointerUp);
-    this.canvas.addEventListener('lostpointercapture', this.onLostPointerCapture);
-  }
-
-  dispose(): void {
-    this.reset();
-    if (!this.attached) return;
-    this.attached = false;
-    this.ownerWindow.removeEventListener('blur', this.onInterrupted);
-    this.ownerWindow.removeEventListener('keydown', this.onKeyDown);
-    this.ownerWindow.removeEventListener('keyup', this.onKeyUp);
-    this.ownerDocument.removeEventListener('visibilitychange', this.onVisibilityChange);
-    this.ownerDocument.removeEventListener('focusin', this.onFocusIn);
-    this.canvas.removeEventListener('pointerdown', this.onPointerDown);
-    this.canvas.removeEventListener('pointerup', this.onPointerUp);
-    this.canvas.removeEventListener('pointercancel', this.onPointerUp);
-    this.canvas.removeEventListener('lostpointercapture', this.onLostPointerCapture);
-  }
-
-  snapshot(): DesktopInputSnapshot {
-    return {activePointer: this.activePointer, grip: this.grip, trigger: this.trigger};
-  }
-
-  isActivePointer(pointerId: number): boolean {
-    return this.enabled && this.activePointer === pointerId;
-  }
-
-  setEnabled(enabled: boolean): void {
-    if (this.enabled === enabled) return;
-    this.enabled = enabled;
-    this.reset();
-  }
-
-  reset(): void {
-    const pointerId = this.activePointer;
-    this.activePointer = null;
-    this.grip = false;
-    this.trigger = 0;
-    if (pointerId === null) return;
-    try {
-      if (this.canvas.hasPointerCapture(pointerId)) this.canvas.releasePointerCapture(pointerId);
-    } catch {
-      // Capture may already belong to the browser after blur/visibility transitions.
-    }
-  }
-
-  private readonly onPointerDown = (event: PointerEvent): void => {
-    if (!this.enabled || event.button !== 0) return;
-    this.canvas.focus({preventScroll: true});
-    this.activePointer = event.pointerId;
-    this.grip = true;
-    try {
-      this.canvas.setPointerCapture(event.pointerId);
-    } catch {
-      this.reset();
-    }
-  };
-
-  private readonly onPointerUp = (event: PointerEvent): void => {
-    if (this.activePointer !== event.pointerId) return;
-    this.activePointer = null;
-    this.grip = false;
-    try {
-      if (this.canvas.hasPointerCapture(event.pointerId)) {
-        this.canvas.releasePointerCapture(event.pointerId);
-      }
-    } catch {
-      // The release still wins locally even when browser capture has already gone.
-    }
-  };
-
-  private readonly onLostPointerCapture = (_event: PointerEvent): void => this.reset();
-
-  private readonly onInterrupted = (): void => this.reset();
-
-  private readonly onVisibilityChange = (): void => {
-    if (this.ownerDocument.visibilityState !== 'visible') this.reset();
-  };
-
-  private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (!this.enabled || event.code !== 'Space' || event.defaultPrevented
-      || event.isComposing || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey
-      || this.interactiveTarget(event)) return;
-    if (event.repeat) {
-      if (this.trigger === 1) event.preventDefault();
-      return;
-    }
-    event.preventDefault();
-    this.trigger = 1;
-  };
-
-  private readonly onKeyUp = (event: KeyboardEvent): void => {
-    if (event.code === 'Space') this.trigger = 0;
-  };
-
-  private interactiveTarget(event: Event): boolean {
-    return [...event.composedPath(),this.ownerDocument.activeElement].some(target =>
-      target instanceof Element && target.closest(
-        'input,textarea,select,button,a[href],[contenteditable]:not([contenteditable="false"]),[role="button"],[role="textbox"],[role="combobox"],[role="slider"],[role="spinbutton"]'));
-  }
-
-  private readonly onFocusIn = (event: FocusEvent): void => {
-    if (this.interactiveTarget(event)) this.reset();
-  };
 }
 
 export class ServerClockAnchor {
@@ -251,7 +118,7 @@ export class SimulationScene {
   private readonly grid = new THREE.GridHelper(4, 40, 0x1f839f, 0x183245);
   private readonly targetMarker = new THREE.Group();
   private readonly graspBlocks = createGraspBlocks();
-  private readonly graspPlatform = createGraspPlatform();
+  private readonly graspWorkbench = createGraspWorkbench();
   private readonly rehearsalSupport = createRehearsalSupport();
   private readonly rehearsalPlacementMarker = createRehearsalPlacementMarker();
   private sessionId = createSessionId();
@@ -261,7 +128,6 @@ export class SimulationScene {
   private sequence = 0;
   private lastFrameMs = Number.NEGATIVE_INFINITY;
   private readonly clockAnchor = new ServerClockAnchor();
-  private readonly inputSafety: DesktopInputSafety;
   private readonly orbitCamera: DesktopOrbitCamera;
   private readonly controllerPosition = new THREE.Vector3(...DESKTOP_CONTROLLER_POSITION);
   private readonly controllerQuaternion = new THREE.Quaternion(...DESKTOP_CONTROLLER_QUATERNION);
@@ -309,7 +175,6 @@ export class SimulationScene {
     this.renderer.shadowMap.enabled = true;
     this.renderer.domElement.className = 'simulation-canvas';
     this.renderer.domElement.style.touchAction = 'none';
-    this.inputSafety = new DesktopInputSafety(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(38, 1, 0.01, 50);
     this.orbitCamera = new DesktopOrbitCamera(this.renderer.domElement, this.camera);
@@ -321,21 +186,17 @@ export class SimulationScene {
     this.robotVisualRoot.add(
       ...this.graspBlocks.map(({object}) => object),
     );
-    this.robotVisualRoot.add(this.graspPlatform);
+    this.robotVisualRoot.add(this.graspWorkbench);
     this.robotVisualRoot.add(this.rehearsalSupport);
     this.robotVisualRoot.add(this.rehearsalPlacementMarker);
     setGraspPropVisibility(
-      this.graspBlocks, this.graspPlatform, this.rehearsalSupport,
+      this.graspBlocks, this.graspWorkbench, this.rehearsalSupport,
       this.rehearsalPlacementMarker, null, this.offlineWorkspace,
     );
     this.graspController = new KinematicGraspController({
       visualRoot: this.robotVisualRoot,
       blocks: this.graspBlocks,
-      tableTopY: GRASP_PLATFORM_TOP_Y,
-      tableCenterX: GRASP_PLATFORM_CENTER_X,
-      tableCenterZ: GRASP_PLATFORM_CENTER_Z,
-      tableHalfWidth: GRASP_PLATFORM_HALF_WIDTH,
-      tableHalfDepth: GRASP_PLATFORM_HALF_DEPTH,
+      ...GRASP_WORKBENCH_SURFACE,
     });
     this.createTargetMarker();
     this.controllerHints = new ControllerHints(this.scene);
@@ -358,7 +219,7 @@ export class SimulationScene {
     this.options.stateBuffer.push(state);
     this.clockAnchor.update(state.server_mono_ns, performance.now());
     setGraspPropVisibility(
-      this.graspBlocks, this.graspPlatform, this.rehearsalSupport,
+      this.graspBlocks, this.graspWorkbench, this.rehearsalSupport,
       this.rehearsalPlacementMarker, state.backend, this.offlineWorkspace,
     );
   }
@@ -366,22 +227,19 @@ export class SimulationScene {
   resetConnection(): void {
     this.options.stateBuffer.reset();
     this.clockAnchor.reset();
-    this.inputSafety.reset();
     setGraspPropVisibility(
-      this.graspBlocks, this.graspPlatform, this.rehearsalSupport,
+      this.graspBlocks, this.graspWorkbench, this.rehearsalSupport,
       this.rehearsalPlacementMarker, null, this.offlineWorkspace,
     );
   }
 
   setOfflineController(sample: OfflineControllerSample | null): void {
     if (sample === null) {
-      this.inputSafety.reset();
       this.controllerPosition.fromArray(DESKTOP_CONTROLLER_POSITION);
       this.controllerQuaternion.fromArray(DESKTOP_CONTROLLER_QUATERNION);
       this.offlineController = null;
       return;
     }
-    this.inputSafety.reset();
     this.offlineController = copyOfflineControllerSample(sample);
     this.controllerPosition.fromArray(this.offlineController.position);
     this.controllerQuaternion.fromArray(this.offlineController.quaternion);
@@ -390,7 +248,6 @@ export class SimulationScene {
   setAutomationActive(active: boolean): void {
     if (this.automationActive === active) return;
     this.automationActive = active;
-    this.inputSafety.setEnabled(!active);
   }
 
   getOfflineSceneSnapshot(): OfflineSceneSnapshot {
@@ -476,7 +333,6 @@ export class SimulationScene {
     if (!this.started) throw new Error('Simulation scene is not running');
     if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
     this.animationHandle = null;
-    this.inputSafety.reset();
     this.vrSafetyPanel.setVisible(false);
     this.controllerHints.setVisible(false);
     await this.renderer.xr.setSession(session);
@@ -484,6 +340,7 @@ export class SimulationScene {
     this.renderer.setAnimationLoop(loop);
     this.controllerHints.setVisible(true);
     this.vrSafetyPanel.setVisible(true);
+    this.targetMarker.visible = true;
   }
 
   async stopXR(): Promise<void> {
@@ -495,6 +352,7 @@ export class SimulationScene {
       this.robotVisualRoot.position.set(0, 0, 0);
       this.controllerHints.setVisible(false);
       this.vrSafetyPanel.setVisible(false);
+      this.targetMarker.visible = false;
       this.sessionId = createSessionId();
       this.sequence = 0;
       this.lastFrameMs = Number.NEGATIVE_INFINITY;
@@ -582,7 +440,6 @@ export class SimulationScene {
     if (nowMs - this.lastFrameMs >= FRAME_INTERVAL_MS) {
       this.lastFrameMs = nowMs;
       const offline = this.offlineController;
-      const input = offline === null && !this.automationActive ? this.inputSafety.snapshot() : null;
       const frame = createVRFrame({
         sessionId: this.sessionId,
         sequence: this.sequence++,
@@ -590,8 +447,8 @@ export class SimulationScene {
         trackingValid: document.visibilityState === 'visible' && (offline?.trackingValid ?? true),
         position: offline?.position ?? this.controllerPosition.toArray() as Vec3,
         quaternion: offline?.quaternion ?? this.controllerQuaternion.toArray() as Quat,
-        grip: offline?.grip ?? input?.grip ?? false,
-        trigger: offline?.trigger ?? input?.trigger ?? 0,
+        grip: offline?.grip ?? false,
+        trigger: offline?.trigger ?? 0,
       });
       this.options.onController({
         tracking: frame.tracking_valid,
@@ -635,7 +492,8 @@ export class SimulationScene {
     const tableMaterial = new THREE.MeshStandardMaterial({color: 0x111923, metalness: 0.35, roughness: 0.78});
     const edgeMaterial = new THREE.MeshStandardMaterial({color: 0x080d12, metalness: 0.9, roughness: 0.35});
     const top = new THREE.Mesh(new THREE.BoxGeometry(1.22, 0.1, 0.86), tableMaterial);
-    top.position.set(0, -0.055, 0);
+    top.name = 'desk-top';
+    top.position.set(0, DESK_TOP_Y - 0.05, 0);
     top.receiveShadow = true;
     this.robotVisualRoot.add(top);
     for (const [x, z] of [[-0.52, -0.34], [0.52, -0.34], [-0.52, 0.34], [0.52, 0.34]] as const) {
@@ -672,47 +530,25 @@ export class SimulationScene {
     );
     this.targetMarker.add(axes, ring, marker);
     this.targetMarker.position.copy(this.controllerPosition);
+    this.targetMarker.visible = false;
     this.robotVisualRoot.add(this.targetMarker);
   }
 
   private addListeners(): void {
     const canvas = this.renderer.domElement;
-    this.inputSafety.attach();
     this.orbitCamera.attach();
     window.addEventListener('resize', this.resizeFromEvent);
-    canvas.addEventListener('pointermove', this.onPointerMove);
-    canvas.addEventListener('wheel', this.onWheel, {passive: false});
     canvas.addEventListener('contextmenu', this.preventContextMenu);
   }
 
   private removeListeners(): void {
     const canvas = this.renderer.domElement;
-    this.inputSafety.dispose();
     this.orbitCamera.dispose();
     window.removeEventListener('resize', this.resizeFromEvent);
-    canvas.removeEventListener('pointermove', this.onPointerMove);
-    canvas.removeEventListener('wheel', this.onWheel);
     canvas.removeEventListener('contextmenu', this.preventContextMenu);
   }
 
   private readonly resizeFromEvent = (): void => this.resize();
-
-  private readonly onPointerMove = (event: PointerEvent): void => this.applyPointerMove(event);
-
-  private applyPointerMove(event: PointerEvent): void {
-    if (this.automationActive || this.offlineController !== null) return;
-    if (!this.inputSafety.isActivePointer(event.pointerId)) return;
-    this.controllerPosition.x = clamp(this.controllerPosition.x + event.movementX * 0.0012, -0.2, 0.8);
-    this.controllerPosition.y = clamp(this.controllerPosition.y - event.movementY * 0.0012, 0.05, 1.05);
-  }
-
-  private readonly onWheel = (event: WheelEvent): void => this.applyWheel(event);
-
-  private applyWheel(event: WheelEvent): void {
-    if (this.automationActive || this.offlineController !== null) return;
-    event.preventDefault();
-    this.controllerPosition.z = clamp(this.controllerPosition.z + event.deltaY * 0.0008, -0.62, 0.62);
-  }
 
   private readonly preventContextMenu = (event: MouseEvent): void => event.preventDefault();
 }
@@ -739,11 +575,11 @@ function setGraspPropVisibility(
 
 export function createGraspBlocks(): GraspBlock[] {
   const definitions = [
-    ['block-orange', 0xff8a3d, [-0.05, 0.56, -0.23]],
-    ['block-blue', 0x39a8ff, [-0.14, 0.56, -0.26]],
-    ['block-green', 0x58d68d, [-0.24, 0.56, -0.25]],
-    ['block-yellow', 0xffd84d, [-0.27, 0.56, -0.14]],
-    ['block-purple', 0xa77bff, [-0.16, 0.56, -0.10]],
+    ['block-orange', 0xff8a3d, [-0.05, -0.23]],
+    ['block-blue', 0x39a8ff, [-0.14, -0.26]],
+    ['block-green', 0x58d68d, [-0.24, -0.25]],
+    ['block-yellow', 0xffd84d, [-0.27, -0.14]],
+    ['block-purple', 0xa77bff, [-0.16, -0.10]],
   ] as const;
   return definitions.map(([id, color, position]) => {
     const object = new THREE.Mesh(
@@ -755,30 +591,49 @@ export function createGraspBlocks(): GraspBlock[] {
       }),
     );
     object.name = id;
-    object.position.set(position[0], position[1], position[2]);
+    object.position.set(position[0], GRASP_WORKBENCH_SURFACE.tableTopY + 0.03, position[1]);
     object.castShadow = true;
     object.receiveShadow = true;
     return {id, object, sizeM: 0.06};
   });
 }
 
-function createGraspPlatform(): THREE.Mesh {
-  const platform = new THREE.Mesh(
-    new THREE.BoxGeometry(
-      GRASP_PLATFORM_HALF_WIDTH * 2,
-      0.03,
-      GRASP_PLATFORM_HALF_DEPTH * 2,
-    ),
+export function createGraspWorkbench(): THREE.Group {
+  const {tableTopY, tableCenterX, tableCenterZ, tableHalfWidth, tableHalfDepth} = GRASP_WORKBENCH_SURFACE;
+  const workbench = new THREE.Group();
+  workbench.name = 'grasp-workbench';
+  const topThickness = 0.03;
+  const undersideY = tableTopY - topThickness;
+  const postHeight = undersideY - DESK_TOP_Y;
+  const frameMaterial = new THREE.MeshStandardMaterial({color: 0x627987, metalness: 0.55, roughness: 0.52});
+  const top = new THREE.Mesh(
+    new THREE.BoxGeometry(tableHalfWidth * 2, topThickness, tableHalfDepth * 2),
     new THREE.MeshStandardMaterial({color: 0x264656, metalness: 0.18, roughness: 0.72}),
   );
-  platform.name = 'grasp-platform';
-  platform.position.set(
-    GRASP_PLATFORM_CENTER_X,
-    GRASP_PLATFORM_TOP_Y - 0.015,
-    GRASP_PLATFORM_CENTER_Z,
-  );
-  platform.receiveShadow = true;
-  return platform;
+  top.name = 'workbench-top';
+  top.position.set(tableCenterX, tableTopY - topThickness / 2, tableCenterZ);
+  top.castShadow = true;
+  top.receiveShadow = true;
+  workbench.add(top);
+
+  const insetX = tableHalfWidth - 0.025;
+  const insetZ = tableHalfDepth - 0.025;
+  for (const x of [-insetX, insetX]) {
+    for (const z of [-insetZ, insetZ]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.04, postHeight, 0.04), frameMaterial);
+      post.name = `workbench-post-${x}-${z}`;
+      post.position.set(tableCenterX + x, DESK_TOP_Y + postHeight / 2, tableCenterZ + z);
+      post.castShadow = true;
+      post.receiveShadow = true;
+      workbench.add(post);
+    }
+    const stretcher = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.03, insetZ * 2), frameMaterial);
+    stretcher.name = `workbench-stretcher-${x}`;
+    stretcher.position.set(tableCenterX + x, DESK_TOP_Y + 0.09, tableCenterZ);
+    stretcher.castShadow = true;
+    workbench.add(stretcher);
+  }
+  return workbench;
 }
 
 export function fakeRehearsalWorkspaceLayout(

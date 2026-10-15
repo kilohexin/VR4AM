@@ -10,7 +10,7 @@ import type {
 import type {TeleopConnectionStatus} from '../transport/teleopSocket';
 import type {XRSessionStatus} from '../xr/session';
 
-const DESKTOP_INPUT_HELP='桌面：鼠标左键长按方向、升降或自转按钮 · 松开停止 · 静止时点击夹爪开合 · 右键转视角';
+const DESKTOP_INPUT_HELP='桌面：鼠标左键拖动摇杆控制前后左右 · 长按升降、自转或夹爪开合 · 松开保持 · 右键只转视角';
 const XR_INPUT_HELP='右 Grip 建立末端零位 · Trigger 控制夹爪 · 左摇杆平移平台 · 左 Grip+摇杆调高度 · 按下左摇杆归零';
 
 export interface ControllerHudState {
@@ -33,7 +33,6 @@ export class Hud {
   readonly sceneContainer: HTMLElement;
   readonly actionContainer: HTMLElement;
   readonly rehearsalBanner: HTMLElement;
-  readonly rehearsalContainer: HTMLElement;
   readonly settingsContainer: HTMLElement;
   readonly diagnosticsContainer: HTMLElement;
   readonly desktopControlContainer: HTMLElement;
@@ -115,7 +114,6 @@ export class Hud {
             <span class="status-label">边界/恢复</span>
             <span class="status-value" data-field="constraint">无</span>
           </div>
-          <div class="offline-rehearsal-rail" aria-label="离线演练控制台"></div>
           <div class="simulation-settings-rail" aria-label="仿真操作设置"></div>
           <div class="diagnostics-rail" aria-label="LM3 diagnostics"></div>
         </aside>
@@ -129,7 +127,6 @@ export class Hud {
     this.sceneContainer = requireElement(root, '.scene-canvas');
     this.actionContainer = requireElement(root, '.command-actions-host');
     this.rehearsalBanner = requireElement(root, '.offline-rehearsal-banner');
-    this.rehearsalContainer = requireElement(root, '.offline-rehearsal-rail');
     this.settingsContainer = requireElement(root, '.simulation-settings-rail');
     this.diagnosticsContainer = requireElement(root, '.diagnostics-rail');
     this.desktopControlContainer = requireElement(root, '.desktop-control-host');
@@ -371,8 +368,8 @@ export function readableConstraint(constraint: ConstraintKind | null): string {
 function readableRecoveryPhase(phase: RecoveryPhase): string {
   return {
     stopping: '正在确认停止',
-    homing: '正在回到初始姿态',
-    stabilizing: '正在确认 Home 稳定',
+    homing: '正在前往工作准备位',
+    stabilizing: '正在确认到位与稳定',
   }[phase];
 }
 

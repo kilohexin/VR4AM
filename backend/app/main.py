@@ -57,6 +57,7 @@ def build_recorder(
     if settings.segmented_target is not None:
         metadata['segment_settling'] = asdict(settings.segmented_target.settling)
         metadata['segment_hardware_verified'] = False
+        metadata['prepare_on_arm'] = settings.segmented_target.prepare_on_arm
     if runtime == "LEBAI_FAKE":
         metadata.update(
             {
@@ -92,6 +93,7 @@ def build_backend(
         from app.robots.segmented_adapter import SegmentedLebaiAdapter
         return SegmentedLebaiAdapter(settings.lebai,
             allow_tool_spin=settings.segmented_target.tool_spin,
+            allow_prepare=settings.segmented_target.prepare_on_arm,
             settling=settings.segmented_target.settling, client_factory=client_factory,
             event_callback=recorder.write_event, backend_label=backend_label)
     return RealLebaiAdapter(
@@ -206,6 +208,8 @@ def create_app(
             limiter=_build_limiter(runtime_settings, runtime_backend),
             transactional_settings=runtime_settings.transactional_target,
             segmented_settings=runtime_settings.segmented_target,
+            prepare_on_arm=(runtime_settings.segmented_target is not None
+                and runtime_settings.segmented_target.prepare_on_arm),
             constraint_clear_ms=runtime_settings.constraint_clear_ms,
             home_options=HomeOptions(
                 max_speed_radps=runtime_settings.home_joint_speed_radps,

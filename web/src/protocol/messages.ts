@@ -140,6 +140,12 @@ export interface GripperRequestMessage {
   value: number;
 }
 
+export interface GripperCancelMessage {
+  v: 1;
+  type: 'gripper_cancel';
+  request_id: string;
+}
+
 export interface GripperResultMessage {
   v: 1;
   type: 'gripper_result';

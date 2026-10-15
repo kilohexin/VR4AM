@@ -26,10 +26,18 @@ async def test_web_claw_backend_fault_keeps_the_control_fault_path():
     from fastapi import WebSocketDisconnect
     from app.api import teleop_ws
     from app.robots.base import BackendCommandError
+    faulted=asyncio.Event()
     control=SimpleNamespace(command_gripper=AsyncMock(side_effect=BackendCommandError('stop_unverified')),
-        _enter_fault=AsyncMock())
-    websocket=SimpleNamespace(app=SimpleNamespace(state=object()),send_json=AsyncMock(),
-        receive_json=AsyncMock(side_effect=[dict(v=1,type='gripper_request',request_id='claw-1',value=1.),WebSocketDisconnect()]))
+        _enter_fault=AsyncMock(side_effect=lambda _:faulted.set()))
+    first=True
+    async def receive():
+        nonlocal first
+        if first:
+            first=False
+            return dict(v=1,type='gripper_request',request_id='claw-1',value=1.)
+        await asyncio.wait_for(faulted.wait(),1)
+        raise WebSocketDisconnect()
+    websocket=SimpleNamespace(app=SimpleNamespace(state=object()),send_json=AsyncMock(),receive_json=receive)
     await teleop_ws._receive_messages(websocket,control,asyncio.Event(),asyncio.Lock())
     control._enter_fault.assert_awaited_once_with('stop_unverified')
 

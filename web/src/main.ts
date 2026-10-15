@@ -1,16 +1,11 @@
 import './styles.css';
-import {disposeAppForUnload, installRehearsalVisibilityStop} from './appDisposal';
-import {forwardTeleopFrame, type TeleopFrameSource} from './appFrameForwarding';
+import {type TeleopFrameSource} from './appFrameForwarding';
 import {
   PROTOCOL_VERSION,
   type DiagnosticsMessage,
   type RobotStateMessage,
   type VRFrame,
 } from './protocol/messages';
-import {
-  OfflineRehearsalController,
-  type OfflineRehearsalSnapshot,
-} from './rehearsal/offlineRehearsalController';
 import {RobotStateBuffer} from './robot/robotState';
 import {SimulationScene} from './scenes/simulationScene';
 import type {RobotRuntimeSummary} from './scenes/vrSafetyPanel';
@@ -22,10 +17,6 @@ import {HoldControlPanel} from './ui/holdControlPanel';
 import {SimulationSettingsPanel} from './ui/simulationSettingsPanel';
 import {LatencyTracker} from './ui/latency';
 import {DiagnosticsPanel, DiagnosticsUpdateCoordinator} from './ui/diagnosticsPanel';
-import {
-  OfflineRehearsalPanel,
-  type OfflineRehearsalEligibility,
-} from './ui/offlineRehearsalPanel';
 import {XRSessionController, type XRSessionStatus} from './xr/session';
 
 const app = document.querySelector<HTMLElement>('#app');
@@ -45,11 +36,8 @@ const diagnosticsUpdates = new DiagnosticsUpdateCoordinator(
 let scene: SimulationScene;
 let armPanel: ArmPanel;
 let xrController: XRSessionController;
-let rehearsal: OfflineRehearsalController;
-let rehearsalPanel: OfflineRehearsalPanel;
 let settingsPanel: SimulationSettingsPanel;
-let rehearsalActive = false;
-let connectionState: OfflineRehearsalEligibility['connected'] = false;
+let connectionState = false;
 let latestRobotState: RobotStateMessage | null = null;
 let latestDiagnostics: DiagnosticsMessage | null = null;
 let xrState: XRSessionStatus['state'] = 'idle';
@@ -69,7 +57,6 @@ const socket = new TeleopSocket(
   undefined,
   (status) => {
     connectionState = status.state === 'connected';
-    rehearsal?.onConnection(status);
     scene?.resetConnection();
     pendingFrames.clear();
     latency.reset();
@@ -88,23 +75,19 @@ const socket = new TeleopSocket(
       diagnosticsUpdates.clear();
       scene?.setRuntimeSummary(emptyRuntimeSummary());
     }
-    refreshRehearsalPanel();
     refreshHoldPanel();
   },
   (message) => {
     armPanel?.handleArmFeedback(message);
-    rehearsal?.onFeedback(message);
   },
   (message) => {
     armPanel?.handleFaultResetResult(message);
-    rehearsal?.onFeedback(message);
   },
   (message) => {
     armPanel?.handleHomeResult(message);
-    rehearsal?.onFeedback(message);
   },
   (message) => onDiagnostics(message),
-  (message) => rehearsal?.onFeedback(message),
+  undefined,
   (message) => {
     if (message.request_id !== pendingScaleRequestId) return;
     pendingScaleRequestId = null;
@@ -126,10 +109,10 @@ armPanel = new ArmPanel(
 armPanel.setConnectionStatus({state: 'disconnected'});
 holdPanel=new HoldControlPanel(hud.desktopControlContainer,(message)=>socket.sendGripper(message),
  ()=>performance.now(),()=>{
-  if(connectionState&&lastManualFrame&&xrState!=='active'&&!rehearsalActive)
+  if(connectionState&&lastManualFrame&&xrState!=='active')
    sendFrame({...lastManualFrame,client_mono_ms:performance.now(),
     visibility:document.visibilityState==='visible'?'visible':'hidden'},'manual');
- });
+ },requestId=>socket.cancelGripper(requestId));
 
 scene = new SimulationScene(hud.sceneContainer, {
   stateBuffer,
@@ -152,31 +135,11 @@ xrController = new XRSessionController({
   onStatus: updateXRStatus,
 });
 
-rehearsalPanel = new OfflineRehearsalPanel(
-  hud.rehearsalContainer,
-  startRehearsal,
-  () => rehearsal.requestStop('operator_stop'),
-);
 settingsPanel = new SimulationSettingsPanel(
   hud.settingsContainer,
   requestSimulationScale,
   () => scene.resetCameraView(),
 );
-rehearsal = new OfflineRehearsalController({
-  nowMs: () => performance.now(),
-  sendControl: (message) => socket.sendControl(message),
-  sendRehearsal: (message) => socket.sendRehearsal(message),
-  closeConnection: () => socket.close(),
-  setOfflineController: (sample) => scene.setOfflineController(sample),
-  readScene: () => scene.getOfflineSceneSnapshot(),
-  configureFakeWorkspace: (limiterAnchor, taskAnchor) => (
-    scene.configureFakeRehearsalWorkspace(limiterAnchor, taskAnchor)
-  ),
-  resetScene: () => scene.resetOfflineScene(),
-  onSnapshot: renderRehearsalSnapshot,
-});
-const removeRehearsalVisibilityStop = installRehearsalVisibilityStop(document, rehearsal);
-refreshRehearsalPanel();
 
 scene.start();
 socket.connect();
@@ -192,7 +155,6 @@ function updateController(controller: {tracking: boolean; grip: boolean; trigger
 }
 
 function sendVRDisarm(): void {
-  if (rehearsalActive) return;
   vrControlSequence += 1;
   socket.sendControl({
     v: PROTOCOL_VERSION,
@@ -216,19 +178,19 @@ function updateXRStatus(status: XRSessionStatus): void {
   } else if (status.state === 'active') {
     hud.clearSceneError();
   }
-  refreshRehearsalPanel();
   refreshSettingsPanel();
   maybeRestorePreferredScale();
 }
 
 function sendFrame(frame: VRFrame, source: TeleopFrameSource): void {
+  if(source==='offline_rehearsal')return;
   if(source==='manual'&&holdPanel){
    lastManualFrame=frame;
    frame=holdPanel.applyFrame(frame);
    frame={...frame,seq:desktopSequence++};
    updateController({tracking:frame.tracking_valid,grip:frame.right.grip,trigger:frame.right.trigger});
   }
-  forwardTeleopFrame(frame, source, rehearsalActive, sendFrameToSocket);
+  sendFrameToSocket(frame);
 }
 
 function sendFrameToSocket(frame: VRFrame): void {
@@ -240,7 +202,6 @@ function sendFrameToSocket(frame: VRFrame): void {
 function onRobotState(state: RobotStateMessage): void {
   lastRobotStateReceivedMs=performance.now();
   latestRobotState = structuredClone(state);
-  rehearsal.onRobotState(state);
   const constraint = state.constraint ?? null;
   const recoveryPhase = state.recovery_phase ?? null;
   scene.applyRobotState(state);
@@ -260,25 +221,13 @@ function onRobotState(state: RobotStateMessage): void {
     targetControl: state.target_control ?? null,
   });
   diagnosticsUpdates.onRobotState(state, recordAcknowledgement);
-  refreshRehearsalPanel();
   refreshSettingsPanel();
   refreshHoldPanel();
 }
 
 function onDiagnostics(diagnostics: DiagnosticsMessage): void {
   latestDiagnostics = structuredClone(diagnostics);
-  rehearsal.onDiagnostics(diagnostics);
   diagnosticsUpdates.onDiagnostics(diagnostics);
-  refreshRehearsalPanel();
-}
-
-function renderRehearsalSnapshot(snapshot: OfflineRehearsalSnapshot): void {
-  rehearsalActive = snapshot.active;
-  refreshHoldPanel();
-  scene.setAutomationActive(snapshot.active);
-  armPanel.setAutomationActive(snapshot.active);
-  rehearsalPanel.update(snapshot, rehearsalEligibility());
-  refreshSettingsPanel();
 }
 
 function refreshSettingsPanel(): void {
@@ -289,7 +238,7 @@ function refreshSettingsPanel(): void {
     mode: latestRobotState?.mode ?? null,
     backendState: latestRobotState?.robot_state ?? null,
     grip: latestGrip,
-    automationActive: rehearsalActive,
+    automationActive: false,
     authoritativeScale: latestRobotState?.translation_scale ?? null,
   });
 }
@@ -313,7 +262,7 @@ function maybeRestorePreferredScale(): void {
     latestRobotState.backend === 'LEBAI_FAKE' &&
     latestRobotState.robot_state === 'IDLE' &&
     ['READY', 'HOLD', 'DISARMED', 'ARMED'].includes(latestRobotState.mode) &&
-    !latestGrip && !rehearsalActive;
+    !latestGrip;
   if (!stopped || preferred === null || latestRobotState.translation_scale == null) return;
   preferredScaleAttempted = true;
   if (Math.abs(preferred - latestRobotState.translation_scale) > 1e-9) {
@@ -321,46 +270,17 @@ function maybeRestorePreferredScale(): void {
   }
 }
 
-function refreshRehearsalPanel(): void {
-  if (!rehearsal || !rehearsalPanel) return;
-  renderRehearsalSnapshot(rehearsal.snapshot);
-}
-
-function rehearsalEligibility(): OfflineRehearsalEligibility {
-  return {
-    connected: connectionState,
-    runtime: latestDiagnostics?.runtime ?? null,
-    robotRuntime: latestRobotState?.backend ?? null,
-    hardwareVerified: latestDiagnostics?.hardware_verified ?? null,
-    mode: latestRobotState?.mode ?? null,
-    backendState: latestRobotState?.robot_state ?? null,
-    fault: latestRobotState?.fault ?? null,
-    constraint: latestRobotState?.constraint ?? null,
-    actualTcp: latestRobotState?.actual_tcp ?? null,
-    xrState,
-    segmentedCandidate: latestRobotState?.target_control?.policy === 'segmented_experimental',
-  };
-}
-
-function startRehearsal(): void {
-  const eligibility = rehearsalEligibility();
-  if (eligibility.xrState !== 'idle' || eligibility.segmentedCandidate) {
-    refreshRehearsalPanel();
-    return;
-  }
-  void rehearsal.start();
-}
-
 function disposeForPageExit(): void {
   window.removeEventListener('pagehide', disposeForPageExit);
   window.removeEventListener('beforeunload', disposeForPageExit);
-  removeRehearsalVisibilityStop();
   holdPanel.dispose();
-  disposeAppForUnload(rehearsal, xrController, scene, socket);
+  void xrController.dispose();
+  scene.dispose();
+  socket.close();
 }
 
 function refreshHoldPanel():void{
- holdPanel?.update(latestRobotState,connectionState&&xrState==='idle'&&!rehearsalActive,lastRobotStateReceivedMs);
+ holdPanel?.update(latestRobotState,connectionState&&xrState==='idle',lastRobotStateReceivedMs);
 }
 
 function recordAcknowledgement(sequence: number | null): void {

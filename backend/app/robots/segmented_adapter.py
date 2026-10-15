@@ -5,6 +5,7 @@ Each segment retains the 100-ms lease, four FK samples and an 80-ms-or-less
 zero-terminal joint reference. No catch-up, interpolation or queued next move.
 """
 from dataclasses import dataclass, replace
+from contextvars import ContextVar
 import copy
 import math
 import numpy as np
@@ -19,6 +20,8 @@ from app.schemas.messages import TargetControlStatus
 from app.robots.lebai_finite_pvat import _controls
 from app.robots.tool_spin import tool_spin_angle,check_spin_sample
 
+_prepare_context = ContextVar('segmented_prepare_owner', default=None)
+
 
 @dataclass(frozen=True)
 class SegmentStatus:
@@ -29,15 +32,55 @@ class SegmentStatus:
 
 
 class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
-    def __init__(self, settings, *, settling: PursuitSettings, client_factory, allow_tool_spin=False, **kwargs):
+    def __init__(self, settings, *, settling: PursuitSettings, client_factory, allow_tool_spin=False,
+                 allow_prepare=False, **kwargs):
         if type(allow_tool_spin) is not bool:raise ValueError('invalid_tool_spin_selection')
+        if type(allow_prepare) is not bool:raise ValueError('invalid_prepare_on_arm')
         self.supports_tool_spin=allow_tool_spin
+        self.supports_prepare_on_arm=allow_prepare
         SegmentedSettings(settling)  # Apply the same hard bounds to injection.
         super().__init__(settings, client_factory=client_factory, **kwargs)
         self.settling = settling
         self._segment = None
         self._segment_enabled = False
         self._segment_fault = None
+        self._prepare_owner = None
+
+    async def prepare(self, options, on_phase):
+        if not self.supports_prepare_on_arm:
+            raise BackendCommandError('finite_diagnostic_action_not_supported')
+        if self._prepare_owner is not None:
+            raise BackendCommandError('segmented_prepare_busy')
+        # Explicit recovery uses the original joint motion ownership, bounds,
+        # feedback stabilization, stop latches and SDK entry revocation. This
+        # opt-in does not enable Home or change finite segment dispatch.
+        owner = object()
+        self._prepare_owner = owner
+        token = _prepare_context.set((self, owner, on_phase))
+        try:
+            await RealLebaiAdapter.prepare(self, options, on_phase)
+        finally:
+            self._prepare_owner = None
+            _prepare_context.reset(token)
+        self._segment = None
+        self._segment_enabled = False
+        self._segment_fault = None
+
+    def _begin_motion_epoch(self):
+        # Recovery is an explicit joint posture request, with the original
+        # Real.prepare guards. Its nested wait_for task inherits this context;
+        # the independent segment pump cannot acquire this admission. Clear
+        # the owner in finally so delayed child contexts never retain it.
+        context = _prepare_context.get()
+        if (self._prepare_owner is not None and context is not None
+                and context[:2] == (self, self._prepare_owner)):
+            # Recheck control's phase callback immediately at both original
+            # recovery epoch entries, including the nested native-call task.
+            # A stop revokes control before its recording await; it must not
+            # wait for backend.stop to invalidate the backend generations.
+            context[2]('homing')
+            return RealLebaiAdapter._begin_motion_epoch(self)
+        return super()._begin_motion_epoch()
 
     async def preflight(self):
         # This mode replaces only the diagnostic's once-per-connection rule.

@@ -1,7 +1,6 @@
 import asyncio
 import gc
 import json
-import threading
 import time
 import warnings
 from pathlib import Path
@@ -35,7 +34,6 @@ from app.digital_twin.runtime import create_digital_twin_app
 from app.control.robot_control import FaultResetResult, HomeResult, LatestVRFrame
 from app.diagnostics.store import DiagnosticsStore
 from app.rehearsal.report import (
-    HARDWARE_PENDING,
     REHEARSAL_PHASES,
     RehearsalReportStore,
 )
@@ -141,7 +139,7 @@ def _install_rehearsal_store(app, root: Path, runtime: str) -> RehearsalReportSt
     return store
 
 
-def test_rehearsal_begin_phase_finish_are_correlated_and_never_call_motion(
+def test_removed_rehearsal_begin_is_correlated_and_never_calls_motion(
     tmp_path: Path,
 ) -> None:
     app = create_app(backend_label="LEBAI_FAKE")
@@ -167,8 +165,10 @@ def test_rehearsal_begin_phase_finish_are_correlated_and_never_call_motion(
             begun = ws.receive_json()
             assert begun["type"] == "offline_rehearsal_begin_result"
             assert begun["request_id"] == "begin-1"
-            assert begun["accepted"] is True
-            run_id = begun["run_id"]
+            assert begun["accepted"] is False
+            assert begun["reason"] == "feature_removed"
+            assert "run_id" not in begun
+            run_id = "removed-feature"
 
             for phase in REHEARSAL_PHASES:
                 ws.send_json(_rehearsal_phase(run_id, phase))
@@ -177,9 +177,10 @@ def test_rehearsal_begin_phase_finish_are_correlated_and_never_call_motion(
                     "v": 1,
                     "type": "offline_rehearsal_phase_ack",
                     "request_id": f"phase-{phase}",
-                    "accepted": True,
+                    "accepted": False,
                     "run_id": run_id,
                     "phase": phase,
+                    "reason": "run_not_active",
                 }
 
             ws.send_json(
@@ -198,14 +199,11 @@ def test_rehearsal_begin_phase_finish_are_correlated_and_never_call_motion(
             "v": 1,
             "type": "offline_rehearsal_finish_result",
             "request_id": "finish-1",
-            "accepted": True,
+            "accepted": False,
             "run_id": run_id,
-            "outcome": "passed",
-            "json_path": str(tmp_path / f"{run_id}.json"),
-            "markdown_path": str(tmp_path / f"{run_id}.md"),
-            "hardware_verified": False,
-            "hardware_pending": list(HARDWARE_PENDING),
+            "reason": "run_not_active",
         }
+        assert list(tmp_path.iterdir()) == []
         app.state.control.arm.assert_not_awaited()
         app.state.control.home.assert_not_awaited()
         app.state.control.disarm.assert_not_awaited()
@@ -215,29 +213,18 @@ def test_rehearsal_begin_phase_finish_are_correlated_and_never_call_motion(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("worker_start_delay", [0.0, 0.10])
-async def test_slow_rehearsal_provenance_does_not_block_frames_or_control_ticks(
+async def test_removed_rehearsal_never_starts_provenance_or_blocks_frames(
     tmp_path: Path,
     worker_start_delay: float,
 ) -> None:
     from app.api import teleop_ws
 
-    loop = asyncio.get_running_loop()
-    slow_started = asyncio.Event()
-    release_provenance = threading.Event()
-    slow_finished = threading.Event()
+    provenance_calls = []
 
     def slow_provenance() -> dict[str, object]:
+        provenance_calls.append(True)
         time.sleep(worker_start_delay)
-        loop.call_soon_threadsafe(slow_started.set)
-        try:
-            if not release_provenance.wait(2.0):
-                raise TimeoutError("test did not release provenance worker")
-            return {
-                "git": {"commit": "a" * 40, "dirty": False, "dirty_paths": []},
-                "model": {},
-            }
-        finally:
-            slow_finished.set()
+        raise AssertionError("removed feature must not start provenance")
 
     store = RehearsalReportStore(
         root=tmp_path,
@@ -289,10 +276,6 @@ async def test_slow_rehearsal_provenance_does_not_block_frames_or_control_ticks(
         teleop_ws._run_coupled_session(Socket(), Control(), set(), object(), asyncio.Event())
     )
     try:
-        # Establish the blocked-work interval before sending the frames under
-        # test. Thread startup order is not a production latency guarantee.
-        await asyncio.wait_for(slow_started.wait(), timeout=1.0)
-        assert not slow_finished.is_set()
         ticks_before = len(ticks)
         await incoming.put(_valid_frame(seq=2))
         await incoming.put(_valid_frame(seq=3))
@@ -301,6 +284,7 @@ async def test_slow_rehearsal_provenance_does_not_block_frames_or_control_ticks(
             while (
                 latest.snapshot() is None or latest.snapshot().frame.seq != 3
                 or len(ticks) < ticks_before + 2
+                or not any(m.get("type") == "offline_rehearsal_begin_result" for m in sent)
             ):
                 await asyncio.sleep(0.002)
 
@@ -308,33 +292,16 @@ async def test_slow_rehearsal_provenance_does_not_block_frames_or_control_ticks(
         snapshot = latest.snapshot()
         assert snapshot is not None and snapshot.frame.seq == 3
         assert len(ticks) >= ticks_before + 2
-        assert not slow_finished.is_set()
-        assert not any(message.get("type") == "offline_rehearsal_begin_result" for message in sent)
-        release_provenance.set()
-
-        async def wait_for_message(message_type: str) -> None:
-            while not any(message.get("type") == message_type for message in sent):
-                await asyncio.sleep(0.002)
-
-        await asyncio.wait_for(wait_for_message("offline_rehearsal_begin_result"), timeout=1.0)
         begun = next(
             message for message in sent
             if message.get("type") == "offline_rehearsal_begin_result"
         )
         assert begun["request_id"] == "slow-begin"
-        assert begun["accepted"] is True
-        run_id = str(begun["run_id"])
-        await incoming.put(_rehearsal_phase(run_id, REHEARSAL_PHASES[0]))
-        await asyncio.wait_for(wait_for_message("offline_rehearsal_phase_ack"), timeout=1.0)
-        ack = next(
-            message for message in sent
-            if message.get("type") == "offline_rehearsal_phase_ack"
-        )
-        assert ack["request_id"] == f"phase-{REHEARSAL_PHASES[0]}"
-        assert ack["run_id"] == run_id
-        assert ack["phase"] == REHEARSAL_PHASES[0]
+        assert begun["accepted"] is False
+        assert begun["reason"] == "feature_removed"
+        assert provenance_calls == []
+        assert list(tmp_path.iterdir()) == []
     finally:
-        release_provenance.set()
         session.cancel()
         with pytest.raises(asyncio.CancelledError):
             await session
@@ -358,7 +325,7 @@ def test_rehearsal_begin_rejects_non_fake_without_closing_socket(tmp_path: Path)
                 "type": "offline_rehearsal_begin_result",
                 "request_id": "begin-sim",
                 "accepted": False,
-                "reason": "not_fake_runtime",
+                "reason": "feature_removed",
             }
             ws.send_json({"v": 1, "type": "ping", "request_id": "still-open"})
             assert ws.receive_json() == {
@@ -401,7 +368,7 @@ def test_rehearsal_wrong_run_and_owner_are_rejected_without_socket_close(
             assert ws.receive_json()["type"] == "pong"
 
 
-def test_rehearsal_disconnect_persists_aborted_report(tmp_path: Path) -> None:
+def test_removed_rehearsal_disconnect_does_not_create_a_report(tmp_path: Path) -> None:
     app = create_app(backend_label="LEBAI_FAKE")
     with TestClient(app) as client:
         _install_rehearsal_store(app, tmp_path, "LEBAI_FAKE")
@@ -414,14 +381,12 @@ def test_rehearsal_disconnect_persists_aborted_report(tmp_path: Path) -> None:
                     "plan_version": 1,
                 }
             )
-            run_id = ws.receive_json()["run_id"]
+            result = ws.receive_json()
+            assert result["accepted"] is False
+            assert result["reason"] == "feature_removed"
+            assert "run_id" not in result
 
-        payload = json.loads(
-            (tmp_path / f"{run_id}.json").read_text(encoding="utf-8")
-        )
-        assert payload["outcome"] == "aborted"
-        assert payload["failure"] == {"reason": "connection_closed"}
-        assert payload["hardware_verified"] is False
+        assert list(tmp_path.iterdir()) == []
 
 
 def _receive_reset_sequence(ws, limit: int = 8) -> list[dict[str, object]]:

@@ -2,6 +2,7 @@ import {
   isArmFeedbackMessage,
   isGripperResultMessage,
   type GripperRequestMessage,
+  type GripperCancelMessage,
   type GripperResultMessage,
   isConnectionRejectedMessage,
   isDiagnosticsMessage,
@@ -87,6 +88,10 @@ export class TeleopSocket {
   sendGripper(message: GripperRequestMessage): void {
     if (!Number.isFinite(message.value) || message.value<0 || message.value>1) return;
     this.send(message);
+  }
+
+  cancelGripper(requestId: string): void {
+    this.send({v: 1, type: 'gripper_cancel', request_id: requestId});
   }
 
   sendRehearsal(message: OfflineRehearsalClientMessage): void {
@@ -191,7 +196,7 @@ export class TeleopSocket {
     }, delay);
   }
 
-  private send(message: VRFrame | ClientControlMessage | OfflineRehearsalClientMessage | SetSimulationScaleMessage | GripperRequestMessage): void {
+  private send(message: VRFrame | ClientControlMessage | OfflineRehearsalClientMessage | SetSimulationScaleMessage | GripperRequestMessage | GripperCancelMessage): void {
     if (this.socket?.readyState !== OPEN_READY_STATE) return;
     this.socket.send(JSON.stringify(message));
   }

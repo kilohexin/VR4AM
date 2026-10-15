@@ -1,6 +1,8 @@
 """Offline delivery app: local LM3 model, explicit fake factory, no native SDK."""
+import asyncio
 import os
 import sys
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from app.digital_twin.lebai_client import DigitalTwinLebaiClient, _joint_tuple
 from app.robots.lebai_codec import joint_vector, pose_from_lebai, pose_to_lebai
 from app.sim.kinematics import forward_pose, geometric_jacobian
 from app.sim.self_collision import is_self_colliding
+from app.sim.lm3_model import LM3Model
 
 
 def validate_demo_environment(environment):
@@ -27,11 +30,30 @@ def demo_settings():
     from app.digital_twin.runtime import load_digital_twin_settings
     from app.control.transactional_settings import PursuitSettings, SegmentedSettings
     settings=load_digital_twin_settings()
+    # A visible local-model work-ready posture. It is synthetic and provides
+    # no real-robot calibration or authorization.
+    ready_q=tuple(a+b for a,b in zip(settings.lebai.home_q,(-.30,-.15,.10,0.,0.,0.)))
+    _validate_ready_path(settings.lebai.home_q,ready_q,settings.lebai,LM3Model())
     control=replace(settings.lebai.control,pvat_horizon_s=.08,pvat_send_hz=25,
         max_tcp_speed_mps=.005,max_tcp_acceleration_mps2=.02,
         max_tcp_step_m=.0002,translation_scale=.2)
-    return replace(settings,lebai=replace(settings.lebai,control=control),rotation_dead_zone_deg=.001,
-        segmented_target=SegmentedSettings(PursuitSettings(500,60,60,.001,.002,3),tool_spin=True))
+    return replace(settings,lebai=replace(settings.lebai,control=control,teleop_ready_q=ready_q),rotation_dead_zone_deg=.001,
+        segmented_target=SegmentedSettings(PursuitSettings(500,60,60,.001,.002,3),tool_spin=True,prepare_on_arm=True))
+
+
+def _validate_ready_path(start,goal,settings,model):
+    # Local sampled geometric checks are not a hardware path certificate.
+    for fraction in np.linspace(0.,1.,65):
+        q=np.array(start)+(np.array(goal)-start)*fraction
+        if (np.any(q<np.array(settings.soft_joint_min_rad)+settings.joint_limit_margin_rad)
+                or np.any(q>np.array(settings.soft_joint_max_rad)-settings.joint_limit_margin_rad)
+                or np.any(abs(q-np.array(model.home_q))>model.joint_window_rad)
+                or is_self_colliding(q,model)):
+            raise ValueError('demo_ready_path_invalid')
+        position=np.array(forward_pose(q,model).p)
+        if (np.any(position<np.array(settings.startup_tcp_min_m))
+                or np.any(position>np.array(settings.startup_tcp_max_m))):
+            raise ValueError('demo_ready_path_invalid')
 
 
 class SegmentedDemoClient(DigitalTwinLebaiClient):
@@ -84,8 +106,34 @@ class SegmentedDemoClient(DigitalTwinLebaiClient):
             raise ValueError('demo_zero_start_required')
         return await super().move_pvat(p,v,a,t)
 
-    async def movej(self,*args,**kwargs):
-        raise ValueError('demo_home_not_supported')
+    async def movej(self,p,a,v,t,r):
+        goal=joint_vector(p,'demo_ready')
+        if goal!=self.settings.teleop_ready_q:
+            raise ValueError('demo_ready_pose_required')
+        if (not all(type(x) in (float,int) and math.isfinite(x) and x>0 for x in (a,v))
+                or t!=0. or r!=0.):
+            raise ValueError('demo_ready_options_invalid')
+        self._advance()
+        if self._motion is not None or self._qd!=(0.,)*6 or self._qdd!=(0.,)*6:
+            raise ValueError('demo_zero_start_required')
+        start_q=self._q
+        epoch=getattr(self,'_ready_epoch',0)
+        # Local sampled geometry is CPU work, not an SDK RPC. Keep it off
+        # the event loop so frame/stop/watchdog tasks remain receivable.
+        await asyncio.to_thread(_validate_ready_path,start_q,goal,self.settings,self.model)
+        self._require_connected()
+        if epoch!=getattr(self,'_ready_epoch',0) or self._q!=start_q or self._motion is not None:
+            raise ValueError('demo_ready_revoked')
+        distance=max(abs(x-y) for x,y in zip(self._q,goal))
+        # Quintic peak speed=1.875*d/T; peak acceleration=10/sqrt(3)*d/T².
+        # Preserve requested/configured limits while making the animation clear.
+        duration=max(2.,1.875*distance/min(v,self.settings.control.max_joint_speed_radps,self.model.max_joint_speed_radps),
+            math.sqrt(10/math.sqrt(3)*distance/min(a,self.settings.control.max_joint_acceleration_radps2,self.model.max_joint_accel_radps2)))
+        return await super().movej(p,a,v,duration,r)
+
+    async def stop_move(self):
+        self._ready_epoch=getattr(self,'_ready_epoch',0)+1
+        await super().stop_move()
 
     async def stop_sys(self):
         raise ValueError('demo_system_stop_not_supported')

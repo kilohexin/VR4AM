@@ -238,6 +238,12 @@ class GripperRequestMessage(StrictMessage):
     value: float = Field(ge=0,le=1,strict=True)
 
 
+class GripperCancelMessage(StrictMessage):
+    v: Literal[1]
+    type: Literal['gripper_cancel']
+    request_id: str = Field(min_length=1,max_length=64)
+
+
 class ClientControlMessage(StrictMessage):
     v: Literal[1]
     type: Literal[
@@ -367,6 +373,7 @@ class OfflineRehearsalFinishMessage(StrictMessage):
 ClientMessage = (
     VRFrame
     | GripperRequestMessage
+    | GripperCancelMessage
     | SetSimulationScaleMessage
     | ClientControlMessage
     | OfflineRehearsalBeginMessage

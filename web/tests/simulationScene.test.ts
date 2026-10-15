@@ -3,8 +3,9 @@ import * as THREE from 'three';
 import {describe, expect, it, vi} from 'vitest';
 import {
   createGraspBlocks,
+  createGraspWorkbench,
+  GRASP_WORKBENCH_SURFACE,
   createVRFrame,
-  DesktopInputSafety,
   disposeObjectResources,
   modelLoadErrorMessage,
   ServerClockAnchor,
@@ -15,8 +16,62 @@ import type {ArmSafetySnapshot} from '../src/ui/armPanel';
 import type {Pose, RobotStateMessage} from '../src/protocol/messages';
 import type {XRPresentationSample} from '../src/xr/session';
 import type {OfflineControllerSample} from '../src/rehearsal/types';
+import {DesktopOrbitCamera} from '../src/scenes/desktopOrbitCamera';
+import {KinematicGraspController} from '../src/scenes/kinematicGraspController';
 
 describe('grasp block resources', () => {
+  it('provides a workbench whose supports touch the existing desk and hold the blocks', () => {
+    const bench = createGraspWorkbench();
+    const environment = {
+      scene: new THREE.Scene(), robotVisualRoot: new THREE.Group(),
+      grid: new THREE.GridHelper(),
+    };
+    (SimulationScene.prototype as unknown as {createEnvironment(this: typeof environment): void})
+      .createEnvironment.call(environment);
+    const deskBounds = new THREE.Box3().setFromObject(environment.robotVisualRoot.getObjectByName('desk-top')!);
+    const worktop = bench.getObjectByName('workbench-top')!;
+    const topBounds = new THREE.Box3().setFromObject(worktop);
+    const supports = bench.children.filter(({name}) => name.startsWith('workbench-post-'));
+    expect(supports).toHaveLength(4);
+    for (const support of supports) {
+      const bounds = new THREE.Box3().setFromObject(support);
+      expect(bounds.min.y).toBeCloseTo(-0.005, 7);
+      expect(bounds.min.y).toBeCloseTo(deskBounds.max.y, 7);
+      expect(bounds.max.y).toBeCloseTo(topBounds.min.y, 7);
+      expect(bounds.min.x).toBeGreaterThanOrEqual(deskBounds.min.x);
+      expect(bounds.max.x).toBeLessThanOrEqual(deskBounds.max.x);
+      expect(bounds.min.z).toBeGreaterThanOrEqual(deskBounds.min.z);
+      expect(bounds.max.z).toBeLessThanOrEqual(deskBounds.max.z);
+    }
+    for (const {object} of createGraspBlocks()) {
+      const bounds = new THREE.Box3().setFromObject(object);
+      expect(bounds.min.y).toBeCloseTo(topBounds.max.y, 7);
+      expect(bounds.min.x).toBeGreaterThan(topBounds.min.x);
+      expect(bounds.max.x).toBeLessThan(topBounds.max.x);
+      expect(bounds.min.z).toBeGreaterThan(topBounds.min.z);
+      expect(bounds.max.z).toBeLessThan(topBounds.max.z);
+    }
+  });
+
+  it('releases a block onto the visible worktop within its surface bounds', () => {
+    const root = new THREE.Group();
+    const block = createGraspBlocks()[0];
+    const bench = createGraspWorkbench();
+    root.add(block.object, bench);
+    const grasp = new KinematicGraspController({
+      visualRoot: root, blocks: [block], ...GRASP_WORKBENCH_SURFACE,
+    });
+    const q = [0, 0, 0, 1] as const;
+    grasp.update({p: [-0.05, 0.56, -0.23], q}, 0.9);
+    grasp.update({p: [2, 0.8, 2], q}, 0.9);
+    grasp.update({p: [2, 0.8, 2], q}, 0.1);
+    const blockBounds = new THREE.Box3().setFromObject(block.object);
+    const topBounds = new THREE.Box3().setFromObject(bench.getObjectByName('workbench-top')!);
+    expect(grasp.snapshot().carriedBlockId).toBeNull();
+    expect(blockBounds.min.y).toBeCloseTo(topBounds.max.y, 7);
+    expect(blockBounds.max.x).toBeCloseTo(topBounds.max.x, 7);
+    expect(blockBounds.max.z).toBeCloseTo(topBounds.max.z, 7);
+  });
   it('creates five exact colored 60 mm blocks at deterministic positions', () => {
     const blocks = createGraspBlocks();
 
@@ -58,6 +113,73 @@ describe('grasp block resources', () => {
 });
 
 describe('desktop VR frame path', () => {
+  it('keeps left-drag, Space and wheel neutral while retaining right-drag camera orbit', () => {
+    Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'visible'});
+    const canvas = document.createElement('canvas');
+    document.body.append(canvas);
+    const captures = new Set<number>();
+    canvas.setPointerCapture = vi.fn(id => captures.add(id));
+    canvas.hasPointerCapture = vi.fn(id => captures.has(id));
+    canvas.releasePointerCapture = vi.fn(id => captures.delete(id));
+    const camera = new THREE.PerspectiveCamera();
+    const orbitCamera = new DesktopOrbitCamera(canvas, camera);
+    const onFrame = vi.fn();
+    const scene = Object.assign(Object.create(SimulationScene.prototype), {
+      renderer: {domElement: canvas}, orbitCamera,
+      controllerPosition: new THREE.Vector3(0.56, 0.42, 0.18),
+      controllerQuaternion: new THREE.Quaternion(),
+      offlineController: null, automationActive: false,
+      sessionId: 'canvas-neutral', sequence: 0, lastFrameMs: Number.NEGATIVE_INFINITY,
+      options: {onFrame, onController: vi.fn()}, resizeFromEvent: () => {},
+      preventContextMenu: (event: Event) => event.preventDefault(),
+    });
+    scene.addListeners();
+    try {
+      canvas.dispatchEvent(pointerEvent('pointerdown', 3));
+      canvas.dispatchEvent(pointerEvent('pointermove', 3, 0, 50, -40));
+      const key = new KeyboardEvent('keydown', {code: 'Space', bubbles: true, cancelable: true});
+      canvas.dispatchEvent(key);
+      const wheel = new WheelEvent('wheel', {deltaY: 100, cancelable: true});
+      canvas.dispatchEvent(wheel);
+      scene.sendDesktopFrame(20);
+      expect(scene.controllerPosition.toArray()).toEqual([0.56, 0.42, 0.18]);
+      expect(onFrame.mock.calls[0][0].right).toEqual({
+        p: [0.56, 0.42, 0.18], q: [0, 0, 0, 1], grip: false, trigger: 0,
+      });
+      expect(key.defaultPrevented).toBe(false);
+      expect(wheel.defaultPrevented).toBe(false);
+      const beforeOrbit = camera.position.clone();
+      canvas.dispatchEvent(pointerEvent('pointerup', 3));
+      canvas.dispatchEvent(pointerEvent('pointerdown', 4, 2));
+      canvas.dispatchEvent(pointerEvent('pointermove', 4, 2, 30, 20));
+      canvas.dispatchEvent(pointerEvent('pointerup', 4, 2));
+      expect(camera.position.equals(beforeOrbit)).toBe(false);
+      scene.sendDesktopFrame(40);
+      expect(onFrame.mock.calls[1][0].right).toEqual(onFrame.mock.calls[0][0].right);
+    } finally {
+      scene.removeListeners();
+      canvas.remove();
+    }
+  });
+  it('publishes neutral manual heartbeats even when obsolete canvas input is latched', () => {
+    Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'visible'});
+    const onFrame = vi.fn();
+    const scene = {
+      lastFrameMs: Number.NEGATIVE_INFINITY,
+      inputSafety: {snapshot: () => ({activePointer: 5, grip: true, trigger: 1})},
+      offlineController: null,
+      automationActive: false,
+      controllerPosition: new THREE.Vector3(0.56, 0.42, 0.18),
+      controllerQuaternion: new THREE.Quaternion(),
+      sessionId: 'manual-neutral', sequence: 0,
+      options: {onFrame, onController: vi.fn()},
+    };
+    (SimulationScene.prototype as unknown as {sendDesktopFrame(this: typeof scene, nowMs: number): void})
+      .sendDesktopFrame.call(scene, 20);
+    expect(onFrame).toHaveBeenCalledWith(expect.objectContaining({
+      right: {p: [0.56, 0.42, 0.18], q: [0, 0, 0, 1], grip: false, trigger: 0},
+    }), 'manual');
+  });
   it('uses the shared VRFrame shape with metre poses and xyzw quaternion order', () => {
     const frame = createVRFrame({
       sessionId: 'desktop-test',
@@ -164,8 +286,7 @@ describe('offline controller scene seam', () => {
     expect(frame.mock.calls[0][0].tracking_valid).toBe(false);
   });
 
-  it('resets safety and controller pose before restoring desktop input', () => {
-    const reset = vi.fn();
+  it('resets the dormant synthetic controller pose before restoring manual heartbeats', () => {
     const position = new THREE.Vector3(9, 8, 7);
     const quaternion = new THREE.Quaternion(1, 0, 0, 0);
     const scene = {
@@ -173,55 +294,15 @@ describe('offline controller scene seam', () => {
         position: [0.1, 0.2, 0.3], quaternion: [0, 0, 0, 1],
         grip: true, trigger: 1, trackingValid: true,
       },
-      inputSafety: {reset},
       controllerPosition: position,
       controllerQuaternion: quaternion,
     };
 
     SimulationScene.prototype.setOfflineController.call(scene as never, null);
 
-    expect(reset).toHaveBeenCalledOnce();
     expect(scene.offlineController).toBeNull();
     expect(position.toArray()).toEqual([0.56, 0.42, 0.18]);
     expect(quaternion.toArray()).toEqual([0, 0, 0, 1]);
-  });
-
-  it('keeps pointer and wheel movement from changing a synthetic pose', () => {
-    const position = new THREE.Vector3(0.1, 0.2, 0.3);
-    const scene = {
-      offlineController: {
-        position: [0.1, 0.2, 0.3], quaternion: [0, 0, 0, 1],
-        grip: false, trigger: 0, trackingValid: true,
-      },
-      inputSafety: {isActivePointer: vi.fn(() => true)},
-      controllerPosition: position,
-    };
-
-    (SimulationScene.prototype as unknown as {applyPointerMove(this: typeof scene, event: PointerEvent): void})
-      .applyPointerMove.call(scene, pointerEvent('pointermove', 3) as PointerEvent);
-    (SimulationScene.prototype as unknown as {applyWheel(this: typeof scene, event: WheelEvent): void})
-      .applyWheel.call(scene, Object.assign(new Event('wheel'), {deltaY: 50, preventDefault: vi.fn()}) as unknown as WheelEvent);
-
-    expect(position.toArray()).toEqual([0.1, 0.2, 0.3]);
-  });
-
-  it('keeps pointer and wheel movement disabled for the full automation run without a sample', () => {
-    const position = new THREE.Vector3(0.1, 0.2, 0.3);
-    const preventDefault = vi.fn();
-    const scene = {
-      offlineController: null,
-      automationActive: true,
-      inputSafety: {isActivePointer: vi.fn(() => true)},
-      controllerPosition: position,
-    };
-
-    (SimulationScene.prototype as unknown as {applyPointerMove(this: typeof scene, event: PointerEvent): void})
-      .applyPointerMove.call(scene, pointerEvent('pointermove', 3) as PointerEvent);
-    (SimulationScene.prototype as unknown as {applyWheel(this: typeof scene, event: WheelEvent): void})
-      .applyWheel.call(scene, Object.assign(new Event('wheel'), {deltaY: 50, preventDefault}) as unknown as WheelEvent);
-
-    expect(position.toArray()).toEqual([0.1, 0.2, 0.3]);
-    expect(preventDefault).not.toHaveBeenCalled();
   });
 
   it('returns a copied immutable-shaped scene observation', () => {
@@ -281,171 +362,6 @@ describe('offline controller scene seam', () => {
   });
 });
 
-describe('desktop input release safety', () => {
-  it.each(['input','textarea','select','button','a','editable','nested-button'])
-  ('does not capture Space from an interactive %s', (kind) => {
-    const canvas=document.createElement('canvas');
-    const control=document.createElement(kind==='editable' ? 'div' : kind==='nested-button' ? 'button' : kind);
-    if(kind==='editable')control.setAttribute('contenteditable','true');
-    if(kind==='a')control.setAttribute('href','#');
-    const child=document.createElement('span');
-    control.append(child);
-    document.body.append(canvas,control);
-    const input=new DesktopInputSafety(canvas);
-    input.attach();
-    try {
-      const event=new KeyboardEvent('keydown',{code:'Space',bubbles:true,cancelable:true});
-      (kind==='nested-button' ? child : control).dispatchEvent(event);
-      expect(input.snapshot().trigger).toBe(0);
-      expect(event.defaultPrevented).toBe(false);
-    } finally {input.dispose();canvas.remove();control.remove();}
-  });
-
-  it('clears active desktop input on focus transfer and accepts a fresh canvas gesture', () => {
-    const canvas=document.createElement('canvas');
-    const control=document.createElement('input');
-    document.body.append(canvas,control);
-    const captures=new Set<number>();
-    canvas.setPointerCapture=vi.fn(id=>captures.add(id));
-    canvas.hasPointerCapture=vi.fn(id=>captures.has(id));
-    canvas.releasePointerCapture=vi.fn(id=>captures.delete(id));
-    const input=new DesktopInputSafety(canvas);
-    input.attach();
-    try {
-      canvas.dispatchEvent(pointerEvent('pointerdown',7,0));
-      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space'}));
-      expect(input.snapshot()).toEqual({activePointer:7,grip:true,trigger:1});
-      control.focus();
-      expect(input.snapshot()).toEqual({activePointer:null,grip:false,trigger:0});
-      expect(captures.size).toBe(0);
-      // Window-dispatched events must also respect the actual focused control.
-      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space'}));
-      expect(input.snapshot().trigger).toBe(0);
-      canvas.dispatchEvent(pointerEvent('pointerdown',8,0));
-      expect(document.activeElement).toBe(canvas);
-      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space'}));
-      expect(input.snapshot()).toEqual({activePointer:8,grip:true,trigger:1});
-      // Release wins even if the matching key-up comes from a form control.
-      control.dispatchEvent(new KeyboardEvent('keyup',{code:'Space',bubbles:true}));
-      expect(input.snapshot().trigger).toBe(0);
-    } finally {input.dispose();canvas.remove();control.remove();}
-  });
-
-  it.each([{repeat:true},{isComposing:true},{ctrlKey:true},{altKey:true},{metaKey:true},{shiftKey:true}])
-  ('does not start a claw input for protected keyboard flags %j', (flags) => {
-    const input=new DesktopInputSafety(document.createElement('canvas'));
-    input.attach();
-    try {
-      const event=new KeyboardEvent('keydown',{code:'Space',cancelable:true,...flags});
-      window.dispatchEvent(event);
-      expect(input.snapshot().trigger).toBe(0);
-      expect(event.defaultPrevented).toBe(false);
-    } finally {input.dispose();}
-  });
-
-  it('does not restart a held key after blur until a fresh keydown', () => {
-    const input=new DesktopInputSafety(document.createElement('canvas'));
-    input.attach();
-    try {
-      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space'}));
-      expect(input.snapshot().trigger).toBe(1);
-      window.dispatchEvent(new Event('blur'));
-      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space',repeat:true}));
-      expect(input.snapshot().trigger).toBe(0);
-      window.dispatchEvent(new KeyboardEvent('keyup',{code:'Space'}));
-      window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space'}));
-      expect(input.snapshot().trigger).toBe(1);
-    } finally {input.dispose();}
-  });
-
-  it('respects Space already handled by another control', () => {
-    const input=new DesktopInputSafety(document.createElement('canvas'));
-    input.attach();
-    try {
-      const event=new KeyboardEvent('keydown',{code:'Space',cancelable:true});
-      event.preventDefault();
-      window.dispatchEvent(event);
-      expect(input.snapshot().trigger).toBe(0);
-    } finally {input.dispose();}
-  });
-  it('does not latch pointer Grip or keyboard Trigger while automation disables manual input', () => {
-    const canvas = document.createElement('canvas');
-    canvas.setPointerCapture = vi.fn();
-    canvas.hasPointerCapture = vi.fn(() => false);
-    const input = new DesktopInputSafety(canvas);
-    input.attach();
-    input.setEnabled(false);
-
-    canvas.dispatchEvent(pointerEvent('pointerdown', 7, 0));
-    window.dispatchEvent(new KeyboardEvent('keydown', {code: 'Space'}));
-    expect(input.snapshot()).toEqual({activePointer: null, grip: false, trigger: 0});
-
-    input.setEnabled(true);
-    canvas.dispatchEvent(pointerEvent('pointerdown', 7, 0));
-    window.dispatchEvent(new KeyboardEvent('keydown', {code: 'Space'}));
-    expect(input.snapshot()).toEqual({activePointer: 7, grip: true, trigger: 1});
-    input.dispose();
-  });
-
-  it.each([
-    ['window blur', (canvas: HTMLCanvasElement) => window.dispatchEvent(new Event('blur'))],
-    ['document visibility loss', (_canvas: HTMLCanvasElement) => {
-      Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'hidden'});
-      document.dispatchEvent(new Event('visibilitychange'));
-    }],
-    ['lost pointer capture', (canvas: HTMLCanvasElement) => canvas.dispatchEvent(pointerEvent('lostpointercapture', 7))],
-  ])('clears Grip, Trigger, and pointer state on %s', (_name, interrupt) => {
-    Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'visible'});
-    const canvas = document.createElement('canvas');
-    const captured = new Set<number>();
-    canvas.setPointerCapture = vi.fn((pointerId: number) => captured.add(pointerId));
-    canvas.hasPointerCapture = vi.fn((pointerId: number) => captured.has(pointerId));
-    canvas.releasePointerCapture = vi.fn((pointerId: number) => captured.delete(pointerId));
-    const input = new DesktopInputSafety(canvas);
-    input.attach();
-    canvas.dispatchEvent(pointerEvent('pointerdown', 7, 0));
-    window.dispatchEvent(new KeyboardEvent('keydown', {code: 'Space'}));
-    expect(input.snapshot()).toEqual({activePointer: 7, grip: true, trigger: 1});
-
-    interrupt(canvas);
-
-    expect(input.snapshot()).toEqual({activePointer: null, grip: false, trigger: 0});
-    input.dispose();
-  });
-
-  it('contains pointer-capture release errors while clearing latched input', () => {
-    const canvas = document.createElement('canvas');
-    canvas.setPointerCapture = vi.fn();
-    canvas.hasPointerCapture = vi.fn(() => true);
-    canvas.releasePointerCapture = vi.fn(() => {
-      throw new DOMException('capture already gone');
-    });
-    const input = new DesktopInputSafety(canvas);
-    input.attach();
-    canvas.dispatchEvent(pointerEvent('pointerdown', 3, 0));
-
-    expect(() => window.dispatchEvent(new Event('blur'))).not.toThrow();
-    expect(input.snapshot().grip).toBe(false);
-    input.dispose();
-  });
-
-  it('clears Trigger on lost capture even after pointer-up already cleared the pointer id', () => {
-    const canvas = document.createElement('canvas');
-    canvas.setPointerCapture = vi.fn();
-    canvas.hasPointerCapture = vi.fn(() => false);
-    canvas.releasePointerCapture = vi.fn();
-    const input = new DesktopInputSafety(canvas);
-    input.attach();
-    window.dispatchEvent(new KeyboardEvent('keydown', {code: 'Space'}));
-    expect(input.snapshot().trigger).toBe(1);
-
-    canvas.dispatchEvent(pointerEvent('lostpointercapture', 99));
-
-    expect(input.snapshot().trigger).toBe(0);
-    input.dispose();
-  });
-});
-
 describe('scene connection and model lifetime helpers', () => {
   it('hides simulated grasp props for real robot state and restores them for Fake', () => {
     const blocks = createGraspBlocks();
@@ -456,7 +372,7 @@ describe('scene connection and model lifetime helpers', () => {
       options: {stateBuffer: {push: vi.fn()}},
       clockAnchor: {update: vi.fn()},
       graspBlocks: blocks,
-      graspPlatform: platform,
+      graspWorkbench: platform,
       rehearsalSupport,
       rehearsalPlacementMarker,
       offlineWorkspace: null,
@@ -572,6 +488,7 @@ describe('XR render-loop handoff', () => {
 
     expect(scene.robotVisualRoot.parent).toBe(scene.scene);
     expect(scene.targetMarker.parent).toBe(scene.robotVisualRoot);
+    expect(scene.targetMarker.visible).toBe(false);
     expect(scene.grid.parent).toBe(scene.scene);
     expect(scene.robotVisualRoot.position.y).toBe(0);
   });
@@ -646,23 +563,21 @@ describe('XR render-loop handoff', () => {
     const setVisible = vi.fn();
     const setHintsVisible = vi.fn();
     const beginSession = vi.fn();
-    const resetInput = vi.fn();
     const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
     const scene = {
       started: true,
       animationHandle: 42,
-      inputSafety: {reset: resetInput},
       renderer: {xr: {setSession}, setAnimationLoop},
       vrSafetyPanel: {setVisible},
       controllerHints: {setVisible: setHintsVisible},
       workspacePlacement: {beginSession},
+      targetMarker: Object.assign(new THREE.Group(), {visible: false}),
     };
 
     const starting = (SimulationScene.prototype.startXR as Function).call(scene, session, loop);
 
     expect(cancel).toHaveBeenCalledWith(42);
     expect(scene.animationHandle).toBeNull();
-    expect(resetInput).toHaveBeenCalledOnce();
     expect(setSession).toHaveBeenCalledWith(session);
     expect(setVisible).not.toHaveBeenCalledWith(true);
     expect(setHintsVisible).not.toHaveBeenCalledWith(true);
@@ -674,6 +589,7 @@ describe('XR render-loop handoff', () => {
     expect(setVisible).toHaveBeenLastCalledWith(true);
     expect(setHintsVisible).toHaveBeenLastCalledWith(true);
     expect(beginSession).toHaveBeenCalledOnce();
+    expect(scene.targetMarker.visible).toBe(true);
     expect(setAnimationLoop).toHaveBeenCalledWith(loop);
   });
 
@@ -684,7 +600,6 @@ describe('XR render-loop handoff', () => {
     const scene = {
       started: true,
       animationHandle: null,
-      inputSafety: {reset: vi.fn()},
       renderer: {
         xr: {setSession: vi.fn().mockRejectedValue(new DOMException('install failed'))},
         setAnimationLoop: vi.fn(),
@@ -692,6 +607,7 @@ describe('XR render-loop handoff', () => {
       vrSafetyPanel: {setVisible},
       controllerHints: {setVisible: setHintsVisible},
       workspacePlacement: {beginSession},
+      targetMarker: Object.assign(new THREE.Group(), {visible: false}),
     };
 
     await expect((SimulationScene.prototype.startXR as Function).call(
@@ -728,6 +644,7 @@ describe('XR render-loop handoff', () => {
       controllerHints: {setVisible: setHintsVisible},
       workspacePlacement: {endSession},
       robotVisualRoot,
+      targetMarker: new THREE.Group(),
     };
 
     await (SimulationScene.prototype.stopXR as Function).call(scene);
@@ -738,6 +655,7 @@ describe('XR render-loop handoff', () => {
     expect(setHintsVisible).toHaveBeenCalledWith(false);
     expect(endSession).toHaveBeenCalledOnce();
     expect(robotVisualRoot.position.y).toBe(0);
+    expect(scene.targetMarker.visible).toBe(false);
     expect(request).toHaveBeenCalledWith(animate);
     expect(scene.animationHandle).toBe(77);
     expect(scene.sessionId).not.toBe('desktop-before-xr');
@@ -777,6 +695,7 @@ describe('XR render-loop handoff', () => {
       controllerHints: {setVisible: setHintsVisible},
       workspacePlacement: {endSession},
       robotVisualRoot,
+      targetMarker: new THREE.Group(),
     };
 
     await expect((SimulationScene.prototype.stopXR as Function).call(scene)).rejects.toThrow();
@@ -786,6 +705,7 @@ describe('XR render-loop handoff', () => {
     expect(setHintsVisible).toHaveBeenCalledWith(false);
     expect(endSession).toHaveBeenCalledOnce();
     expect(robotVisualRoot.position.y).toBe(0);
+    expect(scene.targetMarker.visible).toBe(false);
     expect(request).toHaveBeenCalledWith(animate);
     expect(scene.animationHandle).toBe(88);
     expect(scene.sessionId).not.toBe('desktop-before-rejected-stop');
@@ -947,13 +867,13 @@ function presentationSample(options: {grip?: boolean; leftTrackingValid?: boolea
   };
 }
 
-function pointerEvent(type: string, pointerId: number, button = 0): Event {
+function pointerEvent(type: string, pointerId: number, button = 0, movementX = 0, movementY = 0): Event {
   const event = new Event(type);
   Object.defineProperties(event, {
     pointerId: {value: pointerId},
     button: {value: button},
-    movementX: {value: 0},
-    movementY: {value: 0},
+    movementX: {value: movementX},
+    movementY: {value: movementY},
   });
   return event;
 }
