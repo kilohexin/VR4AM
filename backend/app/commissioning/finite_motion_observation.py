@@ -7,6 +7,9 @@ This is cooperative asyncio isolation, not a real-time scheduling guarantee.
 import asyncio
 import copy
 import time
+from dataclasses import dataclass
+from app.commissioning.native_jog_packet import _integer, _duration
+from app.commissioning.native_jog_site_scope import permission
 
 from app.commissioning.paused_stop_cleanup import BoundedStopOnlyClient
 from app.robots.lebai_codec import joint_vector, pose_from_lebai
@@ -16,10 +19,26 @@ class _ObservationReadOwner(BoundedStopOnlyClient):
     READS = frozenset({'get_kin_data'})
 
 
+@dataclass(frozen=True)
+class MotionReference:
+    started_ns: int
+    duration_s: float
+    authorized: object
+
+    def __post_init__(self):
+        _integer(self.started_ns)
+        _duration(self.duration_s)
+        if not callable(self.authorized):
+            raise ValueError('motion_reference_authorization_required')
+
+
 class MotionObservation:
-    def __init__(self, proxy):
+    def __init__(self, proxy, *, reference=None):
         if proxy.clock != proxy.deadline_clock:
             raise ValueError('motion_observation_requires_one_clock')
+        if reference is not None and type(reference) is not MotionReference:
+            raise ValueError("motion_reference_required")
+        self.reference = reference
         self.proxy = proxy
         self.client = proxy.client
         self.clock = proxy.clock
@@ -39,19 +58,29 @@ class MotionObservation:
 
     def _authorize(self):
         self.proxy.read_guard()
+        if self.reference is None:
+            admitted = (self.proxy.pvat_entries == 1
+                and self.proxy.pvat_call.get('outcome') == 'returned'
+                and self.proxy.pending_pvat is not None and self.proxy.pending_pvat.done())
+        else:
+            permission(self.reference.authorized)
+            admitted = True
         if (not self.active or self.proxy.client is not self.client
-                or self.proxy.sdk_stop_entries or self.proxy.pvat_entries != 1
-                or self.proxy.pvat_call.get('outcome') != 'returned'
-                or self.proxy.pending_pvat is None or not self.proxy.pending_pvat.done()
+                or self.proxy.sdk_stop_entries or not admitted
                 or self.clock() >= self.reference_end_ns):
             raise ValueError('motion_observation_permission_revoked')
+
+    def _reference(self):
+        if self.reference is not None:
+            return self.reference.started_ns, self.reference.duration_s
+        return self.proxy.pvat_started_ns, self.proxy.pvat_horizon_s
 
     def start(self):
         if self.used:
             raise ValueError('motion_observation_already_used')
         self.used = True
-        self.reference_end_ns = (self.proxy.pvat_started_ns
-                                 + round(self.proxy.pvat_horizon_s * 1e9))
+        started, duration = self._reference()
+        self.reference_end_ns = started + round(duration * 1e9)
         self.active = True
         self.read_owner.read_deadline_ns = min(
             self.proxy.read_deadline_ns, self.reference_end_ns)
@@ -68,7 +97,8 @@ class MotionObservation:
     async def _take(self):
         try:
             self._authorize()
-            midpoint = self.proxy.pvat_started_ns + round(self.proxy.pvat_horizon_s * .5e9)
+            started, duration = self._reference()
+            midpoint = started + round(duration * .5e9)
             while (remaining := (midpoint-self.clock())/1e9) > 0:
                 await asyncio.sleep(remaining)
                 self._authorize()
