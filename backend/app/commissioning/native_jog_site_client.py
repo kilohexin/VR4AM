@@ -5,6 +5,7 @@ motion route is denied; speedl and the reserved stop have dedicated entries.
 """
 import asyncio
 import copy
+from contextlib import contextmanager
 
 from app.commissioning.finite_window_run import FiniteScopeClient
 from app.commissioning.idle_stop_baseline import AdmissionRejected
@@ -22,8 +23,20 @@ class _ReadSurface:
         async def invoke(*args, **kwargs):
             p = self.__proxy
             p.read_guard()
-            if not p.speedl_entries: p._jog_scope.hot()
+            if not p.speedl_entries: p._jog_scope.read()
             p.read_guard()  # Local authorization work cannot extend the total deadline.
+            group=p._snapshot_context.get()
+            active=p._active_snapshot_group
+            if active is not None:
+                if group is not active or not active['active']:
+                    p.read_gate_closed=True
+                    raise AdmissionRejected('native_jog_snapshot_native_foreign')
+                used=active.setdefault('native_used',set())
+                if name in used or name not in {'is_connected','get_robot_state','get_estop_reason',
+                        'get_kin_data','get_tcp','get_claw','get_running_motion','get_motion_state'}:
+                    p.read_gate_closed=True
+                    raise AdmissionRejected('native_jog_snapshot_native_duplicate_or_method')
+                used.add(name)
             if name not in p.READS:
                 raise AdmissionRejected('native_jog_write_forbidden')
             if p.read_entries >= 256:
@@ -75,6 +88,43 @@ class SiteJogClient(FiniteScopeClient):
         self.read_deadline_ns = clock()+20_000_000_000
         self._motion_permission_check = motion_permission
         self._stop_permission_check = stop_permission
+        self._snapshot_owner_archive = []
+        self.snapshot_groups = []
+
+    def _snapshot_read_pending(self):
+        return (super()._snapshot_read_pending() or any(child.pending_read is not None
+            and not child.pending_read.done() for child in self._snapshot_owner_archive))
+
+    def require_clear_read_gate(self):
+        if any(child.read_gate_closed or child.read_remote_result_unknown
+                for child in self._snapshot_owner_archive):
+            self.read_gate_closed=True
+            raise AdmissionRejected('native_jog_snapshot_archive_not_clear')
+        return super().require_clear_read_gate()
+
+    @contextmanager
+    def _parallel_snapshot_scope(self, guard, *, purpose='motion'):
+        # Exactly one preflight and one motion group. Completed ownership is
+        # archived, never reset or discarded to make a failed group admissible.
+        self.require_clear_read_gate()
+        used=[row['purpose'] for row in self.snapshot_groups]
+        if (purpose not in ('preflight','motion') or purpose in used or 'motion' in used
+                or self.speedl_attempted or len(used)>=2):
+            raise AdmissionRejected('native_jog_snapshot_group_not_admitted')
+        if self.snapshot_read_owners:
+            self._snapshot_owner_archive.extend(self.snapshot_read_owners.values())
+            self.snapshot_read_owners={}
+        row=dict(purpose=purpose,started_ns=self.clock(),outcome='entered')
+        self.snapshot_groups.append(row)
+        try:
+            with super()._parallel_snapshot_scope(guard):yield
+            row['outcome']='returned'
+        except BaseException:
+            self.read_gate_closed=True
+            row['outcome']='failed'
+            raise
+        finally:
+            row['completed_ns']=self.clock()
 
     def _native_motion_entry_count(self, method):
         return self.speedl_entries if method == 'speedl' else 0

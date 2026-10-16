@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import time
+import re
 
 from app.commissioning.native_jog_site_scope import SiteJogScope, SiteJogDiagnosticAdapter
 from app.commissioning.native_jog_site_client import SiteJogClient
@@ -11,7 +12,20 @@ from app.commissioning.idle_stop_baseline import AdmissionRejected, validate_idl
 from app.commissioning.paused_stop_cleanup import _cached_sample, _geometry
 from app.commissioning.readonly_kinematics import _agree, _pose_error
 from app.robots.lebai_codec import pose_from_lebai
-from app.robots.base import StopReason
+from app.robots.base import StopReason, BackendCommandError
+
+
+def _safe_reason(error):
+    # Only local reason codes, never arbitrary vendor exception text.
+    reason=str(error)
+    if (isinstance(error,(AdmissionRejected,ValueError,BackendCommandError))
+            and re.fullmatch(r'[a-z0-9_:.]{1,128}',reason)
+            and (reason.startswith(('native_jog_','idle_baseline_','paused_cleanup_',
+                                    'finite_scope_','sdk_timeout:'))
+                 or reason in ('stop_unverified','stop_incomplete','robot_state_stale',
+                               'snapshot_rpc_result_unknown'))):
+        return reason
+    return 'native_jog_diagnostic_failed'
 
 
 async def _bounded(awaitable, seconds):
@@ -47,13 +61,17 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
     fk_completed = None
     primary = None
     interruption = None
+    phase = 'admission'
+    rejection_phase = None
 
     def reserved_stop():
         if closed or proxy is None or proxy.speedl_entries != 1 or clock() >= deadline:
             raise AdmissionRejected('native_jog_reserved_stop_unavailable')
 
     def motion_permission():
-        scope.hot()
+        # Site adapter submission authority checks runtime metadata. The native
+        # proxy performs full SHA before this final parameter/freshness check.
+        scope.read()
         if (closed or packet is None or snapshot is None or adapter._snapshot is not snapshot
                 or owner.done() or owner.cancelling() or deadline-clock() < 5_000_000_000
                 or getattr(recorder,'fatal_error',None) is not None
@@ -82,7 +100,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         return proxy
 
     async def stop_once():
-        nonlocal stop_attempted, primary
+        nonlocal stop_attempted, primary, rejection_phase
         if proxy is None or not proxy.speedl_entries or stop_attempted: return
         stop_attempted = True
         if observer is not None: observer.revoke()  # Deliberately no await.
@@ -91,25 +109,36 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         except BaseException as error:
             # A stop failure is the primary result, even after a motion error.
             primary = error
+            rejection_phase = 'stop'
 
     try:
         scope.check()
         await recorder.start()
         adapter = SiteJogDiagnosticAdapter(scope,client_factory=factory,clock=clock,sleep=sleep,
             event_callback=recorder.write_event)
+        phase = 'connect'
         await adapter.connect()
         scope.check()
+        phase = 'velocity_factor'
         factor = await proxy.get_velocity_factor()
         if type(factor) not in (float,int) or factor != 100:
             raise AdmissionRejected('native_jog_velocity_factor_not_100')
-        if not (await adapter.preflight()).ready:
+        phase = 'preflight'
+        preflight_started=clock()
+        preflight=await adapter.preflight()
+        report['preflight']=dict(ready=preflight.ready,
+            duration_ms=(clock()-preflight_started)/1e6,
+            snapshot_age_ms=(clock()-adapter._snapshot.captured_ns)/1e6)
+        if not preflight.ready:
             raise AdmissionRejected('native_jog_preflight_rejected')
         anchor = _cached_sample(adapter)
         validate_idle_sample(anchor,clock()); _geometry(adapter)
         scope.check()  # Cold checks finish before the fresh motion snapshot lease.
         old = adapter._snapshot
+        phase = 'feedback_fk'
         fk = pose_from_lebai(await proxy.kinematics_forward(list(old.actual_q)))
         fk_completed = clock()
+        phase = 'motion_snapshot'
         snapshot = await adapter._read_snapshot(read_purpose='motion')
         report['feedback_fk'] = dict(age_ms=(clock()-fk_completed)/1e6,
             q_identical=tuple(snapshot.actual_q)==tuple(old.actual_q),
@@ -127,6 +156,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
             snapshot_ns=snapshot.captured_ns,now_ns=now,generation=adapter._pump.generation,
             sequence=1,input_ns=now,input_expires_ns=now+100_000_000,duration_s=.08,
             config_sha256=scope.config_sha256)
+        phase = 'speedl'
         await adapter.submit_jog(packet,authorize=motion_permission)
         report['command_outcome'] = 'returned'
         def observe_permission():
@@ -142,6 +172,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         await stop_once()
     except BaseException as error:
         primary = error
+        rejection_phase = phase
         if isinstance(error,(asyncio.CancelledError,KeyboardInterrupt,SystemExit)):
             interruption = error
         report['command_outcome'] = 'error'
@@ -156,6 +187,13 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
             try:
                 tail_anchor = _cached_sample(adapter) if adapter._snapshot is not None else None
                 while clock() < tail_end:
+                    remaining=(tail_end-clock())/1e9
+                    if remaining < .2:
+                        # No request is started without its normal read budget.
+                        # A timer waking slightly early cannot manufacture a
+                        # millisecond RPC timeout at the two-second boundary.
+                        await sleep(max(0.,remaining))
+                        continue
                     proxy.read_deadline_ns = min(proxy.read_deadline_ns,tail_end)
                     sample = await _bounded(adapter.read_stop_observation(),min(.2,(tail_end-clock())/1e9))
                     proxy.require_clear_read_gate()
@@ -169,10 +207,14 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
                     await sleep(min(.2,max(0.,(tail_end-clock())/1e9)))
             except BaseException as error:
                 tail_ok = False
-                if primary is None: primary = error
+                if primary is None:
+                    primary = error
+                    rejection_phase = 'tail'
             report['tail_complete'] = tail_ok and tail_samples > 0
             report['tail_samples'] = tail_samples
         if adapter is not None:
+            if adapter._site_authority_error is not None:
+                report['authority_rejection']=_safe_reason(adapter._site_authority_error)
             report['original_stop_confirmed'] = bool(adapter._stop_transaction and adapter._stop_transaction.confirmed)
             if proxy is not None and (proxy.speedl_remote_result_unknown or observer is not None and observer.blocks_reads):
                 adapter._latched_fault = 'stop_unverified'
@@ -191,6 +233,8 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
                 speedl_remote_result_unknown=proxy.speedl_remote_result_unknown,
                 fk_entries=proxy.special_entries['kinematics_forward'],
                 velocity_factor_entries=proxy.special_entries['get_velocity_factor'],read_entries=proxy.read_entries,
+                snapshot_groups=copy.deepcopy(proxy.snapshot_groups),
+                archived_snapshot_owners=len(proxy._snapshot_owner_archive),
                 read_calls=copy.deepcopy(proxy.read_calls),native_reads=native_reads,
                 read_remote_result_unknown=proxy.read_remote_result_unknown,
                 stop_started_ns=proxy.native_started_ns, stop_completed_ns=proxy.native_completed_ns)
@@ -198,8 +242,8 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         report['stop_confirmed'] = report['original_stop_confirmed'] and report['latched_fault'] is None
         if primary is not None:
             report['error_type'] = type(primary).__name__
-            reason = str(primary)
-            report['primary_rejection'] = reason if reason.startswith(('native_jog_','sdk_timeout:','stop_unverified')) else 'native_jog_diagnostic_failed'
+            report['primary_rejection'] = _safe_reason(primary)
+            report['rejection_phase'] = rejection_phase
         report['complete'] = (primary is None and not report['cleanup_errors']
             and report['speedl_entries'] == report['stop_entries'] == 1 and report['stop_confirmed']
             and report['tail_complete'] and report['motion_observation'].get('outcome') == 'returned')

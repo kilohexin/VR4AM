@@ -158,3 +158,54 @@ async def test_failed_factory_is_consumed_with_zero_motion_and_stop(context):
     assert 'sensitive vendor text' not in json.dumps(r) and p['output'].exists()
     with pytest.raises(FileExistsError):await e.execute(p,**kw,client_factory=factory)
     assert factory.await_count==1
+
+
+async def test_light_read_checks_do_not_scan_runtime_but_hot_still_does(context,monkeypatch):
+    e,p,kw,_=context;x=e.Inputs(p,kw['approved'],kw['expected_hash'],kw['expires'],kw['confirm']);x.cold()
+    def forbid():raise AssertionError('full runtime scan')
+    monkeypatch.setattr(x,'fingerprints',forbid)
+    x.read()
+    with pytest.raises(AssertionError,match='full runtime scan'):x.hot()
+
+
+@pytest.mark.parametrize('change',['config','preview','reference','expiry'])
+async def test_light_read_path_keeps_input_and_absolute_expiry_checks(context,change):
+    e,p,kw,_=context;x=e.Inputs(p,kw['approved'],kw['expected_hash'],kw['expires'],kw['confirm']);x.cold()
+    if change=='config':p['config'].write_bytes(p['config'].read_bytes()+b'\n# changed')
+    elif change=='preview':kw['approved'].write_text('{}')
+    elif change=='reference':p['reference_survey'].write_bytes(p['reference_survey'].read_bytes()+b' ')
+    else:x.expires='2000-01-01T00:00:00Z'
+    with pytest.raises(ValueError):x.read()
+
+
+async def test_old_snapshot_policy_preview_cannot_authorize_new_read_groups(context):
+    e,p,kw,c=context;old=e.preview(p)
+    old.pop('snapshot_order',None);old.pop('read_authorization_policy',None)
+    kw['approved'].write_text(json.dumps(old));kw['expected_hash']=e.sha(kw['approved'])
+    with pytest.raises(ValueError,match='preview_changed'):
+        await e.execute(p,**kw,client_factory=AsyncMock(return_value=c))
+    assert not p['output'].exists()
+
+
+async def test_cold_hash_check_uses_two_complete_metadata_sweeps(context,monkeypatch):
+    e,p,kw,_=context;x=e.Inputs(p,kw['approved'],kw['expected_hash'],kw['expires'],kw['confirm'])
+    original=x.fingerprints;calls=[]
+    def counted():calls.append(True);return original()
+    monkeypatch.setattr(x,'fingerprints',counted)
+    x.cold();assert len(calls)==2
+    calls.clear();x.cold();assert len(calls)==2
+
+
+async def test_source_change_during_preflight_is_caught_at_group_boundary(context):
+    e,p,kw,c=context;old=c.get_kin_data;count=0
+    async def read():
+        nonlocal count
+        count+=1
+        if count==2:(e.ROOT/'code.py').write_text('changed during preflight')
+        return await old()
+    c.get_kin_data=read
+    r=await e.execute(p,**kw,client_factory=AsyncMock(return_value=c))
+    assert r['primary_rejection']=='native_jog_runtime_metadata_changed'
+    assert r['rejection_phase']=='preflight'
+    assert r['snapshot_groups'][0]['outcome']=='failed'
+    assert r['fk_entries']==r['speedl_entries']==r['stop_entries']==0

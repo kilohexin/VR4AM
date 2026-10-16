@@ -131,6 +131,8 @@ def preview(plan):
         hardware_verified=False,joint_bounds_verified=False,braking_verified=False,
         continuous_control_admitted=False,motion_authorized=False,automatic_retry=False,
         requires_fresh_onsite_authorization=True,sdk_binary_sha256=SDK_SHA,
+        snapshot_order='preflight_parallel_six_then_motion_parallel_six',
+        read_authorization_policy='inputs_and_expiry_each_read_runtime_at_group_motion_and_write_boundaries',
         event_clock='time.perf_counter_ns',runtime_check='full_sha_before_lease_and_actual_write_then_original_freshness')
 
 
@@ -162,7 +164,7 @@ class Inputs:
         return [(str(p),s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_ino)
             for p in map(Path,(*self.plan['input_hashes'],*self.copies)) for s in (p.stat(),)]
 
-    def hot(self):
+    def read(self):
         self.expiration()
         if self.confirm!=CONFIRM or self.approved is None:raise ValueError('native_jog_confirmation_required')
         raw=Path(self.approved).read_bytes()
@@ -174,22 +176,30 @@ class Inputs:
             raise ValueError('native_jog_private_copy_changed')
         if self.input_metadata is not None and self.input_metadata!=self.input_fingerprints():
             raise ValueError('native_jog_input_metadata_changed')
+        self.expiration()
+
+    def hot(self):
+        self.read()
         if self.metadata is not None and self.metadata!=self.fingerprints():
             raise ValueError('native_jog_runtime_metadata_changed')
         self.expiration()
 
     def cold(self):
-        self.hot()
+        self.read()
         before=self.fingerprints()
+        if self.metadata is not None and before!=self.metadata:
+            raise ValueError('native_jog_runtime_metadata_changed')
         input_before=self.input_fingerprints()
         for path,digest in (*self.plan['input_hashes'].items(),*self.copies.items()):
             if sha(path)!=digest:raise ValueError('native_jog_inputs_changed')
-        if runtime_hashes()!=self.plan['runtime_hashes'] or before!=self.fingerprints():
+        if runtime_hashes()!=self.plan['runtime_hashes']:
             raise ValueError('native_jog_runtime_changed')
-        self.metadata=before
         if input_before!=self.input_fingerprints():raise ValueError('native_jog_inputs_changed_during_hashes')
         self.input_metadata=input_before
-        self.hot()
+        self.read()
+        after=self.fingerprints()
+        if before!=after:raise ValueError('native_jog_runtime_changed_during_hashes')
+        self.metadata=after
 
     def write(self):
         self.cold()  # A slow full check cannot extend the subsequent 100 ms check.
@@ -252,7 +262,7 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
             raise
     try:
         scope=SiteJogScope(plan['settings'],plan['limits'],plan['config_sha256'],plan['tool'],
-            inputs.cold,inputs.hot,inputs.write)
+            inputs.cold,inputs.hot,inputs.write,read_check=inputs.read)
         await run_site_window(scope,recorder,factory,clock=perf_counter_ns,report=report)
     except BaseException as error:
         report.update(complete=False,error_type=type(error).__name__,primary_rejection='native_jog_entry_failed')

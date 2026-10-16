@@ -47,6 +47,7 @@ class SiteJogScope:
     authorize: object
     hot_check: object
     write_check: object
+    read_check: object = None
     _guard: object = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -60,7 +61,8 @@ class SiteJogScope:
                 or not 0 < s.control.max_joint_acceleration_radps2 <= .2
                 or any(lo < a or hi > b for lo, hi, a, b in zip(l.tcp_min_m, l.tcp_max_m,
                     s.startup_tcp_min_m, s.startup_tcp_max_m))
-                or not all(callable(c) for c in (self.authorize, self.hot_check, self.write_check))):
+                or not all(callable(c) for c in (self.authorize, self.hot_check, self.write_check))
+                or self.read_check is not None and not callable(self.read_check)):
             raise ValueError('native_jog_scope_limits_or_callbacks_invalid')
         object.__setattr__(self, '_guard', _SiteRegionGuard(s, l, self.config_sha256,
             s.teleop_ready_q, self.reference_tool, (.005,)*6, (.001,)*6, .08))
@@ -73,6 +75,10 @@ class SiteJogScope:
 
     def hot(self):
         self._binding(); permission(self.hot_check)
+
+    def read(self):
+        self._binding()
+        permission(self.hot_check if self.read_check is None else self.read_check)
 
     def write(self):
         self._binding(); permission(self.write_check)
@@ -90,6 +96,7 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
         self._site_scope = scope
         self._site_factory_used = False
         self._site_snapshot_tasks = set()
+        self._site_authority_error = None
 
         async def factory(ip):
             scope.check()
@@ -112,7 +119,9 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
         await super().connect()
 
     def _require_model_binding(self):
-        self._site_scope.hot()
+        # Submission authority checks the complete runtime once per boundary;
+        # binding validation must not repeat the same filesystem scan.
+        self._site_scope._binding()
         if self.settings is not self._site_scope.settings:
             raise ValueError('native_jog_configuration_changed')
         super()._require_model_binding()
@@ -123,10 +132,21 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
             self._jog_consumed = True
             raise ValueError('native_jog_fixed_packet_required')
         def check():
-            self._site_scope.hot()
-            permission(authorize)
+            try:
+                self._site_scope.hot()
+                permission(authorize)
+            except Exception as error:
+                if self._site_authority_error is None:self._site_authority_error=error
+                raise
         try:
             return await super().submit_jog(packet, authorize=check)
+        except BackendCommandError:
+            # The owner deliberately collapses revoked permission to a bool.
+            # Keep its local reason when trusted evidence proves no SDK entry.
+            if (self._client is not None and self._site_authority_error is not None
+                    and self._client._native_motion_entry_count('speedl') == 0):
+                raise self._site_authority_error from None
+            raise
         finally:
             # Only trusted native entry creates a stop obligation.
             if self._client is not None:
@@ -134,20 +154,20 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
                 self._motion_write_stop_required = self.native_jog_entries > 0
 
     async def _read_snapshot_impl(self, read, **kwargs):
-        if kwargs['read_purpose'] != 'motion':
+        if kwargs['read_purpose'] not in ('preflight','motion'):
             return await super()._read_snapshot_impl(read, **kwargs)
         self._site_scope.hot()
         group = getattr(self._client, '_parallel_snapshot_scope', None)
-        with group(self._site_scope._binding) if callable(group) else nullcontext():
+        with group(self._site_scope._binding,purpose=kwargs['read_purpose']) if callable(group) else nullcontext():
             return await super()._read_snapshot_impl(read, **kwargs)
 
     def _before_snapshot_install(self, snapshot, read):
-        if snapshot.read_purpose == 'motion':
+        if snapshot.read_purpose in ('preflight','motion'):
             self._site_scope.hot()
             self._ensure_command_snapshot_fresh(snapshot)
 
     async def _read_snapshot_fields(self, client, latencies, deadline_ns, **kwargs):
-        if kwargs['read_purpose'] != 'motion':
+        if kwargs['read_purpose'] not in ('preflight','motion'):
             return await super()._read_snapshot_fields(client, latencies, deadline_ns, **kwargs)
         async def query(name):
             self._site_scope._binding()
@@ -164,7 +184,7 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
         try:
             await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
             values = [t.result() for t in tasks]
-            self._site_scope.hot()
+            self._site_scope._binding()
             return dict(values=[v[0] for v in values], raw_kinematics=values[2][1])
         except BaseException:
             for task in tasks:
