@@ -3,6 +3,7 @@ import asyncio
 import os
 import sys
 import math
+from functools import lru_cache
 from dataclasses import replace
 from pathlib import Path
 
@@ -33,14 +34,16 @@ def demo_settings():
     # A visible local-model work-ready posture. It is synthetic and provides
     # no real-robot calibration or authorization.
     ready_q=tuple(a+b for a,b in zip(settings.lebai.home_q,(-.30,-.15,.10,0.,0.,0.)))
-    _validate_ready_path(settings.lebai.home_q,ready_q,settings.lebai,LM3Model())
     control=replace(settings.lebai.control,pvat_horizon_s=.08,pvat_send_hz=25,
         max_tcp_speed_mps=.005,max_tcp_acceleration_mps2=.02,
         max_tcp_step_m=.0002,translation_scale=.2)
-    return replace(settings,lebai=replace(settings.lebai,control=control,teleop_ready_q=ready_q),rotation_dead_zone_deg=.001,
+    result=replace(settings,lebai=replace(settings.lebai,control=control,teleop_ready_q=ready_q),rotation_dead_zone_deg=.001,
         segmented_target=SegmentedSettings(PursuitSettings(500,60,60,.001,.002,3),tool_spin=True,prepare_on_arm=True))
+    _validate_ready_path(result.lebai.home_q,ready_q,result.lebai,LM3Model())
+    return result
 
 
+@lru_cache(maxsize=32)
 def _validate_ready_path(start,goal,settings,model):
     # Local sampled geometric checks are not a hardware path certificate.
     for fraction in np.linspace(0.,1.,65):

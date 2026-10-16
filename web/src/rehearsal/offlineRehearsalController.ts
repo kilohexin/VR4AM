@@ -343,7 +343,7 @@ export class OfflineRehearsalController {
       this.processFaultResetFeedback(message);
       return;
     }
-    this.processHomeFeedback(message);
+    if (message.type === 'home_result') this.processHomeFeedback(message);
   }
 
   onConnection(status: TeleopConnectionStatus): void {

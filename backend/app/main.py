@@ -199,6 +199,12 @@ def create_app(
             runtime_backend,
         )
         latest = LatestVRFrame()
+        preparation_enabled = bool(
+            getattr(backend, 'supports_prepare_on_arm', False)
+            and runtime_settings.lebai is not None
+            and runtime_settings.lebai.mode == 'control'
+            and runtime_settings.transactional_target is None
+        )
         control = RobotControl(
             backend=backend,
             latest=latest,
@@ -208,8 +214,8 @@ def create_app(
             limiter=_build_limiter(runtime_settings, runtime_backend),
             transactional_settings=runtime_settings.transactional_target,
             segmented_settings=runtime_settings.segmented_target,
-            prepare_on_arm=(runtime_settings.segmented_target is not None
-                and runtime_settings.segmented_target.prepare_on_arm),
+            prepare_on_arm=preparation_enabled,
+            explicit_preparation=preparation_enabled,
             constraint_clear_ms=runtime_settings.constraint_clear_ms,
             home_options=HomeOptions(
                 max_speed_radps=runtime_settings.home_joint_speed_radps,

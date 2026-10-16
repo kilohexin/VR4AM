@@ -412,6 +412,8 @@ async def _receive_operator_messages(
                 send_lock,
             )
             start_sender.set()
+        elif message.type == "prepare_request":
+            await jobs.prepare(message)
         elif message.type == "arm_request":
             if getattr(control,'_prepare_on_arm',False):
                 await jobs.arm(message)

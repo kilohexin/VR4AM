@@ -157,6 +157,7 @@ class _CandidateRejected(BackendCommandError):
 
 
 class RealLebaiAdapter:
+    supports_prepare_on_arm = True
     # Internal commissioning subclass hook, never configurable by VR/API input.
     _motion_stop_rpc_method = "stop_move"
     _stop_blocking_motion_methods = frozenset({'move_pvat', 'set_claw'})
@@ -938,6 +939,7 @@ class RealLebaiAdapter:
         self,
         options: HomeOptions,
         on_phase: Callable[[HomePhase], None],
+        *, authorize: Callable[[], None] | None = None,
     ) -> None:
         self._require_control()
         if self._client is None:
@@ -956,6 +958,8 @@ class RealLebaiAdapter:
             options,
             on_phase,
             failure="prepare_failed",
+            authorize=authorize,
+            require_finished_idle=True,
         )
 
     async def _move_to_joint_pose(
@@ -965,6 +969,8 @@ class RealLebaiAdapter:
         on_phase: Callable[[HomePhase], None],
         *,
         failure: str,
+        authorize: Callable[[], None] | None = None,
+        require_finished_idle: bool = False,
     ) -> None:
         client = self._client
         owner = self._snapshot_calls
@@ -982,6 +988,11 @@ class RealLebaiAdapter:
         on_phase("homing")
         lifecycle: dict[str, object] = {}
         def require_current():
+            if authorize is not None:
+                try:
+                    authorize()
+                except RuntimeError as error:
+                    raise _RecoveryRevoked("recovery_request_revoked") from error
             if (client is not self._client or owner is not self._snapshot_calls or owner.closed
                     or self._disconnecting or self._stop_lock.locked()
                     or generation != self._pump.generation
@@ -1098,6 +1109,8 @@ class RealLebaiAdapter:
             within_tolerance = (
                 position_error <= options.position_tolerance_rad
                 and velocity <= options.velocity_tolerance_radps
+                and (not require_finished_idle or (snapshot.robot_state is BackendState.IDLE
+                    and str(motion_state).upper() == "FINISHED"))
             )
             if within_tolerance:
                 if stable_since_ns is None:

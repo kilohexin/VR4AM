@@ -61,6 +61,8 @@ export interface TargetControlStatus {
 
 export interface RobotStateMessage {
   manual_input_ready?: boolean;
+  preparation_required?: boolean;
+  preparation_unlocked?: boolean;
   v: typeof PROTOCOL_VERSION;
   type: 'robot_state';
   server_mono_ns: number;
@@ -121,6 +123,7 @@ export interface DiagnosticsMessage {
 export type ClientControlType =
   | 'hello'
   | 'arm_request'
+  | 'prepare_request'
   | 'disarm'
   | 'reset_fault'
   | 'home_request'
@@ -163,13 +166,13 @@ export function isGripperResultMessage(value: unknown): value is GripperResultMe
 
 export interface ArmAckMessage {
   v: typeof PROTOCOL_VERSION;
-  type: 'arm_ack';
+  type: 'arm_ack' | 'prepare_ack';
   request_id: string;
 }
 
 export interface ArmRejectedMessage {
   v: typeof PROTOCOL_VERSION;
-  type: 'arm_rejected';
+  type: 'arm_rejected' | 'prepare_rejected';
   request_id: string;
   message: string;
 }
@@ -424,6 +427,7 @@ const REAL_ROBOT_MODES: readonly RealRobotMode[] = ['readonly', 'control'];
 const CONTROL_TYPES: readonly ClientControlType[] = [
   'hello',
   'arm_request',
+  'prepare_request',
   'disarm',
   'reset_fault',
   'home_request',
@@ -663,7 +667,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
       [
         'ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase', 'backend',
         'real_robot_mode', 'preflight_ready', 'preflight_reason',
-        'translation_scale', 'target_control', 'manual_input_ready',
+        'translation_scale', 'target_control', 'manual_input_ready', 'preparation_required', 'preparation_unlocked',
       ],
     ) ||
     value.v !== PROTOCOL_VERSION ||
@@ -680,6 +684,9 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
 
   if (Object.hasOwn(value,'target_control') && value.target_control !== null
       && !isTargetControlStatus(value.target_control)) return false;
+  for (const key of ['preparation_required', 'preparation_unlocked']) {
+    if (Object.hasOwn(value,key) && typeof value[key] !== 'boolean') return false;
+  }
   if (Object.hasOwn(value,'manual_input_ready') && typeof value.manual_input_ready!=='boolean') return false;
 
   if (Object.hasOwn(value, 'ack_seq') && !isNullableNonNegativeInteger(value.ack_seq)) return false;
@@ -794,14 +801,14 @@ export function isArmFeedbackMessage(value: unknown): value is ArmFeedbackMessag
   if (
     !isRecord(value) ||
     value.v !== PROTOCOL_VERSION ||
-    (value.type !== 'arm_ack' && value.type !== 'arm_rejected') ||
+    !['arm_ack','arm_rejected','prepare_ack','prepare_rejected'].includes(String(value.type)) ||
     typeof value.request_id !== 'string' ||
     codePointLength(value.request_id) < 1 ||
     codePointLength(value.request_id) > 64
   ) {
     return false;
   }
-  if (value.type === 'arm_ack') return hasExactKeys(value, ['v', 'type', 'request_id']);
+  if (value.type === 'arm_ack' || value.type === 'prepare_ack') return hasExactKeys(value, ['v', 'type', 'request_id']);
   return (
     hasExactKeys(value, ['v', 'type', 'request_id', 'message']) &&
     typeof value.message === 'string'

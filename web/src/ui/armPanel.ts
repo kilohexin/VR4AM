@@ -68,6 +68,12 @@ const HOME_REJECTION_FEEDBACK: Readonly<Record<HomeRejectReason, string>> = {
 
 export class ArmPanel {
   readonly backendText = 'SIMULATOR';
+  readonly prepareButton: HTMLButtonElement;
+  private preparationRequired = false;
+  private preparationUnlocked = false;
+  private pendingPreparation = false;
+  private preparationResultId: string | null = null;
+  private readonly prepareLabel: HTMLElement;
   readonly armButton: HTMLButtonElement;
   readonly stopButton: HTMLButtonElement;
   readonly vrButton: HTMLButtonElement;
@@ -109,6 +115,9 @@ export class ArmPanel {
       <button class="command-button command-button--arm" type="button" disabled>
         ${lockIcon()}<span>解锁仿真</span>
       </button>
+      <button class="command-button command-button--prepare" type="button" disabled hidden>
+        <span>进入准备姿态</span>
+      </button>
       <button class="command-button command-button--stop" type="button">
         ${stopIcon()}<span>停止</span>
       </button>
@@ -117,6 +126,9 @@ export class ArmPanel {
       </button>
     `;
 
+    this.prepareButton = requireButton(container, '.command-button--prepare');
+    this.prepareLabel = requireElement(this.prepareButton, 'span');
+    this.prepareButton.addEventListener('click', () => this.requestPrepare());
     this.armButton = requireButton(container, '.command-button--arm');
     this.stopButton = requireButton(container, '.command-button--stop');
     this.vrButton = requireButton(container, '.command-button--vr');
@@ -206,6 +218,29 @@ export class ArmPanel {
     this.syncButtonState();
   }
 
+  setPreparationState(required: boolean, unlocked: boolean): void {
+    this.preparationRequired = required;
+    this.preparationUnlocked = required && unlocked && !this.fault && this.connected
+      && !this.isAuthoritativelyUnavailable();
+    this.syncButtonState();
+  }
+
+  requestPrepare(source: ControlSource = 'desktop'): boolean {
+    if (!this.preparationRequired || !this.preparationUnlocked || !this.connected
+        || this.automationActive || this.fault || this.isAuthoritativelyUnavailable()
+        || this.armed || this.isArmPending || this.recoveryPhase !== null
+        || this.pendingHomeRequestId !== null || this.gripPressed) return false;
+    const message = this.control('prepare_request', source);
+    this.pendingArmRequestId = message.request_id;
+    this.pendingPreparation = true;
+    this.preparationResultId = message.request_id;
+    this.preparationUnlocked = false;
+    this.armFeedback = null;
+    this.syncButtonState();
+    this.sendControl(message);
+    return true;
+  }
+
   setAutomationActive(active: boolean): void {
     if (this.automationActive === active) return;
     this.automationActive = active;
@@ -222,6 +257,8 @@ export class ArmPanel {
       this.armed = false;
       this.eligible = false;
       this.pendingArmRequestId = null;
+      this.preparationUnlocked = false;
+      this.pendingPreparation = false;
       this.awaitingArmedMode = false;
       this.armFeedback = null;
       this.stopRequested = true;
@@ -248,12 +285,14 @@ export class ArmPanel {
 
   setMode(mode: TeleopMode): void {
     this.mode = mode;
-    if (mode === 'READY' || mode === 'ARMED') this.stopRequested = false;
+    if (mode === 'READY') this.stopRequested = false;
     const authoritativeArmed =
       !this.stopRequested && (mode === 'ARMED' || mode === 'ACTIVE' || mode === 'HOLD');
     this.armed = authoritativeArmed;
     if (authoritativeArmed) {
       this.pendingArmRequestId = null;
+      this.preparationUnlocked = false;
+      this.pendingPreparation = false;
       this.awaitingArmedMode = false;
     }
     if (
@@ -264,32 +303,46 @@ export class ArmPanel {
     ) {
       this.eligible = false;
       this.pendingArmRequestId = null;
+      this.preparationUnlocked = false;
+      this.pendingPreparation = false;
       this.awaitingArmedMode = false;
     }
     this.syncButtonState();
   }
 
   handleArmFeedback(message: ArmFeedbackMessage): void {
-    if (message.request_id !== this.pendingArmRequestId) return;
+    if (message.request_id !== this.pendingArmRequestId
+        && !(message.type === 'prepare_rejected' && message.request_id === this.preparationResultId)) return;
+    const preparing = this.pendingPreparation || message.type === 'prepare_rejected';
+    this.preparationResultId = null;
+    if (preparing !== (message.type === 'prepare_ack' || message.type === 'prepare_rejected')) return;
     this.pendingArmRequestId = null;
+    this.pendingPreparation = false;
     this.eligible = false;
-    if (message.type === 'arm_ack') {
+    this.armed = false;
+    if (message.type === 'arm_ack' && this.preparationRequired) {
+      this.preparationUnlocked = true;
+      this.awaitingArmedMode = false;
+      this.armFeedback = null;
+    } else if (message.type === 'arm_ack' || message.type === 'prepare_ack') {
       this.awaitingArmedMode = true;
-      this.armed = false;
       this.armFeedback = null;
     } else {
+      this.preparationUnlocked = false;
       this.awaitingArmedMode = false;
-      this.armed = false;
-      this.armFeedback = '解锁请求被拒绝，请松开 Grip 后重试';
+      this.armFeedback = preparing ? '准备未完成，请查看故障；重新解锁后再准备' : '解锁请求被拒绝，请松开 Grip 后重试';
     }
     this.syncButtonState();
   }
 
   resetToLocked(): void {
+    this.preparationResultId = null;
     this.armed = false;
     this.eligible = false;
     this.gripPressed = true;
     this.pendingArmRequestId = null;
+    this.preparationUnlocked = false;
+    this.pendingPreparation = false;
     this.awaitingArmedMode = false;
     this.armFeedback = null;
     this.pendingFaultResetId = null;
@@ -328,6 +381,7 @@ export class ArmPanel {
       this.fault ||
       this.isAuthoritativelyUnavailable() ||
       this.armed ||
+      this.preparationUnlocked ||
       this.isArmPending ||
       this.pendingHomeRequestId !== null ||
       this.recoveryPhase !== null
@@ -345,10 +399,13 @@ export class ArmPanel {
   }
 
   requestDisarm(source: ControlSource = 'desktop'): void {
+    this.preparationResultId = null;
     if (this.automationActive) return;
     this.armed = false;
     this.eligible = false;
     this.pendingArmRequestId = null;
+    this.preparationUnlocked = false;
+    this.pendingPreparation = false;
     this.awaitingArmedMode = false;
     this.armFeedback = null;
     this.stopRequested = true;
@@ -373,7 +430,7 @@ export class ArmPanel {
       this.requestDisarm(source);
       return;
     }
-    if (this.segmentedCandidate) {
+    if (this.segmentedCandidate || this.preparationRequired) {
       this.requestDisarm(source);
       return;
     }
@@ -416,6 +473,8 @@ export class ArmPanel {
     this.armed = false;
     this.eligible = false;
     this.pendingArmRequestId = null;
+    this.preparationUnlocked = false;
+    this.pendingPreparation = false;
     this.awaitingArmedMode = false;
     this.stopRequested = true;
     this.mode = this.connected ? 'DISARMED' : 'DISCONNECTED';
@@ -424,7 +483,7 @@ export class ArmPanel {
   }
 
   private control(
-    type: 'arm_request' | 'disarm' | 'reset_fault' | 'home_request',
+    type: 'arm_request' | 'prepare_request' | 'disarm' | 'reset_fault' | 'home_request',
     source: ControlSource,
   ): ClientControlMessage {
     this.requestSequence += 1;
@@ -451,6 +510,7 @@ export class ArmPanel {
 
   private isUnlockedOrMoving(): boolean {
     return (
+      this.preparationUnlocked ||
       this.mode === 'ARMED' ||
       this.mode === 'ACTIVE' ||
       this.mode === 'HOLD' ||
@@ -464,6 +524,15 @@ export class ArmPanel {
   }
 
   private syncButtonState(): void {
+    this.prepareButton.hidden = !this.preparationRequired;
+    this.prepareButton.disabled = !this.preparationUnlocked || !this.connected
+      || this.automationActive || Boolean(this.fault) || this.armed || this.isArmPending
+      || this.recoveryPhase !== null || this.gripPressed;
+    this.prepareLabel.textContent = this.isArmPending && (this.pendingPreparation || this.awaitingArmedMode)
+      ? this.recoveryPhase === 'stabilizing' ? '正在确认到位' : '正在前往准备位'
+      : this.armed ? '已到准备位' : '进入准备姿态';
+    if (this.preparationRequired && this.armFeedback) this.prepareLabel.textContent = '准备未完成';
+    this.prepareButton.title = this.armFeedback ?? '进入已保存的工作准备姿态；到位前操纵保持锁定';
     if (this.automationActive) {
       this.armButton.disabled = true;
       this.armButton.dataset.state = 'automation';
@@ -481,6 +550,7 @@ export class ArmPanel {
       !this.connected ||
       !this.eligible ||
       this.armed ||
+      this.preparationUnlocked ||
       Boolean(this.fault) ||
       this.isArmPending ||
       this.pendingHomeRequestId !== null ||
@@ -492,7 +562,7 @@ export class ArmPanel {
         : this.eligible
           ? 'ready'
           : 'locked';
-    this.armLabel.textContent = this.isArmPending && this.recoveryPhase
+    this.armLabel.textContent = this.preparationUnlocked || (this.preparationRequired && (this.pendingPreparation || this.armed)) ? '已解锁' : this.isArmPending && this.recoveryPhase
       ? this.recoveryPhase === 'homing' ? '正在前往准备位' : this.recoveryPhase === 'stabilizing' ? '正在确认到位' : '正在准备'
       : this.armFeedback
       ? '解锁被拒绝'
@@ -535,7 +605,7 @@ export class ArmPanel {
       this.stopButton.disabled = true;
     } else {
       const stopped = this.mode === 'DISARMED' || (!this.armed && this.mode === 'READY');
-      const canRequestHome = !this.segmentedCandidate && stopped && !this.isArmPending && this.connected && !this.gripPressed;
+      const canRequestHome = !this.preparationRequired && !this.segmentedCandidate && stopped && !this.isArmPending && this.connected && !this.gripPressed;
       this.stopLabel.textContent = canRequestHome ? '回到 Home' : '停止';
       this.stopButton.disabled = false;
     }

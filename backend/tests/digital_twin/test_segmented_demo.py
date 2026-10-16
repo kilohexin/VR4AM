@@ -101,6 +101,9 @@ def test_full_app_has_fake_identity_and_serves_compiled_page(tmp_path,monkeypatc
         assert identity['target_strategy']=='segmented_experimental'
         assert identity['hardware_verified'] is False
         assert identity['native_sdk_loaded'] is False
+        assert app.state.control._explicit_preparation is True
+        assert app.state.control.prepare_options.timeout_s == 60.
+        assert app.state.control.prepare_options.max_speed_radps == .05
         assert client.get('/health').json()['real_robot_enabled'] is False
         assert 'demo fixture' in client.get('/').text
 
@@ -111,3 +114,16 @@ def test_demo_environment_rejects_live_overrides(env):
     from app.digital_twin.segmented_demo import validate_demo_environment
     with pytest.raises(ValueError,match='unsafe_demo_environment'):
         validate_demo_environment(env)
+
+async def test_demo_reuses_only_the_identical_prevalidated_ready_path():
+    from dataclasses import replace
+    from app.digital_twin.segmented_demo import SegmentedDemoClient,demo_settings,_validate_ready_path
+    from app.sim.lm3_model import LM3Model
+    _validate_ready_path.cache_clear()
+    settings=demo_settings().lebai
+    client=SegmentedDemoClient.idle(settings)
+    await client.movej(settings.teleop_ready_q,.2,.05,0.,0.)
+    assert _validate_ready_path.cache_info().hits==1
+    changed=replace(settings,startup_tcp_min_m=(10.,10.,10.))
+    with pytest.raises(ValueError,match='demo_ready_path_invalid'):
+        _validate_ready_path(settings.home_q,settings.teleop_ready_q,changed,LM3Model())

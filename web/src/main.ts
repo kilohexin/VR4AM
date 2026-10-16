@@ -104,7 +104,7 @@ armPanel = new ArmPanel(
   hud.actionContainer,
   (message) => {if(message.type==='disarm')holdPanel?.cancel();socket.sendControl(message);},
   () => void (xrController.isActive ? xrController.exitVR() : xrController.enterVR()),
-  (snapshot) => scene?.setArmSafetyState(snapshot),
+  (snapshot) => { scene?.setArmSafetyState(snapshot); refreshHoldPanel(); },
 );
 armPanel.setConnectionStatus({state: 'disconnected'});
 holdPanel=new HoldControlPanel(hud.desktopControlContainer,(message)=>socket.sendGripper(message),
@@ -209,6 +209,7 @@ function onRobotState(state: RobotStateMessage): void {
   armPanel.setConstraint(constraint);
   armPanel.setRecoveryPhase(recoveryPhase);
   armPanel.setTargetControl(state.target_control ?? null);
+  armPanel.setPreparationState(state.preparation_required ?? false, state.preparation_unlocked ?? false);
   armPanel.setMode(state.mode);
   xrController.setConstraint(constraint);
   hud.setRobotState({
@@ -280,7 +281,7 @@ function disposeForPageExit(): void {
 }
 
 function refreshHoldPanel():void{
- holdPanel?.update(latestRobotState,connectionState&&xrState==='idle',lastRobotStateReceivedMs);
+ holdPanel?.update(latestRobotState,connectionState&&xrState==='idle'&&Boolean(armPanel?.isArmed),lastRobotStateReceivedMs);
 }
 
 function recordAcknowledgement(sequence: number | null): void {

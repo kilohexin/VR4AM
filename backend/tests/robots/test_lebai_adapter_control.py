@@ -2339,3 +2339,53 @@ async def _send_and_wait_for_ik(
         }
     await _wait_until(lambda: len(client.ik_calls) > previous_calls)
     await _wait_until(lambda: adapter._pump._inflight is None and not adapter._pump.has_pending)
+
+
+async def test_prepare_rechecks_operator_authority_after_sdk_lock_wait():
+    adapter,client,_=await _connected_control_adapter()
+    snapshot=adapter._snapshot
+    async def read(**kwargs):return snapshot
+    adapter._read_snapshot=read
+    authorized=True
+    def authorize():
+        if not authorized:raise RuntimeError('operator_revoked')
+    phases=[]
+    await adapter._sdk_lock.acquire()
+    task=asyncio.create_task(adapter.prepare(HOME_OPTIONS,phases.append,authorize=authorize))
+    try:
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if phases or task.done():break
+        if task.done():await task
+        assert phases==['homing']
+        authorized=False
+        adapter._sdk_lock.release()
+        with pytest.raises(BackendCommandError,match='recovery_request_revoked'):await task
+        assert not any(call[0]=='movej' for call in client.write_calls)
+    finally:
+        if adapter._sdk_lock.locked():adapter._sdk_lock.release()
+        await asyncio.gather(task,return_exceptions=True)
+        await adapter.disconnect()
+
+
+@pytest.mark.parametrize('state,motion',[('MOVING','FINISHED'),('IDLE','RUNNING')])
+async def test_prepare_waits_for_finished_idle_before_stability(state,motion):
+    adapter,client,clock=await _connected_control_adapter()
+    move=client.movej
+    async def moving(*args):
+        value=await move(*args)
+        client.kin_data['actual_joint_pose']=list(args[0])
+        client.kin_data['target_joint_pose']=list(args[0])
+        client.robot_state=state;client.motion_state=motion
+        return value
+    client.movej=moving
+    async def sleep(seconds):
+        await clock.sleep(seconds)
+        if clock.now_ns()>=600_000_000:
+            client.robot_state='IDLE';client.motion_state='FINISHED'
+    adapter._sleep=sleep
+    try:
+        await adapter.prepare(HOME_OPTIONS,lambda _:None)
+        assert clock.now_ns()>=900_000_000
+    finally:
+        client.robot_state='IDLE';await adapter.disconnect()

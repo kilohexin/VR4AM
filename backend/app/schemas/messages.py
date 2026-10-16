@@ -143,6 +143,8 @@ class TargetControlStatus(StrictMessage):
 
 class RobotStateMessage(StrictMessage):
     manual_input_ready: bool = Field(default=False,strict=True)
+    preparation_required: bool = Field(default=False,strict=True)
+    preparation_unlocked: bool = Field(default=False,strict=True)
     v: Literal[1] = 1
     type: Literal["robot_state"] = "robot_state"
     server_mono_ns: int = Field(ge=0)
@@ -249,6 +251,7 @@ class ClientControlMessage(StrictMessage):
     type: Literal[
         "hello",
         "arm_request",
+        "prepare_request",
         "disarm",
         "reset_fault",
         "home_request",

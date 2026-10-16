@@ -145,8 +145,13 @@ class SimRobotAdapter:
         self,
         options: HomeOptions,
         on_phase: Callable[[HomePhase], None],
+        *, authorize: Callable[[], None] | None = None,
     ) -> None:
-        await self.home(options, on_phase)
+        def phase(value):
+            if authorize is not None: authorize()
+            on_phase(value)
+        if authorize is not None: authorize()
+        await self.home(options, phase)
 
     async def get_state(self) -> RobotStateMessage:
         async with self._lock:

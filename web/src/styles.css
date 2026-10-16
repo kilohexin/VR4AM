@@ -933,3 +933,17 @@ button {
     transition: none !important;
   }
 }
+
+/* Explicit preparation is a separate operator action. */
+.command-button[hidden] { display: none; }
+.command-button--prepare { width: 180px; background: #126474; border-color: #4597a5; }
+.command-button--prepare:disabled { color: #9eb3bb; background: #19343d; border-color: #35515b; cursor: not-allowed; }
+@media (min-width: 901px) and (max-width: 1350px) {
+  .command-actions { gap: 6px; }
+  .command-actions .command-button { width: 132px; padding: 0 8px; font-size: 15px; }
+}
+@media (max-width: 900px) {
+  .command-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.command-button--prepare span { font-size: 16px; line-height: 1.25; }

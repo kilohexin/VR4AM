@@ -226,7 +226,7 @@ export class Hud {
     this.lastFault = state.fault;
     const displayFault = state.fault ?? (state.targetControl?.phase === 'fault' ? 'segment_control_fault' : null);
     const displayMode: TeleopMode = displayFault ? 'FAULT' : state.mode;
-    this.modeValue.textContent = `${displayMode} · ${modeLabel(displayMode)}`;
+    this.modeValue.textContent = `${displayMode} · ${!displayFault && state.recoveryPhase ? readableRecoveryPhase(state.recoveryPhase) : modeLabel(displayMode)}`;
     this.modeValue.parentElement?.setAttribute('data-tone', modeTone(displayMode));
     this.backendStateValue.textContent = state.backendState;
     this.backendStateValue.dataset.tone = state.backendState === 'FAULT' ? 'fault' : 'healthy';

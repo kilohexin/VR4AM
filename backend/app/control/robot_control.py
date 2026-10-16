@@ -153,6 +153,8 @@ class RobotControl:
         transactional_settings: PursuitSettings | None = None,
         segmented_settings: SegmentedSettings | None = None,
         prepare_on_arm: bool = False,
+        explicit_preparation: bool = False,
+        prepare_options: HomeOptions | None = None,
     ) -> None:
         self.backend = backend
         self.latest = latest
@@ -163,6 +165,11 @@ class RobotControl:
         if prepare_on_arm and getattr(backend, 'supports_prepare_on_arm', False) is not True:
             raise ValueError('prepare_on_arm_not_supported')
         self._prepare_on_arm = prepare_on_arm
+        if type(explicit_preparation) is not bool or explicit_preparation and not prepare_on_arm:
+            raise ValueError('explicit_preparation_requires_prepare_capability')
+        self._explicit_preparation = explicit_preparation
+        self._preparation_unlock = None
+        self.prepare_options = prepare_options or HomeOptions(.05,60.,.001,.02,.3)
         self._preparation_episode: RecoveryEpisode | None = None
         self._explicit_gripper_current: Callable[[], bool] | None = None
         self.mapper = mapper if mapper is not None else CoordinateMapper()
@@ -363,6 +370,17 @@ class RobotControl:
             self._task = asyncio.create_task(self.run())
 
     async def arm(self) -> None:
+        if self._explicit_preparation:
+            episode=self._recovery_episode()
+            if (not self.machine.can_arm or not self._preparation_is_current(episode)
+                    or self._pending_stop_completion or self._stop_unverified):
+                raise RuntimeError('unlock_requires_fresh_grip_release')
+            if not await self._record_critical('preparation_unlocked',{'mode':self.machine.mode.value}):
+                self._latch_recording_fault()
+                raise RuntimeError('unlock_recording_unavailable')
+            if not self._preparation_is_current(episode):raise RuntimeError('arm_authority_changed')
+            self._preparation_unlock=(episode,self.latest.grip_release_count)
+            return
         if self._prepare_on_arm:
             if self._recovery_lock.locked():
                 raise RuntimeError('arm_blocked_by_recovery')
@@ -370,6 +388,21 @@ class RobotControl:
                 await self._prepare_and_arm()
             return
         await self._arm_without_prepare()
+
+    def _preparation_unlocked(self) -> bool:
+        grant=self._preparation_unlock
+        return bool(grant is not None and grant[1]==self.latest.grip_release_count
+            and self._preparation_is_current(grant[0])
+            and not self._pending_stop_completion and not self._stop_unverified)
+
+    async def prepare(self) -> None:
+        if (not self._explicit_preparation or not self._preparation_unlocked()
+                or self._recovery_lock.locked()):
+            self._preparation_unlock=None
+            raise RuntimeError('prepare_requires_unlock')
+        self._preparation_unlock=None  # A failed/cancelled request cannot replay.
+        async with self._recovery_lock:
+            await self._prepare_and_arm()
 
     async def _arm_without_prepare(self, *, ensure_prepared: Callable[[], None] | None = None) -> None:
         if self._shutdown_started:
@@ -445,7 +478,7 @@ class RobotControl:
         )
 
     async def _prepare_and_arm(self) -> None:
-        # Only an explicit Unlock enters this path. Connection and reconnect
+        # Only an explicit operator request enters this path. Connection and reconnect
         # never prepare. The original recovery owns joint writes and stopping.
         episode = self._recovery_episode()
         if not self.machine.can_arm or not self._preparation_is_current(episode):
@@ -492,7 +525,7 @@ class RobotControl:
                 self._recovery_phase = phase
 
             motion_started = True
-            await self.backend.prepare(self.home_options, on_phase)
+            await self.backend.prepare(self.prepare_options if self._explicit_preparation else self.home_options, on_phase, authorize=ensure_current)
             ensure_current()
             self.mapper.clear()
             self.filter.clear()
@@ -1488,6 +1521,8 @@ class RobotControl:
                 "manual_input_ready": self.machine.mode in {TeleopMode.ARMED,TeleopMode.ACTIVE,TeleopMode.HOLD}
                     and self._control_generation_is_current(self._control_generation)
                     and not self._pending_stop_completion and not self._stop_unverified,
+                "preparation_required": self._explicit_preparation,
+                "preparation_unlocked": self._preparation_unlocked(),
             }
         )
 
@@ -1853,6 +1888,7 @@ class RobotControl:
 
     def _advance_control_generation(self) -> None:
         self._control_generation += 1
+        self._preparation_unlock=None
         self._last_target_input_ns = None
         self._last_target_step_ns = None
         if self.target_lifecycle is not None:

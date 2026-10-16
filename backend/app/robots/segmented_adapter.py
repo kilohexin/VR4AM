@@ -46,7 +46,7 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
         self._segment_fault = None
         self._prepare_owner = None
 
-    async def prepare(self, options, on_phase):
+    async def prepare(self, options, on_phase, *, authorize=None):
         if not self.supports_prepare_on_arm:
             raise BackendCommandError('finite_diagnostic_action_not_supported')
         if self._prepare_owner is not None:
@@ -58,7 +58,7 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
         self._prepare_owner = owner
         token = _prepare_context.set((self, owner, on_phase))
         try:
-            await RealLebaiAdapter.prepare(self, options, on_phase)
+            await RealLebaiAdapter.prepare(self, options, on_phase, authorize=authorize)
         finally:
             self._prepare_owner = None
             _prepare_context.reset(token)

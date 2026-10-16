@@ -71,6 +71,7 @@ class RobotBackend(Protocol):
         self,
         options: HomeOptions,
         on_phase: Callable[[HomePhase], None],
+        *, authorize: Callable[[], None] | None = None,
     ) -> None: ...
 
     async def get_state(self) -> RobotStateMessage: ...

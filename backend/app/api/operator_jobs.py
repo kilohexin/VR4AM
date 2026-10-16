@@ -73,20 +73,28 @@ class OperatorJobs:
         self._start(run())
 
     async def arm(self, message):
-        if self._arm is not None or self._claw is not None or not self.open or not self.allowed():
-            await self.send(dict(v=1,type='arm_rejected',request_id=message.request_id,message='操作正在进行，请等待结束。'))
+        await self._arm_job(message, 'arm', self.control.arm)
+
+    async def prepare(self, message):
+        await self._arm_job(message, 'prepare', self.control.prepare)
+
+    async def _arm_job(self, message, action, operation):
+        if (message.request_id in self._seen or self._arm is not None
+                or self._claw is not None or not self.open or not self.allowed()):
+            await self.send(dict(v=1,type=action+'_rejected',request_id=message.request_id,message='请求重复、操作进行中或控制权不可用。'))
             return
+        self._seen.append(message.request_id)
         async def run():
             try:
                 try:
-                    await self.control.arm()
+                    await operation()
                 except RuntimeError:
                     if self.open:
-                        await self.send(dict(v=1,type='arm_rejected',request_id=message.request_id,
-                                             message='工作准备位未完成，请查看状态和故障。'))
+                        await self.send(dict(v=1,type=action+'_rejected',request_id=message.request_id,
+                                             message='操作未完成，请查看状态和故障；重新解锁后再准备。'))
                 else:
                     if self.open:
-                        await self.send(dict(v=1,type='arm_ack',request_id=message.request_id))
+                        await self.send(dict(v=1,type=action+'_ack',request_id=message.request_id))
             finally:
                 self._arm = None
         self._arm = self._start(run())

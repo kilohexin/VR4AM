@@ -118,7 +118,7 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
     async def home(self, options, on_phase):
         raise BackendCommandError('finite_diagnostic_action_not_supported')
 
-    async def prepare(self, options, on_phase):
+    async def prepare(self, options, on_phase, *, authorize=None):
         raise BackendCommandError('finite_diagnostic_action_not_supported')
 
     async def submit_catch_up(self, accepted_command, command_id):

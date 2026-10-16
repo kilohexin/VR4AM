@@ -18,7 +18,7 @@ class PreparingBackend(FakeBackend):
         self.entered, self.finish = asyncio.Event(), asyncio.Event()
         self.prepare_count = 0
 
-    async def prepare(self, options, on_phase):
+    async def prepare(self, options, on_phase, *, authorize=None):
         self.prepare_count += 1
         on_phase('homing')
         self.entered.set()

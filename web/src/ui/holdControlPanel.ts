@@ -58,7 +58,7 @@ export class HoldControlPanel {
           <button type="button" data-claw="close" disabled>长按闭合</button></div>
         <p>按住渐变，松开保持当前目标开口</p>
       </section>
-      <p data-field="hold-status" role="status">先解锁并等待到达工作准备位</p>
+      <p data-field="hold-status" role="status">先解锁，再点击进入准备姿态</p>
       <p data-field="hold-feedback">等待实际反馈</p>`;
     this.status = root.querySelector('[data-field="hold-status"]')!;
     this.feedback = root.querySelector('[data-field="hold-feedback"]')!;
@@ -172,7 +172,7 @@ export class HoldControlPanel {
         || (this.pending !== null && button !== this.capture);
       button.classList.toggle('is-held', button === this.capture);
     }
-    this.status.textContent = !this.enabled ? '先解锁并等待到达工作准备位' : this.motionHeld() ? '摇杆松开回中停止；坐标固定于机械臂基座'
+    this.status.textContent = !this.enabled ? '先解锁，再点击进入准备姿态' : this.motionHeld() ? '摇杆松开回中停止；坐标固定于机械臂基座'
       : this.action === 'open' || this.action === 'close' ? `目标开口 ${((1 - this.clawTarget) * 100).toFixed(0)}% · 松开保持`
       : this.pending ? '等待上次夹爪请求收尾；不自动重发' : '摇杆控制平面；升降、自转和夹爪长按操作';
   }

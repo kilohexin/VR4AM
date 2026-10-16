@@ -57,6 +57,21 @@ async def test_preparing_does_not_block_receiver_side_stop_or_accept_duplicate_a
     finish.set();await jobs.join();assert send.await_args.args[0]['type']=='arm_ack'
     await jobs.close()
 
+async def test_explicit_prepare_is_a_distinct_owned_job_and_rejects_replay():
+    from app.api.operator_jobs import OperatorJobs
+    entered,finish=asyncio.Event(),asyncio.Event()
+    async def prepare():entered.set();await finish.wait()
+    control=SimpleNamespace(prepare=prepare,arm=AsyncMock())
+    send=AsyncMock();jobs=OperatorJobs(control,send)
+    await jobs.prepare(SimpleNamespace(request_id='p'));await entered.wait()
+    await jobs.arm(SimpleNamespace(request_id='unlock'))
+    assert send.await_args.args[0]['type']=='arm_rejected'
+    finish.set();await jobs.join()
+    assert send.await_args.args[0]['type']=='prepare_ack'
+    await jobs.prepare(SimpleNamespace(request_id='p'))
+    assert send.await_args.args[0]['type']=='prepare_rejected'
+    control.arm.assert_not_awaited();await jobs.close()
+
 async def test_websocket_receives_cancel_while_claw_read_is_pending():
     from app.api.teleop_ws import _receive_messages
     from fastapi import WebSocketDisconnect
@@ -113,3 +128,33 @@ async def test_removed_rehearsal_cannot_start_through_an_old_client():
     message=OfflineRehearsalBeginMessage(v=1,type='offline_rehearsal_begin',request_id='old',plan_version=1)
     await _handle_rehearsal_message(socket,SimpleNamespace(),object(),message,asyncio.Lock())
     assert socket.send_json.await_args.args[0]['reason']=='feature_removed'
+
+async def test_websocket_receives_stop_while_explicit_preparation_is_pending():
+    from app.api.teleop_ws import _receive_messages
+    from fastapi import WebSocketDisconnect
+    entered,finish,pong=asyncio.Event(),asyncio.Event(),asyncio.Event()
+    queue=asyncio.Queue();sent=[]
+    async def prepare():entered.set();await finish.wait()
+    async def receive():
+        value=await queue.get()
+        if value is None:raise WebSocketDisconnect()
+        return value
+    async def send(value):
+        sent.append(value)
+        if value['type']=='pong':pong.set()
+    control=SimpleNamespace(prepare=prepare,disarm=AsyncMock())
+    socket=SimpleNamespace(app=SimpleNamespace(state=object()),receive_json=receive,send_json=send)
+    task=asyncio.create_task(_receive_messages(socket,control,asyncio.Event(),asyncio.Lock()))
+    try:
+        await queue.put(dict(v=1,type='prepare_request',request_id='prepare'))
+        await asyncio.wait_for(entered.wait(),1)
+        await queue.put(dict(v=1,type='disarm',request_id='stop'))
+        await queue.put(dict(v=1,type='ping',request_id='ping'))
+        await asyncio.wait_for(pong.wait(),1)
+        control.disarm.assert_awaited_once()
+        finish.set();await queue.put(None);await asyncio.wait_for(task,1)
+        assert any(x['type']=='disarm_ack' for x in sent)
+    finally:
+        finish.set()
+        if not task.done():task.cancel()
+        await asyncio.gather(task,return_exceptions=True)

@@ -1,4 +1,4 @@
-﻿{
+{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
     "GripperCancelMessage": {
@@ -69,6 +69,7 @@
           "enum": [
             "hello",
             "arm_request",
+            "prepare_request",
             "disarm",
             "reset_fault",
             "home_request",
@@ -470,6 +471,8 @@
       "additionalProperties": false,
       "properties": {
         "manual_input_ready":{"type":"boolean","default":false},
+        "preparation_required":{"type":"boolean","default":false},
+        "preparation_unlocked":{"type":"boolean","default":false},
         "v": {
           "const": 1,
           "default": 1,
