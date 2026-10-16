@@ -119,6 +119,23 @@ def validate_packet(packet, *, limits, actual_p, snapshot_ns, now_ns,
             raise ValueError('outside nominal planning box/reserve')
 
 
+def validate_inflight_input(packet, *, now_ns, generation, config_sha256):
+    """Existing RPC authority only; this cannot admit another native write.
+
+    The entry owner must already have checked feedback freshness and geometry.
+    Never renew the original input/expiry or substitute a new snapshot stamp.
+    """
+    if type(packet) is not NativeJogPacket:
+        raise ValueError('native_jog_inflight_packet_required')
+    _integer(now_ns);_integer(generation);_sha(config_sha256)
+    try:_fresh(packet.input_ns,now_ns)
+    except ValueError:
+        raise ValueError('native_jog_inflight_input_expired') from None
+    if (now_ns>=packet.expires_ns or packet.expires_ns>packet.input_ns+2*FRESH_NS
+            or generation!=packet.generation or config_sha256!=packet.config_sha256):
+        raise ValueError('native_jog_inflight_input_or_identity_invalid')
+
+
 def plan_jog(direction, strength, *, limits, actual_p, snapshot_ns, now_ns,
              generation, sequence, input_ns, input_expires_ns, duration_s, config_sha256):
     direction = _vector(direction)

@@ -6,7 +6,7 @@ import re
 
 from app.commissioning.native_jog_site_scope import SiteJogScope, SiteJogDiagnosticAdapter
 from app.commissioning.native_jog_site_client import SiteJogClient
-from app.commissioning.native_jog_packet import plan_jog
+from app.commissioning.native_jog_packet import NativeJogPacket,plan_jog,validate_packet,validate_inflight_input
 from app.commissioning.finite_motion_observation import MotionObservation, MotionReference
 from app.commissioning.idle_stop_baseline import AdmissionRejected, validate_idle_sample, validate_position_continuity
 from app.commissioning.paused_stop_cleanup import _cached_sample, _geometry
@@ -26,6 +26,29 @@ def _safe_reason(error):
                                'snapshot_rpc_result_unknown'))):
         return reason
     return 'native_jog_diagnostic_failed'
+
+
+def _packet_values(packet):
+    if type(packet) is not NativeJogPacket:
+        raise AdmissionRejected('native_jog_packet_binding_changed')
+    values=(packet.velocity_mps,*packet.velocity_mps,packet.acceleration_mps2,
+        packet.duration_s,packet.generation,packet.sequence,packet.input_ns,
+        packet.expires_ns,packet.config_sha256)
+    return tuple((type(value),value) for value in values)
+
+
+def _snapshot_values(snapshot):
+    # Independent scalar/tuple values, including the original timestamps.
+    # Nested Pose objects are mutable; object identity alone is insufficient.
+    values=[type(snapshot),snapshot.captured_ns,snapshot.read_requested_ns,
+        snapshot.read_completed_ns,snapshot.read_purpose,snapshot.robot_state,
+        snapshot.estop,snapshot.running_motion,snapshot.motion_state,snapshot.gripper]
+    vectors=(snapshot.actual_q,snapshot.actual_qd,snapshot.actual_qdd,snapshot.target_q,
+        snapshot.target_qd,snapshot.target_qdd,snapshot.actual_tcp.p,snapshot.actual_tcp.q,
+        snapshot.target_tcp.p,snapshot.target_tcp.q,snapshot.actual_flange.p,
+        snapshot.actual_flange.q,snapshot.tcp_setting.p,snapshot.tcp_setting.q)
+    for vector in vectors:values.extend((type(vector),*vector))
+    return tuple((type(value),value) for value in values)
 
 
 async def _bounded(awaitable, seconds):
@@ -52,12 +75,15 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         speedl_entries=0, stop_entries=0, fk_entries=0, velocity_factor_entries=0,
         read_entries=0, tail_complete=False, cleanup_errors=[], native_connection_release_verified=False,
         process_exit_required=True, command_outcome='not_started', motion_observation={},
-        model=scope.model_guard().assessment)
+        model=scope.model_guard().assessment,
+        motion_authorization_policy='feedback_at_entry_original_input_until_rpc_terminal')
     owner = asyncio.current_task()
     started = clock(); deadline = started+20_000_000_000
     proxy = adapter = observer = None
     used = closed = stop_attempted = False
     packet = snapshot = None
+    packet_binding = None
+    snapshot_binding = None
     fk_completed = None
     primary = None
     interruption = None
@@ -76,15 +102,30 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
                 or getattr(recorder,'fatal_error',None) is not None
                 or getattr(recorder,'dropped_normal_events',0)):
             raise AdmissionRejected('native_jog_motion_permission_revoked')
+        if _packet_values(packet)!=packet_binding:
+            raise AdmissionRejected('native_jog_packet_binding_changed')
+        if _snapshot_values(snapshot)!=snapshot_binding:
+            raise AdmissionRejected('native_jog_snapshot_binding_changed')
         proxy.require_clear_read_gate()
-        from app.commissioning.native_jog_packet import validate_packet
-        scope.model_guard().validate(packet,snapshot,settings=scope.settings,
-            limits=scope.limits,config_sha256=scope.config_sha256)
-        validate_packet(packet, limits=scope.limits, actual_p=snapshot.actual_tcp.p,
-            snapshot_ns=snapshot.captured_ns, now_ns=clock(), generation=adapter._pump.generation,
-            config_sha256=scope.config_sha256)
-        if fk_completed is None or not 0 <= clock()-fk_completed < 100_000_000:
-            raise AdmissionRejected('native_jog_feedback_fk_expired_before_entry')
+        guard=scope.model_guard()  # Recheck current configuration/model binding.
+        if proxy.speedl_entries==0:
+            guard.validate(packet,snapshot,settings=scope.settings,
+                limits=scope.limits,config_sha256=scope.config_sha256)
+            validate_packet(packet, limits=scope.limits, actual_p=snapshot.actual_tcp.p,
+                snapshot_ns=snapshot.captured_ns, now_ns=clock(), generation=adapter._pump.generation,
+                config_sha256=scope.config_sha256)
+            if fk_completed is None or not 0 <= clock()-fk_completed < 100_000_000:
+                raise AdmissionRejected('native_jog_feedback_fk_expired_before_entry')
+        elif (proxy.speedl_entries==1 and type(proxy.speedl_started_ns) is int
+                and proxy.speedl_started_ns<=clock() and proxy.pending_speedl is not None
+                and proxy.speedl_call is not None
+                and proxy.speedl_call.get('native_started_ns')==proxy.speedl_started_ns
+                and proxy.speedl_call.get('outcome') in ('entered','returned')):
+            # Only trusted actual entry selects this phase. Check original input
+            # and generation; the already-used feedback timestamp stays intact.
+            validate_inflight_input(packet,now_ns=clock(),generation=adapter._pump.generation,
+                config_sha256=scope.config_sha256)
+        else:raise AdmissionRejected('native_jog_native_phase_invalid')
 
     def motion_permission():
         # Full SHA finished before FK. The proxy checks metadata at write.
@@ -160,6 +201,8 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
             snapshot_ns=snapshot.captured_ns,now_ns=now,generation=adapter._pump.generation,
             sequence=1,input_ns=now,input_expires_ns=now+100_000_000,duration_s=.08,
             config_sha256=scope.config_sha256)
+        packet_binding=_packet_values(packet)
+        snapshot_binding=_snapshot_values(snapshot)
         phase = 'speedl'
         await adapter.submit_jog(packet,authorize=motion_checks)
         report['command_outcome'] = 'returned'

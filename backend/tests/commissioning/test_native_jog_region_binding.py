@@ -44,6 +44,25 @@ def test_fast_model_binding_detects_in_place_changes(damage):
     with pytest.raises(ValueError,match='binding_changed'):guard.require_binding(s,args['limits'],SHA)
 
 
+async def test_identical_model_inputs_reuse_only_immutable_fk_math(monkeypatch):
+    from app.commissioning import native_jog_model_guard as module
+    a,c,_,p,guard=await connected();calls=[];original=module.mdh_tcp_jacobian
+    def measured(q,tool):calls.append((tuple(q),tool));return original(q,tool)
+    monkeypatch.setattr(module,'mdh_tcp_jacobian',measured)
+    try:
+        for _ in range(2):guard.validate(p,a._snapshot,settings=a.settings,limits=a._jog_limits,config_sha256=SHA)
+        assert len(calls)==1  # Actual/target joint vectors are identical here.
+        # Every actual pose is still compared against the cached pure result.
+        pose=a._snapshot.actual_tcp;pose.p=(pose.p[0]+.002,*pose.p[1:])
+        with pytest.raises(ValueError,match='feedback_mismatch'):
+            guard.validate(p,a._snapshot,settings=a.settings,limits=a._jog_limits,config_sha256=SHA)
+        assert len(calls)==1
+        model_p,model_q=guard._model_pose(tuple(IDLE_Q),TOOL.translation_m,TOOL.rotation_xyzw)
+        assert type(model_p) is type(model_q) is tuple
+        assert guard._model_pose.cache_info().maxsize==4
+    finally:await cleanup(a)
+
+
 def fixture(**changes):
     t=independent_transform(IDLE_Q,TOOL)
     pose=Pose(p=tuple(t[:3,3]),q=tuple(Rotation.from_matrix(t[:3,:3]).as_quat()))

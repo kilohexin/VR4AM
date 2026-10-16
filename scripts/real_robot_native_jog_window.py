@@ -133,6 +133,7 @@ def preview(plan):
         continuous_control_admitted=False,motion_authorized=False,automatic_retry=False,
         requires_fresh_onsite_authorization=True,sdk_binary_sha256=SDK_SHA,
         snapshot_order='preflight_parallel_six_then_motion_parallel_six',
+        motion_authorization_policy='feedback_at_entry_original_input_until_rpc_terminal',
         read_authorization_policy='inputs_and_expiry_each_read_and_permission_runtime_at_group_submission_native_write_and_return',
         event_clock='time.perf_counter_ns',
         runtime_check='full_sha_after_loading_before_lease_metadata_at_native_write_then_original_freshness',

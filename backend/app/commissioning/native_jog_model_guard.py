@@ -4,6 +4,7 @@ This is not evidence of factory calibration, physical braking or real-robot
 joint limits. The public constructor rejects every non-loopback address.
 """
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -39,6 +40,17 @@ def _value_matcher(value):
     return lambda current:type(current) is cls and current==value
 
 
+def _model_pose_cache():
+    # A bounded cache of pure math, never of admission or SDK results. Keys
+    # contain all normalized FK inputs; results cannot expose mutable arrays.
+    @lru_cache(maxsize=4)
+    def model_pose(joints,translation,rotation):
+        model,_=mdh_tcp_jacobian(joints,MdhTool(translation,rotation))
+        return (tuple(float(v) for v in model[:3,3]),
+            tuple(float(v) for v in Rotation.from_matrix(model[:3,:3]).as_quat()))
+    return model_pose
+
+
 def _pose_matches(p, q, expected_p, expected_q, position_m, rotation_deg):
     p, q = _components(p, 3), _components(q, 4)
     if abs(math.hypot(*q)-1.) > 1e-9:
@@ -59,6 +71,7 @@ class _ModelRegionGuardCore:
     duration_s: float
     _settings_sha256: str = field(init=False, repr=False)
     _settings_match: object = field(init=False, repr=False, compare=False)
+    _model_pose: object = field(init=False, repr=False, compare=False)
     _assessment_json: str = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -95,6 +108,7 @@ class _ModelRegionGuardCore:
             raise ValueError('native_jog_region_model_reference_rejected')
         object.__setattr__(self, '_settings_sha256', _identity(s))
         object.__setattr__(self, '_settings_match', _value_matcher(s))
+        object.__setattr__(self, '_model_pose', _model_pose_cache())
         object.__setattr__(self, '_assessment_json', json.dumps(result, allow_nan=False))
 
     @property
@@ -125,9 +139,9 @@ class _ModelRegionGuardCore:
                 self.tool.rotation_xyzw, 1e-9, 1e-6):
             raise ValueError('native_jog_region_tool_changed')
         for q, pose in ((actual, snapshot.actual_tcp), (target, snapshot.target_tcp)):
-            model, _ = mdh_tcp_jacobian(q, self.tool)
-            if not _pose_matches(pose.p, pose.q, model[:3, 3],
-                    Rotation.from_matrix(model[:3, :3]).as_quat(), .0001, .1):
+            model_p,model_q=self._model_pose(q,_components(self.tool.translation_m,3),
+                _components(self.tool.rotation_xyzw,4))
+            if not _pose_matches(pose.p, pose.q,model_p,model_q,.0001,.1):
                 raise ValueError('native_jog_region_feedback_mismatch')
 
 

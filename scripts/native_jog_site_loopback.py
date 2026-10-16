@@ -25,7 +25,8 @@ from scipy.spatial.transform import Rotation
 HOST='127.0.0.1'
 Q=(0.,-1.2,1.8,-.6,1.,0.)
 TOOL=MdhTool((0.,0.,.175),(0.,0.,0.,1.))
-CASES=('normal','preflight_read_delay_20ms','speedl_late_100ms','stop_late_250ms','observation_stuck')
+CASES=('normal','preflight_read_delay_20ms','speedl_late_100ms','stop_late_250ms','observation_stuck',
+    'feedback_ages_reply_35ms','revoked_during_speedl','late_effect_after_stop')
 READS={'get_robot_state','get_estop_reason','get_kin_data','get_tcp','get_claw','get_running_motion','get_kin_factor'}
 
 
@@ -44,7 +45,9 @@ def speed_request():
         frame=dict(position_kind='CUSTOM',rotation_kind='CUSTOM',**wire_pose((0.,0.,0.))))
 
 
-def parse_request(raw):
+def parse_request(raw, *, active_motion_id=503):
+    if type(active_motion_id) is not int or active_motion_id not in (7,503):
+        raise ValueError('invalid fixed owned motion id')
     r=json.loads(raw,object_pairs_hook=_unique_object)
     if (type(r) is not dict or set(r)!={'jsonrpc','id','method','params'} or r['jsonrpc']!='2.0'
             or type(r['id']) not in (int,str) or type(r['params']) is not list or len(r['params'])!=1):
@@ -52,7 +55,7 @@ def parse_request(raw):
     method=r['method']
     if method=='speed_linear':expected=speed_request()
     elif method=='get_forward_kin':expected=dict(pose=dict(kind='JOINT',joint=dict(joint=list(Q))))
-    elif method=='get_motion_state':expected=dict(id=503)
+    elif method=='get_motion_state':expected=dict(id=active_motion_id)
     elif method in READS|{'stop_move'}:expected={}
     else:raise ValueError('forbidden owned peer method')
     if not _same_wire(r['params'][0],expected):raise ValueError('invalid owned peer parameters')
@@ -62,13 +65,19 @@ def parse_request(raw):
 class Peer(LoopbackPeer):
     def __init__(self,case):
         super().__init__();self.case=case;self.speed_seen=False;self.stopped=False
+        self.late_effect_started_ns=None
+
+    async def _late_effect(self):
+        await asyncio.sleep(.035)
+        self.late_effect_started_ns=time.perf_counter_ns()
 
     async def handler(self,connection):
         self._connections.add(connection)
         try:
             async for raw in connection:
                 try:
-                    r=parse_request(raw);key=(type(r['id']),r['id'])
+                    r=parse_request(raw,active_motion_id=7 if self.late_effect_started_ns is not None else 503)
+                    key=(type(r['id']),r['id'])
                     if key in self._ids:raise ValueError('duplicate owned peer id')
                     self._ids.add(key)
                     if r['method']=='speed_linear':
@@ -77,6 +86,9 @@ class Peer(LoopbackPeer):
                     if r['method']=='stop_move':
                         if self.stopped or not self.speed_seen:raise ValueError('invalid owned stop')
                         self.stopped=True
+                        if self.case=='late_effect_after_stop':
+                            effect=asyncio.create_task(self._late_effect());self._tasks.add(effect)
+                            effect.add_done_callback(self._reply_done)
                 except ValueError:
                     self.errors.append('owned_protocol_rejected');await connection.close(code=1008);return
                 row={**copy.deepcopy(r),'received_ns':time.perf_counter_ns()}
@@ -89,21 +101,26 @@ class Peer(LoopbackPeer):
         method=row['method']
         if (self.case=='preflight_read_delay_20ms' and not self.speed_seen
                 and method in READS|{'get_motion_state'}):await asyncio.sleep(.02)
-        if method=='speed_linear' and self.case=='speedl_late_100ms':await asyncio.sleep(.1)
+        if method=='speed_linear' and self.case in ('speedl_late_100ms','late_effect_after_stop'):
+            await asyncio.sleep(.1)
+        if method=='speed_linear' and self.case=='feedback_ages_reply_35ms':await asyncio.sleep(.035)
+        if method=='speed_linear' and self.case=='revoked_during_speedl':await asyncio.sleep(.05)
         if method=='stop_move' and self.case=='stop_late_250ms':await asyncio.sleep(.25)
         if method=='get_kin_data' and self.case=='observation_stuck' and self.speed_seen and not self.stopped:
             await asyncio.Event().wait()
         if method=='speed_linear':result=dict(id=7)
         elif method=='get_kin_factor':result=dict(speed_factor=100)
         elif method=='get_forward_kin':result=tcp()
-        elif method=='get_motion_state':result=dict(state='FINISHED')
+        elif method=='get_motion_state':result=dict(state='RUNNING' if self.late_effect_started_ns is not None else 'FINISHED')
         elif method=='get_running_motion' and self.case=='preflight_read_delay_20ms':result=dict(id=503)
+        elif method=='get_running_motion' and self.late_effect_started_ns is not None:result=dict(id=7)
         else:
-            result=fixture_result(method)
+            result=fixture_result(method,moving=self.late_effect_started_ns is not None)
             if method=='get_kin_data':
                 for prefix in ('actual','target'):
                     result[prefix+'_joint_pose']=list(Q);result[prefix+'_tcp_pose']=tcp()
                 result['actual_flange_pose']=tcp()
+        if method=='get_robot_state':row['synthetic_state']=result['state']
         row['send_started_ns']=time.perf_counter_ns()
         await connection.send(json.dumps(dict(jsonrpc='2.0',id=row['id'],result=result)))
         row['send_completed_ns']=time.perf_counter_ns()
@@ -130,8 +147,40 @@ def matches_expected_case(result):
             and result.get('primary_rejection')=='native_jog_loopback_preflight_only'
             and preflight.get('ready') is True and 0<=preflight.get('snapshot_age_ms',100)<100)
     if speeds!=1 or stops!=1 or result['speedl_entries']!=1 or result['stop_entries']!=1:return False
-    if result['case']=='normal':return result['complete'] is True and result['stop_confirmed'] is True
-    return result['case'] in CASES and result['complete'] is False and result['latched_fault']=='stop_unverified'
+    speed=next(r for r in records if r['method']=='speed_linear')
+    stop=next(r for r in records if r['method']=='stop_move')
+    late_reply=(type(speed.get('send_completed_ns')) is int and type(stop.get('send_completed_ns')) is int
+        and stop['send_completed_ns']<speed['send_completed_ns'])
+    known_speed=(result.get('speedl_call',{}).get('outcome')=='returned'
+        and result.get('speedl_remote_result_unknown') is False)
+    failed=(result['complete'] is False and result['latched_fault']=='stop_unverified')
+    if result['case']=='normal':return result['complete'] is True and result['stop_confirmed'] is True and known_speed
+    if result['case']=='feedback_ages_reply_35ms':
+        fks=[r for r in result.get('native_reads',[]) if r['method']=='kinematics_forward' and r['outcome']=='returned']
+        if len(fks)!=1 or not known_speed:return False
+        completed=fks[0]['completed_ns']
+        return (result['complete'] is True and result['stop_confirmed'] is True
+            and 0<=result['speedl_started_ns']-completed<100_000_000
+            and result['speedl_call']['native_completed_ns']-completed>=100_000_000)
+    if result['case']=='revoked_during_speedl':
+        return (failed and result.get('authority_rejection')=='native_jog_loopback_revoked'
+            and result.get('speedl_remote_result_unknown') is True
+            and result.get('speedl_call',{}).get('outcome')=='unknown' and late_reply)
+    if result['case']=='late_effect_after_stop':
+        effect=result.get('late_effect_started_ns')
+        return (failed and result.get('primary_rejection')=='stop_incomplete'
+            and result.get('original_stop_confirmed') is False
+            and result.get('speedl_remote_result_unknown') is True
+            and result.get('speedl_call',{}).get('outcome')=='unknown' and late_reply
+            and type(effect) is int and stop['send_completed_ns']<effect
+            and any(r['method']=='get_robot_state' and r.get('synthetic_state')=='MOVING'
+                and r['received_ns']>=effect for r in records))
+    if result['case']=='stop_late_250ms':
+        return failed and known_speed and result.get('primary_rejection')=='sdk_timeout:stop_move'
+    if result['case']=='speedl_late_100ms':return failed and result.get('speedl_remote_result_unknown') is True
+    if result['case']=='observation_stuck':
+        return failed and known_speed and result.get('motion_observation',{}).get('remote_result_unknown') is True
+    return False
 
 
 async def one_case(sdk,case):
@@ -155,13 +204,25 @@ async def one_case(sdk,case):
                     if report.get('preflight',{}).get('ready'):
                         raise ValueError('native_jog_loopback_preflight_only')
                 scope=replace(scope,authorize=preflight_only)
+            elif case=='feedback_ages_reply_35ms':
+                aged=False
+                def age_feedback():
+                    nonlocal aged
+                    if not aged and any(r['method']=='get_forward_kin' for r in peer.records):
+                        aged=True;time.sleep(.065)
+                scope=replace(scope,hot_check=age_feedback,read_check=lambda:None)
+            elif case=='revoked_during_speedl':
+                def revoke():
+                    if peer.speed_seen:raise ValueError('native_jog_loopback_revoked')
+                scope=replace(scope,read_check=revoke)
             result=await run_site_window(scope,NoopRecorder(),factory,clock=time.perf_counter_ns,report=report)
         finally:
             await peer.close()
             if client is not None:await asyncio.wait_for(client.wait_disconnect(),2)
         closed=client is not None and not await client.is_connected()
         result.update(case=case,rpc_records=copy.deepcopy(peer.records),local_connection_closed=closed,
-            listener=dict(host=HOST,port=port),protocol_errors=list(peer.errors))
+            listener=dict(host=HOST,port=port),protocol_errors=list(peer.errors),
+            late_effect_started_ns=peer.late_effect_started_ns)
         result['expected_outcome_matched']=matches_expected_case(result)
         return result
 

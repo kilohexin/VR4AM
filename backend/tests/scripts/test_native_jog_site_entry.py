@@ -274,6 +274,14 @@ async def test_old_full_sha_at_write_preview_cannot_authorize_metadata_policy(co
     assert not p['output'].exists()
 
 
+async def test_old_single_phase_preview_cannot_authorize_inflight_policy(context):
+    e,p,kw,c=context;old=e.preview(p);old.pop('motion_authorization_policy',None)
+    kw['approved'].write_text(json.dumps(old));kw['expected_hash']=e.sha(kw['approved'])
+    with pytest.raises(ValueError,match='preview_changed'):
+        await e.execute(p,**kw,client_factory=AsyncMock(return_value=c))
+    assert not p['output'].exists()
+
+
 async def test_full_runtime_hash_finishes_after_loading_and_before_fk_lease(context,monkeypatch):
     e,p,kw,c=context;events=[];original=e.runtime_hashes;fk=c.kinematics_forward;speed=c.speedl
     def hashes():events.append('hash');return original()
