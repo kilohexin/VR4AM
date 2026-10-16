@@ -22,6 +22,28 @@ SHA='a'*64
 TOOL=MdhTool((0.,0.,.175),(0.,0.,0.,1.))
 
 
+def test_model_binding_does_not_reserialize_settings_on_each_permission(monkeypatch):
+    from app.commissioning import native_jog_model_guard as module
+    args,_=fixture();guard=ModelJogRegionGuard(**args)
+    def forbidden(*args,**kwargs):raise AssertionError('settings serialized inside motion lease')
+    monkeypatch.setattr(module,'_identity',forbidden)
+    guard.require_binding(args['settings'],args['limits'],SHA)
+    object.__setattr__(args['settings'].control,'max_joint_speed_radps',.04)
+    with pytest.raises(ValueError,match='binding_changed'):
+        guard.require_binding(args['settings'],args['limits'],SHA)
+
+
+@pytest.mark.parametrize('damage',['root','nested','tuple','type','nonfinite'])
+def test_fast_model_binding_detects_in_place_changes(damage):
+    args,_=fixture();guard=ModelJogRegionGuard(**args);s=args['settings']
+    if damage=='root':object.__setattr__(s,'ip','127.0.0.2')
+    elif damage=='nested':object.__setattr__(s.expected_tcp,'z',.18)
+    elif damage=='tuple':object.__setattr__(s,'teleop_ready_q',(9.,*s.teleop_ready_q[1:]))
+    elif damage=='type':object.__setattr__(s.control,'loop_hz',str(s.control.loop_hz))
+    else:object.__setattr__(s.control,'max_joint_speed_radps',float('nan'))
+    with pytest.raises(ValueError,match='binding_changed'):guard.require_binding(s,args['limits'],SHA)
+
+
 def fixture(**changes):
     t=independent_transform(IDLE_Q,TOOL)
     pose=Pose(p=tuple(t[:3,3]),q=tuple(Rotation.from_matrix(t[:3,:3]).as_quat()))

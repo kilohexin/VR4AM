@@ -1,6 +1,7 @@
 """Preview by default. One separately authorized fixed +Z speedl diagnostic."""
 import argparse
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 import hashlib
 import importlib
@@ -132,8 +133,12 @@ def preview(plan):
         continuous_control_admitted=False,motion_authorized=False,automatic_retry=False,
         requires_fresh_onsite_authorization=True,sdk_binary_sha256=SDK_SHA,
         snapshot_order='preflight_parallel_six_then_motion_parallel_six',
-        read_authorization_policy='inputs_and_expiry_each_read_runtime_at_group_motion_and_write_boundaries',
-        event_clock='time.perf_counter_ns',runtime_check='full_sha_before_lease_and_actual_write_then_original_freshness')
+        read_authorization_policy='inputs_and_expiry_each_read_and_permission_runtime_at_group_submission_native_write_and_return',
+        event_clock='time.perf_counter_ns',
+        runtime_check='full_sha_after_loading_before_lease_metadata_at_native_write_then_original_freshness',
+        runtime_metadata_fields=['device','inode','size','mtime_ns','ctime_ns'],
+        runtime_bytes_rehashed_at_write=False,
+        metadata_preserving_content_tampering_detected_at_write=False)
 
 
 class Inputs:
@@ -142,6 +147,7 @@ class Inputs:
         self.metadata=None;self.copies={}
         self.input_metadata=None
         self._paths=None
+        self._verified=False
 
     def expiration(self):
         try:
@@ -152,16 +158,27 @@ class Inputs:
 
     def paths(self):
         if self._paths is not None:return self._paths
-        paths=[(ROOT/name).resolve(strict=True) for name in self.plan['runtime_hashes']]
-        if not all(p.is_relative_to(ROOT.resolve()) for p in paths):raise ValueError('native_jog_runtime_path_invalid')
+        paths=[ROOT/name for name in self.plan['runtime_hashes']]
+        if not all(p.resolve(strict=True).is_relative_to(ROOT.resolve()) for p in paths):
+            raise ValueError('native_jog_runtime_path_invalid')
         self._paths=tuple(paths)
         return self._paths
 
     def fingerprints(self):
-        return [(s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_ino) for s in (p.stat() for p in self.paths())]
+        paths=self.paths()
+        def scan(chunk):
+            return [(i,(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns))
+                for i,p in chunk for s in (p.stat(),)]
+        indexed=list(enumerate(paths))
+        if len(paths)<16:return [row for _,row in scan(indexed)]
+        # File metadata only: no SDK work or authorization callbacks on workers.
+        # Join every worker before comparing or returning, including failures.
+        with ThreadPoolExecutor(max_workers=4,thread_name_prefix='jog-metadata') as pool:
+            rows=[row for chunk in pool.map(scan,[indexed[i::4] for i in range(4)]) for row in chunk]
+        return [row for _,row in sorted(rows)]
 
     def input_fingerprints(self):
-        return [(str(p),s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_ino)
+        return [(str(p),s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
             for p in map(Path,(*self.plan['input_hashes'],*self.copies)) for s in (p.stat(),)]
 
     def read(self):
@@ -185,6 +202,7 @@ class Inputs:
         self.expiration()
 
     def cold(self):
+        self._verified=False
         self.read()
         before=self.fingerprints()
         if self.metadata is not None and before!=self.metadata:
@@ -200,9 +218,15 @@ class Inputs:
         after=self.fingerprints()
         if before!=after:raise ValueError('native_jog_runtime_changed_during_hashes')
         self.metadata=after
+        self._verified=True
 
     def write(self):
-        self.cold()  # A slow full check cannot extend the subsequent 100 ms check.
+        # The complete byte hash finishes after loading and before the FK lease.
+        # Keep the original path names so replacement through a directory link
+        # also changes the file identity observed at this boundary.
+        if not self._verified or self.metadata is None or self.input_metadata is None:
+            raise ValueError('native_jog_runtime_not_verified')
+        self.hot()
 
 
 def require_execution_runtime():

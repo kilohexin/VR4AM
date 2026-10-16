@@ -127,19 +127,32 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
         super()._require_model_binding()
 
     async def submit_jog(self, packet, *, authorize):
+        if self._jog_consumed:
+            raise BackendCommandError('native_jog_submission_consumed')
         if (packet.velocity_mps != (0., 0., .005) or packet.acceleration_mps2 != .01
                 or packet.duration_s != .08):
             self._jog_consumed = True
             raise ValueError('native_jog_fixed_packet_required')
         def check():
             try:
-                self._site_scope.hot()
+                # Polling ownership is not a new file-entry boundary. Keep
+                # input/expiry checks here; the proxy checks metadata again
+                # immediately before native speedl, even after lock waiting.
+                self._site_scope.read()
                 permission(authorize)
             except Exception as error:
                 if self._site_authority_error is None:self._site_authority_error=error
                 raise
         try:
-            return await super().submit_jog(packet, authorize=check)
+            try:
+                self._site_scope.hot()
+            except Exception as error:
+                self._jog_consumed=True
+                if self._site_authority_error is None:self._site_authority_error=error
+                raise
+            result=await super().submit_jog(packet, authorize=check)
+            self._site_scope.hot()
+            return result
         except BackendCommandError:
             # The owner deliberately collapses revoked permission to a bool.
             # Keep its local reason when trusted evidence proves no SDK entry.

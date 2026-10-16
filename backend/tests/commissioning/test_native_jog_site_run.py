@@ -154,3 +154,27 @@ async def test_fk_age_is_rechecked_after_native_write_identity_checks():
     assert r['speedl_entries']==r['stop_entries']==0 and not c.write_calls
 
 
+async def test_runner_does_not_repeat_adapter_owned_input_check(monkeypatch):
+    from app.commissioning.native_jog_site_scope import SiteJogDiagnosticAdapter
+    original=SiteJogDiagnosticAdapter.submit_jog;reads=[];observed=[]
+    s,c=setup(read_check=lambda:reads.append(True))
+    async def measured(self,packet,*,authorize):
+        before=len(reads);authorize();observed.append(len(reads)-before)
+        return await original(self,packet,authorize=authorize)
+    monkeypatch.setattr(SiteJogDiagnosticAdapter,'submit_jog',measured)
+    r,_=await run(s,c)
+    assert r['complete'],r
+    assert observed==[0]  # Adapter checks inputs before invoking this callback.
+
+
+async def test_observation_permissions_use_light_read_checks_after_publication(monkeypatch):
+    s,c=setup();after=[];original=SiteJogScope.hot
+    def measured(self):
+        if any(call[0]=='speedl' for call in c.write_calls):after.append(True)
+        return original(self)
+    monkeypatch.setattr(SiteJogScope,'hot',measured)
+    r,_=await run(s,c)
+    assert r['complete'],r
+    assert after==[True]  # One publication boundary; observation has no writes.
+
+

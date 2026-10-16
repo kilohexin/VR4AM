@@ -40,3 +40,32 @@ async def test_non_fixed_direction_consumes_without_write():
 
 def test_site_adapter_requires_explicit_scope_and_factory():
     with pytest.raises(ValueError):SiteJogDiagnosticAdapter(None,client_factory=None,clock=lambda:0,sleep=asyncio.sleep,event_callback=None)
+
+
+async def test_submission_scans_runtime_at_boundaries_and_checks_each_permission(monkeypatch):
+    a,c,p=await connected();calls=[]
+    from app.commissioning.native_jog_site_scope import SiteJogScope
+    hot=SiteJogScope.hot;read=SiteJogScope.read
+    def scan(self):calls.append('metadata');return hot(self)
+    def light(self):calls.append('inputs');return read(self)
+    monkeypatch.setattr(SiteJogScope,'hot',scan);monkeypatch.setattr(SiteJogScope,'read',light)
+    try:
+        assert await a.submit_jog(p,authorize=lambda:calls.append('permission'))==7
+        assert calls.count('metadata')==2  # Submission and publication. Native proxy adds its own write check.
+        assert calls.count('inputs')==calls.count('permission') and calls.count('permission')>=3
+        assert calls[0]==calls[-1]=='metadata'
+        await a.stop(StopReason.GRIP_RELEASED)
+    finally:await a.disconnect()
+
+
+async def test_metadata_rejection_consumes_submission_even_if_files_are_restored(monkeypatch):
+    a,c,p=await connected();allowed=False
+    def hot(self):
+        if not allowed:raise ValueError('native_jog_runtime_metadata_changed')
+    monkeypatch.setattr(SiteJogScope,'hot',hot)
+    try:
+        with pytest.raises(ValueError,match='metadata_changed'):await a.submit_jog(p,authorize=lambda:None)
+        allowed=True
+        with pytest.raises(BackendCommandError,match='consumed'):await a.submit_jog(p,authorize=lambda:None)
+        assert not c.write_calls
+    finally:await a.disconnect()

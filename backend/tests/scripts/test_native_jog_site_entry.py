@@ -209,3 +209,100 @@ async def test_source_change_during_preflight_is_caught_at_group_boundary(contex
     assert r['rejection_phase']=='preflight'
     assert r['snapshot_groups'][0]['outcome']=='failed'
     assert r['fk_entries']==r['speedl_entries']==r['stop_entries']==0
+
+
+async def test_native_write_requires_completed_full_hash_check(context):
+    e,p,kw,_=context;x=e.Inputs(p,kw['approved'],kw['expected_hash'],kw['expires'],kw['confirm'])
+    with pytest.raises(ValueError,match='native_jog_runtime_not_verified'):x.write()
+
+
+async def test_native_write_uses_verified_metadata_without_runtime_byte_hash(context,monkeypatch):
+    e,p,kw,_=context;x=e.Inputs(p,kw['approved'],kw['expected_hash'],kw['expires'],kw['confirm']);x.cold()
+    def forbidden():raise AssertionError('runtime bytes hashed inside lease')
+    monkeypatch.setattr(e,'runtime_hashes',forbidden)
+    x.write()
+
+
+async def test_failed_full_recheck_invalidates_previous_verification(context,monkeypatch):
+    e,p,kw,_=context;x=e.Inputs(p,kw['approved'],kw['expected_hash'],kw['expires'],kw['confirm']);x.cold()
+    monkeypatch.setattr(e,'runtime_hashes',lambda:{'code.py':'0'*64})
+    with pytest.raises(ValueError,match='runtime_changed'):x.cold()
+    with pytest.raises(ValueError,match='runtime_not_verified'):x.write()
+
+
+async def test_full_sha_after_sdk_loading_rejects_source_change_before_sdk_init(context,monkeypatch):
+    from tests.robots.fake_lebai import FakeLebaiModule
+    e,p,kw,c=context;sdk=FakeLebaiModule(c)
+    def load():
+        (e.ROOT/'code.py').write_text('changed while loading')
+        return sdk
+    monkeypatch.setattr(e,'require_execution_runtime',lambda:None)
+    monkeypatch.setattr(e,'load_sdk',load)  # Explicit fake module; no native import.
+    r=await e.execute(p,**kw)
+    assert not r['complete'] and r['speedl_entries']==r['stop_entries']==0
+    assert sdk.init_count==0 and not sdk.connect_calls
+    assert not r['connection_diagnostics']['native_sdk_init_entered']
+
+
+@pytest.mark.parametrize('change',['runtime','config','preview','reference','expiry','identity'])
+async def test_metadata_write_still_rejects_changed_authority(context,monkeypatch,change):
+    e,p,kw,_=context;x=e.Inputs(p,kw['approved'],kw['expected_hash'],kw['expires'],kw['confirm']);x.cold()
+    if change=='runtime':(e.ROOT/'code.py').write_text('changed source')
+    elif change=='config':p['config'].write_bytes(p['config'].read_bytes()+b'\n# changed')
+    elif change=='preview':kw['approved'].write_text('{}')
+    elif change=='reference':p['reference_survey'].write_bytes(p['reference_survey'].read_bytes()+b' ')
+    elif change=='expiry':x.expires='2000-01-01T00:00:00Z'
+    else:
+        original=Path.stat;code=e.ROOT/'code.py'
+        from types import SimpleNamespace
+        def replaced(path,*args,**kwargs):
+            s=original(path,*args,**kwargs)
+            if path==code:
+                return SimpleNamespace(st_dev=s.st_dev+1,st_ino=s.st_ino,st_size=s.st_size,
+                    st_ctime_ns=s.st_ctime_ns,st_mtime_ns=s.st_mtime_ns)
+            return s
+        monkeypatch.setattr(Path,'stat',replaced)
+    with pytest.raises(ValueError):x.write()
+
+
+async def test_old_full_sha_at_write_preview_cannot_authorize_metadata_policy(context):
+    e,p,kw,c=context;old=e.preview(p)
+    old['runtime_check']='full_sha_before_lease_and_actual_write_then_original_freshness'
+    kw['approved'].write_text(json.dumps(old));kw['expected_hash']=e.sha(kw['approved'])
+    with pytest.raises(ValueError,match='preview_changed'):
+        await e.execute(p,**kw,client_factory=AsyncMock(return_value=c))
+    assert not p['output'].exists()
+
+
+async def test_full_runtime_hash_finishes_after_loading_and_before_fk_lease(context,monkeypatch):
+    e,p,kw,c=context;events=[];original=e.runtime_hashes;fk=c.kinematics_forward;speed=c.speedl
+    def hashes():events.append('hash');return original()
+    async def factory(ip):events.append('loaded');return c
+    async def measured_fk(q):events.append('fk');return await fk(q)
+    async def measured_speed(*args):events.append('speed');return await speed(*args)
+    monkeypatch.setattr(e,'runtime_hashes',hashes);c.kinematics_forward=measured_fk;c.speedl=measured_speed
+    r=await e.execute(p,**kw,client_factory=factory)
+    assert r['complete'],r
+    assert events.index('loaded')<max(i for i,v in enumerate(events) if v=='hash')<events.index('fk')
+    assert events[-1]=='speed'
+
+
+async def test_runtime_metadata_scan_preserves_order_and_joins_all_workers(context,monkeypatch):
+    import threading
+    e,p,kw,_=context
+    names=[f'module{i}.py' for i in range(16)]
+    for name in names:(e.ROOT/name).write_text(name)
+    p['runtime_hashes']={name:e.sha(e.ROOT/name) for name in names}
+    x=e.Inputs(p,kw['approved'],kw['expected_hash'],kw['expires'],kw['confirm'])
+    original=Path.stat;workers=set()
+    def observed(path,*args,**kwargs):
+        if path.name in names:workers.add(threading.get_ident())
+        return original(path,*args,**kwargs)
+    # Resolve/validate paths before measuring the metadata scan itself.
+    x.paths();monkeypatch.setattr(Path,'stat',observed)
+    actual=x.fingerprints()
+    expected=[(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+        for name in names for s in (original(e.ROOT/name),)]
+    assert actual==expected
+    assert threading.get_ident() not in workers and workers
+    assert not any(t.name.startswith('jog-metadata') for t in threading.enumerate())

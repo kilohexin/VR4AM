@@ -68,10 +68,9 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         if closed or proxy is None or proxy.speedl_entries != 1 or clock() >= deadline:
             raise AdmissionRejected('native_jog_reserved_stop_unavailable')
 
-    def motion_permission():
-        # Site adapter submission authority checks runtime metadata. The native
-        # proxy performs full SHA before this final parameter/freshness check.
-        scope.read()
+    def motion_checks():
+        # Caller owns input authorization: the adapter at each authority gate,
+        # or motion_permission at the native proxy. Do not read twice per gate.
         if (closed or packet is None or snapshot is None or adapter._snapshot is not snapshot
                 or owner.done() or owner.cancelling() or deadline-clock() < 5_000_000_000
                 or getattr(recorder,'fatal_error',None) is not None
@@ -86,6 +85,11 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
             config_sha256=scope.config_sha256)
         if fk_completed is None or not 0 <= clock()-fk_completed < 100_000_000:
             raise AdmissionRejected('native_jog_feedback_fk_expired_before_entry')
+
+    def motion_permission():
+        # Full SHA finished before FK. The proxy checks metadata at write.
+        scope.read()
+        motion_checks()
 
     async def factory(ip):
         nonlocal used, proxy
@@ -157,10 +161,12 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
             sequence=1,input_ns=now,input_expires_ns=now+100_000_000,duration_s=.08,
             config_sha256=scope.config_sha256)
         phase = 'speedl'
-        await adapter.submit_jog(packet,authorize=motion_permission)
+        await adapter.submit_jog(packet,authorize=motion_checks)
         report['command_outcome'] = 'returned'
         def observe_permission():
-            scope.hot()
+            # The one diagnostic read grants no new motion. Its repeated
+            # ownership checks use the same light input/expiry path as reads.
+            scope.read()
             if proxy.speedl_call is None or proxy.speedl_call['outcome'] != 'returned':
                 raise AdmissionRejected('native_jog_observation_not_admitted')
         observer = proxy.motion_observation = MotionObservation(proxy,

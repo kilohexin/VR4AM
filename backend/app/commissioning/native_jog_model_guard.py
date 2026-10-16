@@ -3,7 +3,7 @@
 This is not evidence of factory calibration, physical braking or real-robot
 joint limits. The public constructor rejects every non-loopback address.
 """
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 import hashlib
 import json
 import math
@@ -19,6 +19,24 @@ from app.config import LebaiSettings
 def _identity(settings):
     return hashlib.sha256(json.dumps(asdict(settings), sort_keys=True,
         separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
+
+
+def _value_matcher(value):
+    """Capture independent immutable values once; compare all fields at gates."""
+    cls=type(value)
+    if is_dataclass(value):
+        checks=tuple((f.name,_value_matcher(getattr(value,f.name))) for f in fields(value))
+        return lambda current:type(current) is cls and all(check(getattr(current,name)) for name,check in checks)
+    if cls in (tuple,list):
+        checks=tuple(_value_matcher(v) for v in value)
+        return lambda current:type(current) is cls and len(current)==len(checks) and all(
+            check(v) for check,v in zip(checks,current,strict=True))
+    if cls is float:
+        expected=value.hex()  # Preserve type and signed-zero differences too.
+        return lambda current:type(current) is float and current.hex()==expected
+    if cls not in (str,int,bool,type(None)):
+        raise ValueError('native_jog_region_unsupported_configuration_value')
+    return lambda current:type(current) is cls and current==value
 
 
 def _pose_matches(p, q, expected_p, expected_q, position_m, rotation_deg):
@@ -40,6 +58,7 @@ class _ModelRegionGuardCore:
     initial_offset_rad: tuple[float, ...]
     duration_s: float
     _settings_sha256: str = field(init=False, repr=False)
+    _settings_match: object = field(init=False, repr=False, compare=False)
     _assessment_json: str = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -75,6 +94,7 @@ class _ModelRegionGuardCore:
         if not result['model_reference_eligible']:
             raise ValueError('native_jog_region_model_reference_rejected')
         object.__setattr__(self, '_settings_sha256', _identity(s))
+        object.__setattr__(self, '_settings_match', _value_matcher(s))
         object.__setattr__(self, '_assessment_json', json.dumps(result, allow_nan=False))
 
     @property
@@ -83,7 +103,7 @@ class _ModelRegionGuardCore:
 
     def require_binding(self, settings, limits, config_sha256):
         if (settings is not self.settings or limits is not self.limits
-                or config_sha256 != self.config_sha256 or _identity(settings) != self._settings_sha256):
+                or config_sha256 != self.config_sha256 or not self._settings_match(settings)):
             raise ValueError('native_jog_region_binding_changed')
 
     def validate(self, packet, snapshot, *, settings, limits, config_sha256):
