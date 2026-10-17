@@ -211,7 +211,11 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
                 raise _MotionSnapshotFault('segment_audit_not_admitted')
             self._segment['origin_q'] = tuple(snapshot.actual_q)
             angle=(Rotation.from_quat(snapshot.actual_tcp.q).inv()*Rotation.from_quat(target.q)).magnitude()
-            if self.supports_tool_spin and angle>1e-9:
+            # A translated reference can retain numerical IK rotation residue.
+            # Select spin only when its existing position-only gate applies;
+            # translation retains the parent's stricter rotation audit.
+            if (self.supports_tool_spin and angle>1e-9
+                    and math.dist(snapshot.actual_tcp.p,target.p)<=1e-9):
                 return await self._solve_spin_candidate(client,snapshot,target,**kwargs)
             return await super()._solve_candidate(client, snapshot, target, **kwargs)
         except BackendCommandError as error:

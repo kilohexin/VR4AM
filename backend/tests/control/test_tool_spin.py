@@ -13,6 +13,28 @@ from tests.commissioning.test_finite_diagnostic import AuditClient
 from tests.robots.real_settings import control_settings
 from tests.robots.test_lebai_adapter_control import FakeClock,_target
 
+
+@pytest.mark.parametrize('angle_rad,accepted',[(2e-9,True),(5e-9,True),(1e-8,True),
+    (math.radians(1e-6)*.99,True),(math.radians(1e-6)*1.01,False)])
+async def test_translated_reference_uses_translation_audit_with_orientation_residue(angle_rad,accepted):
+    from tests.control.test_segmented_control import rig,send
+    adapter,client,_clock,_box,strategy=await rig()
+    adapter.supports_tool_spin=True
+    try:
+        target=Pose(p=_target(.31).p,q=tuple(Rotation.from_rotvec((0,0,angle_rad)).as_quat()))
+        # Preserve the tiny requested residue in the planner's reference;
+        # the actual feedback still has the preceding numerical IK rotation.
+        strategy.pose=strategy.pose.model_copy(update={'q':target.q})
+        result=await send(strategy,adapter,target,1)
+        if accepted:
+            assert result.sdk_outcome=='returned',result.error
+            assert len(client.fk_calls)==4
+            assert [call[0] for call in client.write_calls]==['move_pvat']
+        else:
+            assert result.sdk_outcome=='not_started' and result.error=='finite_diagnostic_translation_only'
+            assert not any(call[0]=='move_pvat' for call in client.write_calls)
+    finally:await adapter.disconnect()
+
 class SpinClient(AuditClient):
     async def kinematics_inverse(self,pose,joints):
         self.ik_calls.append((pose.copy(),list(joints)))
