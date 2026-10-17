@@ -120,8 +120,12 @@ def _run_offline_server(server):
     # Keep this scheduler local to the offline-only entry. Robot timestamps,
     # freshness limits and the process-wide event-loop policy stay unchanged.
     from app.commissioning.qpc_event_loop import new_qpc_loop
-    with asyncio.Runner(loop_factory=new_qpc_loop) as runner:
-        runner.run(server.serve())
+    from app.digital_twin.offline_timing import offline_timer_period
+    # Hold through Runner cleanup so cancelled tasks and executor work finish
+    # before releasing this process's timer request.
+    with offline_timer_period():
+        with asyncio.Runner(loop_factory=new_qpc_loop) as runner:
+            runner.run(server.serve())
 
 
 def main(argv=None):
@@ -154,7 +158,7 @@ def main(argv=None):
             raise ValueError('delivery_service_shutdown_unconfirmed')
         print('Local fake demo closed; this is not hardware stop verification.',flush=True)
         return 0
-    except (ValueError,OSError,subprocess.SubprocessError) as error:
+    except (ValueError,OSError,RuntimeError,subprocess.SubprocessError) as error:
         print(f'Offline delivery refused: {error}',file=sys.stderr)
         return 2
 

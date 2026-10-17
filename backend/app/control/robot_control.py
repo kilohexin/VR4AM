@@ -218,6 +218,7 @@ class RobotControl:
         self._trigger_changed_since_arm = False
         self._observed_grip_release_count = latest.grip_release_count
         self._grip_stop_in_progress = False
+        self._target_hold_release_count: int | None = None
         self._consecutive_overruns = 0
         self._deadline_rebase_requested = False
         self._deadline_compensation_ns = 0
@@ -1066,6 +1067,23 @@ class RobotControl:
         if update.stop:
             await self.disarm()
             return True
+        if update.hold:
+            self._target_hold_release_count=self.latest.grip_release_count
+            self.machine.observe_grip(False)
+            self.mapper.clear()
+            self.filter.clear()
+            self.limiter.clear()
+            self.last_target=None
+            self._clear_constraint()
+            self._advance_control_generation()
+            try:
+                recorded=await self._record_critical('target_hold',{'reason':'segment_unsent_expired','requires_release':True})
+                await self._stop_backend(StopReason.STALE)
+                if not recorded:self._latch_recording_fault()
+            except asyncio.CancelledError:
+                self._latch_stop_unverified(from_cancelled_stop=True)
+                raise
+            return True
         if update.committed is not None:
             self.last_target = update.committed.model_copy(deep=True)
         return False
@@ -1160,6 +1178,15 @@ class RobotControl:
                 and not self._shutdown_started
             ):
                 mode_before_grip = self.machine.mode
+                if mode_before_grip in {TeleopMode.ARMED,TeleopMode.HOLD} and self._target_hold_release_count is not None:
+                    # This is a fresh, validated frame after the HOLD decision.
+                    # A new session's released input has no inherited edge count.
+                    if not received.frame.right.grip:
+                        self._target_hold_release_count=None
+                    else:
+                        self.last_seq=received.frame.seq
+                        self._last_frame_id=frame_id
+                        return
                 if (
                     mode_before_grip == TeleopMode.HOLD
                     and received.frame.right.grip
@@ -1520,6 +1547,7 @@ class RobotControl:
                 "target_control": status_message() if callable(status_message) else None,
                 "manual_input_ready": self.machine.mode in {TeleopMode.ARMED,TeleopMode.ACTIVE,TeleopMode.HOLD}
                     and self._control_generation_is_current(self._control_generation)
+                    and self._target_hold_release_count is None
                     and not self._pending_stop_completion and not self._stop_unverified,
                 "preparation_required": self._explicit_preparation,
                 "preparation_unlocked": self._preparation_unlocked(),

@@ -18,7 +18,7 @@ from tests.robots.test_vr_profile_experiments import limiter
 OPTIONS = PursuitSettings(500, 40, 40, .00001, .00001, 3)
 
 
-async def rig(settling=OPTIONS, horizon=.08):
+async def rig(settling=OPTIONS, horizon=.08, allow_unsent_expiry_hold=False):
     from app.robots.segmented_adapter import SegmentedLebaiAdapter
     from app.control.segmented_strategy import SegmentedTargetStrategy
     clock, client = FakeClock(), AuditClient()
@@ -27,7 +27,9 @@ async def rig(settling=OPTIONS, horizon=.08):
         pvat_horizon_s=horizon, max_joint_speed_radps=.05, max_joint_acceleration_radps2=.2))
     adapter = SegmentedLebaiAdapter(settings, settling=settling,
         client_factory=AsyncMock(return_value=client), clock=clock.now_ns,
-        pvat_clock=clock.now_ns, sleep=clock.sleep)
+        pvat_clock=clock.now_ns, sleep=clock.sleep,
+        allow_unsent_expiry_hold=allow_unsent_expiry_hold,
+        backend_label='LEBAI_FAKE' if allow_unsent_expiry_hold else 'LEBAI')
     await adapter.connect()
     assert (await adapter.preflight()).ready
     box = [TargetContext(1, clock.now_ns(), True, True)]

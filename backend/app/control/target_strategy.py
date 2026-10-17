@@ -50,9 +50,10 @@ class TargetUpdate:
     committed: Pose | None = None
     stop: bool = False
     fault: str | None = None
+    hold: bool = False
 
     def __post_init__(self):
-        if sum((self.committed is not None, self.stop, self.fault is not None)) > 1:
+        if sum((self.committed is not None, self.stop, self.fault is not None, self.hold)) > 1:
             raise ValueError('conflicting_target_update')
 
 

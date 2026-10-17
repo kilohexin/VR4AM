@@ -29,11 +29,17 @@ class SegmentStatus:
     committed: object = None
     command: object = None
     fault: str | None = None
+    hold: bool = False
 
 
 class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
     def __init__(self, settings, *, settling: PursuitSettings, client_factory, allow_tool_spin=False,
-                 allow_prepare=False, **kwargs):
+                 allow_prepare=False, allow_unsent_expiry_hold=False, **kwargs):
+        if type(allow_unsent_expiry_hold) is not bool:
+            raise ValueError('invalid_unsent_expiry_hold')
+        if allow_unsent_expiry_hold and kwargs.get('backend_label')!='LEBAI_FAKE':
+            raise ValueError('unsent_expiry_hold_offline_only')
+        self.allow_unsent_expiry_hold=allow_unsent_expiry_hold
         if type(allow_tool_spin) is not bool:raise ValueError('invalid_tool_spin_selection')
         if type(allow_prepare) is not bool:raise ValueError('invalid_prepare_on_arm')
         self.supports_tool_spin=allow_tool_spin
@@ -136,8 +142,49 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
         receipt = await FiniteWindowDiagnosticAdapter.submit_tcp(self, target, command_id)
         self._segment = dict(receipt=receipt, target=target.model_copy(deep=True),
             started_ns=self._clock(), accepted=None, feedback_floor=None,
-            last_sample=None, good=0, deadline=None, ready=False)
+            last_sample=None, good=0, deadline=None, ready=False,
+            previous_settled=status.ready and status.command is not None,
+            previous_accepted=self.read_motion_view().accepted,
+            previous_client=self._client,
+            previous_read_owner=self._snapshot_calls,
+            previous_pvat_record=self._motion_calls.last.get('move_pvat'),unsent_expired=False)
         return receipt
+
+    async def _send_target_impl(self,request,lifecycle):
+        try:
+            return await super()._send_target_impl(request,lifecycle)
+        except _MotionSnapshotFault as error:
+            if not (self.allow_unsent_expiry_hold and self._backend_label=='LEBAI_FAKE'
+                    and str(error)=='finite_diagnostic_expired'):
+                raise
+            # Expiry must not hide a concurrent estop/tool/read fault whose
+            # check happened later in the diagnostic parent's guard order.
+            self._check_known_snapshot_fault(self._client,request.generation)
+            segment=self._segment
+            if not (segment is not None and segment['previous_settled']
+                    and self._client is segment['previous_client']
+                    and segment['receipt'].command==request.reference
+                    and self._finite_context is request and not self._finite_entered and not lifecycle
+                    and self._motion_dispatch_is_current(request)
+                    and not self._latched_fault and not self._pump.fault
+                    and not self._finite_fk_failed
+                    and not self._motion_calls.unknown_methods and not self._snapshot_calls.unknown_methods
+                    and self._snapshot_calls is segment['previous_read_owner']
+                    and not self._snapshot_calls.closed and not self._snapshot_calls.active
+                    and not any(not task.done() for task in self._motion_calls.tasks
+                        | self._snapshot_calls.tasks
+                        | self._finite_pending_fks | self._finite_fk_wrappers | self._finite_snapshot_wrappers)
+                    and self._motion_calls.last.get('move_pvat') is segment['previous_pvat_record']
+                    and self.read_motion_view().accepted==segment['previous_accepted']):
+                raise
+            # No await between the proof and fencing this episode. The owner
+            # still runs the original stop transaction before any new anchor.
+            self._segment_enabled=False
+            segment['unsent_expired']=True
+            request.completion._resolve('handled',sdk_outcome='not_started',error='segment_unsent_expired')
+            self._schedule_sdk_diagnostic(dict(kind='segment_unsent_expired',
+                command=request.reference.__dict__,previous_command=segment['previous_accepted'].command.__dict__,
+                sdk_outcome='not_started',requires_release=True))
 
     def _build_advancing_candidate(self, snapshot, target, metrics, fraction):
         finite = build_finite_pvat_candidate(metrics.solution_q, snapshot.actual_q,
@@ -227,6 +274,8 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
         segment = self._segment
         if segment is None:
             return SegmentStatus(self._segment_enabled)
+        if segment['unsent_expired']:
+            return SegmentStatus(False,hold=True)
         receipt = segment['receipt']
         done = receipt.completion.result
         if receipt.completion.invalidated or not view.is_current(receipt.command.generation):

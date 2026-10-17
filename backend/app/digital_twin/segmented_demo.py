@@ -161,7 +161,8 @@ def create_segmented_demo_app(web_directory:Path):
     async def factory(ip):
         if ip!='digital-twin':raise ValueError('demo_factory_target_invalid')
         return client
-    app=create_app(settings=settings,client_factory=factory,backend_label='LEBAI_FAKE')
+    app=create_app(settings=settings,client_factory=factory,backend_label='LEBAI_FAKE',
+        offline_unsent_expiry_hold=True)
     @app.get('/demo/identity')
     async def identity():
         return dict(runtime='LEBAI_FAKE',target_strategy='segmented_experimental',

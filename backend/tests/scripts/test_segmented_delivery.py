@@ -147,3 +147,26 @@ def test_offline_service_uses_an_isolated_high_resolution_loop():
     value._run_offline_server(SimpleNamespace(serve=serve))
     assert len(captured)==1 and captured[0].is_closed()
     assert asyncio.get_event_loop_policy() is policy
+
+
+def test_timer_period_outlives_loop_and_executor_cleanup(monkeypatch):
+    import asyncio
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from app.digital_twin import offline_timing
+    value=module();events=[];loops=[]
+    @contextmanager
+    def period():
+        events.append('begin')
+        try:yield
+        finally:
+            assert loops[0].is_closed()
+            events.append('end')
+    async def serve():
+        loops.append(asyncio.get_running_loop())
+        assert events==['begin']
+        await asyncio.to_thread(lambda:events.append('executor'))
+        events.append('serve')
+    monkeypatch.setattr(offline_timing,'offline_timer_period',period)
+    value._run_offline_server(SimpleNamespace(serve=serve))
+    assert events==['begin','executor','serve','end']

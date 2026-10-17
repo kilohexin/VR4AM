@@ -104,6 +104,10 @@ class SegmentedTargetStrategy:
             self.halted = True
             self.prepared = None
             return TargetUpdate(context.generation, fault=status.fault)
+        if status.hold:
+            self.halted=True
+            self.prepared=self.latest_requested=None
+            return TargetUpdate(context.generation,hold=True)
         if status.committed is not None and status.command != self.committed_command:
             self.pose = status.committed.model_copy(deep=True)
             self.committed_command = status.command
