@@ -10,7 +10,7 @@ from app.control.robot_control import LatestVRFrame, RobotControl
 from app.diagnostics.display_snapshot import DisplaySnapshotView
 from app.diagnostics.display_state import LiveDisplayControl, compose_display_state
 from app.recording.noop import NoopRecorder
-from app.robots.base import StopReason
+from app.robots.base import BackendCommandError, StopReason
 from app.schemas.messages import RobotStateMessage, TeleopMode
 from tests.robots.test_lebai_adapter_control import _frame, _target, _wait_until
 from tests.robots.test_snapshot_contention import delayed_adapter, waiter_count
@@ -38,6 +38,16 @@ class DisplayHarness:
 
         adapter._read_snapshot = publish_read
         self.publish(self.generation, adapter._snapshot)
+
+    def authorize_motion(self):
+        """Synthetic session for contention tests; exercise the real authority gate."""
+        if self.control.mode is TeleopMode.DISCONNECTED:
+            self.control.machine.connect()
+        self.control.machine.observe_grip(False)
+        self.control.machine.arm()
+        self.latest.publish(_frame(1, grip=True), self.clock.now_ns())
+        self.control.machine.observe_grip(True)
+        assert self.control._has_motion_dispatch_authority()
 
     def publish(self, generation, snapshot):
         measurement = RobotStateMessage(
@@ -145,25 +155,33 @@ async def test_late_old_generation_publication_is_rejected_after_disconnect_and_
         assert harness.compose().status == "available"
 
 
-async def test_fake_adapter_reconnect_keeps_old_read_out_of_new_display_generation():
+async def test_cancelled_cooperative_read_cannot_reconnect_or_publish_into_new_display_generation():
     async with delayed_adapter(block_first_read=True) as (adapter, client, clock, events, tasks, entered, release):
         harness = DisplayHarness(adapter, clock)
         pending = asyncio.create_task(adapter.get_state())
         tasks.append(pending)
         await asyncio.wait_for(entered.wait(), 1)
         old = harness.generation
+        publications = list(harness.publications)
         harness.view.disconnect()
         await adapter.disconnect()
         harness.generation = harness.view.begin_connection()
-        connecting = asyncio.create_task(adapter.connect())
-        tasks.append(connecting)
-        await _wait_until(lambda: waiter_count(adapter) == 1)
+        done, _ = await asyncio.wait({pending}, timeout=.2)
+        assert done, "local read cancellation must not wait for a transport reply"
+        with pytest.raises((asyncio.CancelledError, BackendCommandError)):
+            pending.result()
+        assert adapter._snapshot_calls.unknown_methods == {"get_kin_data"}
+        with pytest.raises(BackendCommandError, match="^snapshot_rpc_result_unknown$"):
+            await adapter.connect()
         release.set()
-        await asyncio.wait_for(asyncio.gather(pending, connecting), 1)
-        assert (old, False) in harness.publications
-        assert harness.publications[-1] == (harness.generation, True)
-        assert harness.compose().read_purpose == "connection"
-        assert harness.compose().status == "available"
+        await _wait_until(lambda: not adapter._snapshot_calls.tasks)
+        with pytest.raises(BackendCommandError, match="^snapshot_rpc_result_unknown$"):
+            await adapter.connect()
+        assert harness.generation != old
+        assert harness.publications == publications
+        assert harness.compose().status == "missing"
+        assert adapter._client is None and adapter._snapshot is None
+        assert not client.write_calls
         assert client.network_calls == client.discovery_calls == 0
 
 
@@ -239,6 +257,7 @@ async def test_cancelled_consumer_does_not_cancel_blocked_read_or_its_publicatio
 async def test_three_display_consumers_compare_motion_wait_and_sdk_read_count(passive):
     async with delayed_adapter() as (adapter, client, clock, events, tasks, _, _release):
         harness = DisplayHarness(adapter, clock)
+        harness.authorize_motion()
         before = client.read_calls.count("get_kin_data")
         await adapter._sdk_lock.acquire()
         try:
@@ -261,6 +280,22 @@ async def test_three_display_consumers_compare_motion_wait_and_sdk_read_count(pa
         assert event["timing_ms"]["snapshot_lock_wait"] == (0 if passive else 48)
         assert client.read_calls.count("get_kin_data") - before == (1 if passive else 4)
         assert harness.compose().read_purpose == "motion"
+
+
+@pytest.mark.parametrize("stale", [False, True])
+async def test_contention_harness_cannot_dispatch_without_fresh_active_authority(stale):
+    async with delayed_adapter() as (adapter, client, clock, events, tasks, _, _release):
+        harness = DisplayHarness(adapter, clock)
+        if stale:
+            harness.authorize_motion()
+            clock.advance_ms(100)
+        before = list(client.read_calls)
+        admission = await adapter.submit_tcp(_target(), 1)
+        await _wait_until(lambda: admission.completion.result is not None)
+        result = admission.completion.result
+        assert result.outcome == "invalidated"
+        assert result.error == "teleop_motion_authority_revoked"
+        assert client.read_calls == before and not client.write_calls
 
 
 @pytest.mark.parametrize("passive", [False, True])

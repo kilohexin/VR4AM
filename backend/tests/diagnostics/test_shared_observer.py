@@ -11,7 +11,7 @@ import pytest
 
 from app.api.teleop_ws import state_sender
 from app.recording.commissioning import RecorderUnavailable
-from app.robots.base import StopReason
+from app.robots.base import BackendCommandError, StopReason
 from app.schemas.messages import TeleopMode
 from tests.control.test_state_observation import StateRecorder
 from tests.diagnostics.test_display_integration import DisplayHarness
@@ -317,10 +317,11 @@ async def test_recorder_unavailable_keeps_existing_authoritative_failure_respons
             await probe.close()
 
 
-async def test_close_joins_cancel_resistant_read_before_new_generation_can_start():
+async def test_close_is_bounded_and_late_read_stays_quarantined_without_publication():
     async with delayed_adapter() as (adapter, client, clock, events, tasks, _, _release):
         probe = SharedObserverProbe(adapter, clock)
         entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        finished = asyncio.Event()
         original = client.get_kin_data
 
         async def resistant_read():
@@ -330,7 +331,10 @@ async def test_close_joins_cancel_resistant_read_before_new_generation_can_start
             except asyncio.CancelledError:
                 cancelled.set()
                 await release.wait()
-            return await original()
+            try:
+                return await original()
+            finally:
+                finished.set()
 
         client.get_kin_data = resistant_read
         tasks.append(probe.start())
@@ -340,21 +344,23 @@ async def test_close_joins_cancel_resistant_read_before_new_generation_can_start
             old_generation = probe.generation
             closing = asyncio.create_task(probe.close())
             await asyncio.wait_for(cancelled.wait(), 1)
-            assert not closing.done()
+            await asyncio.wait_for(closing, .2)
+            assert probe.task is None
+            assert any(not task.done() for task in adapter._snapshot_calls.tasks)
             assert probe.compose().status == "disconnected"
-            with pytest.raises(RuntimeError, match="prior_observer_not_joined"):
-                probe.start()
+            assert adapter._snapshot_calls.unknown_methods == {"get_kin_data"}
+            with pytest.raises(BackendCommandError, match="^snapshot_rpc_result_unknown$"):
+                await adapter.connect()
             release.set()
-            await asyncio.wait_for(closing, 1)
-            assert (old_generation, False) in probe.publications
-            assert len(probe.recorder.rows) == 1  # Old authority may finish; join matters.
-            client.get_kin_data = original
+            await asyncio.wait_for(finished.wait(), 1)
+            await _wait_until(lambda: not adapter._snapshot_calls.tasks)
+            assert not any(generation == old_generation for generation, _ in probe.publications)
+            assert probe.recorder.rows == []
+            assert probe.compose().status == "disconnected"
             await adapter.disconnect()
-            await adapter.connect()
-            tasks.append(probe.start())
-            await probe.gate.wait(1)
-            assert probe.generation != old_generation
-            assert probe.compose().status == "available"
+            with pytest.raises(BackendCommandError, match="^snapshot_rpc_result_unknown$"):
+                await adapter.connect()
+            assert adapter._snapshot is None and not client.write_calls
         finally:
             release.set()
             if closing is not None:
@@ -367,6 +373,8 @@ async def test_close_joins_cancel_resistant_read_before_new_generation_can_start
 async def test_contention_comparison_includes_one_authoritative_observation(shared, consumers, reads, operation):
     async with delayed_adapter() as (adapter, client, clock, events, tasks, _, _release):
         probe = SharedObserverProbe(adapter, clock)
+        if operation == "motion":
+            probe.authorize_motion()
         before = client.read_calls.count("get_kin_data")
         await adapter._sdk_lock.acquire()
         try:
