@@ -219,18 +219,24 @@ class DiagnosticsMessage(StrictMessage):
 
 
 def _validate_json_payload(value: object) -> None:
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError("diagnostic payload must contain only finite values")
-    if isinstance(value, dict):
-        for item in value.values():
-            _validate_json_payload(item)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            _validate_json_payload(item)
+    _validate_finite_payload(value)
+    # Encode the complete payload once, after the original finite-value walk.
+    # Re-encoding each subtree makes high-rate diagnostic validation redundant.
     try:
         json.dumps(value, allow_nan=False)
     except (TypeError, ValueError, OverflowError):
         raise ValueError("diagnostic payload must be JSON safe") from None
+
+
+def _validate_finite_payload(value: object) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("diagnostic payload must contain only finite values")
+    if isinstance(value, dict):
+        for item in value.values():
+            _validate_finite_payload(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_finite_payload(item)
 
 
 class GripperRequestMessage(StrictMessage):

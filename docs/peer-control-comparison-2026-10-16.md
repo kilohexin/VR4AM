@@ -259,3 +259,28 @@ QPC只解决计时精度，不改变Windows等待唤醒粒度。本机纯等待�
 | formal/repeat-failure.json | `e5fda0de4a9b885bbe5b80f5b17b6a4adbe18ac0ff35cd8db24d14ac38169d44` |
 
 临时8770探针已结束且端口已复查关闭。其非PTY中断退出码1，未生成finally尾段文件，未宣称该进程完成了完整应用关闭验证；探针已有的停止后导出结果保留。无网络的状态采样进程正常退出0并完成生命周期清理。真实机器人始终未连接、未控制，未推送。
+
+### 用户确认后：载荷校验单次编码及两轮正式离线操作
+
+已按确认方案重构`backend/app/schemas/messages.py`：原字典值/列表/元组的递归有限数值检查保留，由独立函数执行；完成后整份载荷只调用一次`json.dumps(..., allow_nan=False)`。没有删除JSON可编码性检查，没有更改协议字段、日志载荷、控制权限或时间门槛。该公共辅助函数也用于历史演练消息载荷。若同一输入同时含有多个不同类别的非法项，先报告的错误类别可能改变；接收/拒绝结论不变。独立复核未发现接收或拒绝规则缺口。
+
+- 新测试先重现14次编码而非1次，再修复通过。18项新增用例覆盖嵌套载荷、NaN/正负无穷、非法对象/bytes/set/complex、非法嵌套键及Unicode/tuple/null的线缆格式。
+- 核心协议、载荷、诊断存储/记录器、会话跟踪和性能记录共**146项通过**。扩大至诊断目录的检查为196通过、8失败，不能称全套通过。以`git show HEAD:backend/app/schemas/messages.py`提取原函数并只在独立pytest进程内恢复，同样两份测试文件为28通过、完全相同8失败，证实不是此次重构引入。未修改这些显示观察器原型测试或其产品路径，未运行后端全集。
+- 8项保留失败：`test_display_integration.py::test_fake_adapter_reconnect_keeps_old_read_out_of_new_display_generation`；`test_three_display_consumers_compare_motion_wait_and_sdk_read_count[False/True]`两项；`test_shared_observer.py::test_close_joins_cancel_resistant_read_before_new_generation_can_start`；`test_contention_comparison_includes_one_authoritative_observation[motion-False-1-1/motion-True-1-1/motion-False-3-3/motion-True-3-1]`四项。重连和运动竞争项等待锁队列数量超时，关闭项的未完成假设失败；仍待独立处理。
+- 相同150次状态读取/15次诊断构建CPU对照：JSON编码总调用20879→1079；载荷校验累计采样238.33→67.37 ms（约减少72%）；诊断事件观察375.15→208.37 ms。总采样4.80→4.67秒，包含约3秒事件循环等待。该单轮对照证明减少重复校验开销，不证明整体实时性或全部overrun已修复。
+- TypeScript/Vite构建及清单检查通过，新包`artifacts/delivery/segmented-demo/20261017T062151Z-d6612ef4`，保留已有大包提示。前端产品代码没有变更。
+
+重新启动正式8768 Fake入口，使用已有Edge/Playwright、1440×1000、不带CPU采样，连续完成两轮“解锁→独立准备→平面摇杆→升降→自转→夹爪渐变并保持→停止→再次准备→停止”。两轮结果通过，页面身份/非空/无框架覆盖层、控制台及截图检查通过。Browser plugin not available；截图已本机查看，未重复移动端或头显测试。
+
+软件日志`logs/commissioning/20261017T062225Z-d42698b3/session.jsonl`本次统计：17条pvat_sent、0条robot_fault、0条segment_unsent_expired、0条stop_failed。存在的HOLD转换是松开后的原停止/等待路径，没有靠未发送过期候选吞掉故障。本次Fake软件停止记录不构成真机停止证据。700 ms持按的平移约0.169–0.279 mm、升降0.170–0.185 mm、自转约0.127–0.250°；夹爪目标到0.08、0.15后松开保持。幅度由原保守Fake配置决定，本轮未修改速度。
+
+两轮通过是有限次数的正向证据，尚不足以作长时间稳定、VR或真机验收；先前control_overrun、finite_diagnostic_expired与现场停止问题记录均保留。本次启动期仍有最大332 ms浏览器长任务，不能宣称全部卡顿消失。8768保留运行，仅Fake；未连接真机、未推送，原项目总结保持不变。
+
+新增证据位于同一本机目录的`after-validator/`：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| state-cpu.prof | `089f0f66c0010c35f1e43cb67a329359d9c92ac52d5acb9d6ebe951be0519466` |
+| state-cpu.txt | `efa91bb861fb8987b1fce0188a5a1f4e3ea47400403d4a7abc010c64ce3ea84e` |
+| formal/repeat-result.json | `b355e0a8abc5545903cd394d483d647e5a8e375988382d190e0a1d90bbaa2a92` |
+| formal/repeat-complete.png | `411e64cf8617faa989996e2829348239cb50fa46b850c0a4fd9d1a717588cd5e` |
