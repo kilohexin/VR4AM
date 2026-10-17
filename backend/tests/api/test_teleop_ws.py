@@ -872,18 +872,23 @@ async def test_state_sender_sleeps_exactly_twenty_ms(monkeypatch: pytest.MonkeyP
         async def state_message(self) -> FakeMessage:
             return FakeMessage()
 
+    now = 0.
     async def fake_sleep(delay: float) -> None:
+        nonlocal now
         sleeps.append(delay)
+        now += delay
         if len(sleeps) == 3:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr(teleop_ws.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(teleop_ws, "asyncio", SimpleNamespace(
+        Lock=asyncio.Lock, sleep=fake_sleep,
+        get_running_loop=lambda: SimpleNamespace(time=lambda: now)))
 
     with pytest.raises(asyncio.CancelledError):
         await teleop_ws.state_sender(FakeWebSocket(), FakeControl())
 
     assert len(sent) == 3
-    assert sleeps == [0.02, 0.02, 0.02]
+    assert sleeps == pytest.approx([0.02, 0.02, 0.02])
 
 
 @pytest.mark.asyncio
@@ -930,12 +935,14 @@ async def test_state_sender_selects_runtime_configured_state_rate(
         sleeps.append(delay)
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(teleop_ws.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(teleop_ws, "asyncio", SimpleNamespace(
+        Lock=asyncio.Lock, sleep=fake_sleep,
+        get_running_loop=lambda: SimpleNamespace(time=lambda: 0.)))
 
     with pytest.raises(asyncio.CancelledError):
         await teleop_ws.state_sender(FakeWebSocket(), FakeControl())
 
-    assert sleeps == [expected_period_s]
+    assert sleeps == pytest.approx([expected_period_s])
 
 
 @pytest.mark.asyncio

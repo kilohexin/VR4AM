@@ -80,7 +80,7 @@ def test_failed_service_startup_is_not_reported_as_success(tmp_path,monkeypatch)
     class Server:
         started=False
         def __init__(self,*args):pass
-        def run(self):pass
+        async def serve(self):pass
     stub=types.SimpleNamespace(run=lambda *a,**k:None,Config=lambda *a,**k:object(),Server=Server)
     monkeypatch.setitem(sys.modules,'uvicorn',stub)
     assert value.main([])==2
@@ -129,7 +129,21 @@ def test_interrupt_succeeds_only_after_verified_local_app_shutdown(tmp_path,monk
         lifespan=types.SimpleNamespace(shutdown_failed=failed,error_occurred=False,
             shutdown_event=types.SimpleNamespace(is_set=lambda:completed))
         def __init__(self,*args):pass
-        def run(self):raise KeyboardInterrupt()
+        async def serve(self):raise KeyboardInterrupt()
     monkeypatch.setitem(sys.modules,'uvicorn',types.SimpleNamespace(
         Config=lambda *a,**k:object(),Server=Server))
     assert value.main([])==expected
+
+
+def test_offline_service_uses_an_isolated_high_resolution_loop():
+    import asyncio
+    from types import SimpleNamespace
+    value=module();captured=[]
+    policy=asyncio.get_event_loop_policy()
+    async def serve():
+        loop=asyncio.get_running_loop();captured.append(loop)
+        assert loop.vr4arm_timing_clock=='time.perf_counter_ns'
+        assert loop._clock_resolution<=1e-6
+    value._run_offline_server(SimpleNamespace(serve=serve))
+    assert len(captured)==1 and captured[0].is_closed()
+    assert asyncio.get_event_loop_policy() is policy

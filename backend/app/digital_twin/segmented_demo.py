@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from scipy.spatial.transform import Rotation
 
 from app.digital_twin.lebai_client import DigitalTwinLebaiClient, _joint_tuple
+from app.digital_twin.path_geometry import validate_ready_samples
 from app.robots.lebai_codec import joint_vector, pose_from_lebai, pose_to_lebai
 from app.sim.kinematics import forward_pose, geometric_jacobian
 from app.sim.self_collision import is_self_colliding
@@ -46,17 +47,7 @@ def demo_settings():
 @lru_cache(maxsize=32)
 def _validate_ready_path(start,goal,settings,model):
     # Local sampled geometric checks are not a hardware path certificate.
-    for fraction in np.linspace(0.,1.,65):
-        q=np.array(start)+(np.array(goal)-start)*fraction
-        if (np.any(q<np.array(settings.soft_joint_min_rad)+settings.joint_limit_margin_rad)
-                or np.any(q>np.array(settings.soft_joint_max_rad)-settings.joint_limit_margin_rad)
-                or np.any(abs(q-np.array(model.home_q))>model.joint_window_rad)
-                or is_self_colliding(q,model)):
-            raise ValueError('demo_ready_path_invalid')
-        position=np.array(forward_pose(q,model).p)
-        if (np.any(position<np.array(settings.startup_tcp_min_m))
-                or np.any(position>np.array(settings.startup_tcp_max_m))):
-            raise ValueError('demo_ready_path_invalid')
+    validate_ready_samples(start,goal,settings,model)
 
 
 class SegmentedDemoClient(DigitalTwinLebaiClient):

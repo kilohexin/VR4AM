@@ -1,5 +1,6 @@
 """Build/check/serve an offline-only PC delivery demo; no live CLI options."""
 import argparse
+import asyncio
 from datetime import datetime,timezone
 import hashlib
 import json
@@ -115,6 +116,14 @@ def parser():
     result.add_argument('--node',type=Path,help='Node.js 22+ executable for build')
     return result
 
+def _run_offline_server(server):
+    # Keep this scheduler local to the offline-only entry. Robot timestamps,
+    # freshness limits and the process-wide event-loop policy stay unchanged.
+    from app.commissioning.qpc_event_loop import new_qpc_loop
+    with asyncio.Runner(loop_factory=new_qpc_loop) as runner:
+        runner.run(server.serve())
+
+
 def main(argv=None):
     options=parser().parse_args(argv)
     sys.path.insert(0,str(ROOT/'backend'))
@@ -133,7 +142,7 @@ def main(argv=None):
         server=uvicorn.Server(uvicorn.Config(create_segmented_demo_app(directory),
             host='127.0.0.1',port=PORT,log_level='info',lifespan='on'))
         try:
-            server.run()
+            _run_offline_server(server)
         except KeyboardInterrupt:
             # Uvicorn re-raises the signal after its application cleanup.
             # A forced/interrupted cleanup must still be reported as failure.

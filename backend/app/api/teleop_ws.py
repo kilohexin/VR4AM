@@ -55,11 +55,20 @@ async def state_sender(
     ):
         state_hz = settings.lebai.control.state_hz
     period_s = 1.0 / state_hz
+    clock = asyncio.get_running_loop().time
     while True:
         async with send_lock:
+            started = clock()
             state = await control.state_message()
             await websocket.send_json(state.model_dump(mode="json"))
-        await asyncio.sleep(period_s)
+        # The configured period includes reading/encoding/sending. Sleeping a
+        # full period after that work ages feedback beyond the settling gate.
+        # Drop missed slots rather than issuing a catch-up burst of SDK reads.
+        now = clock()
+        deadline = started + period_s if now < started + period_s else now + period_s
+        while (remaining := deadline - clock()) > 0:
+            # Recheck the remaining period after an early scheduler wakeup.
+            await asyncio.sleep(remaining)
 
 
 async def _delayed_state_sender(
