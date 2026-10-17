@@ -32,7 +32,7 @@ class AuditClient(FakeLebaiClient):
         return result
 
 
-async def setup(client=None, normal=False, parallel=False):
+async def setup(client=None, normal=False, parallel=False, backend_label='LEBAI'):
     client = client or AuditClient()
     clock = FakeClock()
     settings = control_settings()
@@ -46,6 +46,7 @@ async def setup(client=None, normal=False, parallel=False):
     adapter = (RealLebaiAdapter if normal else FiniteWindowDiagnosticAdapter)(
         settings, client_factory=AsyncMock(return_value=client), clock=clock.now_ns,
         pvat_clock=clock.now_ns, sleep=clock.sleep, event_callback=record,
+        backend_label=backend_label,
         **({} if normal else {'parallel_fk': parallel}),
     )
     await adapter.connect()
@@ -73,6 +74,55 @@ async def test_opt_in_parallel_triplet_keeps_feedback_first_and_blocks_write_unt
         assert result.sdk_outcome=='returned' and len(client.write_calls)==1
     finally:
         release.set();await asyncio.gather(task,return_exceptions=True);await adapter.disconnect()
+
+
+@pytest.mark.parametrize('runtime,failed', [('LEBAI_FAKE',False),('LEBAI',True)])
+async def test_returned_parallel_reads_revoked_after_reply_do_not_poison_fake_audit(runtime,failed):
+    client=AuditClient()
+    adapter,_,_,_=await setup(client,parallel=True,backend_label=runtime)
+    allowed=True
+    adapter.bind_motion_authority(lambda:allowed)
+    async def revoke(count,pose):
+        nonlocal allowed
+        if count==4:allowed=False
+        return pose
+    client.fk_hook=revoke
+    try:
+        result=await submit(adapter)
+        await _wait_until(lambda:adapter._finite_context is None)
+        assert result.sdk_outcome=='not_started'
+        assert not any(c[0]=='move_pvat' for c in client.write_calls)
+        assert len(client.fk_calls)==4
+        assert adapter._finite_fk_failed is failed
+    finally:await adapter.disconnect()
+
+
+async def test_fake_revocation_with_unresolved_parallel_read_keeps_audit_fence():
+    client=AuditClient()
+    adapter,_,_,_=await setup(client,parallel=True,backend_label='LEBAI_FAKE')
+    allowed=True
+    release=asyncio.Event()
+    adapter.bind_motion_authority(lambda:allowed)
+    async def pending(count,pose):
+        nonlocal allowed
+        if count==3:
+            while not release.is_set():
+                try:await release.wait()
+                except asyncio.CancelledError:pass
+        if count==4:allowed=False
+        return pose
+    client.fk_hook=pending
+    try:
+        result=await submit(adapter)
+        await _wait_until(lambda:adapter._finite_context is None)
+        assert result.sdk_outcome=='not_started'
+        assert adapter._finite_fk_failed
+        assert any(not t.done() for t in adapter._finite_pending_fks)
+        assert not any(c[0]=='move_pvat' for c in client.write_calls)
+    finally:
+        release.set()
+        await _wait_until(lambda:not adapter._finite_pending_fks)
+        await adapter.disconnect()
 
 
 @pytest.mark.parametrize('wrong',[2,3,4])
@@ -117,8 +167,9 @@ async def test_parallel_unknown_read_stays_owned_and_prevents_reconnect(monkeypa
 
 @pytest.mark.parametrize('role',[2,3,4])
 @pytest.mark.parametrize('kind',['malformed','error','expired','revoked'])
-async def test_each_parallel_role_failure_prevents_motion(role,kind):
-    client=AuditClient();adapter,_,clock,_=await setup(client,parallel=True)
+@pytest.mark.parametrize('runtime',['LEBAI','LEBAI_FAKE'])
+async def test_each_parallel_role_failure_prevents_motion(role,kind,runtime):
+    client=AuditClient();adapter,_,clock,_=await setup(client,parallel=True,backend_label=runtime)
     allowed=True
     adapter.bind_motion_authority(lambda:allowed)
     async def fail(count,pose):
@@ -133,8 +184,10 @@ async def test_each_parallel_role_failure_prevents_motion(role,kind):
     client.fk_hook=fail
     try:
         result=await submit(adapter)
+        await _wait_until(lambda:adapter._finite_context is None)
         assert result.sdk_outcome=='not_started'
         assert not any(c[0]=='move_pvat' for c in client.write_calls)
+        if kind!='revoked':assert adapter._finite_fk_failed
     finally:await adapter.disconnect()
 
 

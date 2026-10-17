@@ -79,7 +79,14 @@ def build_backend(
     *,
     stop_diagnostic_sampling: bool = False,
     offline_unsent_expiry_hold: bool = False,
+    offline_parallel_segment_fk: bool = False,
 ) -> RobotBackend:
+    if type(offline_parallel_segment_fk) is not bool:
+        raise ValueError('invalid_offline_parallel_segment_fk')
+    if offline_parallel_segment_fk and (backend_label!='LEBAI_FAKE'
+            or settings.backend!='lebai' or settings.segmented_target is None
+            or settings.lebai is None or settings.lebai.ip!='digital-twin'):
+        raise ValueError('offline_parallel_segment_fk_offline_only')
     if type(offline_unsent_expiry_hold) is not bool:
         raise ValueError('invalid_unsent_expiry_hold')
     if offline_unsent_expiry_hold and (backend_label!='LEBAI_FAKE' or settings.segmented_target is None):
@@ -100,6 +107,7 @@ def build_backend(
             allow_tool_spin=settings.segmented_target.tool_spin,
             allow_prepare=settings.segmented_target.prepare_on_arm,
             allow_unsent_expiry_hold=offline_unsent_expiry_hold,
+            parallel_fk=offline_parallel_segment_fk,
             settling=settings.segmented_target.settling, client_factory=client_factory,
             event_callback=recorder.write_event, backend_label=backend_label)
     return RealLebaiAdapter(
@@ -186,6 +194,7 @@ def create_app(
     client_factory: ClientFactory = connect_real_client,
     backend_label: RuntimeBackend | None = None,
     offline_unsent_expiry_hold: bool = False,
+    offline_parallel_segment_fk: bool = False,
 ) -> FastAPI:
     runtime_settings = settings if settings is not None else Settings.load()
     runtime_backend = backend_label or (
@@ -205,6 +214,7 @@ def create_app(
             client_factory,
             runtime_backend,
             offline_unsent_expiry_hold=offline_unsent_expiry_hold,
+            offline_parallel_segment_fk=offline_parallel_segment_fk,
         )
         latest = LatestVRFrame()
         preparation_enabled = bool(

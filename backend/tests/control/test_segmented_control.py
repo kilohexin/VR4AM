@@ -18,7 +18,7 @@ from tests.robots.test_vr_profile_experiments import limiter
 OPTIONS = PursuitSettings(500, 40, 40, .00001, .00001, 3)
 
 
-async def rig(settling=OPTIONS, horizon=.08, allow_unsent_expiry_hold=False):
+async def rig(settling=OPTIONS, horizon=.08, allow_unsent_expiry_hold=False, parallel=False):
     from app.robots.segmented_adapter import SegmentedLebaiAdapter
     from app.control.segmented_strategy import SegmentedTargetStrategy
     clock, client = FakeClock(), AuditClient()
@@ -29,6 +29,7 @@ async def rig(settling=OPTIONS, horizon=.08, allow_unsent_expiry_hold=False):
         client_factory=AsyncMock(return_value=client), clock=clock.now_ns,
         pvat_clock=clock.now_ns, sleep=clock.sleep,
         allow_unsent_expiry_hold=allow_unsent_expiry_hold,
+        parallel_fk=parallel,
         backend_label='LEBAI_FAKE' if allow_unsent_expiry_hold else 'LEBAI')
     await adapter.connect()
     assert (await adapter.preflight()).ready
@@ -43,6 +44,36 @@ async def send(strategy, adapter, target, command_id):
     assert plan.kind == 'candidate'
     assert await strategy.dispatch(plan, command_id, backend=adapter) is None
     return await asyncio.wait_for(strategy.receipt.completion.wait(), 2)
+
+
+async def test_fake_returned_fk_revocation_requires_original_stop_then_a_new_audit():
+    from app.robots.base import StopReason
+    from tests.robots.test_lebai_adapter_control import _wait_until
+    adapter,client,clock,box,strategy=await rig(allow_unsent_expiry_hold=True,parallel=True)
+    allowed=True
+    adapter.bind_motion_authority(lambda:allowed)
+    async def release_after_reply(count,pose):
+        nonlocal allowed
+        if count==4:allowed=False
+        return pose
+    client.fk_hook=release_after_reply
+    try:
+        result=await send(strategy,adapter,_target(.31),1)
+        await _wait_until(lambda:adapter._finite_context is None)
+        assert result.sdk_outcome=='not_started' and result.invalidated
+        assert not client.write_calls and not adapter._finite_fk_failed
+        strategy.on_revoke(box[0].generation)
+        await adapter.stop(StopReason.GRIP_RELEASED)
+        assert adapter._stop_transaction.confirmed
+        client.fk_hook=None;allowed=True
+        box[0]=replace(box[0],generation=box[0].generation+1,now_ns=clock.now_ns())
+        assert (await adapter.preflight()).ready
+        strategy.on_anchor(_target(.3),box[0])
+        result=await send(strategy,adapter,_target(.31),2)
+        assert result.sdk_outcome=='returned'
+        assert len(client.fk_calls)==8  # Fresh four-FK audit; no revoked-result reuse.
+        assert sum(call[0]=='move_pvat' for call in client.write_calls)==1
+    finally:await adapter.disconnect()
 
 
 async def observe(adapter, client, clock, box, strategy, *, close=True):

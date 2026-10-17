@@ -313,3 +313,37 @@ QPC只解决计时精度，不改变Windows等待唤醒粒度。本机纯等待�
 | guard-final.json | `d3e088c1e11020cbdd089b4f2a2ae9d3dfc82b483953236f74d06a70c1b6fd73` |
 
 8770临时服务已关闭并复查无监听，进程中断退出码1，保存了finally证据；8768正式Fake入口已重新启动供查看。未连接真机、未推送；现场停止延迟和VR/真机持续操纵仍未验收。原项目总结未修改。
+
+## 2026-10-17：已批准的Fake三FK并发候选及撤权收尾修复
+
+用户已明确批准本机Fake演示接通已有并发实现。`build_backend`/`create_app`增加默认关闭的私有参数`offline_parallel_segment_fk`；只有LEBAI_FAKE、lebai分段配置和字面目标`digital-twin`同时满足才接受开启。正式离线演示显式启用，真实入口和其它默认调用仍为顺序FK。反馈FK先完成，目标/中点/终点三项数学FK并发；原四项验证、100 ms期限、80 ms参考、HOLD前提和停止规则不变。没有启用并行快照或提前反馈FK。
+
+### 首次延长检查暴露的收尾缺陷
+
+已有Edge/Playwright、1440×1000，Browser plugin not available，无CPU采样。第一次并发候选五轮计划完成前三轮：每轮准备、XYZ双向、自转双向、渐变开合及松开保持、停止；第四轮+X通过，-X出现`finite_fk_audit_failed`后结束。没有自动重试。页面控制台无错误。
+
+日志`logs/commissioning/20261017T064245Z-979c65ac/session.jsonl`显示前一段四次FK都已返回，松开撤权仍使并发收尾永久标记`_finite_fk_failed`，下一手势被拒绝。本次共163条pvat_sent，审计中129条parallel_fk=true；robot_fault事件计数为0，但状态确实报告FK故障，不能仅据该事件计数声称没有故障。先前三轮正向结果不作为整次验收通过。
+
+已用定向失败用例复现并修复：仅Fake并发路径在全部读取已进入且已知返回、全部包装任务已结束且无取消、异常只有撤权、无待决/未知RPC且此前没有失败屏障时，不新增数学读取失败标记。本段结果继续撤销并丢弃；不清除已有屏障，不复用旧结果。真实后端、未决读取、错误、非法数据和期限失败保留原隔离。下一手势仍需原停止事务确认、新代次/预检及重新四次FK。
+
+### 最终离线验证及仍存在的输入中断
+
+- 三类配置隔离、真实/Fake异常分支、未决读取、原停止后全新审计与准备/交付入口共**177项定向测试通过**。未运行后端全集；保留已有Starlette/httpx弃用警告。两次独立只读复核均未发现剩余具体缺陷。
+- TypeScript/Vite构建及交付清单检查通过，包为`artifacts/delivery/segmented-demo/20261017T065018Z-782be16d`，保留已有单包大于500 kB提示。
+- 修复后使用完全相同的五轮脚本，首轮X+/X-/Y+/Y-长按及各自松开400 ms保持检查通过，位移分别约1.163/0.663/0.673/0.770 mm，保持漂移为0。随后等待升降按钮可用时超时，检查结束，未执行升降、自转、夹爪或后续轮次。不能称五轮或整链通过。
+- 日志`logs/commissioning/20261017T065033Z-e6e7718d/session.jsonl`中29项FK审计均通过、parallel_fk=true，29条pvat_sent；无stop_failed/segment_unsent_expired事件。四向松开后进入HOLD，空闲时桌面输入帧出现约401.8 ms客户端间隔；服务端在上一帧后109 ms执行原stale停止/撤权，随后DISARMED→READY，准备权限清除，按钮因此保持锁定。没有放宽100 ms或自动重新准备。该间隔说明输入连续性仍有问题，尚未区分浏览器调度、渲染、GC或主机负载的各自贡献。
+- 无浏览器控制台错误，结束截图已本机查看；未重复移动端/头显验证。当前Fake原生SDK未加载，无真实机器人连接。本轮结果不足以证明长时间稳定、VR或真机停止可靠性。现场停止延迟与stop_unverified仍保留。
+
+两次运行都原样保存于本机`C:/Users/Kilo/Documents/ChatGPT/Agent4ARM/endurance-qa-20261017/`，未提交原始日志或截图：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| parallel/check.cjs及parallel-cleanup/check.cjs（相同脚本） | `497e5a040a61cdaff9378a8249a84e47b6ce27072fec20330dca22b5e6a11b2a` |
+| parallel/result.json | `fa660f1ab21f1a4a2775590b5d63006b194de7150cf93b5ccf09baf6cabea921` |
+| parallel/end.png | `3d25fa3d2d6b3ca36e48c13bd20aa1857615fc1137fcf46263698867535e331a` |
+| 首次session.jsonl | `65abc0747edd0268f0ae502d0deef261779c012db1f2d20a3f1657df6998157c` |
+| parallel-cleanup/result.json | `ad4a810c488db03a34338f103f6b287e4a41ba4b120c227c48a7a1573d64fb2a` |
+| parallel-cleanup/end.png | `bf8d98f00fa41ff498315a285d6d01c8f6fbafda8976fc2f40d941b7877ef54f` |
+| 修复后session.jsonl | `d77956c460623d97104e2241365094f863f2aeacfec7acaa76dd9adea3741ee0` |
+
+8768保留修复版Fake服务供查看。关闭上版进程时应用清理完成，PTY外层退出码1，未称整个命令返回0。未连接真机、未推送；用户原总结文件SHA-256仍为`c023cb2ed8528c277632a320190c7d540fe7c35a3a5f6224fbeb2835e4a2c59f`。下一项优先定位桌面输入约402 ms中断，不能用补发过期输入心跳掩盖它。

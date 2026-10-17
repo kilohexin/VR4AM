@@ -353,6 +353,7 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
     async def _fk_triplet(self, client, snapshot, samples, calls):
         if self._finite_pending_fks or self._finite_fk_wrappers:
             raise _MotionSnapshotFault('finite_fk_read_pending')
+        call_floor = len(calls)
         tasks = [asyncio.create_task(self._fk(client, snapshot, role, joints, calls),
                     name='finite-fk-' + role) for role, joints in samples]
         self._finite_fk_wrappers.update(tasks)
@@ -369,8 +370,25 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
                 if task.done() and (task.cancelled() or task.exception() is not None):
                     task.result()
             return tuple(task.result() for task in tasks)
-        except BaseException:
-            self._finite_fk_failed = True
+        except BaseException as error:
+            triplet_calls = calls[call_floor:]
+            # Fake-only: withdrawal after all known replies is not a failed
+            # mathematical read. Discard this audit; a new gesture audits anew.
+            # Never clear an existing fence or reuse these revoked results.
+            known_revocation = (
+                self._backend_label == 'LEBAI_FAKE' and isinstance(error, _FiniteRevoked)
+                and not self._finite_fk_failed
+                and len(triplet_calls) == len(samples)
+                and all(call.get('outcome') == 'returned' and call.get('entered')
+                    and not call.get('remote_result_unknown') for call in triplet_calls)
+                and all(task.done() and not task.cancelled()
+                    and (task.exception() is None or isinstance(task.exception(), _FiniteRevoked))
+                    for task in tasks)
+                and not any(not task.done() for task in self._finite_pending_fks)
+                and not self._snapshot_calls.unknown_methods and not self._motion_calls.unknown_methods
+            )
+            if not known_revocation:
+                self._finite_fk_failed = True
             for task in tasks:
                 if not task.done() and not task.cancelling():
                     task.cancel()

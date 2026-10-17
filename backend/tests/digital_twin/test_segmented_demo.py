@@ -61,7 +61,8 @@ async def test_cancelled_local_read_does_not_claim_an_unknown_native_rpc():
     await adapter.disconnect()
 
 
-async def test_demo_fk_and_segment_adapter_use_the_local_model():
+@pytest.mark.parametrize('parallel', [False, True])
+async def test_demo_fk_and_segment_adapter_use_the_local_model(parallel):
     from app.digital_twin.segmented_demo import SegmentedDemoClient,demo_settings
     from app.robots.segmented_adapter import SegmentedLebaiAdapter
     from app.schemas.messages import Pose
@@ -72,7 +73,8 @@ async def test_demo_fk_and_segment_adapter_use_the_local_model():
         assert ip=='digital-twin'
         return client
     adapter=SegmentedLebaiAdapter(settings.lebai,settling=settings.segmented_target.settling,
-        client_factory=factory,clock=clock.now_ns,pvat_clock=clock.now_ns,sleep=clock.sleep)
+        client_factory=factory,clock=clock.now_ns,pvat_clock=clock.now_ns,sleep=clock.sleep,
+        parallel_fk=parallel)
     try:
         await adapter.connect()
         assert (await adapter.preflight()).ready
@@ -102,6 +104,9 @@ def test_full_app_has_fake_identity_and_serves_compiled_page(tmp_path,monkeypatc
         assert identity['hardware_verified'] is False
         assert identity['native_sdk_loaded'] is False
         assert app.state.control._explicit_preparation is True
+        assert app.state.backend.parallel_fk is True
+        assert app.state.backend.parallel_motion_reads is False
+        assert app.state.backend.prelease_feedback_fk is False
         assert app.state.control.prepare_options.timeout_s == 60.
         assert app.state.control.prepare_options.max_speed_radps == .05
         assert client.get('/health').json()['real_robot_enabled'] is False
@@ -127,3 +132,57 @@ async def test_demo_reuses_only_the_identical_prevalidated_ready_path():
     changed=replace(settings,startup_tcp_min_m=(10.,10.,10.))
     with pytest.raises(ValueError,match='demo_ready_path_invalid'):
         _validate_ready_path(settings.home_q,settings.teleop_ready_q,changed,LM3Model())
+
+
+def test_parallel_fk_is_explicitly_selected_only_for_the_offline_segment_backend():
+    from app.digital_twin.segmented_demo import demo_settings
+    from app.main import build_backend
+    from app.recording.noop import NoopRecorder
+    settings=demo_settings()
+    fake=build_backend(settings,NoopRecorder(),None,'LEBAI_FAKE',offline_parallel_segment_fk=True)
+    assert fake.parallel_fk is True
+    for runtime in ('LEBAI','LEBAI_FAKE'):
+        ordinary=build_backend(settings,NoopRecorder(),None,runtime)
+        assert ordinary.parallel_fk is False
+    assert fake.parallel_motion_reads is False
+    assert fake.settings.control.pvat_horizon_s==.08
+
+
+@pytest.mark.parametrize('runtime', ['LEBAI', 'SIMULATOR', None])
+def test_offline_parallel_fk_rejects_other_runtime_identities(runtime):
+    from app.digital_twin.segmented_demo import demo_settings
+    from app.main import build_backend
+    from app.recording.noop import NoopRecorder
+    with pytest.raises(ValueError,match='offline_parallel_segment_fk_offline_only'):
+        build_backend(demo_settings(),NoopRecorder(),None,runtime,offline_parallel_segment_fk=True)
+
+
+@pytest.mark.parametrize('value', [1, None, 'true'])
+def test_offline_parallel_fk_requires_a_boolean(value):
+    from app.digital_twin.segmented_demo import demo_settings
+    from app.main import build_backend
+    from app.recording.noop import NoopRecorder
+    with pytest.raises(ValueError,match='invalid_offline_parallel_segment_fk'):
+        build_backend(demo_settings(),NoopRecorder(),None,'LEBAI_FAKE',offline_parallel_segment_fk=value)
+
+
+@pytest.mark.parametrize('backend', ['lebai','simulator'])
+def test_offline_parallel_fk_rejects_missing_segment_policy(backend):
+    from dataclasses import replace
+    from app.digital_twin.segmented_demo import demo_settings
+    from app.main import build_backend
+    from app.recording.noop import NoopRecorder
+    settings=replace(demo_settings(),backend=backend,segmented_target=None)
+    with pytest.raises(ValueError,match='offline_parallel_segment_fk_offline_only'):
+        build_backend(settings,NoopRecorder(),None,'LEBAI_FAKE',offline_parallel_segment_fk=True)
+
+
+def test_offline_parallel_fk_rejects_nonlocal_target_even_with_fake_label():
+    from dataclasses import replace
+    from app.digital_twin.segmented_demo import demo_settings
+    from app.main import build_backend
+    from app.recording.noop import NoopRecorder
+    settings=demo_settings()
+    settings=replace(settings,lebai=replace(settings.lebai,ip='192.0.2.1'))
+    with pytest.raises(ValueError,match='offline_parallel_segment_fk_offline_only'):
+        build_backend(settings,NoopRecorder(),None,'LEBAI_FAKE',offline_parallel_segment_fk=True)
