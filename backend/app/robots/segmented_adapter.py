@@ -34,7 +34,16 @@ class SegmentStatus:
 
 class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
     def __init__(self, settings, *, settling: PursuitSettings, client_factory, allow_tool_spin=False,
-                 allow_prepare=False, allow_unsent_expiry_hold=False, **kwargs):
+                 allow_prepare=False, allow_unsent_expiry_hold=False, offline_parallel_snapshot_reads=False, **kwargs):
+        if type(offline_parallel_snapshot_reads) is not bool:
+            raise ValueError('invalid_offline_parallel_snapshot_reads')
+        if offline_parallel_snapshot_reads:
+            if kwargs.get('backend_label')!='LEBAI_FAKE' or settings.ip!='digital-twin':
+                raise ValueError('offline_parallel_snapshot_reads_offline_only')
+            if 'parallel_motion_reads' in kwargs:
+                raise ValueError('conflicting_parallel_snapshot_selection')
+            kwargs['parallel_motion_reads']=True
+        self.offline_parallel_snapshot_reads=offline_parallel_snapshot_reads
         if type(allow_unsent_expiry_hold) is not bool:
             raise ValueError('invalid_unsent_expiry_hold')
         if allow_unsent_expiry_hold and kwargs.get('backend_label')!='LEBAI_FAKE':
@@ -51,6 +60,31 @@ class SegmentedLebaiAdapter(FiniteWindowDiagnosticAdapter):
         self._segment_enabled = False
         self._segment_fault = None
         self._prepare_owner = None
+
+    async def _read_snapshot_fields(self, client, latencies, deadline_ns, **kwargs):
+        if not self.offline_parallel_snapshot_reads or kwargs['read_purpose']!='state':
+            return await super()._read_snapshot_fields(client,latencies,deadline_ns,**kwargs)
+        owner=self._snapshot_calls
+        def check():
+            if (client is not self._client or owner is not self._snapshot_calls
+                    or owner.closed):
+                raise BackendCommandError('snapshot_read_client_changed')
+            if owner.unknown_methods:
+                raise BackendCommandError('snapshot_rpc_result_unknown')
+        return await self._parallel_snapshot_fields(client,latencies,deadline_ns,check=check,
+            include_raw_kinematics=kwargs['include_raw_kinematics'])
+
+    def _before_snapshot_install(self, snapshot, read):
+        if self.offline_parallel_snapshot_reads and snapshot.read_purpose=='state':
+            if (read.client is not self._client or read.owner is not self._snapshot_calls
+                    or read.owner.closed):
+                raise BackendCommandError('snapshot_read_client_changed')
+            if read.owner.unknown_methods:
+                raise BackendCommandError('snapshot_rpc_result_unknown')
+            # Ordinary feedback can finish across a normal stop, as in the
+            # original reader. The parent never installs an old-generation
+            # read as current motion evidence. Motion reads retain their lease.
+        return super()._before_snapshot_install(snapshot,read)
 
     async def prepare(self, options, on_phase, *, authorize=None):
         if not self.supports_prepare_on_arm:

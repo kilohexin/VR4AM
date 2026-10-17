@@ -242,10 +242,15 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
         if not self.parallel_motion_reads or kwargs['read_purpose'] != 'motion':
             return await super()._read_snapshot_fields(client, latencies, deadline_ns, **kwargs)
         self._guard_request(client)
+        return await self._parallel_snapshot_fields(client, latencies, deadline_ns,
+            check=lambda: self._guard_request(client), include_raw_kinematics=kwargs['include_raw_kinematics'])
+
+    async def _parallel_snapshot_fields(self, client, latencies, deadline_ns, *, check, include_raw_kinematics):
+        check()
         async def query(name):
-            self._guard_request(client)
+            check()
             value = await self._timed(name, getattr(client, name), latencies, deadline_ns=deadline_ns)
-            if name == 'get_kin_data' and kwargs['include_raw_kinematics'] and isinstance(value, Mapping):
+            if name == 'get_kin_data' and include_raw_kinematics and isinstance(value, Mapping):
                 return value, copy.deepcopy(dict(value))
             return value, None
         tasks = [asyncio.create_task(query(name), name='finite-snapshot-' + name) for name in
@@ -260,7 +265,7 @@ class FiniteWindowDiagnosticAdapter(RealLebaiAdapter):
             for task in tasks:
                 if task.done() and (task.cancelled() or task.exception() is not None):task.result()
             results = [task.result() for task in tasks]
-            self._guard_request(client)
+            check()
             return dict(values=[item[0] for item in results], raw_kinematics=results[2][1])
         except BaseException:
             for task in tasks:

@@ -347,3 +347,43 @@ QPC只解决计时精度，不改变Windows等待唤醒粒度。本机纯等待�
 | 修复后session.jsonl | `d77956c460623d97104e2241365094f863f2aeacfec7acaa76dd9adea3741ee0` |
 
 8768保留修复版Fake服务供查看。关闭上版进程时应用清理完成，PTY外层退出码1，未称整个命令返回0。未连接真机、未推送；用户原总结文件SHA-256仍为`c023cb2ed8528c277632a320190c7d540fe7c35a3a5f6224fbeb2835e4a2c59f`。下一项优先定位桌面输入约402 ms中断，不能用补发过期输入心跳掩盖它。
+
+## 2026-10-17后续：输入分层取证与Fake六字段并发
+
+先用仓库外临时脚本记录RAF开始/结束、实际WebSocket发送、消息回调、页面longtask、25 ms观察计时器和可见性。脚本仅观察，不发送额外控制心跳。正式8768复跑完成首轮XYZ中的X+/X-/Y+/Y-/Z+及松开保持，Z-发生`finite_diagnostic_expired`后结束；暖机六秒后的最大发送间隔42.7 ms，未复现402 ms。349.7/331.5 ms的两个长RAF回调位于启动前两秒，不能归因于原先约28秒的402 ms间隔。该次是后端期限失败，不能称输入故障已经修复。
+
+独立8770 Fake探针另外记录原guard调用及异步回调时间，不改guard返回或门槛；构建副本仅将WebSocket地址改为本机8770。第一次+X操作出现`segment_feedback_expired`后结束，暖机发送最大间隔52.5 ms。反馈已到目标且速度/加速度为0，但读取完成与控制采集的调度使已有样本到检查时年龄63 ms，超过原60 ms；记录不满足三份连续稳定样本，因此拒绝。947次state快照耗时中位数7.91 ms、95分位16.97 ms、最大32.34 ms；6次motion快照中位数7.59 ms。探针会增加开销，不能将这些统计视作无探针性能基准或原402 ms的根因。最大475.5 ms服务回调在静态文件启动阶段，仍不能说明暖机后全部问题的原因。
+
+这两次记录证明本轮有独立于大输入间隔的后端准入/反馈期限失败；它们没有证明这些期限失败共享唯一根因。没有靠自动重试、清除故障或放宽期限取得通过记录。临时8770已关闭且无监听；Ctrl+C退出1，finally证据保存，未称其整体命令成功。
+
+### 用户确认后的有界实现
+
+用户明确批准后，为本机Fake分段演示增加默认关闭的`offline_parallel_snapshot_reads`私有选项。应用和适配器两层检查LEBAI_FAKE、字面目标digital-twin及分段配置，拒绝非布尔、真实身份和非本机目标。正式Fake演示显式启用。
+
+- motion复用已有六字段并发读取，保持先is_connected、六字段全完成、再按原依赖查询保留任务的状态；原运动租约、实际发送前100 ms、IK1/FK4及80 ms参考不变。
+- 普通state复用同一分组辅助函数，保留每项原OwnedSnapshotCalls及超时/取消/unknown隔离，六项完成后原解析和校验继续执行。client、owner、closed及unknown变化仍拒绝；停止验证、预检、准备、Home和连接读取继续顺序执行。未启用提前反馈FK，未改变真实入口默认配置。
+- 初版额外将普通state的pump代次变化当成连接错误。独立复核指出正常停止与读取重叠会断开WebSocket，浏览器也在准备期间实际出现`snapshot_read_client_changed`并最终准备超时；失败完整保留。新用例先复现，再去掉这个新增条件，恢复原普通state契约：同一client/owner的普通反馈可以跨正常停止完成；父类仍按原generation条件禁止它更新新代次的`_motion_observation`。motion租约不变，没有吞掉owner错误或增加重读。补充真实adapter.stop重叠及state_sender继续发送两帧的回归，复核确认修复充分。
+- 新增33项用例，包括分组屏障、一次完整运动及四FK、六字段逐项失败、迟到/取消隔离、closed/301 ms读取超期、原非法载荷解析、依赖任务状态查询、配置及默认隔离。过期测试最初写在原300 ms允许边界上，断言不符，改为301 ms；产品边界未改。完整相关集合**300项通过**，未运行后端全集，保留既有Starlette/httpx弃用警告。
+- TypeScript/Vite构建及交付清单检查通过，最终包`artifacts/delivery/segmented-demo/20261017T131929Z-c0aa9984`；已有大包提示保留。
+
+最终使用与前轮SHA完全相同的五轮网页脚本，无CPU探针；**准备期间出现control_overrun并结束，未完成准备或任何摇杆/夹爪验收**。故障记录为READY阶段、deadline_lateness=49 ms、wakeup_lateness=15 ms、上一tick耗时0、输入帧年龄15 ms。此记录不是402 ms输入故障，也不能说明造成首次落后的具体回调。候选的定向正确性已通过，不等于正式连续操作通过。页面/身份/非空/无框架覆盖层及控制台检查通过，故障截图已本机查看；完整交互检查失败。仍为Edge/Playwright、1440×1000、Browser plugin not available，未重复移动端或头显验证。
+
+原始证据仅存本机`C:/Users/Kilo/Documents/ChatGPT/Agent4ARM/input-gap-qa-20261017/`：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| summary.json（前两次探针统计及完整文件哈希） | `9f769e71f891790b6e8db96185ad2f0d308b1f3abefcd83a86364938f91968eb` |
+| light/result.json | `f3d8501f1fbc6d02dee60477bb5c6985a20d2dd0caffef8387b75582bdf55057` |
+| light/telemetry.json | `fac0bdb3b89b575fa0063e2e10609bca414f61000bbfb802d080a8dbfce36727` |
+| light/session.jsonl（路径见result内identity） | `9759be6ee5c7b034d939eda93ecb8f86d71fb8d2fe228caad8a12d6e0d21532d` |
+| server-timing/server-evidence.json | `654944afbf35eae501cc60bd95afb76ffbde2a69e76ceb0ef70561ea0f286a2d` |
+| server-timing/session.jsonl（同上） | `a35393f0a48184267c9ad34460b2e131c5150e91862040ec1d3fdb66d8a58684` |
+| after-parallel/result.json（初版断线失败） | `ef28e6c758d5594e020b85b0841a772188dcb56b03991339d0a8936fb469e2da` |
+| after-parallel/session.jsonl（同上） | `48787d7635e716f306045c603e634106e78dc2298dc2701d64f2cd5ba46f319b` |
+| after-stop-fix/result.json（最终overrun失败） | `777154c054322627a6cff48d98db053717a6f7857b976c3f5cf434b5463921f0` |
+| after-stop-fix/end.png | `31269941eec661489448eeb11b50b6cd0321e6612533309362be4cba906a1d0d` |
+| after-stop-fix/session.jsonl（同上） | `8ad9921dd5f49cf2f41614ab33b6557022030bb6b310acd0dc98a459ebe03e64` |
+
+所有临时脚本、日志和截图均未加入Git。现场停止延迟/stop_unverified、402 ms输入中断根因和长时间网页/VR稳定性仍未验收。没有访问真机或推送；用户原总结文件保持原哈希。重启8768仅恢复本机Fake预览，不覆盖任何失败记录，不作真机收尾证明。
+
+最终另外完成无准备运动的界面门槛检查：“解锁→准备按钮可用而摇杆仍锁定→停止后重新锁定”，结果通过，无控制台错误，截图已查看；它不替代上面的准备失败。`final-smoke/smoke.json`的SHA-256为`215ae356167aa390faffa8f033a615428320f10a20a3d330cd6a4bd6a48305be`，`final-smoke/smoke.png`为`f1118e6a316c48d17dd8c899d4c65a73c4f7d24659a01fc8b0445c530c28dd9d`。8768保留本机Fake运行供查看。
