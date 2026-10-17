@@ -192,6 +192,7 @@ describe('VR safety presentation', () => {
     const sent: ClientControlMessage[] = [];
     const panel = new ArmPanel(container, (message) => sent.push(message));
     panel.setConnected(true);
+    panel.setMode('READY');
     panel.setMode('ARMED');
     panel.setMode('ACTIVE');
     expect(panel.safetyState.phase).toBe('active');

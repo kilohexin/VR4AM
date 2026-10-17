@@ -17,11 +17,14 @@ type DiagnosticsRuntimeRender = (
 export class DiagnosticsUpdateCoordinator {
   private state: RobotStateMessage | null = null;
   private diagnostics: DiagnosticsMessage | null = null;
+  private lastDetailsAt: number | null = null;
+  private lastStatusKey: string | null = null;
 
   constructor(
     private readonly panel: Pick<DiagnosticsPanel, 'update' | 'clear'>,
     private readonly onRuntimeRender: DiagnosticsRuntimeRender,
     private readonly readLatency: () => LatencyView,
+    private readonly now: () => number = () => performance.now(),
   ) {}
 
   onRobotState(
@@ -41,14 +44,35 @@ export class DiagnosticsUpdateCoordinator {
   clear(): void {
     this.state = null;
     this.diagnostics = null;
+    this.lastDetailsAt = null;
+    this.lastStatusKey = null;
     this.panel.clear();
   }
 
   private render(): void {
     if (!this.state) return;
     const latency = this.readLatency();
-    this.panel.update(this.state, this.diagnostics, latency);
+    // Control feedback and the runtime summary are never rate limited.
     this.onRuntimeRender(this.state, this.diagnostics, latency);
+    const now = this.now();
+    const state = this.state;
+    const statusKey = JSON.stringify([
+      state.mode, state.robot_state, state.fault, state.constraint, state.recovery_phase,
+      state.backend, this.diagnostics?.runtime, state.real_robot_mode,
+      state.preflight_ready, state.preflight_reason, state.manual_input_ready,
+      state.preparation_required, state.preparation_unlocked,
+      state.target_control?.phase === 'fault',
+    ]);
+    if (
+      this.lastDetailsAt === null || !Number.isFinite(now)
+      || now < this.lastDetailsAt || now - this.lastDetailsAt >= 200
+      || statusKey !== this.lastStatusKey
+    ) {
+      // Coalesce detail DOM work on incoming messages; no timer can revive a cleared connection.
+      this.panel.update(state, this.diagnostics, latency);
+      this.lastDetailsAt = Number.isFinite(now) ? now : null;
+      this.lastStatusKey = statusKey;
+    }
   }
 }
 

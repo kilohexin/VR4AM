@@ -180,3 +180,57 @@ QPC只解决计时精度，不改变Windows等待唤醒粒度。本机纯等待�
 | gc-timing.json（独立GC观测） | `a2887c6922ddba0dfc18ea09ac45409129aecafe9be83d0653e9109e38a5baba` |
 | repeat-cold-failure.json | `3571a961c18113e796b878fc29fb43062250b073b2712fce80b0098827f2c724` |
 | repeat-failure.json（含长任务/发帧时间） | `684624377f105ce40127373623c3a81e5eedfb7ec1dcc5ac8621b752ef97ae76` |
+
+## 2026-10-17浏览器CPU取证：诊断详情更新热点
+
+在正式8768离线入口使用已有Edge/Playwright及CDP CPU采样，沿“解锁→准备→平面摇杆”操作取证。Browser plugin not available，视口1440×1000。服务身份仍为LEBAI_FAKE，原生SDK未加载，无真实机器人访问。
+
+- 20.383秒采样包含10180个样本。状态消息触发的诊断面板`update`调用树累计约2815 ms，另一调用路径约497 ms；WebGL绘制调用树约1714 ms。采样时间包含子调用，不能将父子节点相加，也不是硬实时期限测量。
+- 源码确认`DiagnosticsUpdateCoordinator`在每个机器人状态回调中重建详情面板；演示状态约50 Hz，而诊断消息约5 Hz。每次详情更新还查询滚动位置、重建六张卡和最多20条JSON事件。它是值得优化的页面热点，不足以证明所有输入间隔和后端期限失败均由此造成。
+- 本次操作在平面摇杆阶段仍触发`finite_diagnostic_expired`，未通过完整操作验收；无浏览器控制台错误。四个长任务为344、318、67、373 ms，均位于启动早期，不能直接归因于后续摇杆故障。
+- 已提交待确认的有界方案：详情合并为最多约5 Hz，模式/故障/恢复等状态变化立即刷新；确认序号、控制状态、实际反馈和运行摘要保持原频率；不新增缓存输入心跳，不更改100 ms期限。按brainstorming技能，短设计尚需用户确认，本轮尚未实现此项产品变更或宣称修复。
+
+原始CPU数据及失败记录仅在本机`C:/Users/Kilo/Documents/ChatGPT/Agent4ARM/input-render-qa-20261017/`：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| browser-cpu.json | `9af73ae24f5ca70a8dd90522d3143361c85c974202eee7a7f17f4c7959a29bfc` |
+| repeat-failure.json | `933f69e04a3d2b1f1b5d43cb81c68f2b1d969743f030e2c204f57dfdd26ba2bd` |
+| repeat-failure.png | `a76d49681d536be1573a36f8876ef66896fdbcad2f4714e3476a9243b9853d79` |
+
+### 用户确认后的实现与对照
+
+用户明确认可后，完成诊断协调器的局部修改：普通详情在收到消息时最多每200 ms重建一次，只保存最新状态/诊断；模式、机器人状态、故障、约束、恢复、运行身份及准入/准备字段变化立即调用详情更新。现有滚动阅读期间暂停详情重建的规则不变，主状态和故障提示仍由原实时路径处理。每条消息的确认、反馈处理和运行摘要保持原频率，并先于详情更新。连接清理同时重置缓存及刷新窗口；不创建定时器或输入心跳，不修改控制后端或100 ms保护。
+
+- 新增定向用例先观察到50次重建而非预期5次的失败，再修复通过；覆盖最新诊断合并、13类状态变化及清除、连接清理、时钟回退/非有限值。诊断面板27项测试通过。
+- 首次前端全套为450通过、3失败。失败项为`VR waiting copy keeps stopping controls and fault precedence`、`local segment fault cannot keep an ACTIVE screen looking healthy`、`does not turn a local disarm request into a physical standstill claim`。这三项测试未经过此次协调器；其原前置条件在连接后跳过READY，导致原`stopRequested`锁仍保持。经代码及独立复核确认，仅补上测试前置READY，不改产品安全判断。最终**30个文件、453项前端测试全部通过**。未运行后端全集。独立只读复核未发现具体缺陷。
+- TypeScript/Vite构建及交付清单检查通过，包为`artifacts/delivery/segmented-demo/20261017T042143Z-2c2a2716`；保留已有单包大于500 kB提示。
+- 正式8768入口操作复跑在准备阶段出现`control_overrun`，因此本轮没有完整操纵通过证据；失败原样保留。当前仍不标为稳定整链验收或真机停止修复。
+
+为分开测量展示开销，另用Playwright自有WebSocket模拟路由，向前后两版页面发送相同结构的固定安全状态和20条冻结格式日志，不建立后端控制连接、不进行准备或操纵。每版先预热5秒，再记录约10秒，视口1440×1000；两版仅产品诊断协调器有差异。定时发送受本机调度影响，实际收到状态数不同，不能称为严格50 Hz的基准测试。
+
+| 指标 | 修改前 | 修改后 |
+| --- | ---: | ---: |
+| 状态发送数 | 403 | 389 |
+| 详情DOM重建次数 | 444 | 48 |
+| 诊断详情update累计采样耗时 | 679 ms | 72 ms |
+| RAF间隔95分位 | 16.9 ms | 17.0 ms |
+| 最大RAF间隔 | 100.0 ms | 83.3 ms |
+
+重建次数和该详情函数采样耗时均下降约89%；95分位帧间隔没有改善，不能由此宣称整体流畅度或停止可靠性已经通过。该合成回放不模拟持按、运动反馈转换、后台SDK或VR负载。两版页面身份/非空/无框架覆盖层及控制台检查通过；截图已本机查看，样式未改。本轮未重复移动端或头显验证。
+
+补充证据仍只保存在同一本机目录：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| details-before.json | `ace4357230c1b628b06780d929cb7e0046a91a12945fc75f154475c3dc11ab8a` |
+| details-after.json | `7dcd630263a94f7b7a1f112d8e13fe1f536d5ec6d11a6a18664115abf8c03a67` |
+| details-before-cpu.json | `5f2b1649c2c8e71ba0bb1c070a459f45cf6d7f82880eb36d1a929e3d4d377a7f` |
+| details-after-cpu.json | `cd8cd737a30257009d9f685a09541923de6eb0b3f0c6eb18258632908e74d279` |
+| after/repeat-failure.json | `fdc35d43796b6f64cae6632c6ef3be731855770fe827f85c52e8ad337b523b2b` |
+| final-smoke.json | `7b3139141607e805f6b141def994a4e85cc420716a9dd1d697f039ca50a8675a` |
+| final-unlocked.png | `682cb222c89bad4db8ddb4eda3d95db512bb9aeca0c5b304ae96eedae66e2168` |
+
+最后重启正式Fake入口并检查真实页面“解锁→准备按钮可用、摇杆仍锁定→停止”。该无准备运动的界面门槛检查通过，无控制台错误；截图已查看。它不替代先前准备/运动失败的记录。8768保留供查看；先前进程关闭均完成应用清理，PTY外层退出码1，不视作整体命令返回0。
+
+下一项仍需定位准备阶段自然运行的`control_overrun`及运动段期限拒绝；本轮没有放宽门槛或新增真机权限。未推送，原项目总结保持不变。

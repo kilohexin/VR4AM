@@ -53,6 +53,7 @@ it('B remains stop and cannot send unsupported Home or reset in segment mode', (
 it('VR waiting copy keeps stopping controls and fault precedence', () => {
   const panel = new ArmPanel(document.querySelector('#app')!, () => {});
   panel.setConnected(true);
+  panel.setMode('READY');
   panel.setMode('ARMED');
   panel.setMode('ACTIVE');
   const summary = {backend:'LEBAI',realRobotMode:'control',actualTcp:null,gripper:0,
@@ -68,7 +69,7 @@ it('VR waiting copy keeps stopping controls and fault precedence', () => {
 
 it('local segment fault cannot keep an ACTIVE screen looking healthy', () => {
   const panel = new ArmPanel(document.querySelector('#app')!, () => {});
-  panel.setConnected(true);panel.setMode('ARMED');panel.setMode('ACTIVE');
+  panel.setConnected(true);panel.setMode('READY');panel.setMode('ARMED');panel.setMode('ACTIVE');
   const target={...status,phase:'fault'} as const;
   const summary={backend:'LEBAI',realRobotMode:'control',actualTcp:null,gripper:0,
     latencyMs:1,hardwareVerified:false,targetControl:target} as const;

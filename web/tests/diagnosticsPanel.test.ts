@@ -9,6 +9,100 @@ beforeEach(() => {
   document.body.innerHTML = '<aside id="diagnostics"></aside>';
 });
 
+describe('DiagnosticsUpdateCoordinator cadence', () => {
+  const state = robotFixture as RobotStateMessage;
+  const diagnostics = validDiagnostics as unknown as DiagnosticsMessage;
+
+  function setup() {
+    let now = 0;
+    const panel = {update: vi.fn(), clear: vi.fn()};
+    const runtime = vi.fn();
+    const acknowledge = vi.fn();
+    const coordinator = new DiagnosticsUpdateCoordinator(
+      panel, runtime, () => ({currentMs: 18, p95Ms: 27}), () => now,
+    );
+    return {panel, runtime, acknowledge, coordinator, at: (time: number) => {now = time;}};
+  }
+
+  it('coalesces 50 Hz details to 5 Hz while processing every acknowledgement and summary', () => {
+    const {panel, runtime, acknowledge, coordinator, at} = setup();
+    for (let i = 0; i < 50; i++) {
+      at(i * 20);
+      coordinator.onRobotState({...state, ack_seq: i, gripper: i / 100}, acknowledge);
+    }
+    expect(panel.update).toHaveBeenCalledTimes(5);
+    expect(panel.update.mock.calls.map(([s]) => s.ack_seq)).toEqual([0, 10, 20, 30, 40]);
+    expect(acknowledge).toHaveBeenCalledTimes(50);
+    expect(acknowledge).toHaveBeenLastCalledWith(49);
+    expect(runtime).toHaveBeenCalledTimes(50);
+    expect(runtime.mock.calls.at(-1)?.[0].gripper).toBe(0.49);
+    expect(runtime.mock.invocationCallOrder[0]).toBeLessThan(panel.update.mock.invocationCallOrder[0]);
+  });
+
+  it.each<Partial<RobotStateMessage>>([
+    {mode: 'FAULT'}, {robot_state: 'MOVING'}, {fault: 'stop_unverified'},
+    {constraint: 'workspace_boundary'}, {recovery_phase: 'stopping'},
+    {backend: 'LEBAI'}, {real_robot_mode: 'control'},
+    {manual_input_ready: true}, {preparation_required: true}, {preparation_unlocked: true},
+    {preflight_ready: false}, {preflight_reason: 'feedback_stale'},
+    {target_control: {policy: 'segmented_experimental', phase: 'fault', samples_observed: 0,
+      samples_required: 2, hardware_verified: false}},
+  ])('immediately renders safety/readiness changes and their clearance: %j', (change) => {
+    const {panel, coordinator, acknowledge, at} = setup();
+    coordinator.onRobotState(state, acknowledge);
+    at(10);
+    coordinator.onRobotState({...state, ...change}, acknowledge);
+    at(20);
+    coordinator.onRobotState(state, acknowledge);
+    expect(panel.update).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the newest diagnostic data and refreshes runtime identity immediately', () => {
+    const {panel, runtime, coordinator, acknowledge, at} = setup();
+    coordinator.onRobotState(state, acknowledge);
+    at(50);
+    coordinator.onDiagnostics({...diagnostics, runtime: 'LEBAI_FAKE', dropped_events: 1});
+    const afterIdentity = panel.update.mock.calls.length;
+    at(60);
+    const newest = {...diagnostics, runtime: 'LEBAI_FAKE' as const, dropped_events: 2};
+    coordinator.onDiagnostics(newest);
+    expect(panel.update).toHaveBeenCalledTimes(afterIdentity);
+    expect(runtime).toHaveBeenCalledTimes(3);
+    at(250);
+    coordinator.onRobotState(state, acknowledge);
+    expect(panel.update).toHaveBeenLastCalledWith(state, newest, {currentMs: 18, p95Ms: 27});
+    at(260);
+    coordinator.onDiagnostics({...newest, runtime: 'LEBAI'});
+    expect(panel.update).toHaveBeenCalledTimes(afterIdentity + 2);
+  });
+
+  it('clears connection data and gives the next connection an immediate first render', () => {
+    const {panel, coordinator, acknowledge, at} = setup();
+    coordinator.onRobotState(state, acknowledge);
+    coordinator.onDiagnostics(diagnostics);
+    coordinator.clear();
+    const before = panel.update.mock.calls.length;
+    at(10);
+    coordinator.onDiagnostics(diagnostics);
+    expect(panel.update).toHaveBeenCalledTimes(before);
+    coordinator.clear();
+    coordinator.onRobotState(state, acknowledge);
+    expect(panel.clear).toHaveBeenCalledTimes(2);
+    expect(panel.update).toHaveBeenLastCalledWith(state, null, {currentMs: 18, p95Ms: 27});
+    expect(panel.update).toHaveBeenCalledTimes(before + 1);
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])('does not freeze details for invalid/backwards clock %s', (time) => {
+    const {panel, coordinator, acknowledge, at} = setup();
+    coordinator.onRobotState(state, acknowledge);
+    at(time);
+    coordinator.onRobotState(state, acknowledge);
+    at(20);
+    coordinator.onRobotState(state, acknowledge);
+    expect(panel.update.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe('DiagnosticsPanel', () => {
   it('renders authoritative real-path diagnostics and recent events', () => {
     const root = document.querySelector<HTMLElement>('#diagnostics')!;
