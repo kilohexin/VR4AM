@@ -107,6 +107,7 @@ def test_full_app_has_fake_identity_and_serves_compiled_page(tmp_path,monkeypatc
         assert app.state.backend.parallel_fk is True
         assert app.state.backend.parallel_motion_reads is True
         assert app.state.backend.offline_parallel_snapshot_reads is True
+        assert app.state.backend._observer_window.max_wait_s == .020
         assert app.state.backend.prelease_feedback_fk is False
         assert app.state.control.prepare_options.timeout_s == 60.
         assert app.state.control.prepare_options.max_speed_radps == .05

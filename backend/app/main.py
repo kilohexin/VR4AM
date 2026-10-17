@@ -81,7 +81,14 @@ def build_backend(
     offline_unsent_expiry_hold: bool = False,
     offline_parallel_segment_fk: bool = False,
     offline_parallel_snapshot_reads: bool = False,
+    offline_observer_priority: bool = False,
 ) -> RobotBackend:
+    if type(offline_observer_priority) is not bool:
+        raise ValueError('invalid_offline_observer_priority')
+    if offline_observer_priority and (backend_label!='LEBAI_FAKE'
+            or settings.backend!='lebai' or settings.segmented_target is None
+            or settings.lebai is None or settings.lebai.ip!='digital-twin'):
+        raise ValueError('offline_observer_priority_offline_only')
     if type(offline_parallel_snapshot_reads) is not bool:
         raise ValueError('invalid_offline_parallel_snapshot_reads')
     if offline_parallel_snapshot_reads and (backend_label!='LEBAI_FAKE'
@@ -116,6 +123,7 @@ def build_backend(
             allow_unsent_expiry_hold=offline_unsent_expiry_hold,
             parallel_fk=offline_parallel_segment_fk,
             offline_parallel_snapshot_reads=offline_parallel_snapshot_reads,
+            observer_wait_s=.020 if offline_observer_priority else 0.,
             settling=settings.segmented_target.settling, client_factory=client_factory,
             event_callback=recorder.write_event, backend_label=backend_label)
     return RealLebaiAdapter(
@@ -204,6 +212,7 @@ def create_app(
     offline_unsent_expiry_hold: bool = False,
     offline_parallel_segment_fk: bool = False,
     offline_parallel_snapshot_reads: bool = False,
+    offline_observer_priority: bool = False,
 ) -> FastAPI:
     runtime_settings = settings if settings is not None else Settings.load()
     runtime_backend = backend_label or (
@@ -225,6 +234,7 @@ def create_app(
             offline_unsent_expiry_hold=offline_unsent_expiry_hold,
             offline_parallel_segment_fk=offline_parallel_segment_fk,
             offline_parallel_snapshot_reads=offline_parallel_snapshot_reads,
+            offline_observer_priority=offline_observer_priority,
         )
         latest = LatestVRFrame()
         preparation_enabled = bool(

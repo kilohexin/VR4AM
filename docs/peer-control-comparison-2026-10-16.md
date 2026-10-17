@@ -387,3 +387,45 @@ QPC只解决计时精度，不改变Windows等待唤醒粒度。本机纯等待�
 所有临时脚本、日志和截图均未加入Git。现场停止延迟/stop_unverified、402 ms输入中断根因和长时间网页/VR稳定性仍未验收。没有访问真机或推送；用户原总结文件保持原哈希。重启8768仅恢复本机Fake预览，不覆盖任何失败记录，不作真机收尾证明。
 
 最终另外完成无准备运动的界面门槛检查：“解锁→准备按钮可用而摇杆仍锁定→停止后重新锁定”，结果通过，无控制台错误，截图已查看；它不替代上面的准备失败。`final-smoke/smoke.json`的SHA-256为`215ae356167aa390faffa8f033a615428320f10a20a3d330cd6a4bd6a48305be`，`final-smoke/smoke.png`为`f1118e6a316c48d17dd8c899d4c65a73c4f7d24659a01fc8b0445c530c28dd9d`。8768保留本机Fake运行供查看。
+
+## 2026-10-17：Fake普通反馈有界让行及五轮完整操作
+
+### 先定位竞争，保留未解释的停顿
+
+本轮仅离线取证。仓库外8770临时探针记录到准备前后69.46 ms回调（线程CPU粗计62.5 ms），轻量探针另记录58.10 ms诊断回调；后者没有重叠的第二代GC，不能据此修改GC策略或宣称找到全部control_overrun根因。进一步分阶段观察连续三次准备通过，正式8768无探针三次准备/停留/停止也通过。间歇准备停顿和历史402 ms输入中断仍没有唯一归因。临时探针不提交；其中GC探针退出时回调栈过浅报错，运行期证据已保存，后续探针已在清理时移除回调。
+
+随后正式入口相同五轮脚本在首轮X+通过后，X-出现finite_diagnostic_expired并结束。该失败段SDK运动入口未进入，但整场此前已有12条PVAT，不能称整场零动作。QPC显示快照21.4519 ms、命令锁等待19.4724 ms、锁后核验61.1733 ms，handler至实际入口105.9306 ms；普通state快照抢先排入同一把锁，dispatch_snapshot_changed=true。这支持减少此处读取竞争，不证明所有历史超时共享根因，也没有放宽100 ms。
+
+### 用户明确批准后的实现与验证
+
+增加默认关闭的私有选项offline_observer_priority，仅LEBAI_FAKE、lebai分段配置及字面目标digital-twin同时满足才接受开启。正式本机Fake演示显式将已有ObserverWindow设为20 ms；普通读取最多让行一次，随后继续读取新反馈，不复用缓存。真实入口及其它默认构造仍为0。未改ObserverWindow本体、SDK、运动/停止事务、原100/60 ms期限或三稳定样本要求；原停止路径立即释放让行等待。
+
+- 全应用接线用例先RED：预期0.020、实际0.0；实现后通过。新增11项布尔类型、真实/非本机/缺失配置及默认关闭隔离用例。
+- 相关ObserverWindow、适配器、负载、分段/HOLD、准备及交付测试共**181项通过**，耗时7.86秒，保留既有Starlette/httpx弃用警告。没有运行后端全集。
+- 独立只读复核未发现接线或隔离缺陷。TypeScript/Vite构建及交付清单检查通过；包为artifacts/delivery/segmented-demo/20261017T134537Z-81b8277b，原大包提示保留。
+
+### 正式Fake入口：五轮50项操作全部通过
+
+使用与前次失败完全相同的网页脚本，SHA-256为`497e5a040a61cdaff9378a8249a84e47b6ce27072fec20330dca22b5e6a11b2a`。已有Edge/Playwright、1440×1000；Browser plugin not available。最终运行未加CPU或调度探针，没有自动重试。
+
+每轮解锁、独立进入准备位、XYZ双向、自转双向、渐变开合、停止；每轮X+长按2秒，其余各操作长按1.2秒。40项机械臂操作松开后原IDLE/可操纵状态成立，再观察400 ms，位置/姿态漂移均为0；10项夹爪操作方向正确且松开保持。十次自转的工具局部Z旋转向量符号均正确，约±0.0084–0.0085 rad。五轮结束后追加一次准备/停止也通过。页面身份、非空、无开发错误覆盖层及控制台检查通过，结束截图已查看。桌面保留；物理引擎仍未实现。
+
+冻结日志logs/commissioning/20261017T134557Z-c9365449/session.jsonl：259条pvat_sent，259个运动SDK生命周期均正常返回；55次stop_requested/stop_confirmed，0个robot_fault、stop_failed或segment_unsent_expired事件。冷启动在首次准备前有一次原stale撤权，不能声称整场没有stale。日志与浏览器完整通过记录共同支持本次结果，单独事件计数不构成验收。
+
+259段QPC handler至SDK await完成时间中位20.7662 ms、95分位32.5358 ms、最大51.6461 ms；命令锁等待中位0.0028 ms、最大0.022 ms；锁后核验中位16.3294 ms、最大39.9289 ms，dispatch_snapshot_changed=false共259次。此为单次正向运行；此前记录暖机/负载条件不同，不能作为严格受控A/B或长期性能保证。
+
+证据仅保存本机C:/Users/Kilo/Documents/ChatGPT/Agent4ARM/overrun-origin-qa-20261017/，不提交原始日志、截图或临时探针：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| evidence.json（早期回调探针） | `0de3c5166b53460ffa18f5265ef66e081a512f0459ffb882ba713568fd7c5608` |
+| gc-light/evidence.json | `0067043f6b75a731fc2d94da2b34b677b9b490bd4b7dcb0c2e712fefcba2929c` |
+| phases/evidence.json | `8a08155ba1085af79d6073a47f94ec1a49b9351be213d16c6afd4246d3a67301` |
+| formal/result.json（三次准备通过） | `7bf3e4cd1f288350edeba49e4d1a78bd9b25a4baa05520ba5e6f35f253be9a1e` |
+| full-chain/result.json（让行前失败） | `f6efad226cf5aa6ae19f2d1e1ddb7647e1aed809cfdfea99c51c0af4958e5213` |
+| after-priority/result.json（五轮通过） | `14c241abe8aebc8af803bbc1fa8112a0d93313774d14bb9099a97d8d642a4b01` |
+| after-priority/end.png | `8807f3d33a0080126d1058c594ec6a637bb0d69aa96ded1d571bf3f01faac1e0` |
+| after-priority/summary.json | `12351ddfe83c6c7bf65041ce8226efc34a80cee2734ca3077ca4acc0f6cfd27d` |
+| 最终session.jsonl（上述仓库本机日志路径） | `011a10adf0a355d2263d593f2023318dfb8b1b1912e1bf553fe1789ee50bd41c` |
+
+这是五轮完整Fake操作的有限正向证据，不能追溯覆盖先前失败，也不代表真机、头显VR、物理抓取或运动中停止可靠性已经验收。没有加载原生SDK或访问真实机器人，历史stop_unverified与现场停止延迟继续保留。本轮仅本地提交，不推送；原项目总结文件保持原哈希。8768恢复为此候选的锁定Fake预览，8770临时入口已关闭。
