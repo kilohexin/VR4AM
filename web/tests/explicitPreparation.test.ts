@@ -7,6 +7,34 @@ beforeEach(()=>{document.body.innerHTML='<div id="panel"></div>';});
 function rig(){const send=vi.fn();const p=new ArmPanel(document.querySelector('#panel')!,send);
  p.setConnectionStatus({state:'connected'});p.setMode('READY');p.observeGrip(false);
  p.setPreparationState(true,false);return {p,send};}
+it('routes two distinct XR primary actions through unlock then separate preparation',()=>{
+ const {p,send}=rig();
+ expect(p.requestXRPrimaryAction()).toBe(true);
+ expect(send.mock.calls.map(c=>c[0].type)).toEqual(['arm_request']);
+ expect(p.requestXRPrimaryAction()).toBe(false); // Await unlock acknowledgement.
+ p.handleArmFeedback({v:1,type:'arm_ack',request_id:send.mock.calls[0][0].request_id});
+ expect(send).toHaveBeenCalledTimes(1); // Ack never starts movement.
+ expect(p.safetyState).toMatchObject({preparationRequired:true,preparationUnlocked:true,preparationPending:false});
+ expect(p.requestArm('desktop')).toBe(false); // Desktop keeps its separate button.
+ expect(p.requestXRPrimaryAction()).toBe(true);
+ expect(send.mock.calls.map(c=>c[0].type)).toEqual(['arm_request','prepare_request']);
+ expect(send.mock.calls[1][0].request_id).toMatch(/^xr-/);
+ expect(p.safetyState.preparationPending).toBe(true);
+ expect(p.requestXRPrimaryAction()).toBe(false);
+ p.handleArmFeedback({v:1,type:'prepare_ack',request_id:send.mock.calls[1][0].request_id});
+ expect(p.isArmed).toBe(false);expect(p.safetyState.preparationPending).toBe(true);
+ p.setMode('ARMED');expect(p.isArmed).toBe(true);expect(p.safetyState.preparationPending).toBe(false);
+});
+it.each(['grip','stop','fault','disconnect'] as const)('blocks XR preparation after %s',change=>{
+ const {p,send}=rig();p.requestArm('xr');
+ p.handleArmFeedback({v:1,type:'arm_ack',request_id:send.mock.calls[0][0].request_id});
+ if(change==='grip')p.observeGrip(true);
+ if(change==='stop')p.requestDisarm('xr');
+ if(change==='fault')p.setFault('stop_unverified');
+ if(change==='disconnect')p.setConnectionStatus({state:'disconnected'});
+ const before=send.mock.calls.length;expect(p.requestXRPrimaryAction()).toBe(false);
+ expect(send).toHaveBeenCalledTimes(before);
+});
 it('shows a separate preparation action and unlock alone never sends it',()=>{
  const {p,send}=rig();expect(p.prepareButton.disabled).toBe(true);p.armButton.click();
  expect(send.mock.calls.map(c=>c[0].type)).toEqual(['arm_request']);

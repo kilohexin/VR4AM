@@ -56,6 +56,9 @@ export function describeVrSafety(
       core.tone = 'amber';
     }
   }
+  if (state.preparationRequired) {
+    core.footer = CONTROL_FOOTER.replace('A解锁 B停止/Home', 'A解锁/再按A准备 B停止');
+  }
   const statusLine = formatRuntimeSummary(summary)
     + (target ? ' · 分段候选 · 未真机验收' : '');
   return {...core, statusLine};
@@ -87,7 +90,7 @@ function describeSafety(
   if (lastStopWarning) {
     return presentation(readableFault(state.fault), '保持 Grip 松开，确认现场静止；异常按急停', 'red', 'warning');
   }
-  if (state.homePending || state.recoveryPhase) {
+  if (state.homePending || (state.recoveryPhase && !state.preparationRequired)) {
     return presentation('正在返回 Home', '请保持 Grip 松开', 'red', 'warning');
   }
   if (state.faultResetPending) {
@@ -111,7 +114,15 @@ function describeSafety(
   if (state.phase === 'fault') {
     return presentation('无法在线复位', '保持安全距离，检查 L Master/急停', 'red', 'warning');
   }
+  if (state.preparationRequired && state.recoveryPhase) {
+    const title = state.recoveryPhase === 'homing' ? '正在前往准备位'
+      : state.recoveryPhase === 'stabilizing' ? '正在确认到位' : '正在准备';
+    return presentation(title, '保持 Grip 松开 · B 请求停止', 'cyan', 'shield');
+  }
   if (state.phase === 'pending') {
+    if (state.preparationPending) {
+      return presentation('正在准备', '等待到位确认 · B 请求停止', 'cyan', 'shield');
+    }
     return presentation('解锁中', '等待仿真确认', 'cyan', 'shield');
   }
   if (state.constraint) {
@@ -122,11 +133,14 @@ function describeSafety(
       'warning',
     );
   }
+  if (state.preparationRequired && state.preparationUnlocked) {
+    return presentation('待进入准备姿态', '保持 Grip 松开，再按 A 进入准备位', 'muted', 'shield');
+  }
   if (state.phase === 'active') {
     return presentation('运动中', '松开 Grip 请求停止 · B 请求停止', 'cyan', 'shield');
   }
   if (state.phase === 'armed') {
-    return presentation('已解锁', '按住 Grip 移动', 'cyan', 'shield');
+    return presentation(state.preparationRequired ? '可操纵' : '已解锁', '按住 Grip 移动', 'cyan', 'shield');
   }
   if (state.phase === 'stopped') {
     return presentation('控制已锁定', '保持 Grip 松开，确认现场静止后再操作', 'red', 'stop');

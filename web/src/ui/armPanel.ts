@@ -39,6 +39,9 @@ export type ArmSafetySnapshot = Readonly<{
   faultRecoverable: boolean;
   faultResetPending: boolean;
   homePending?: boolean;
+  preparationRequired?: boolean;
+  preparationUnlocked?: boolean;
+  preparationPending?: boolean;
   constraint: ConstraintKind | null;
   recoveryPhase: RecoveryPhase | null;
 }>;
@@ -170,6 +173,9 @@ export class ArmPanel {
       faultRecoverable: this.isFaultRecoverable,
       faultResetPending: this.pendingFaultResetId !== null,
       homePending: this.pendingHomeRequestId !== null,
+      preparationRequired: this.preparationRequired,
+      preparationUnlocked: this.preparationUnlocked,
+      preparationPending: this.preparationRequired && (this.pendingPreparation || this.awaitingArmedMode),
       constraint: this.constraint,
       recoveryPhase: this.recoveryPhase,
     });
@@ -371,6 +377,12 @@ export class ArmPanel {
       : status.state === 'active'
         ? '退出 VR'
         : '进入 VR';
+  }
+
+  requestXRPrimaryAction(): boolean {
+    // Each call comes from a fresh released A edge. An acknowledgement alone
+    // never starts preparation; both actions keep their original guards.
+    return this.preparationUnlocked ? this.requestPrepare('xr') : this.requestArm('xr');
   }
 
   requestArm(source: ControlSource = 'desktop'): boolean {

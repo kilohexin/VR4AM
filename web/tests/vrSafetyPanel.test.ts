@@ -26,6 +26,37 @@ const state = (phase: ArmSafetyPhase): ArmSafetySnapshot => ({
 } as const);
 
 describe('VR safety presentation', () => {
+  it('shows the distinct second A action after explicit unlock', () => {
+    expect(describeVrSafety({...state('locked'), preparationRequired:true,
+      preparationUnlocked:true}, true)).toMatchObject({
+      title:'待进入准备姿态',instruction:'保持 Grip 松开，再按 A 进入准备位',
+    });
+  });
+  it.each([
+    [null,'正在准备'],['stopping','正在准备'],['homing','正在前往准备位'],['stabilizing','正在确认到位'],
+  ] as const)('labels explicit preparation phase %s without Home', (recoveryPhase,title) => {
+    const view=describeVrSafety({...state('pending'), preparationRequired:true,
+      preparationPending:true,recoveryPhase},true);
+    expect(view.title).toBe(title);expect(view.instruction).toContain('B');
+    expect(view.footer).toContain('再按A准备');expect(JSON.stringify(view)).not.toContain('Home');
+  });
+  it('shows explicit ready state as controllable and preserves stop failure priority',()=>{
+    expect(describeVrSafety({...state('armed'),preparationRequired:true},true).title).toBe('可操纵');
+    expect(describeVrSafety({...state('locked'),preparationRequired:true,preparationUnlocked:true,
+      fault:'stop_unverified'},true)).toMatchObject({tone:'red',title:'停止状态未确认'});
+  });
+  it.each([
+    [{fault:'snapshot_rpc_result_unknown',phase:'fault',mode:'FAULT'},true,'无法在线复位'],
+    [{mode:'STALE'},true,'数据陈旧'],
+    [{},false,'手柄不受支持'],
+  ] as const)('keeps warnings above explicit preparation progress %j',(changes,supported,title)=>{
+    expect(describeVrSafety({...state('pending'),preparationRequired:true,preparationPending:true,
+      recoveryPhase:'homing',...changes},supported)).toMatchObject({title,tone:'red'});
+  });
+  it('keeps a constraint visible while preparation is unlocked',()=>{
+    expect(describeVrSafety({...state('locked'),preparationRequired:true,preparationUnlocked:true,
+      constraint:'workspace_boundary'},true)).toMatchObject({tone:'amber',title:'已到达操作边界，保持 Grip 向反方向退回'});
+  });
   it.each([
     ['locked', '未解锁', '松开 Grip 后按 A', 'muted', 'shield'],
     ['pending', '解锁中', '等待仿真确认', 'cyan', 'shield'],

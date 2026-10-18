@@ -127,7 +127,7 @@ xrController = new XRSessionController({
   host: scene,
   onFrame: (frame) => sendFrame(frame, 'xr'),
   onController: updateController,
-  onArmRequest: () => { armPanel.requestArm('xr'); },
+  onArmRequest: () => { armPanel.requestXRPrimaryAction(); },
   onStopOrResetRequest: () => { armPanel.requestStopOrReset('xr'); },
   onControllerSupport: (supported) => scene.setQuestControllerSupport(supported),
   onDisarm: sendVRDisarm,

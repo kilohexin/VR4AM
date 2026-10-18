@@ -429,3 +429,29 @@ QPC只解决计时精度，不改变Windows等待唤醒粒度。本机纯等待�
 | 最终session.jsonl（上述仓库本机日志路径） | `011a10adf0a355d2263d593f2023318dfb8b1b1912e1bf553fe1789ee50bd41c` |
 
 这是五轮完整Fake操作的有限正向证据，不能追溯覆盖先前失败，也不代表真机、头显VR、物理抓取或运动中停止可靠性已经验收。没有加载原生SDK或访问真实机器人，历史stop_unverified与现场停止延迟继续保留。本轮仅本地提交，不推送；原项目总结文件保持原哈希。8768恢复为此候选的锁定Fake预览，8770临时入口已关闭。
+
+## 2026-10-18：补齐VR手柄的独立准备动作
+
+静态追踪发现进入VR会撤权，A仅连接requestArm；显式解锁确认后preparationUnlocked阻止再次解锁，头显没有连接requestPrepare，因此必须回电脑点准备。仓库外无传输的生产ArmPanel复现结果为第一次A=true、第二次A=false，仅arm_request；点击桌面准备按钮才追加prepare_request。另发现VR提示将准备位阶段误显示为返回Home。用户明确批准“两次独立A完成解锁/准备、B停止、同步VR状态”的有界离线修改。
+
+- ArmPanel新增XR主动作分派，复用原requestArm/requestPrepare各自权限守卫；main的XR回调接线。桌面按钮、后端准备事务、SDK、期限及运动/停止策略均未改。既有手柄释放边沿要求保留，持续A、回复及重复在途请求不会自动准备。
+- 安全快照增加可选准备显示字段，VR面板区分待准备、前往准备位、确认到位、可操纵；准备路径不提示Home，B仍停止。缺少新字段的旧调用保持原显示。
+- 首次新增11项用例全部有效失败（缺入口和原错误提示），随后实现。绿色回归中两处新测试夹具预期错误分别为既有“停止状态未确认”文字和hello握手，按真实合同修正，未改生产协议。
+- 独立复核指出新增cyan进度会覆盖普通故障/STALE/不支持手柄，以及待准备覆盖约束提示。增加四项组合反例并先观察全部失败，再调整显示优先级；复核无剩余具体缺陷。
+- 最终前端**30文件470项通过**；后端准备合同定向**24项通过**，未运行后端全集。TypeScript/Vite构建及清单检查通过，最终包artifacts/delivery/segmented-demo/20261018T130114Z-21fa8afc；原大包/项目外输出目录提示保留。
+- 合成XR集成验证真实XRSessionController→ArmPanel→TeleopSocket：第一次A只解锁、按住A跨越回复无准备、松开再按才准备、B撤权后迟到prepare_ack/ARMED不重新解锁；另验证prepare_ack本身不等于ARMED、Grip/模拟量Trigger与tracking=false帧。
+- 渲染核验使用已有Edge/Playwright，Browser plugin not available，1280×800及390×844。独立本机5187组件页面使用实际XR输入解析、ArmPanel与VR Canvas，确认上述两步动作、准备文案、B停止和停止未确认优先，页名/非空/无覆盖层/控制台/横向溢出及截图通过。首次测试页面缺favicon报404，补测试页面data图标后同脚本通过；初版组件容器继承100%高度遮住Canvas，修正测试容器尺寸后重新核验Canvas完整入屏与footer测宽，没有修改产品样式。
+- 最终正式8768 Fake页面另外完成原桌面独立解锁→准备三个阶段→ARMED→渐进夹爪→停止，1440×1000与390×844通过，无控制台错误或横向溢出；未追加摇杆长测或声称再次完成五轮。截图已查看。临时5187已关闭；8768保留新版锁定预览。
+
+证据仅在本机C:/Users/Kilo/Documents/ChatGPT/Agent4ARM/xr-preparation-audit-20261018/，不提交临时脚本、截图、原始配置或日志：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| result.json（修改前无网络复现） | `76d3b4cc0fc7c72e2efb1a09c6624f91c034554c449ed6c20c9101381c92d38f` |
+| browser-result.json | `f7024e8efe587260a138555692304940b7a2323d39866e718aa17dc7bc335edb` |
+| preparing.png（实际VR Canvas，合成状态） | `d91738ecb1bc4e504d396de800b5d43b5f7cd88d64932ce443244065f04d1050` |
+| mobile-fault.png | `699d9188492a2ef249f298544b7336e328e29e0826fcdb8f021c52f6e439ebf4` |
+| formal/result.json（正式Fake网页） | `f8df18f379fa6e95ea6ffc83a89f912343960fcc3919e797f57d706f75369a4d` |
+| formal/04-ready.png | `0716d26d87450faefc1030c67d0c4204d897b77dba8bd1c3c07b5deab5a232b4` |
+
+本轮补齐的是VR输入侧准备入口，不是运动执行或现场停止修复；未连接真实机器人、未使用实际头显、未推送。现场速度反馈审计、运动中stop_unverified和真实持续VR控制仍未验收。原项目总结文件SHA保持不变。旧8768进程Application shutdown complete及启动器清理核对完成，PTY外层退出1；仅称本机清理完成，不称物理停止已验证。

@@ -41,6 +41,7 @@ function setup() {
     panel.setFault(state.fault ?? null);
     panel.setConstraint(state.constraint ?? null);
     panel.setRecoveryPhase(state.recovery_phase ?? null);
+    panel.setPreparationState(state.preparation_required ?? false, state.preparation_unlocked ?? false);
     panel.setMode(state.mode);
   }, () => wire as unknown as WebSocket,
   (status) => panel.setConnectionStatus(status), (ack) => panel.handleArmFeedback(ack));
@@ -62,7 +63,7 @@ function setup() {
     host, createSessionId: () => scenario.session_id, now: () => now,
     onFrame: (frame) => forwardTeleopFrame(frame, 'xr', false, (message) => socket.sendFrame(message)),
     onController: (state) => { if (state.tracking) panel.observeGrip(state.grip); },
-    onArmRequest: () => { panel.requestArm('xr'); },
+    onArmRequest: () => { panel.requestXRPrimaryAction(); },
     onStopOrResetRequest: () => { panel.requestStopOrReset('xr'); },
     onDisarm: () => socket.sendControl({v: 1, type: 'disarm',
       request_id: `vr-disarm-${++disarm}`, client_mono_ms: now}),
@@ -75,14 +76,60 @@ function setup() {
       position: {x: 0.4, y: 0.5, z: 0.6}, orientation: {x: 0, y: 0, z: 0, w: 1},
     }} : null, getViewerPose: () => null} as unknown as XRFrame);
   }
-  function feedback(mode: RobotStateMessage['mode'], fault: string | null = null) {
-    wire.receive({...robotFixture, backend: 'LEBAI_FAKE', mode, fault});
+  function feedback(mode: RobotStateMessage['mode'], fault: string | null = null,
+    extra: Partial<RobotStateMessage> = {}) {
+    wire.receive({...robotFixture, backend: 'LEBAI_FAKE', mode, fault, ...extra});
   }
   return {wire, socket, panel, controller, emit, feedback, setNow: (at: number) => { now = at; },
     savedLoop: () => loop};
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+it('requires a second released A gesture for preparation and B revokes pending completion', async()=>{
+  const r=setup();
+  const controls=()=>r.wire.sent.map(value=>JSON.parse(value)).filter(m=>m.type!=='vr_frame');
+  try {
+    r.socket.connect();r.wire.open();await r.controller.enterVR();
+    r.feedback('READY',null,{preparation_required:true,preparation_unlocked:false});
+    r.emit(100,{});r.emit(120,{a:true});
+    const arm=controls().at(-1);expect(arm.type).toBe('arm_request');
+    r.wire.receive({v:1,type:'arm_ack',request_id:arm.request_id});
+    r.feedback('READY',null,{preparation_required:true,preparation_unlocked:true});
+    r.emit(140,{a:true});r.emit(160,{a:true});
+    expect(controls().map(m=>m.type)).toEqual(['hello','disarm','arm_request']);
+    expect(r.panel.isArmed).toBe(false);
+    r.emit(180,{});r.emit(200,{a:true});
+    const prepare=controls().at(-1);expect(prepare.type).toBe('prepare_request');
+    r.feedback('READY',null,{preparation_required:true,preparation_unlocked:false,recovery_phase:'homing'});
+    r.emit(220,{});r.emit(240,{b:true});
+    expect(controls().map(m=>m.type)).toEqual(['hello','disarm','arm_request','prepare_request','disarm']);
+    r.wire.receive({v:1,type:'prepare_ack',request_id:prepare.request_id});
+    r.feedback('ARMED',null,{preparation_required:true});
+    expect(r.panel.isArmed).toBe(false); // Late completion cannot undo B.
+    expect(r.panel.safetyState.phase).toBe('stopped');
+  } finally {await r.controller.dispose();r.socket.close();}
+});
+
+it('accepts Grip and analog Trigger frames only after authoritative preparation state',async()=>{
+  const r=setup();
+  const lastControl=()=>r.wire.sent.map(value=>JSON.parse(value)).filter(m=>m.type!=='vr_frame').at(-1);
+  try {
+    r.socket.connect();r.wire.open();await r.controller.enterVR();
+    r.feedback('READY',null,{preparation_required:true});r.emit(100,{});r.emit(120,{a:true});
+    r.wire.receive({v:1,type:'arm_ack',request_id:lastControl().request_id});
+    r.emit(140,{});r.emit(160,{a:true});
+    expect(lastControl().type).toBe('prepare_request');
+    r.wire.receive({v:1,type:'prepare_ack',request_id:lastControl().request_id});
+    expect(r.panel.isArmed).toBe(false);
+    r.feedback('ARMED',null,{preparation_required:true});expect(r.panel.isArmed).toBe(true);
+    r.emit(180,{grip:true,trigger:.4});
+    expect(JSON.parse(r.wire.sent.at(-1)!)).toMatchObject({type:'vr_frame',right:{grip:true,trigger:.4}});
+    r.emit(200,{});expect(JSON.parse(r.wire.sent.at(-1)!)).toMatchObject({right:{grip:false,trigger:0}});
+    r.emit(220,{},false);
+    expect(JSON.parse(r.wire.sent.at(-1)!)).toMatchObject({tracking_valid:false,right:{grip:false,trigger:0}});
+  } finally {await r.controller.dispose();r.socket.close();}
+});
 
 it('generates the shared wire fixture through XR, ArmPanel and TeleopSocket', async () => {
   const rig = setup();
