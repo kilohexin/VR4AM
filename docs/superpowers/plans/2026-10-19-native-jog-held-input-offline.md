@@ -1,6 +1,6 @@
 # 有限速度包持按续接离线实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 在显式Fake及自有回环中完成“新鲜持按输入续接、最新目标替换、松手撤权并原停止”的有界软件闭环，为长按控制补齐单次候选尚不具备的续接能力。
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** 已有Python、asyncio/QPC、pytest、固定SHA的原生SDK和自有127.0.0.1模拟端；不安装或升级依赖。
 
-**Spec:** [已认可的原生笛卡尔平移设计](../specs/2026-10-15-native-cartesian-jog-design.md)，第3–5节规定持续输入及所有权，第6节规定分阶段验收。本计划仅补充离线续接验证，不进入第6节的真机或网页验收阶段。当前用户已选择当前会话直接实施；本计划尚待审阅，未开始产品编码。
+**Spec:** [已认可的原生笛卡尔平移设计](../specs/2026-10-15-native-cartesian-jog-design.md)，第3–5节规定持续输入及所有权，第6节规定分阶段验收。本计划仅补充离线续接验证，不进入第6节的真机或网页验收阶段。当前用户已选择当前会话直接实施；用户已批准全部三项离线实现及验证，现已完成；执行结果和取舍见下方记录。
 
 ## 当前证据与方案选择
 
@@ -45,11 +45,11 @@
 
 **Interfaces:** `JogStreamGate(*, generation: int, config_sha256: str, clock)`，固定10写入/1秒；`offer(packet: NativeJogPacket) -> None`、`take_latest() -> NativeJogPacket | None`、`require_before_entry(packet) -> None`、`mark_entered(packet) -> None`、`require_inflight(packet) -> None`、`finish(packet) -> None`、`revoke() -> None`。每会话一个正在处理的包和至多一个未发送最新包；阶段区分等待入口、已进入和终结，不能由新输入改写已进入包的授权。
 
-- [ ] **RED:** 测试连续offer序号1/2/3只取3，取出的包在native前被4替换时拒绝旧包；不改任何input_ns/expires_ns。相同/倒退序号、未来/倒退时间、代次/SHA变化、过期、布尔/NaN等输入拒绝。
-- [ ] **RED:** 取出包只消费一次；没有新offer时下一次take返回None；mark_entered后允许另一个最新输入等待，但第二包不能同时进入；revoke前后、刚好100 ms、刚好1秒、实际第11次入口均拒绝。已进入包不因新序号而续租或自动撤销其结果归属。
-- [ ] **验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_stream_gate.py -q -p no:cacheprovider`，确认缺失门/行为的失败。
-- [ ] **GREEN:** 实现纯输入门，复用原NativeJogPacket及validate_inflight_input，不引入SDK、网络或前端依赖。
-- [ ] **验证/提交:** 运行新测试与`backend/tests/commissioning/test_native_jog_packet.py`，保留初次失败，提交本任务。
+- [x] **RED:** 测试连续offer序号1/2/3只取3，取出的包在native前被4替换时拒绝旧包；不改任何input_ns/expires_ns。相同/倒退序号、未来/倒退时间、代次/SHA变化、过期、布尔/NaN等输入拒绝。
+- [x] **RED:** 取出包只消费一次；没有新offer时下一次take返回None；mark_entered后允许另一个最新输入等待，但第二包不能同时进入；revoke前后、刚好100 ms、刚好1秒、实际第11次入口均拒绝。已进入包不因新序号而续租或自动撤销其结果归属。
+- [x] **验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_stream_gate.py -q -p no:cacheprovider`，确认缺失门/行为的失败。
+- [x] **GREEN:** 实现纯输入门，复用原NativeJogPacket及validate_inflight_input，不引入SDK、网络或前端依赖。
+- [x] **验证/提交:** 运行新测试与`backend/tests/commissioning/test_native_jog_packet.py`，保留初次失败，提交本任务。
 
 ## Task 2: 仅Fake的续接适配器与原停止闭环
 
@@ -57,28 +57,38 @@
 
 **Interfaces:** `LoopbackJogStreamAdapter(settings, *, limits, config_sha256, client_factory, clock, sleep, event_callback, model_region_guard, backend_label='LEBAI_FAKE')`；`offer_jog(packet) -> None`、`dispatch_latest() -> int | None`、`revoke_stream(reason: StopReason) -> None`（异步）。前两者使用任务1输入门；revoke先同步撤权再等待原stop。connect启动唯一截止监听任务，disconnect撤权并收拢该任务；截止监听不能生成输入或运动。不提供通用submit_tcp/Home/prepare/gripper/恢复。
 
-- [ ] **RED:** 拒绝真实IP、缺省工厂、非Fake身份及不匹配模型/设置；第一包要求原完整IDLE预检。正常合成流程依次发送新输入，实际包数≤10、每包显式10–80 ms；中间不逐包停止，松开后恰好一次原stop，停止后再offer不能重开会话。
-- [ ] **RED:** 后续快照为MOVING时，仅同连接、同代次、已知正常返回的己方motion ID可以续接；未知/外部ID、PAUSED、错误状态、急停、工具变化、软限位/奇异、工作区、模型边界、未决读取或过期快照均拒绝并撤权。不能修改/伪造快照robot_state或running_motion来通过原预检。
-- [ ] **RED:** SDK锁前/锁后/原生任务入口各处撤权或输入替换；已进入后到达更新输入；60 ms晚返、无效ID、取消不生效、读取消或未知结果；任何情况不产生额外运动、重试或第二次stop，原停止失败不能被新会话状态覆盖。只有一次输入、随后不再调用任何适配器API时，截止监听仍须在原输入到期时撤权并原停止；第10包正常收尾不被写入计数提前变成未知，第11包不能进入。
-- [ ] **验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_stream_candidate.py -q -p no:cacheprovider`。
-- [ ] **GREEN:** 同一手势只建立一个运动epoch；复用原SDK锁及运动调用所有权。首次原预检不放宽，己方续接检查逐项保留状态以外的全部前提，并校验真实原始状态及已知ID归属。每包原生入口重查最新输入、模型、快照和身份，已进入后保持该包固定截止。截止监听基于最后真实输入的固定到期时间及会话截止，offer仅唤醒重算，不修改旧包期限；结束等待原停止并释放监听任务。
-- [ ] **验证/提交:** 新测试、原`test_native_jog_candidate.py`、`test_native_jog_packet.py`及`backend/tests/robots/test_motion_call_ownership.py`、`test_stop_transaction.py`、`test_stop_timing_boundaries.py`定向通过；旧单次实例仍只能发送一次。提交本任务。
+- [x] **RED:** 拒绝真实IP、缺省工厂、非Fake身份及不匹配模型/设置；第一包要求原完整IDLE预检。正常合成流程依次发送新输入，实际包数≤10、每包显式10–80 ms；中间不逐包停止，松开后恰好一次原stop，停止后再offer不能重开会话。
+- [x] **RED:** 后续快照为MOVING时，仅同连接、同代次、已知正常返回的己方motion ID可以续接；未知/外部ID、PAUSED、错误状态、急停、工具变化、软限位/奇异、工作区、模型边界、未决读取或过期快照均拒绝并撤权。不能修改/伪造快照robot_state或running_motion来通过原预检。
+- [x] **RED:** SDK锁前/锁后/原生任务入口各处撤权或输入替换；已进入后到达更新输入；60 ms晚返、无效ID、取消不生效、读取消或未知结果；任何情况不产生额外运动、重试或第二次stop，原停止失败不能被新会话状态覆盖。只有一次输入、随后不再调用任何适配器API时，截止监听仍须在原输入到期时撤权并原停止；第10包正常收尾不被写入计数提前变成未知，第11包不能进入。
+- [x] **验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/commissioning/test_native_jog_stream_candidate.py -q -p no:cacheprovider`。
+- [x] **GREEN:** 同一手势只建立一个运动epoch；复用原SDK锁及运动调用所有权。首次原预检不放宽，己方续接检查逐项保留状态以外的全部前提，并校验真实原始状态及已知ID归属。每包原生入口重查最新输入、模型、快照和身份，已进入后保持该包固定截止。截止监听基于最后真实输入的固定到期时间及会话截止，offer仅唤醒重算，不修改旧包期限；结束等待原停止并释放监听任务。
+- [x] **验证/提交:** 新测试、原`test_native_jog_candidate.py`、`test_native_jog_packet.py`及`backend/tests/robots/test_motion_call_ownership.py`、`test_stop_transaction.py`、`test_stop_timing_boundaries.py`定向通过；旧单次实例仍只能发送一次。提交本任务。
 
 ## Task 3: 自有SDK回环与阶段交付
 
 **Files:** Create `scripts/native_jog_stream_loopback.py`; test `backend/tests/scripts/test_native_jog_stream_loopback.py`; results `docs/native-jog-held-input-offline-2026-10-19.md`。
 
-**Interfaces:** CLI仅`--output PATH`，路径必须尚不存在；`async run_matrix() -> dict`创建自己的127.0.0.1随机监听。沿用固定SDK SHA和QPC循环，只能发送合成预检/运动反馈读取、有界speed_line及一次stop_move；不接受IP、配置、端口或真实执行选项，不加载现场材料。
+**Interfaces:** CLI仅`--output PATH`，路径必须尚不存在；`async run_matrix() -> dict`创建自己的127.0.0.1随机监听。沿用固定SDK SHA和QPC循环，只能发送合成预检/运动反馈读取、有界speed_linear及一次stop_move（固定SDK实际协议名）；不接受IP、配置、端口或真实执行选项，不加载现场材料。
 
-- [ ] **RED:** 输出冲突、任意IP/端口/execute参数、SDK身份错误均在初始化前拒绝；监听端身份必须由本进程创建的唯一IPv4 loopback socket取得。
-- [ ] **RED:** 固定场景为正常持按松开、未发送目标被新输入替换、输入中断/超时、运动回复晚到、停止后旧运动晚生效、外部任务ID、工具/区域变化、停止回复迟到。验证服务端实际接收顺序和参数；只有正常场景可报告软件停止通过，失败场景保留原fault，不以快速回执代替停稳。
-- [ ] **验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/scripts/test_native_jog_stream_loopback.py -q -p no:cacheprovider`。
-- [ ] **GREEN:** 复用现有`native_jog_loopback_probe.py`已核对的协议fixture和关闭流程，新场景不放宽旧peer白名单。每场景独立门/连接，真实连接0，每个包都来自合成新输入事件；无广播、发现或任意RPC。
-- [ ] **回环验证:** `.venv/Scripts/python.exe scripts/native_jog_stream_loopback.py --output .tmp/native-jog-held-input-20261019/sdk-matrix-unique.json`。输出必须标注offline_only、原生调用数、实际间隔/期限、原停止结果、晚到结果及资源释放；不声称控制器限时/制动或真实关节边界通过。
-- [ ] **交付:** 定向复跑三个新文件、任务2旧用例、原单次/现场隔离用例与1728c1d参数拒绝用例；不运行全集或无关前端构建。保留偶发和预期失败；独立复核后提交代码及无敏感信息的阶段报告，核对用户原总结未改，不推送。
+- [x] **RED:** 输出冲突、任意IP/端口/execute参数、SDK身份错误均在初始化前拒绝；监听端身份必须由本进程创建的唯一IPv4 loopback socket取得。
+- [x] **RED:** 固定场景为正常持按松开、未发送目标被新输入替换、输入中断/超时、运动回复晚到、停止后旧运动晚生效、外部任务ID、工具/区域变化、停止回复迟到。验证服务端实际接收顺序和参数；控制续接拒绝与原停止结果分别记录；外部ID/工具/区域变化可以拒绝续接且原停止通过，迟到与晚生效仍保留原fault，不以快速回执代替停稳（执行取舍）。
+- [x] **验证失败:** `.venv/Scripts/python.exe -m pytest backend/tests/scripts/test_native_jog_stream_loopback.py -q -p no:cacheprovider`。
+- [x] **GREEN:** 复用现有`native_jog_loopback_probe.py`已核对的协议fixture和关闭流程，新场景不放宽旧peer白名单。每场景独立门/连接，真实连接0，每个包都来自合成新输入事件；无广播、发现或任意RPC。
+- [x] **回环验证:** `.venv/Scripts/python.exe scripts/native_jog_stream_loopback.py --output .tmp/native-jog-held-input-20261019/sdk-matrix-unique.json`。输出必须标注offline_only、原生调用数、实际间隔/期限、原停止结果、晚到结果及资源释放；不声称控制器限时/制动或真实关节边界通过。
+- [x] **交付:** 定向复跑三个新文件、任务2旧用例、原单次/现场隔离用例与1728c1d参数拒绝用例；不运行全集或无关前端构建。保留偶发和预期失败；独立复核后提交代码及无敏感信息的阶段报告，核对用户原总结未改，不推送。
 
 ## 完成口径与后续门槛
 
 本计划交付的是可观察的离线多包控制闭环，不能称为网页/VR真机运行、运动中停止修复或抓取完成。生产选择器和真实地址始终不可选，原单次授权全部已消耗。只有后续明确的现场范围、关节/工作区及制动余量证据、实际方向/速度跟随和原停止行为得到验收，才能另行计划网页接线。
 
-自审：原设计中的真实动作前提在本阶段仍保持未满足/禁用，不提前实施网页阶段。五项Review Focus均分配测试，所有接口由任务1/2明确产生；任务3仅消费它们。执行方式沿用当前会话直接实施，在用户审阅本计划后开始。
+自审：原设计中的真实动作前提在本阶段仍保持未满足/禁用，不提前实施网页阶段。五项Review Focus均分配测试，所有接口由任务1/2明确产生；任务3仅消费它们。执行方式沿用当前会话直接实施，用户已审阅，全部三项及定向验证已完成。
+
+## 执行完成记录
+
+- Task 1：`8278f5c`，输入门及原速度包61项通过；随后补充输入到期永久关闭和不可变签名边界。
+- Task 2：`5c31172`，适配器及原单次/所有权/停止150项通过；保留模型守卫零报告速度/加速度限制，合成MOVING/己方任务ID只证明协议续接。
+- Task 3：`41ca8af`，27项脚本回归及九场景自有SDK回环；作者修复`3bbb7f6`，独立复核两项P2修复`0317ffe`。
+- 最终319项定向回归、87项原入口隔离回归通过，九场景最终身份回环符合预期；未运行后端全集、未连接真机、未推送。
+- [完整结果与执行取舍](../../native-jog-held-input-offline-2026-10-19.md)记录早期失败、两项复核修复、最终原始材料路径/哈希和限制。
+
+完成范围为**零速合成反馈下的离线协议续接**；原模型不接受非零速度起点，真实连续运动、动态关节约束、制动及停止仍未验收，不能从以上勾选推导为真机网页/VR可用。
