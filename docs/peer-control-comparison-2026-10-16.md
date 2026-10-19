@@ -958,3 +958,37 @@ complete=true、stop_confirmed=true、sdk_stop_entries=1、latched_fault=null、
 用户通过call_0dcc8d2b38344b74ba161bd3f9a17deb确认“全程完全静止、无异常、未使用急停”。单独保存`.tmp/finite-pause-parallel-20261019/cleanup-approved-20261019T102358014625Z/onsite-closure.json`，SHA-256为778362123b177c93f70511cdefe26270ec40ebc7b7209806b8b91948911164b2，绑定本次result及analysis；原analysis的待收尾标记保留为当时写入状态，由此独立回复补全，不改写旧记录。
 
 清理后的新微动申请材料为`.tmp/finite-pause-parallel-20261019/after-cleanup-motion-scope-20261019T102845925404Z/scope.md`，SHA-256为85c7036526369093561c19d9bb7cf19413eaeaee0fff979c82b2343ec2aac601。reviewed-preview.json与原默认预览逐字节一致（SHA-256为302256e99dae4a4f6feb236607b7c5d3da910887d9001faaad4eb1f9f2ca8e86），117个当前运行时文件及原配置均匹配，本机RPC0、SDK未导入。它仍无有效期且不可执行；新的连接及动作须独立批准。目视收尾不自动授权新的PVAT、暂停或其它动作。
+
+## 2026-10-19：并发停止采样首次进入运动，原判据仍失败
+
+用户通过call_c634c24781114d948be70c3d82863410明确批准清理后新一次微动及完整现场条件。代码906ad1f（产品8ffc7a5）、117个运行时文件、原配置与已审预览一致，本机RPC0。北京时间18:31:02生成新十分钟材料，逐项只改输出目录和有效期，随后Python原样argv及唯一排他标记执行一次。准备脚本的初次生成曾因Windows默认GBK解码UTF-8文件失败，后续查找不存在的脚本也未进入入口；当时无执行材料、SDK初始化或连接。修正生成器为显式UTF-8后才生成本次材料，没有对真实入口自动重试、放宽权限或改产品代码。
+
+一次连接后原预检、IK1/FK4及完整端点通过；准备位最大差值0.000862864193 rad，运动反馈年龄70.5632 ms。唯一PVAT已知返回，原生await12.3857 ms；唯一pause_move已知返回，代理QPC await16.9352 ms，stop_move为0，无未知运动/读取结果。这些是软件调用时序，不是物理制动时间。
+
+### 精确时序已排除继续只优化组间等待
+
+新并发采样确已执行，19组各保留全部八项读取，六字段全部已知完成后才发任务状态查询。整组读取20.8086–45.1218 ms。前六组均PAUSED/RUNNING，不合格；首组PAUSED/FINISHED及stationary出现在精确记录的verification_started_ns后206.5701 ms。按原300 ms稳定跨度，最早合格结束为506.5701 ms，已超过原500 ms截止6.5701 ms。这里使用本次直接记录的验证起点，不是暂停请求时刻，也不回填上个RUNNING样本。
+
+497.1346 ms的最后一组截止前样本稳定跨度仅290.5645 ms；下一组524.1062 ms虽覆盖317.5361 ms，已经超过截止24.1062 ms，不能通过。因此stop_incomplete按原规则保留。精确时序显示，本次从首次合格样本起已无可通过区间，不能再将问题仅当作一次偶然采样迟到或额外20 ms等待；增加采样并发没有解决全部阻塞，也不证明控制器内部完成/物理停下的时刻。
+
+### 微小实际反馈变化仍不满足方向判据
+
+两秒尾段取得10组PAUSED/FINISHED样本，原尾段读取条件通过，但displacement_consistent=false。最后一组相对本次运动起点报告TCP增量为[-29.286,-27.991,+45.625] µm，横向40.511 µm，方向与+Z夹角约41.60°；不是合格的50 µm纯+Z跟随。该组实际关节变化只有J3、J5各-0.000095873799 rad，其余不变，控制器目标与PVAT目标最大差值3.78e-15 rad。不能把软件目标匹配、末速度回传0或用户目视静止当作目标物理执行证明。
+
+进一步只读核对三份冻结微动记录，共81组actual_q向量：所有数值落在2π/65536 rad（约95.873799 µrad、0.005493164°）的数值网格上，双精度计算残差为0。各次命令最大关节增量仅约1.35个这样的报告步距，其余四个关节增量均小于0.08个步距；50 µm/5°方向条件对应横向容许约4.374 µm。这是报告数据的特征，不证明硬件编码器分辨率、精度、协议编码/取整规则或实际偏移的唯一原因。它说明现有微动尺度的可观测性需要单独评估，不能继续把其方向失败直接归结为IK未送达或机械故障，也不能据此放宽原方向门槛。
+
+close只复用同一个暂停事务：2条stop_diagnostics、1条终止RPC生命周期，没有第二次暂停或其它写入；旧截止及stop_incomplete仍保留，cleanup_errors为BackendCommandError。整体complete=false、stop_confirmed=false、tail_complete=true仅为诊断尾段完成。本机引用释放，退出后RPC0，原生控制器连接释放仍未验证；子进程退出2、外层工具退出1。未恢复、复位、Home、夹爪、清理或追加测试。
+
+本次失败后立即请求目视确认。用户通过call_816eb0bccf1a420da86290398fc71323回复“完全静止、无异常、未使用急停”，已单独封存收尾；它不清除软件失败，也不授权新连接或动作。下一步应重新评估停止验证时序与可观测的有限位移方案，保留现有判据和失败记录，不再自动重复同范围微动。新方案尚未实施或授权。
+
+私有目录：`.tmp/finite-pause-parallel-20261019/after-cleanup-approved-20261019T103102103358Z/`。
+
+| 文件 | SHA-256 |
+| --- | --- |
+| preview.json | 95d210b6f6a86b56cd5f904096d586cbdf756e5191b50989758de1f9f117312a |
+| result/result.json | de9cde03d2f5d2ca5508e221d88a38e4ed0ba1c1242c035beaca5ee57cae7418 |
+| result/sessions/20261019T103121Z-ac54f047/session.jsonl | e1f9970cab3006b5822f4f5125497a27a033e4f12503aa8829514ac202d76eab |
+| analysis.json（收尾回复前的离线派生） | 7bb105452d9342d3e0814ab8b8c9b040c8ad36d7332751ddc19924b37397ea41 |
+| onsite-closure.json | 14e03081970fc82414949cad35b1f24b7918c33b09a512d64c4ee5f6c32c742d |
+
+报告步距分析为`.tmp/finite-pause-parallel-20261019/reported-joint-grid.json`，SHA-256为d327dd270efb0c73f3ba7b30720270e6b33db0d213feed383f547e2dc07bb1f9。本轮无产品代码修改、pytest或前端构建，原始资料和配置留本机，用户原总结未改，未推送。
