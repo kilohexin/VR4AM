@@ -952,3 +952,9 @@ complete=true、stop_confirmed=true、sdk_stop_entries=1、latched_fault=null、
 | analysis.json（只读离线派生，收尾待确认） | c22d25dc7032446958074d50f2d6d698b102b912e603b7ef8a9585caea6834c3 |
 
 本轮无产品代码修改、pytest或前端构建；原始资料和配置留本机，用户原总结未改，未推送。
+
+### 本次静止清理的目视收尾及下一范围
+
+用户通过call_0dcc8d2b38344b74ba161bd3f9a17deb确认“全程完全静止、无异常、未使用急停”。单独保存`.tmp/finite-pause-parallel-20261019/cleanup-approved-20261019T102358014625Z/onsite-closure.json`，SHA-256为778362123b177c93f70511cdefe26270ec40ebc7b7209806b8b91948911164b2，绑定本次result及analysis；原analysis的待收尾标记保留为当时写入状态，由此独立回复补全，不改写旧记录。
+
+清理后的新微动申请材料为`.tmp/finite-pause-parallel-20261019/after-cleanup-motion-scope-20261019T102845925404Z/scope.md`，SHA-256为85c7036526369093561c19d9bb7cf19413eaeaee0fff979c82b2343ec2aac601。reviewed-preview.json与原默认预览逐字节一致（SHA-256为302256e99dae4a4f6feb236607b7c5d3da910887d9001faaad4eb1f9f2ca8e86），117个当前运行时文件及原配置均匹配，本机RPC0、SDK未导入。它仍无有效期且不可执行；新的连接及动作须独立批准。目视收尾不自动授权新的PVAT、暂停或其它动作。
