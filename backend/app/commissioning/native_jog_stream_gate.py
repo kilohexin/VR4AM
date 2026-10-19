@@ -5,7 +5,11 @@ from app.commissioning.native_jog_packet import NativeJogPacket, validate_inflig
 
 
 def _signature(packet):
-    return tuple((type(v), v) for v in (getattr(packet, f.name) for f in fields(NativeJogPacket)))
+    def value_signature(value):
+        if type(value) in (tuple, list):
+            return type(value), tuple(value_signature(item) for item in value)
+        return type(value), value
+    return tuple(value_signature(getattr(packet, f.name)) for f in fields(NativeJogPacket))
 
 
 class JogStreamGate:
@@ -42,7 +46,9 @@ class JogStreamGate:
         if type(packet) is not NativeJogPacket or _signature(packet) != signature:
             raise ValueError('native_jog_stream_packet_changed')
         # Revalidate a frozen object at the boundary without modifying it.
-        NativeJogPacket(*(getattr(packet, f.name) for f in fields(NativeJogPacket)))
+        canonical = NativeJogPacket(*(getattr(packet, f.name) for f in fields(NativeJogPacket)))
+        if _signature(canonical) != signature:
+            raise ValueError('native_jog_stream_packet_changed')
         validate_inflight_input(packet, now_ns=now, generation=self.generation,
             config_sha256=self.config_sha256)
 

@@ -148,3 +148,22 @@ def test_new_input_cannot_revive_consumed_input_after_expiry_before_watchdog_run
     with pytest.raises(ValueError, match='expired'):
         g.offer(packet(2, clock[0]))
     assert g.revoked
+
+
+def test_mutable_vector_in_frozen_packet_is_not_a_valid_gate_input():
+    g, _ = gate()
+    p = packet(1)
+    values = [0., 0., .005]
+    object.__setattr__(p, 'velocity_mps', values)
+    with pytest.raises(ValueError, match='changed'):
+        g.offer(p)
+
+
+def test_mutable_replacement_after_offer_cannot_alias_pinned_signature():
+    g, _ = gate()
+    p = packet(1)
+    g.offer(p)
+    g.take_latest()
+    object.__setattr__(p, 'velocity_mps', [0., 0., -.005])
+    with pytest.raises(ValueError, match='changed'):
+        g.mark_entered(p)

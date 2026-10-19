@@ -365,3 +365,107 @@ async def test_input_gap_cannot_reopen_stream_ahead_of_delayed_watchdog():
         assert a.native_jog_entries == 1 and a._gate.revoked
     finally:
         await close(a)
+
+
+async def test_latest_input_at_owned_task_scheduling_consumes_old_without_closing(monkeypatch):
+    a, c, clock, _ = await connected()
+    try:
+        offer(a, clock, 1)
+        create = asyncio.create_task
+        replaced = False
+        def schedule(coro, **kwargs):
+            nonlocal replaced
+            if kwargs.get('name') == 'owned-motion-speedl' and not replaced:
+                replaced = True
+                offer(a, clock, 2)
+            return create(coro, **kwargs)
+        monkeypatch.setattr(asyncio, 'create_task', schedule)
+        assert await a.dispatch_latest() is None
+        assert c.write_calls == [] and not a._gate.revoked
+        assert not a._motion_calls.unknown_methods
+        assert await a.dispatch_latest() == 7
+        assert a.native_jog_entries == 1
+    finally:
+        await close(a)
+
+
+@pytest.mark.parametrize('damage', ['config', 'expired'])
+async def test_task_boundary_replacement_cannot_hide_other_revocation(monkeypatch, damage):
+    a, c, clock, _ = await connected()
+    try:
+        offer(a, clock, 1)
+        create = asyncio.create_task
+        def schedule(coro, **kwargs):
+            if kwargs.get('name') == 'owned-motion-speedl':
+                offer(a, clock, 2)
+                if damage == 'config':
+                    object.__setattr__(a.settings.control, 'max_tcp_speed_mps', .1)
+                else:
+                    clock.advance_ms(100)
+            return create(coro, **kwargs)
+        monkeypatch.setattr(asyncio, 'create_task', schedule)
+        with pytest.raises(BackendCommandError):
+            await a.dispatch_latest()
+        assert a._gate.revoked and not c.write_calls
+        assert not a._motion_calls.unknown_methods
+    finally:
+        await close(a)
+
+
+async def test_concurrent_snapshot_during_owned_state_query_rejects_old_snapshot():
+    a, c, clock, _ = await connected()
+    started, release = asyncio.Event(), asyncio.Event()
+    original = c.get_motion_state
+    async def pending(motion_id):
+        started.set()
+        await release.wait()
+        return await original(motion_id)
+    try:
+        offer(a, clock, 1)
+        await a.dispatch_latest()
+        c.get_motion_state = pending
+        offer(a, clock, 2)
+        task = asyncio.create_task(a.dispatch_latest())
+        await started.wait()
+        await a._read_snapshot(emit_kinematics=False, read_purpose='motion')
+        release.set()
+        with pytest.raises(BackendCommandError, match='snapshot_owner_changed'):
+            await task
+        assert a.native_jog_entries == 1 and a._gate.revoked
+        assert sum(x[0] == 'stop_move' for x in c.write_calls) == 1
+    finally:
+        release.set()
+        await close(a)
+
+
+async def test_cancelled_owned_state_query_quarantines_late_result():
+    a, c, clock, _ = await connected()
+    started, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    async def pending(_motion_id):
+        started.set()
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+        return 'RUNNING'
+    try:
+        offer(a, clock, 1)
+        await a.dispatch_latest()
+        c.get_motion_state = pending
+        offer(a, clock, 2)
+        task = asyncio.create_task(a.dispatch_latest())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(cancelled.wait(), .5)
+        assert 'stream_motion_state' in a._snapshot_calls.unknown_methods
+        assert a._gate.revoked and a._latched_fault == 'stop_unverified'
+        release.set()
+        await asyncio.sleep(.01)
+        assert a.native_jog_entries == 1
+        assert sum(x[0] == 'stop_move' for x in c.write_calls) == 1
+    finally:
+        release.set()
+        await close(a)

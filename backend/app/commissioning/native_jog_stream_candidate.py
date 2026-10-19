@@ -170,6 +170,8 @@ class LoopbackJogStreamAdapter(RealLebaiAdapter):
         self._dispatching = True
         packet = None
         entered = False
+        current = None
+        motion_call_started = False
         try:
             packet = self._gate.take_latest()
             if packet is None:
@@ -194,9 +196,18 @@ class LoopbackJogStreamAdapter(RealLebaiAdapter):
                 finally:
                     owner.active -= 1
 
-            def current():
+            def current(*, superseded_only=False):
+                def require_input():
+                    try:
+                        self._gate.require_before_entry(packet)
+                    except ValueError as error:
+                        if superseded_only and str(error) == 'native_jog_stream_superseded':
+                            return
+                        raise
+                    if superseded_only:
+                        raise ValueError('native_jog_stream_not_superseded')
                 self._binding()
-                self._gate.require_before_entry(packet)
+                require_input()
                 if (client is not self._stream_client or client is not self._client
                         or generation != self._gate.generation or not self._pump.is_current(generation)
                         or self._stop_lock.locked() or self._snapshot is not snapshot
@@ -212,7 +223,7 @@ class LoopbackJogStreamAdapter(RealLebaiAdapter):
                     config_sha256=self._stream_sha)
                 self._stream_model.validate(packet, snapshot, settings=self.settings,
                     limits=self._stream_limits, config_sha256=self._stream_sha)
-                self._gate.require_before_entry(packet)
+                require_input()
                 validate_packet(packet, limits=self._stream_limits, actual_p=snapshot.actual_tcp.p,
                     snapshot_ns=snapshot.captured_ns, now_ns=self._clock(), generation=generation,
                     config_sha256=self._stream_sha)
@@ -234,6 +245,7 @@ class LoopbackJogStreamAdapter(RealLebaiAdapter):
                         raise BackendCommandError('invalid_native_jog_motion_id')
                     return value
                 try:
+                    motion_call_started = True
                     value = await self._await_motion_call('speedl', operation, .06,
                         generation=generation, entered=lambda: entered)
                 except TimeoutError:
@@ -247,8 +259,21 @@ class LoopbackJogStreamAdapter(RealLebaiAdapter):
             return value
         except BaseException as error:
             # A displaced, proven-unentered input is consumed, not retried.
-            superseded = (isinstance(error, ValueError) and str(error) == 'native_jog_stream_superseded'
-                and not entered and not self._motion_calls.unknown_methods and not self._gate.revoked)
+            record = self._motion_calls.last.get('speedl', {})
+            displaced_error = (isinstance(error, ValueError) and str(error) == 'native_jog_stream_superseded')
+            displaced_error |= (isinstance(error, BackendCommandError) and str(error) == 'sdk_timeout:speedl'
+                and motion_call_started and record.get('entered') is False
+                and record.get('abandon_reason') == 'authority_revoked')
+            superseded = (displaced_error and not entered and current is not None
+                and not self._motion_calls.unknown_methods and not self._snapshot_calls.unknown_methods
+                and not self._gate.revoked)
+            if superseded:
+                try:
+                    # Recheck every other fence. Only latest-input displacement
+                    # may be consumed without revoking a still-valid session.
+                    current(superseded_only=True)
+                except (BackendCommandError, ValueError, TypeError, OverflowError):
+                    superseded = False
             if superseded:
                 return None
             task = self._request_stop(StopReason.GRIP_RELEASED)
