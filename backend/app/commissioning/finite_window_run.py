@@ -13,7 +13,10 @@ import time
 
 from app.commissioning.finite_diagnostic import FiniteWindowDiagnosticAdapter, _angle
 from app.commissioning.idle_stop_baseline import AdmissionRejected, validate_idle_sample, validate_position_continuity
-from app.commissioning.paused_stop_cleanup import BoundedStopOnlyClient, _cached_sample, _geometry
+from app.commissioning.paused_stop_cleanup import (
+    BoundedStopOnlyClient, _cached_sample, _geometry,
+    validate_sample as validate_paused_tail,
+)
 from app.commissioning.stop_observation import observe_after_stop
 from app.commissioning.readonly_kinematics import computational_distance
 from app.commissioning.finite_motion_observation import MotionObservation
@@ -43,6 +46,10 @@ def validate_ready_tolerance(value):
 
 class FiniteScopeClient(BoundedStopOnlyClient):
     READS = BoundedStopOnlyClient.READS | {'kinematics_inverse', 'kinematics_forward'}
+
+    @property
+    def termination_entries(self):
+        return self.sdk_stop_entries
 
     def __init__(self, native, motion_permission, stop_permission, hot, owner, clock, *, parallel_fk=False,
                  parallel_motion_reads=False, native_write_check=None,deadline_clock=None):
@@ -311,6 +318,33 @@ class _SnapshotReadOwner(BoundedStopOnlyClient):
                       'get_tcp','get_claw','get_running_motion'})
 
 
+class _FinitePauseScopeClient(FiniteScopeClient):
+    """Offline comparison: one reserved pause, with no stop_move fallback."""
+    sdk_pause_entries = 0
+
+    @property
+    def termination_entries(self):
+        return self.sdk_pause_entries
+
+    async def stop_move(self):
+        raise AdmissionRejected('finite_scope_pause_stop_move_forbidden')
+
+    async def pause_move(self):
+        if self.sdk_pause_entries:
+            raise AdmissionRejected('finite_scope_pause_already_used')
+        self.permission()  # Reserved cleanup survives motion revocation/cancellation.
+        self.sdk_pause_entries += 1
+        self.native_started_ns = time.perf_counter_ns()
+        try:
+            return await self.client.pause_move()
+        finally:
+            self.native_completed_ns = time.perf_counter_ns()
+
+
+class _FinitePauseComparisonAdapter(FiniteWindowDiagnosticAdapter):
+    _motion_stop_rpc_method = 'pause_move'
+
+
 def _rest(sample, now_ns):
     validate_idle_sample(sample, now_ns)
     acceleration = sample.get('actual_qdd')
@@ -323,7 +357,13 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, write_check=None,
                      parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
                      parallel_motion_reads=False,prelease_feedback_fk=False,deadline_clock=None,
-                     observe_motion=False):
+                     observe_motion=False,offline_pause_comparison=False):
+    # No CLI or normal backend selects this option. The explicit injected
+    # factory must supply the caller's Fake, never a real robot transport.
+    if type(offline_pause_comparison) is not bool:
+        raise TypeError('finite_pause_comparison_requires_boolean')
+    if offline_pause_comparison and settings.ip != '127.0.0.1':
+        raise ValueError('finite_pause_comparison_requires_injected_loopback')
     if type(observe_motion) is not bool:
         raise TypeError('finite_motion_observation_requires_boolean')
     if observe_motion and deadline_clock != clock:
@@ -342,7 +382,9 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
     full_endpoint_required=distance_m<DISTANCE_M
     report = {} if report is None else report
     report.update(complete=False, hardware_verified=False, motion_authorized=False, scope_admitted=False,
-        stop_confirmed=False, latched_fault=None, pvat_entries=0, stop_entries=0,
+        stop_confirmed=False, latched_fault=None, pvat_entries=0, stop_entries=0, pause_entries=0,
+        termination_entries=0, termination_method='pause_move' if offline_pause_comparison else 'stop_move',
+        offline_pause_comparison=offline_pause_comparison,
         tail_complete=False, displacement_consistent=False, displacement_samples=0, cleanup_errors=[], interrupted=False,
         read_remote_result_unknown=False, read_calls=[], native_connection_release_verified=False,
         local_resources_released=False, process_exit_required=True, pvat_remote_result_unknown=False,
@@ -357,6 +399,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
     cleanup_deadline = None
     connected_once = admitted = closed = False
     primary_error = None
+    tail_rejected = False
 
     def ready_pose(sample):
         if full_endpoint_required:
@@ -378,7 +421,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         _callback(hot_check)
         hot()
         stop_permission()
-        if cleanup_deadline - clock() < 1_000_000_000 or proxy.sdk_stop_entries:
+        if cleanup_deadline - clock() < 1_000_000_000 or proxy.termination_entries:
             raise AdmissionRejected('finite_scope_cleanup_reservation_insufficient')
         if (not admitted or closed or owner is None or owner.done() or owner.cancelling()
                 or getattr(recorder, 'fatal_error', None) is not None or getattr(recorder, 'dropped_normal_events', 0)):
@@ -418,11 +461,15 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         if connected_once:
             raise AdmissionRejected('finite_scope_connection_already_used')
         connected_once = True
+        if offline_pause_comparison and ip != '127.0.0.1':
+            raise AdmissionRejected('finite_scope_pause_loopback_changed')
         native = await client_factory(ip)
+        termination_method = 'pause_move' if offline_pause_comparison else 'stop_move'
         if not all(callable(getattr(native, name, None)) for name in
-                   ('move_pvat', 'stop_move', 'kinematics_inverse', 'kinematics_forward')):
+                   ('move_pvat', termination_method, 'kinematics_inverse', 'kinematics_forward')):
             raise AdmissionRejected('finite_scope_capability_missing')
-        proxy = FiniteScopeClient(native, motion_permission, stop_permission, hot, owner, clock,
+        client_type = _FinitePauseScopeClient if offline_pause_comparison else FiniteScopeClient
+        proxy = client_type(native, motion_permission, stop_permission, hot, owner, clock,
                                  parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads,
                                  native_write_check=write_check,deadline_clock=deadline_clock)
         return proxy
@@ -431,10 +478,12 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         if settings.mode != 'control': raise AdmissionRejected('finite_scope_control_config_required')
         _callback(authorization_check)
         await recorder.start()
-        adapter = FiniteWindowDiagnosticAdapter(settings, client_factory=factory, clock=clock,
+        adapter_type = _FinitePauseComparisonAdapter if offline_pause_comparison else FiniteWindowDiagnosticAdapter
+        adapter = adapter_type(settings, client_factory=factory, clock=clock,
                                                sleep=sleep, event_callback=recorder.write_event,
                                                parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads,
-                                               prelease_feedback_fk=prelease_feedback_fk)
+                                               prelease_feedback_fk=prelease_feedback_fk,
+                                               backend_label='LEBAI_FAKE' if offline_pause_comparison else 'LEBAI')
         await adapter.connect()
         _callback(authorization_check)  # Full hashes remain outside the 100 ms motion lease.
         preflight = await adapter.preflight()
@@ -443,7 +492,9 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         proxy.require_clear_read_gate()
         _rest(anchor, clock()); ready_pose(anchor); _geometry(adapter)
         await recorder.write_critical_event('finite_scope_admission', dict(sample=anchor,
-            allowed_pvat=1, allowed_cleanup_stop=1, cleanup_stop_s=CLEANUP_STOP_S), clock())
+            allowed_pvat=1, allowed_cleanup_stop=0 if offline_pause_comparison else 1,
+            allowed_cleanup_pause=1 if offline_pause_comparison else 0,
+            cleanup_stop_s=CLEANUP_STOP_S), clock())
         _callback(authorization_check)
         sample = await adapter.read_stop_observation()
         proxy.require_clear_read_gate()
@@ -480,17 +531,39 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
             primary_error = error
         if isinstance(primary_error, INTERRUPTIONS):
             raise primary_error
-        if proxy.sdk_stop_entries:
-            tail_anchor = _cached_sample(adapter)
+        if proxy.termination_entries:
+            if offline_pause_comparison:
+                # PAUSED correctly installs a known motion-read fence. Keep it;
+                # use the existing snapshot only as a diagnostic drift anchor,
+                # never as eligibility for another motion or a fresh read.
+                snapshot = adapter._snapshot
+                tail_anchor = dict(actual_q=list(snapshot.actual_q),
+                    actual_tcp=snapshot.actual_tcp.model_dump(mode='json'))
+            else:
+                tail_anchor = _cached_sample(adapter)
             class Tail:
                 async def read_stop_observation(self):
+                    nonlocal tail_rejected
+                    try:
+                        return await self._read()
+                    except BaseException:
+                        tail_rejected = True
+                        raise
+
+                async def _read(self):
                     observed = await adapter.read_stop_observation()
                     proxy.require_clear_read_gate()
                     # Diagnostic reads preserve these original latches in output.
                     check = copy.deepcopy(observed)
                     if check['latched_fault'] in ('stop_unverified', 'stop_incomplete'):
                         check['latched_fault'] = None
-                    validate_idle_sample(check, clock())
+                    if offline_pause_comparison:
+                        # PAUSED remains PAUSED and motion-ineligible. A retained
+                        # task requires explicit FINISHED evidence; this is only
+                        # diagnostic acceptance and never rearming authority.
+                        validate_paused_tail(observed, clock(), admission=False)
+                    else:
+                        validate_idle_sample(check, clock())
                     _geometry(adapter)
                     validate_position_continuity(observed, tail_anchor)
                     delta = [a - b for a, b in zip(Pose.model_validate(observed['actual_tcp']).p, origin.p)]
@@ -503,7 +576,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                     report['last_displacement'] = dict(progress_m=progress, cross_m=cross)
                     return observed
             await observe_after_stop(Tail(), recorder, 2., clock=clock, sleep=sleep)
-            report['tail_complete'] = True
+            report['tail_complete'] = not tail_rejected if offline_pause_comparison else True
     except BaseException as error:
         primary_error = error
     finally:
@@ -528,6 +601,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                 report['motion_observation']=proxy.motion_observation.snapshot()
                 proxy.read_remote_result_unknown |= report['motion_observation']['remote_result_unknown']
             report.update(pvat_entries=proxy.pvat_entries, stop_entries=proxy.sdk_stop_entries,
+                pause_entries=getattr(proxy, 'sdk_pause_entries', 0), termination_entries=proxy.termination_entries,
                 math_entries=copy.deepcopy(proxy.math_entries), read_calls=copy.deepcopy(proxy.read_calls),
                 read_remote_result_unknown=proxy.read_remote_result_unknown,
                 pvat_remote_result_unknown=proxy.pvat_remote_result_unknown, pvat_call=copy.deepcopy(proxy.pvat_call),
@@ -544,7 +618,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
             report['primary_rejection']=(reason if isinstance(primary_error,(AdmissionRejected,ValueError))
                 and reason.startswith(('finite_scope_','idle_baseline_','paused_cleanup_')) else None)
         report['complete'] = (primary_error is None and not report['cleanup_errors'] and report.get('command_sdk_outcome') == 'returned'
-            and report['pvat_entries'] == report['stop_entries'] == 1 and report['stop_confirmed']
+            and report['pvat_entries'] == report['termination_entries'] == 1 and report['stop_confirmed']
             and report['latched_fault'] is None and report['tail_complete'] and report['displacement_consistent']
             and (not observe_motion or report['motion_observation'].get('outcome')=='returned'
                  and report['motion_observation'].get('within_reference') is True))

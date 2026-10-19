@@ -93,8 +93,15 @@ class SyntheticController:
 
     async def kinematics_inverse(self, pose, joints):
         self.ik_entries += 1
-        if self.scenario in ('ik_timeout', 'expired_lease'):
-            await asyncio.sleep(.3 if self.scenario == 'ik_timeout' else .105)
+        if self.scenario == 'ik_timeout':
+            await asyncio.sleep(.3)
+        elif self.scenario == 'expired_lease':
+            # Windows' coarse monotonic clock and asyncio's timer lookahead
+            # can count a single 105 ms wait as only 93--94 ms. This synthetic
+            # fault must actually exceed the adapter's 100 ms lease clock.
+            deadline_ns = time.monotonic_ns() + 105_000_000
+            while (remaining_ns := deadline_ns - time.monotonic_ns()) > 0:
+                await asyncio.sleep(remaining_ns / 1e9)
         return [self.origin['q'][0] + pose['z'] - self.origin['tcp']['p'][2], *joints[1:]]
 
     async def kinematics_forward(self, joints):

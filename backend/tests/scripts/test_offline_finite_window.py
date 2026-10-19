@@ -60,6 +60,10 @@ async def test_failed_math_or_expired_lease_cannot_send_window(context, scenario
     assert result['fk_entries'] == (1 if scenario.startswith('fk_') else 0)
     assert result['stop_entries'] <= 1 and not result['motion_authorized']
     assert result['assessment'] == 'simulation_only_not_live_acceptance'
+    if scenario == 'expired_lease':
+        # A timeout injection must expire the lease, not happen to pass through
+        # an early asyncio timer or fail for a different mathematical reason.
+        assert result['command_error'] == 'finite_diagnostic_expired'
 
 
 @pytest.mark.parametrize('scenario,latch', [('stop_late', 'stop_unverified'), ('stop_moving', 'stop_incomplete')])
