@@ -786,3 +786,9 @@ Fake摘要：`.tmp/static-cleanup-identity-20261019/real-code-scale-20261019T081
 已离线准备原单次+Z 50 µm/≤80 ms、IK1/FK4、起点周期采样pause1及原停止验证/两秒尾段的新待授权材料：`.tmp/static-cleanup-identity-20261019/motion-pending-c977550/scope.md`，preview.json的SHA-256为8fb90ff9a18d14f1b9b190518001907d68a889a99b67d95b9f18223a8d2a9136。它绑定当前114个运动运行时文件，有效期null、输出目录不存在，不可执行；需先收到目视收尾，再获新的动作范围及现场条件确认。未连接、未启动或恢复机械臂来准备此材料。
 
 本轮未改产品代码、未新增或重跑离线测试。原始日志、配置、批准材料及离线明细保留本机，未推送，用户原总结文件未改。
+
+### 静止清理目视收尾补充
+
+用户随后通过 call_f78e5556df93498d825907deabc6e09d 确认“全程完全静止、无异常、未使用急停”。该回复单独封存于上述成功清理目录的onsite-closure.json，SHA-256为c0a2f752c001cc5425b1cc044aa6ec00edd1d362f12289fba8ae1c9c1f2eb1e8，绑定原结果哈希；没有改写原记录、清除历史失败或授予新连接。
+
+已重新核对待授权运动材料的114个运行时文件及原配置一致、预览有效期null且结果目录不存在；未加载SDK或连接。收尾更新后的范围为 `.tmp/static-cleanup-identity-20261019/motion-site-scope-20261019T082415Z/scope.md`，SHA-256为18828b01b95b96fd7a5852bef8bc757b3f00853a723faf3fa309866192afb211；其reviewed-preview.json仍为8fb90ff9a18d14f1b9b190518001907d68a889a99b67d95b9f18223a8d2a9136。下一次仍需明确批准这一次微动及新的现场条件，不复用静止清理授权。
