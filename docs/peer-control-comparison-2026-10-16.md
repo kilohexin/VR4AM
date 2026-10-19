@@ -686,3 +686,24 @@ Fake摘要位于 `.tmp/finite-pause-sampling-20261019/real-code-scale-20261019T0
 独立只读复核未发现P1/P2阻塞问题，另行55项定向测试通过；复核确认实际哈希链包含114个文件且未导入SDK。工厂是可信依赖注入契约，不构成网络或授权沙箱；源码元数据策略仍不能防御故意保留元数据的篡改，沿用已批准边界。
 
 历史 `stop_unverified`、现场 `stop_incomplete`、目标跟随和速度反馈审计继续保留。未推送，用户原总结文件未修改。
+
+## 2026-10-19：已授权单次采样诊断因PAUSED零写入拒绝
+
+用户通过 call_368fca8e86314e9b88511af063eb8438 确认现场条件并批准一次范围。代码为3f94a69、配置哈希b95938219902cb2f406da21b95cca732cbbf14eeeb239ca5252470eda53f6df9，114个运行时文件与待审预览一致，本机既有RPC0。北京时间15:33:17生成十分钟有效材料，只有输出目录和有效期相对已审预览变化；唯一启动标记创建后执行一次，没有重试。
+
+单次连接已正常完成。连接快照和预检快照均回传PAUSED/HOLD，保留任务编号552且FINISHED；两组报告关节速度/加速度均为零，关节/TCP回传相同。这与用户此前确认的IDLE不一致；当前证据不能确定界面状态差异原因，也不能据此推断物理停止时间。原预检先检查非IDLE而拒绝，结果为 `finite_scope_preflight_rejected`；根据冻结快照和原检查顺序，内层原因可定位为 `robot_not_idle`。未放宽或覆盖控制器状态。
+
+本次 scope_admitted=false、PVAT0、pause0、stop0、IK0/FK0，complete=false；没有新故障锁存，也没有进行停止验证，因此不能算新采样策略现场通过。全部读取已知返回，无未决读取，关闭本机引用/任务完成；执行后本机RPC0，原生控制器连接释放仍未证明。子进程退出2、外层执行器退出1，仅表示诊断失败，未自动追加命令。
+
+结果保留在 `.tmp/finite-pause-sampling-20261019/approved-20261019T073317602459Z/`：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| preview.json | de2adf0cadb9b4bac1bf5620fe4d2c14eac5fc3133f05fc4a70a7dc6cda4c945 |
+| result/result.json | c581985344796e49ff88d6196c60cfccbb85bf3e25ba8f26c57856357b03d49e |
+| result/sessions/20261019T073336Z-fb4a2b92/session.jsonl | dcc4bd08d74fa53fa6d907f1fd99d61c12dac0f23e79446a99aa1608055d44c3 |
+| analysis.json（只读离线派生） | fde2ba899dd49a21f876fb3d53155ff41f21cafd290f4baf5a93d2d6663ce561 |
+
+本次授权已消耗。已告知用户保持现状、不启动或恢复。另行准备已有PAUSED静止清理入口的待授权范围，位于 `.tmp/finite-pause-sampling-20261019/cleanup-pending-20261019T073531Z/scope.md`；其preview.json哈希为b5961df4a146a44f6adab9afc986c12e1f2c48864f8fc336f5e9c758f6a39d5b，111个运行时文件，有效期null、结果目录未创建。只有获得新的明确范围和现场条件批准后，才可一次连接、确认PAUSED/FINISHED及零反馈速度后执行唯一stop_move。它只清理暂停，不能充当运动中停止或连续VR验收；没有自动执行该入口。
+
+本轮未修改产品代码、未新增或重跑离线测试，没有恢复、准备位、Home、夹爪、复位、抓包或推送。原始日志、配置、授权材料与派生明细不提交，用户原总结文件未修改；历史停止、实际跟随和速度审计问题继续保留。
