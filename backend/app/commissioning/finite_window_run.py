@@ -364,6 +364,19 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         raise TypeError('finite_pause_comparison_requires_boolean')
     if offline_pause_comparison and settings.ip != '127.0.0.1':
         raise ValueError('finite_pause_comparison_requires_injected_loopback')
+    return await _run_window(settings, recorder, client_factory, authorization_check, hot_check,
+        clock=clock, sleep=sleep, report=report, write_check=write_check,
+        parallel_fk_audit=parallel_fk_audit, ready_joint_tolerance_rad=ready_joint_tolerance_rad,
+        parallel_motion_reads=parallel_motion_reads, prelease_feedback_fk=prelease_feedback_fk,
+        deadline_clock=deadline_clock, observe_motion=observe_motion,
+        pause_comparison=offline_pause_comparison, offline_pause_comparison=offline_pause_comparison)
+
+
+async def _run_window(settings, recorder, client_factory, authorization_check, hot_check,
+                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, write_check=None,
+                      parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
+                      parallel_motion_reads=False, prelease_feedback_fk=False, deadline_clock=None,
+                      observe_motion=False, pause_comparison=False, offline_pause_comparison=False):
     if type(observe_motion) is not bool:
         raise TypeError('finite_motion_observation_requires_boolean')
     if observe_motion and deadline_clock != clock:
@@ -383,8 +396,9 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
     report = {} if report is None else report
     report.update(complete=False, hardware_verified=False, motion_authorized=False, scope_admitted=False,
         stop_confirmed=False, latched_fault=None, pvat_entries=0, stop_entries=0, pause_entries=0,
-        termination_entries=0, termination_method='pause_move' if offline_pause_comparison else 'stop_move',
+        termination_entries=0, termination_method='pause_move' if pause_comparison else 'stop_move',
         offline_pause_comparison=offline_pause_comparison,
+        site_pause_comparison=pause_comparison and not offline_pause_comparison,
         tail_complete=False, displacement_consistent=False, displacement_samples=0, cleanup_errors=[], interrupted=False,
         read_remote_result_unknown=False, read_calls=[], native_connection_release_verified=False,
         local_resources_released=False, process_exit_required=True, pvat_remote_result_unknown=False,
@@ -464,11 +478,11 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         if offline_pause_comparison and ip != '127.0.0.1':
             raise AdmissionRejected('finite_scope_pause_loopback_changed')
         native = await client_factory(ip)
-        termination_method = 'pause_move' if offline_pause_comparison else 'stop_move'
+        termination_method = 'pause_move' if pause_comparison else 'stop_move'
         if not all(callable(getattr(native, name, None)) for name in
                    ('move_pvat', termination_method, 'kinematics_inverse', 'kinematics_forward')):
             raise AdmissionRejected('finite_scope_capability_missing')
-        client_type = _FinitePauseScopeClient if offline_pause_comparison else FiniteScopeClient
+        client_type = _FinitePauseScopeClient if pause_comparison else FiniteScopeClient
         proxy = client_type(native, motion_permission, stop_permission, hot, owner, clock,
                                  parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads,
                                  native_write_check=write_check,deadline_clock=deadline_clock)
@@ -478,7 +492,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         if settings.mode != 'control': raise AdmissionRejected('finite_scope_control_config_required')
         _callback(authorization_check)
         await recorder.start()
-        adapter_type = _FinitePauseComparisonAdapter if offline_pause_comparison else FiniteWindowDiagnosticAdapter
+        adapter_type = _FinitePauseComparisonAdapter if pause_comparison else FiniteWindowDiagnosticAdapter
         adapter = adapter_type(settings, client_factory=factory, clock=clock,
                                                sleep=sleep, event_callback=recorder.write_event,
                                                parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads,
@@ -492,8 +506,8 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         proxy.require_clear_read_gate()
         _rest(anchor, clock()); ready_pose(anchor); _geometry(adapter)
         await recorder.write_critical_event('finite_scope_admission', dict(sample=anchor,
-            allowed_pvat=1, allowed_cleanup_stop=0 if offline_pause_comparison else 1,
-            allowed_cleanup_pause=1 if offline_pause_comparison else 0,
+            allowed_pvat=1, allowed_cleanup_stop=0 if pause_comparison else 1,
+            allowed_cleanup_pause=1 if pause_comparison else 0,
             cleanup_stop_s=CLEANUP_STOP_S), clock())
         _callback(authorization_check)
         sample = await adapter.read_stop_observation()
@@ -532,7 +546,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         if isinstance(primary_error, INTERRUPTIONS):
             raise primary_error
         if proxy.termination_entries:
-            if offline_pause_comparison:
+            if pause_comparison:
                 # PAUSED correctly installs a known motion-read fence. Keep it;
                 # use the existing snapshot only as a diagnostic drift anchor,
                 # never as eligibility for another motion or a fresh read.
@@ -557,7 +571,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                     check = copy.deepcopy(observed)
                     if check['latched_fault'] in ('stop_unverified', 'stop_incomplete'):
                         check['latched_fault'] = None
-                    if offline_pause_comparison:
+                    if pause_comparison:
                         # PAUSED remains PAUSED and motion-ineligible. A retained
                         # task requires explicit FINISHED evidence; this is only
                         # diagnostic acceptance and never rearming authority.
@@ -576,7 +590,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                     report['last_displacement'] = dict(progress_m=progress, cross_m=cross)
                     return observed
             await observe_after_stop(Tail(), recorder, 2., clock=clock, sleep=sleep)
-            report['tail_complete'] = not tail_rejected if offline_pause_comparison else True
+            report['tail_complete'] = not tail_rejected if pause_comparison else True
     except BaseException as error:
         primary_error = error
     finally:

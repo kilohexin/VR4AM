@@ -108,6 +108,15 @@ class Inputs:
         self.copied = None
         self.paths = self.fingerprints = None
 
+    def confirmation(self):
+        return CONFIRM
+
+    def scope_preview(self):
+        return preview(self.plan)
+
+    def current_runtime_hashes(self):
+        return runtime_hashes()
+
     def expiration(self):
         try:
             expiry = datetime.fromisoformat(self.expires.replace('Z', '+00:00'))
@@ -127,7 +136,7 @@ class Inputs:
         return tuple(values)
 
     def cold(self):
-        if self.confirm != CONFIRM: raise ValueError('finite_scope_confirmation_required')
+        if self.confirm != self.confirmation(): raise ValueError('finite_scope_confirmation_required')
         expiry = self.expiration()
         if (self.approved is None or type(self.expected_hash) is not str
                 or re.fullmatch('[a-f0-9]{64}', self.expected_hash) is None):
@@ -135,7 +144,7 @@ class Inputs:
         try:
             raw = Path(self.approved).read_bytes(); approved = json.loads(raw)
         except (OSError, ValueError): raise ValueError('finite_scope_preview_unavailable') from None
-        if hashlib.sha256(raw).hexdigest() != self.expected_hash or approved != preview(self.plan):
+        if hashlib.sha256(raw).hexdigest() != self.expected_hash or approved != self.scope_preview():
             raise ValueError('finite_scope_preview_or_hash_changed')
         if self.paths is None:
             paths = tuple((ROOT / name).resolve(strict=True) for name in self.plan['runtime_hashes'])
@@ -143,7 +152,7 @@ class Inputs:
         else: paths = self.paths
         before = self.metadata(paths)
         if (self.fingerprints is not None and before != self.fingerprints
-                or runtime_hashes() != self.plan['runtime_hashes']):
+                or self.current_runtime_hashes() != self.plan['runtime_hashes']):
             raise ValueError('finite_scope_runtime_changed')
         after = self.metadata(paths)
         if before != after: raise ValueError('finite_scope_runtime_changed_during_hashes')
@@ -167,17 +176,23 @@ class Inputs:
 
 async def execute(plan, *, approved, expected_hash, expires, confirm, client_factory=None):
     from app.commissioning.finite_window_run import run_window
+    inputs = Inputs(plan, approved, expected_hash, expires, confirm)
+    return await _execute_scope(plan, inputs, run_window, client_factory=client_factory,
+        rpc_check=existing_rpc_connections, workflow='single_finite_window', live_runtime='LIVE_FINITE_DIAGNOSTIC')
+
+
+async def _execute_scope(plan, inputs, runner, *, client_factory, rpc_check, workflow, live_runtime):
+    """Shared lifecycle; the standalone caller supplies its own scope verifier."""
     from app.commissioning.readonly_kinematics import _Queries, new_report
     from app.recording.commissioning import CommissioningRecorder
     if plan['qpc_timing']:
         from app.commissioning.qpc_event_loop import QpcEventLoop
         if not isinstance(asyncio.get_running_loop(),QpcEventLoop):
             raise ValueError('qpc_event_loop_required')
-    inputs = Inputs(plan, approved, expected_hash, expires, confirm)
     inputs.cold()
-    if existing_rpc_connections() != 0: raise ValueError('existing_rpc_connections')
+    if rpc_check() != 0: raise ValueError('existing_rpc_connections')
     output = plan['output']; output.mkdir(parents=True, exist_ok=False)
-    (output / 'admission.json').write_text(json.dumps(dict(scope=preview(plan), approved_preview_sha256=expected_hash,
+    (output / 'admission.json').write_text(json.dumps(dict(scope=inputs.scope_preview(), approved_preview_sha256=inputs.expected_hash,
         started_utc=datetime.now(UTC).isoformat()), indent=2), encoding='utf-8')
     inputs.copied = output / 'config-control.yaml'
     inputs.copied.write_bytes(plan['config'].read_bytes())
@@ -185,15 +200,16 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
     calls = _Queries(inputs.cold, connector)
     calls.deadline = monotonic_ns() + 3_000_000_000
     connection_used = False
-    report = dict(runtime='SIMULATION' if client_factory is not None else 'LIVE_FINITE_DIAGNOSTIC',
-        event_clock=preview(plan)['event_clock'],event_clock_anchor=preview(plan)['event_clock_anchor'],
+    scope = inputs.scope_preview()
+    report = dict(runtime='SIMULATION' if client_factory is not None else live_runtime,
+        event_clock=scope['event_clock'],event_clock_anchor=scope['event_clock_anchor'],
         connector_clock='time.monotonic_ns')
-    recorder = CommissioningRecorder(output / 'sessions', metadata=dict(workflow='single_finite_window', **report))
+    recorder = CommissioningRecorder(output / 'sessions', metadata=dict(workflow=workflow, **report))
 
     async def factory(ip):
         nonlocal connection_used
         calls.guard()
-        if connection_used or ip != plan['settings'].ip or existing_rpc_connections() != 0:
+        if connection_used or ip != plan['settings'].ip or rpc_check() != 0:
             raise ValueError('finite_scope_connection_not_admitted')
         connection_used = True
         async def connect():
@@ -207,7 +223,7 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
         return await calls.call('connect', connect)
 
     try:
-        await run_window(plan['settings'], recorder, factory, inputs.cold, inputs.hot,
+        await runner(plan['settings'], recorder, factory, inputs.cold, inputs.hot,
                          write_check=inputs.write, report=report, parallel_fk_audit=plan['parallel_fk_audit'],
                          ready_joint_tolerance_rad=plan['ready_joint_tolerance_rad'],
                          parallel_motion_reads=plan['parallel_motion_reads'],
