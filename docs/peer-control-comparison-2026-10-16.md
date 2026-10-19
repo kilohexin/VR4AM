@@ -908,3 +908,24 @@ Fake摘要：`.tmp/static-cleanup-identity-20261019/real-code-scale-20261019T081
 独立只读复核未发现P1/P2，确认新旧scope/token双向隔离、默认预览零执行、输出一次消费、源码/配置身份链及新MRO的读取所有权和取消/迟到保护；新两测试文件及原Fake22项共65项通过（12.85秒），复核未连接设备或导入SDK。
 
 离线待审材料为`.tmp/finite-pause-parallel-20261019/pending/scope.md`及preview.json；预览SHA-256为302256e99dae4a4f6feb236607b7c5d3da910887d9001faaad4eb1f9f2ca8e86，当前117个运行时文件及原配置SHA均核对一致，SDK未导入、执行目录不存在、有效期为null，不可据此启动。后续先根据当天现场状态选择范围；本轮没有申请或消耗新的真机授权。
+
+## 2026-10-19：并发入口首次现场尝试在PAUSED预检零写入结束
+
+用户先通过call_a794197ac7674ca0905eed86c0b01ef1确认在旁、地址172.16.2.162、上电静止且L Master显示IDLE，再通过call_e7adf321b22d4132b5f00b8449d70264明确批准新单次范围及完整现场条件。代码8ffc7a5、117个运行时文件、原配置SHA及已审预览302256e99dae4a4f6feb236607b7c5d3da910887d9001faaad4eb1f9f2ca8e86均一致，本机RPC0。北京时间17:13:25生成新的十分钟材料，逐项只改变输出目录和有效期；Python原样argv、排他启动标记，执行一次，没有重试。
+
+SDK初始化及一次连接已进入并返回。连接及预检两组原始状态均为PAUSED，保留任务编号563均明确FINISHED，报告实际关节速度/加速度均为0，两组actual_q完全一致。该结果与用户报告的L Master显示IDLE不一致，现有证据不赋予UI、SDK、控制器或用户操作唯一原因。
+
+原预检拒绝，scope_admitted=false、primary_rejection=finite_scope_preflight_rejected；IK0/FK0、PVAT0、pause_move0、stop_move0，无其它写入。complete=false但无新故障锁存、未启动停止验证/新并发采样或尾段。因此这次没有验收运动、并发停止采样或物理停止，也没有以“全程未动”替代原验收。连接外的17个原生读取全部已知返回，无未决读取/运动结果；本机引用释放、退出后RPC0，控制器端连接释放仍未验证。子进程退出2，外层工具退出1，本次授权已消耗，即使零写入也不能复用。
+
+已及时告知用户零写入拒绝及保持状态、不启动/恢复。本轮没有追加静止清理、重试、复位或任何其它命令。现有曾通过的静止清理入口已离线生成新的无有效期待审预览，需另行批准一次连接、PAUSED/FINISHED/零报告速度及全部原预检通过后才一次stop_move；若已IDLE则零写入结束。原200/300/500 ms、100 ms新鲜度及串行停止采样保持原样，不在清理中采用新并发策略。
+
+私有冻结目录：`.tmp/finite-pause-parallel-20261019/approved-20261019T091325936956Z/`。
+
+| 文件 | SHA-256 |
+| --- | --- |
+| preview.json | 332ac7eb981c6ec09586d6ff4af6912eb5724a3ce16a493c2fe0b4b1cfdb6374 |
+| result/result.json | 68876a9cb561ba8a08b91f3d11d5b62b2985d186cf358826dce8054f6f28eb67 |
+| result/sessions/20261019T091342Z-8dbc55ce/session.jsonl | 5962372f29ffdcdc0731aa9223e246319248143462f0db215c350847caa53f74 |
+| analysis.json（只读离线派生） | 525dd3d21e025ed718d4d0d54f54a1054463c434de8742812c04465a7ac52fbc |
+
+清理待审材料：`.tmp/finite-pause-parallel-20261019/cleanup-pending-20261019T091535583148Z/scope.md`及preview.json，预览SHA-256为977789d9a97cba821cfed4293fcf5be6b70563de69a6c8d4f1670cb37aa80af3，113个当前运行时文件与原配置一致，SDK未导入、执行目录不存在、无有效期，未执行。历史运动中停止、实际跟随及速度审计问题继续保留；本轮无产品代码修改、pytest或前端构建，原始资料留本机，用户原总结未改，未推送。
