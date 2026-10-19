@@ -35,3 +35,11 @@
 测试通过显式工厂注入进程内 Fake。工厂是可信依赖注入契约，不构成网络沙箱；Fake 结果不代表控制器行为。本轮还使用真实仓库的完整源码/SDK哈希及元数据检查运行该流程，未导入原生 SDK、未连接机器人。
 
 `termination_method`、`pause_entries`、`stop_entries` 分别报告实际方法及次数；`stop_confirmed` 是通用停止事务的判据结果，暂停路径并不因此变成一次 `stop_move`。`hardware_verified` 保持 false。现场停止可靠性、实际位移、速度反馈和持续网页/VR操纵仍需独立验收。
+
+### 离线采样调度候选（2026-10-19）
+
+`run_window` 新增默认关闭的严格布尔参数 `offline_stop_start_period`，只能与显式工厂、字面 `127.0.0.1`、`offline_pause_comparison=True` 一起使用。该工厂仍是可信依赖注入契约；测试实际注入进程内 Fake。独立真机暂停入口拒绝这个参数，没有新增 CLI 或网页开关。
+
+候选保留原串行读取和全部判据，仅将读完后固定等待20 ms改为相邻读取起点至少间隔20 ms；慢读取不再追加等待，但仍让出事件循环以处理取消。报告用 `stop_sampling_policy` 区分 `start_period_20ms` 与原 `fixed_delay_after_read_20ms`。原停止路径和现场暂停入口继续使用后者。
+
+合成慢读取模型中，原调度在502 ms失败，候选在494 ms取得304 ms稳定区间；这不是现场日志重放或物理制动证据。RUNNING、持续漂移、迟到RPC、未知读取及取消仍不能整体通过，旧现场 `stop_incomplete` 保留。

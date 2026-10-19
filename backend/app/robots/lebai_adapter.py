@@ -726,6 +726,10 @@ class RealLebaiAdapter:
         finally:
             call["completed_ns"] = self._clock()
 
+    async def _wait_for_next_stop_sample(self, read_started_ns: int) -> None:
+        # Original production cadence: a fixed delay after a completed read.
+        await self._sleep(0.02)
+
     async def _stop_verified(
         self, reason: StopReason, diagnostics: dict[str, Any],
     ) -> None:
@@ -782,6 +786,7 @@ class RealLebaiAdapter:
         stable_anchor: LebaiSnapshot | None = transaction.stable_anchor
         try:
             while True:
+                read_started_ns = self._clock()
                 snapshot = await self._read_snapshot(
                     emit_kinematics=False, read_purpose="stop_verification",
                 )
@@ -856,7 +861,7 @@ class RealLebaiAdapter:
                         preserve_fault=True,
                     )
                     raise BackendCommandError("stop_incomplete")
-                await self._sleep(0.02)
+                await self._wait_for_next_stop_sample(read_started_ns)
         except asyncio.CancelledError:
             await asyncio.shield(
                 self._fail_unverified_stop(

@@ -344,6 +344,26 @@ class _FinitePauseScopeClient(FiniteScopeClient):
 class _FinitePauseComparisonAdapter(FiniteWindowDiagnosticAdapter):
     _motion_stop_rpc_method = 'pause_move'
 
+    def __init__(self, settings, *, offline_stop_start_period=False, **kwargs):
+        if type(offline_stop_start_period) is not bool:
+            raise TypeError('finite_stop_start_period_requires_boolean')
+        if offline_stop_start_period and (
+                settings.ip != '127.0.0.1' or kwargs.get('backend_label') != 'LEBAI_FAKE'
+                or not callable(kwargs.get('client_factory'))):
+            raise ValueError('finite_stop_start_period_requires_offline_pause')
+        self._offline_stop_start_period = offline_stop_start_period
+        super().__init__(settings, **kwargs)
+
+    async def _wait_for_next_stop_sample(self, read_started_ns):
+        if not self._offline_stop_start_period:
+            return await super()._wait_for_next_stop_sample(read_started_ns)
+        deadline_ns = read_started_ns + 20_000_000
+        # Always yield, including a slow read. Recheck an early timer wakeup;
+        # neither extra reads nor a non-yielding loop may bypass the period.
+        await self._sleep(max(0., (deadline_ns - self._clock()) / 1e9))
+        while (remaining_ns := deadline_ns - self._clock()) > 0:
+            await self._sleep(remaining_ns / 1e9)
+
 
 def _rest(sample, now_ns):
     validate_idle_sample(sample, now_ns)
@@ -357,7 +377,7 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, write_check=None,
                      parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
                      parallel_motion_reads=False,prelease_feedback_fk=False,deadline_clock=None,
-                     observe_motion=False,offline_pause_comparison=False):
+                     observe_motion=False,offline_pause_comparison=False,offline_stop_start_period=False):
     # No CLI or normal backend selects this option. The explicit injected
     # factory must supply the caller's Fake, never a real robot transport.
     if type(offline_pause_comparison) is not bool:
@@ -369,14 +389,21 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         parallel_fk_audit=parallel_fk_audit, ready_joint_tolerance_rad=ready_joint_tolerance_rad,
         parallel_motion_reads=parallel_motion_reads, prelease_feedback_fk=prelease_feedback_fk,
         deadline_clock=deadline_clock, observe_motion=observe_motion,
-        pause_comparison=offline_pause_comparison, offline_pause_comparison=offline_pause_comparison)
+        pause_comparison=offline_pause_comparison, offline_pause_comparison=offline_pause_comparison,
+        offline_stop_start_period=offline_stop_start_period)
 
 
 async def _run_window(settings, recorder, client_factory, authorization_check, hot_check,
                       *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, write_check=None,
                       parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
                       parallel_motion_reads=False, prelease_feedback_fk=False, deadline_clock=None,
-                      observe_motion=False, pause_comparison=False, offline_pause_comparison=False):
+                      observe_motion=False, pause_comparison=False, offline_pause_comparison=False,
+                      offline_stop_start_period=False):
+    if type(offline_stop_start_period) is not bool:
+        raise TypeError('finite_stop_start_period_requires_boolean')
+    if offline_stop_start_period and (
+            not offline_pause_comparison or not pause_comparison or settings.ip != '127.0.0.1'):
+        raise ValueError('finite_stop_start_period_requires_offline_pause')
     if type(observe_motion) is not bool:
         raise TypeError('finite_motion_observation_requires_boolean')
     if observe_motion and deadline_clock != clock:
@@ -399,6 +426,7 @@ async def _run_window(settings, recorder, client_factory, authorization_check, h
         termination_entries=0, termination_method='pause_move' if pause_comparison else 'stop_move',
         offline_pause_comparison=offline_pause_comparison,
         site_pause_comparison=pause_comparison and not offline_pause_comparison,
+        stop_sampling_policy='start_period_20ms' if offline_stop_start_period else 'fixed_delay_after_read_20ms',
         tail_complete=False, displacement_consistent=False, displacement_samples=0, cleanup_errors=[], interrupted=False,
         read_remote_result_unknown=False, read_calls=[], native_connection_release_verified=False,
         local_resources_released=False, process_exit_required=True, pvat_remote_result_unknown=False,
@@ -493,11 +521,13 @@ async def _run_window(settings, recorder, client_factory, authorization_check, h
         _callback(authorization_check)
         await recorder.start()
         adapter_type = _FinitePauseComparisonAdapter if pause_comparison else FiniteWindowDiagnosticAdapter
+        adapter_options = dict(offline_stop_start_period=offline_stop_start_period) if pause_comparison else {}
         adapter = adapter_type(settings, client_factory=factory, clock=clock,
                                                sleep=sleep, event_callback=recorder.write_event,
                                                parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads,
                                                prelease_feedback_fk=prelease_feedback_fk,
-                                               backend_label='LEBAI_FAKE' if offline_pause_comparison else 'LEBAI')
+                                               backend_label='LEBAI_FAKE' if offline_pause_comparison else 'LEBAI',
+                                               **adapter_options)
         await adapter.connect()
         _callback(authorization_check)  # Full hashes remain outside the 100 ms motion lease.
         preflight = await adapter.preflight()

@@ -135,6 +135,7 @@ def test_one_fake_execution_persists_actual_pause_and_consumes_attempt(context):
     assert result['complete'] and result['stop_confirmed']
     assert result['runtime'] == 'SIMULATION' and result['site_pause_comparison']
     assert not result['offline_pause_comparison']
+    assert result['stop_sampling_policy'] == 'fixed_delay_after_read_20ms'
     assert result['pvat_entries'] == result['pause_entries'] == 1 and result['stop_entries'] == 0
     assert result['math_entries'] == dict(kinematics_inverse=1, kinematics_forward=4)
     assert [c[0] for c in client.write_calls] == ['move_pvat', 'pause_move']
