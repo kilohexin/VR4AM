@@ -28,6 +28,9 @@ def context(tmp_path,monkeypatch):
         data=yaml.safe_load(REAL_CONFIG_TEMPLATE.format(mode='control'))
         data['real_robot']['control']['max_joint_speed_radps']=.05
         data['real_robot']['control']['max_joint_acceleration_radps2']=.2
+        # Synthetic 0.2mm/80ms reference requires at least0.125m/s2. This is
+        # a Fake fixture; field limits/configuration are never changed here.
+        data['real_robot']['control']['max_tcp_acceleration_mps2']=.2
         config=tmp_path/'config.yaml';config.write_text(yaml.safe_dump(data))
         expires=(datetime.now(UTC)+timedelta(minutes=5)).isoformat()
         plan=entry.prepare(config,tmp_path/'.tmp/once',expires=expires)

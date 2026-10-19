@@ -86,6 +86,9 @@ def test_scope_rejects_other_window_sizes_without_editing_config(context, step):
     entry, plan, _, _ = context()
     data = yaml.safe_load(plan['config'].read_text())
     data['real_robot']['control']['max_tcp_step_m'] = step
+    # Isolate the pause scope-size rejection from the independent requested
+    # distance feasibility check. These are synthetic configuration values.
+    data['real_robot']['control']['max_tcp_acceleration_mps2'] = .2
     plan['config'].write_text(yaml.safe_dump(data))
     saved = plan['config'].read_bytes()
     with pytest.raises(ValueError, match='pause.*50um'):

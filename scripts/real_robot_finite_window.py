@@ -37,6 +37,21 @@ def existing_rpc_connections():
     return helper.existing_rpc_connections()
 
 
+def reference_parameter_check(plan):
+    from app.commissioning.finite_reference_parameters import assess_rest_to_rest_parameters
+    from app.commissioning.readonly_kinematics import computational_distance
+    settings = plan['settings']
+    control = settings.control
+    check = assess_rest_to_rest_parameters(computational_distance(settings), control.pvat_horizon_s,
+        control.max_tcp_speed_mps, control.max_tcp_acceleration_mps2)
+    # Check the full requested distance conservatively even for the original
+    # partial-endpoint scope. A possible smaller fraction is not a certified
+    # trajectory and must not bypass this pre-SDK parameter rejection.
+    if not check['necessary_conditions_satisfied']:
+        raise ValueError('finite_reference_rest_to_rest_infeasible')
+    return check
+
+
 def prepare(config, output, *, expires=None, parallel_fk_audit=False, ready_joint_tolerance_rad=.0001,
             parallel_motion_reads=False,prelease_feedback_fk=False,qpc_timing=False,observe_motion=False):
     from app.commissioning.finite_window_run import validate_ready_tolerance
@@ -58,6 +73,7 @@ def prepare(config, output, *, expires=None, parallel_fk_audit=False, ready_join
     plan['ready_joint_tolerance_rad'] = validate_ready_tolerance(ready_joint_tolerance_rad)
     if not .01 <= plan['settings'].control.pvat_horizon_s <= .08:
         raise ValueError('finite_window_horizon_invalid')
+    reference_parameter_check(plan)
     plan['runtime_hashes'] = runtime_hashes()
     return plan
 
@@ -66,12 +82,14 @@ def preview(plan):
     from app.commissioning.finite_window_run import CLEANUP_STOP_S, DISTANCE_M, READY_Q_TOLERANCE_RAD, FiniteScopeClient
     from app.commissioning.readonly_kinematics import computational_distance
     distance_m=computational_distance(plan['settings'])
+    reference_check = reference_parameter_check(plan)
     return dict(schema=1, scope='one_finite_z_window_and_reserved_cleanup_stop', target_ip=plan['settings'].ip,
         output=str(plan['output']), config_sha256=plan['config_sha256'], runtime_hashes=plan['runtime_hashes'],
         authorization_expires_utc=plan['authorization_expires_utc'], max_connections=1, max_pvat_entries=1,
         max_stop_entries=1, max_ik_entries=1, max_fk_entries=4, allowed_queries=sorted(FiniteScopeClient.READS),
         allowed_writes=['move_pvat', 'stop_move'], target=dict(axis='z', distance_m=distance_m, rotation=False),
         requires_full_endpoint=distance_m<DISTANCE_M,
+        reference_parameter_check=reference_check,
         parallel_fk_audit=plan['parallel_fk_audit'],
         parallel_motion_reads=plan['parallel_motion_reads'],
         prelease_feedback_fk=plan['prelease_feedback_fk'],
@@ -185,6 +203,7 @@ async def _execute_scope(plan, inputs, runner, *, client_factory, rpc_check, wor
     """Shared lifecycle; the standalone caller supplies its own scope verifier."""
     from app.commissioning.readonly_kinematics import _Queries, new_report
     from app.recording.commissioning import CommissioningRecorder
+    reference_parameter_check(plan)  # Also refuse mutated/direct plans before output or SDK initialization.
     if plan['qpc_timing']:
         from app.commissioning.qpc_event_loop import QpcEventLoop
         if not isinstance(asyncio.get_running_loop(),QpcEventLoop):
