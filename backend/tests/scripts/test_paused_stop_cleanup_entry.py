@@ -21,7 +21,9 @@ def context(tmp_path, monkeypatch):
     monkeypatch.setattr(entry, 'ROOT', tmp_path)
     monkeypatch.setattr(entry.idle, 'ROOT', tmp_path)
     monkeypatch.setattr(entry.idle, 'runtime_hashes', lambda: {})
-    monkeypatch.setattr(entry, 'runtime_hashes', lambda: {'synthetic': 'a' * 64})
+    code = tmp_path / 'synthetic'
+    code.write_text('trusted fixture\n')
+    monkeypatch.setattr(entry, 'runtime_hashes', lambda: {'synthetic': entry.sha(code)})
     monkeypatch.setattr(entry, 'existing_rpc_connections', lambda: 0)
     data = yaml.safe_load(REAL_CONFIG_TEMPLATE.format(mode='control'))
     data['real_robot']['control']['max_joint_speed_radps'] = .05
@@ -131,7 +133,7 @@ async def test_utc_expiry_during_hashes_refuses_before_output(context, monkeypat
     monkeypatch.setattr(entry, 'datetime', SimpleNamespace(now=lambda zone: current[0], fromisoformat=datetime.fromisoformat))
     def hashes():
         current[0] = datetime.fromisoformat(kw['expires'])
-        return {'synthetic':'a'*64}
+        return plan['runtime_hashes']
     monkeypatch.setattr(entry, 'runtime_hashes', hashes)
     factory = AsyncMock()
     with pytest.raises(ValueError, match='expired'):

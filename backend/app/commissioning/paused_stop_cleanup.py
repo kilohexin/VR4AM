@@ -3,6 +3,7 @@ import asyncio
 import copy
 from dataclasses import replace
 import math
+import re
 import time
 
 from app.commissioning.idle_stop_baseline import AdmissionRejected, StopOnlyClient, validate_position_continuity
@@ -201,16 +202,20 @@ def _geometry(adapter):
 
 
 async def run_cleanup(settings, recorder, client_factory, authorization_check,
-                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, read_authorization_check=None):
+                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, read_authorization_check=None,
+                      stop_authorization_check=None):
     if not callable(client_factory) or not callable(authorization_check):
         raise TypeError('explicit_factory_and_authorization_required')
+    if stop_authorization_check is not None and not callable(stop_authorization_check):
+        raise TypeError('paused_cleanup_explicit_stop_authorization_required')
     report = {} if report is None else report
     report.update(complete=False, stop_confirmed=False, sdk_stop_entries=0, latched_fault=None,
         idle_tail_samples=0, tail_samples=0, tail_all_idle=True, tail_rejected=False,
         local_resources_released=False, native_connection_release_verified=False,
         hardware_stop_verified=False, motion_authorized=False, process_exit_required=True,
         read_gate_closed=True, read_remote_result_unknown=False, read_calls=[],
-        cleanup_errors=[], native_sdk_await_qpc_ms=None)
+        cleanup_errors=[], native_sdk_await_qpc_ms=None,
+        stop_entry_rejection=None, stop_entry_rejection_type=None)
     owner = asyncio.current_task()
     proxy = adapter = anchor = None
     permitted = connected_once = recorder_started = False
@@ -227,16 +232,26 @@ async def run_cleanup(settings, recorder, client_factory, authorization_check,
             raise AdmissionRejected('paused_cleanup_invalid_authorization_result')
 
     def permission():
-        authorize()
-        if not permitted or owner is None or owner.done() or owner.cancelling() or adapter is None or anchor is None:
-            raise AdmissionRejected('paused_cleanup_permission_revoked')
-        if getattr(recorder, 'fatal_error', None) is not None or getattr(recorder, 'dropped_normal_events', 0):
-            raise AdmissionRejected('paused_cleanup_recording_unavailable')
-        latest = _cached_sample(adapter)
-        proxy.require_clear_read_gate()
-        validate_sample(latest, clock())
-        _geometry(adapter)
-        validate_position_continuity(latest, anchor)
+        try:
+            check_authorization(stop_authorization_check if stop_authorization_check is not None else authorization_check)
+            if not permitted or owner is None or owner.done() or owner.cancelling() or adapter is None or anchor is None:
+                raise AdmissionRejected('paused_cleanup_permission_revoked')
+            if getattr(recorder, 'fatal_error', None) is not None or getattr(recorder, 'dropped_normal_events', 0):
+                raise AdmissionRejected('paused_cleanup_recording_unavailable')
+            latest = _cached_sample(adapter)
+            proxy.require_clear_read_gate()
+            validate_sample(latest, clock())
+            _geometry(adapter)
+            validate_position_continuity(latest, anchor)
+        except BaseException as error:
+            report['stop_entry_rejection_type'] = type(error).__name__
+            reason = str(error)
+            # Only our local code-shaped reasons are public. Never copy arbitrary
+            # callback/SDK exception text, paths or credentials into the report.
+            if isinstance(error, (AdmissionRejected, ValueError)) and re.fullmatch(
+                    r'(?:paused_cleanup|idle_baseline)_[a-z0-9_]{1,120}', reason):
+                report['stop_entry_rejection'] = reason
+            raise
 
     async def factory(ip):
         nonlocal connected_once, proxy

@@ -64,11 +64,13 @@ def preview(plan):
         readonly_tail_s=2., requires_all_tail_samples_idle_for_complete=True, automatic_movement=False,
         automatic_resume=False, automatic_reset=False, automatic_home=False, automatic_retry=False,
         packet_capture=False, motion_authorized=False, hardware_stop_verified=False,
+        runtime_checks='full_sha_before_fresh_snapshot_metadata_at_stop_for_already_loaded_code',
+        runtime_metadata_is_not_new_byte_hash=True,
         requires_fresh_onsite_authorization=True, native_connection_release='standalone_process_exit_required_not_verified',
         success_means='static_cleanup_evidence_not_motion_stop_or_vr_acceptance')
 
 
-def check(plan, *, approved, expected_hash, expires, confirm):
+def check_scope(plan, *, approved, expected_hash, expires, confirm):
     if confirm != CONFIRM:
         raise ValueError('paused_cleanup_scope_confirmation_required')
     try:
@@ -88,10 +90,26 @@ def check(plan, *, approved, expected_hash, expires, confirm):
         raise ValueError('paused_cleanup_preview_unavailable') from None
     if hashlib.sha256(raw).hexdigest() != expected_hash or value != preview(plan):
         raise ValueError('paused_cleanup_scope_or_hash_changed')
+    return expiry
+
+
+def check(plan, *, approved, expected_hash, expires, confirm):
+    expiry = check_scope(plan, approved=approved, expected_hash=expected_hash, expires=expires, confirm=confirm)
     if sha(plan['config']) != plan['config_sha256'] or runtime_hashes() != plan['runtime_hashes']:
         raise ValueError('paused_cleanup_inputs_changed')
     if datetime.now(UTC) >= expiry:
         raise ValueError('paused_cleanup_authorization_expired_during_checks')
+
+
+def runtime_metadata(paths):
+    try:
+        values = []
+        for path in paths:
+            stat = path.stat()
+            values.append((stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino))
+        return tuple(values)
+    except OSError:
+        raise ValueError('paused_cleanup_runtime_metadata_unavailable') from None
 
 
 async def execute(plan, *, approved, expected_hash, expires, confirm, client_factory=None):
@@ -100,12 +118,28 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
     from app.recording.commissioning import CommissioningRecorder
 
     def admit():
+        nonlocal paths, fingerprints
+        if paths is None:
+            try:
+                candidates = tuple((ROOT / name).resolve(strict=True) for name in plan['runtime_hashes'])
+            except OSError:
+                raise ValueError('paused_cleanup_runtime_metadata_unavailable') from None
+            if not all(path.is_relative_to(ROOT.resolve()) for path in candidates):
+                raise ValueError('paused_cleanup_runtime_path_invalid')
+            paths = candidates
+        before = runtime_metadata(paths)
+        if fingerprints is not None and before != fingerprints:
+            raise ValueError('paused_cleanup_loaded_runtime_metadata_changed')
         check(plan, approved=approved, expected_hash=expected_hash, expires=expires, confirm=confirm)
         read_admit()
+        after = runtime_metadata(paths)
+        if before != after:
+            raise ValueError('paused_cleanup_runtime_changed_during_hashes')
+        read_admit()  # Expiry/config must survive the final metadata sample too.
+        fingerprints = after
 
     def read_admit():
-        # Full scope/runtime hashing remains at phase boundaries and native stop entry.
-        # Per-read guards keep the original stop verification clock budget available.
+        # Full SHA stays before fresh reads; native stop uses the pinned identity.
         expiry = datetime.fromisoformat(expires.replace('Z', '+00:00'))
         if datetime.now(UTC) >= expiry:
             raise ValueError('paused_cleanup_authorization_expired')
@@ -116,7 +150,17 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
         if datetime.now(UTC) >= expiry:
             raise ValueError('paused_cleanup_authorization_expired_during_config_checks')
 
+    def write_admit():
+        check_scope(plan, approved=approved, expected_hash=expected_hash, expires=expires, confirm=confirm)
+        read_admit()
+        if paths is None or fingerprints is None or runtime_metadata(paths) != fingerprints:
+            raise ValueError('paused_cleanup_loaded_runtime_metadata_changed')
+        # Authorization/config must still be valid after the metadata check.
+        check_scope(plan, approved=approved, expected_hash=expected_hash, expires=expires, confirm=confirm)
+        read_admit()
+
     copied = None
+    paths = fingerprints = None
     admit()
     if existing_rpc_connections() != 0:
         raise ValueError('existing_rpc_connections')
@@ -158,7 +202,7 @@ async def execute(plan, *, approved, expected_hash, expires, confirm, client_fac
 
     try:
         await run_cleanup(plan['settings'], recorder, factory, admit, report=report,
-                          read_authorization_check=read_admit)
+                          read_authorization_check=read_admit, stop_authorization_check=write_admit)
     except asyncio.CancelledError:
         report.update(complete=False, interrupted=True)
         raise
