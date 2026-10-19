@@ -267,3 +267,70 @@ async def test_pause_reply_later_than_200ms_stays_unknown_after_late_finish():
         release.set()
         for _ in range(10):
             await asyncio.sleep(0)
+
+
+@pytest.mark.parametrize('elapsed_ns,accepted', [
+    (199_999_999, True), (200_000_000, False), (200_000_001, False),
+])
+async def test_pause_rpc_deadline_boundary_never_accepts_exactly_200ms(elapsed_ns, accepted):
+    clock = FakeClock()
+    client = PauseZClient(clock)
+    original = client.pause_move
+    async def pause():
+        await original()
+        clock.value += elapsed_ns
+    client.pause_move = pause
+    result, _, recorder = await exercise(client=client, clock=clock)
+    assert result['complete'] is accepted
+    assert result['stop_confirmed'] is accepted
+    assert result['latched_fault'] == (None if accepted else 'stop_unverified')
+    lifecycle = [e for e in recorder.events if e['kind'] == 'stop_rpc_lifecycle']
+    assert len(lifecycle) == 1 and lifecycle[0]['method'] == 'pause_move'
+    assert lifecycle[0]['outcome'] == ('returned' if accepted else 'returned_late')
+    assert [c[0] for c in client.write_calls] == ['move_pvat', 'pause_move']
+
+
+@pytest.mark.parametrize('finished_after_ns,accepted', [
+    (0, True), (180_000_000, True), (199_000_000, False),
+    (200_000_000, False), (201_000_000, False), (281_000_000, False),
+])
+async def test_pause_needs_full_stability_before_original_verification_deadline(finished_after_ns, accepted):
+    # Synthetic 20 ms cadence, not a replay of field feedback or physical braking.
+    clock = FakeClock()
+    client = PauseZClient(clock, mode='running')
+    original = client.get_kin_data
+    async def kin():
+        if client.pause_ns is not None:
+            elapsed = clock.now_ns() - client.pause_ns
+            client.motion_state = 'FINISHED' if elapsed >= finished_after_ns else 'RUNNING'
+        return await original()
+    client.get_kin_data = kin
+    result, _, recorder = await exercise(client=client, clock=clock)
+    assert result['complete'] is accepted
+    assert result['stop_confirmed'] is accepted
+    assert result['latched_fault'] == (None if accepted else 'stop_incomplete')
+    diagnostics = next(e for e in recorder.events if e['kind'] == 'stop_diagnostics')
+    samples = diagnostics['samples']
+    first_eligible = next(s for s in samples if s['stationary'])
+    span_ns = samples[-1]['observed_ns'] - first_eligible['observed_ns']
+    verification_elapsed_ns = samples[-1]['observed_ns'] - samples[0]['observed_ns']
+    if accepted:
+        assert span_ns >= 300_000_000 and verification_elapsed_ns < 500_000_000
+    else:
+        assert verification_elapsed_ns >= 500_000_000
+    assert [c[0] for c in client.write_calls] == ['move_pvat', 'pause_move']
+
+
+@pytest.mark.parametrize('raw', ['IDLE', 'PAUSED', 5, 6])
+async def test_settled_raw_state_cannot_hide_unfinished_task(raw):
+    clock = FakeClock()
+    client = PauseZClient(clock, mode='running')
+    original = client.pause_move
+    async def pause():
+        await original()
+        client.robot_state = raw
+    client.pause_move = pause
+    result, _, _ = await exercise(client=client, clock=clock)
+    assert not result['complete'] and not result['stop_confirmed']
+    assert result['latched_fault'] == 'stop_incomplete'
+    assert [c[0] for c in client.write_calls] == ['move_pvat', 'pause_move']
