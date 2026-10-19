@@ -387,7 +387,8 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
                      *, clock=time.monotonic_ns, sleep=asyncio.sleep, report=None, write_check=None,
                      parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
                      parallel_motion_reads=False,prelease_feedback_fk=False,deadline_clock=None,
-                     observe_motion=False,offline_pause_comparison=False,offline_stop_start_period=False):
+                     observe_motion=False,offline_pause_comparison=False,offline_stop_start_period=False,
+                     offline_parallel_stop_reads=False):
     # No CLI or normal backend selects this option. The explicit injected
     # factory must supply the caller's Fake, never a real robot transport.
     if type(offline_pause_comparison) is not bool:
@@ -400,7 +401,8 @@ async def run_window(settings, recorder, client_factory, authorization_check, ho
         parallel_motion_reads=parallel_motion_reads, prelease_feedback_fk=prelease_feedback_fk,
         deadline_clock=deadline_clock, observe_motion=observe_motion,
         pause_comparison=offline_pause_comparison, offline_pause_comparison=offline_pause_comparison,
-        offline_stop_start_period=offline_stop_start_period)
+        offline_stop_start_period=offline_stop_start_period,
+        offline_parallel_stop_reads=offline_parallel_stop_reads)
 
 
 async def _run_window(settings, recorder, client_factory, authorization_check, hot_check,
@@ -408,7 +410,14 @@ async def _run_window(settings, recorder, client_factory, authorization_check, h
                       parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
                       parallel_motion_reads=False, prelease_feedback_fk=False, deadline_clock=None,
                       observe_motion=False, pause_comparison=False, offline_pause_comparison=False,
-                      offline_stop_start_period=False, _site_pause_start_period=False):
+                      offline_stop_start_period=False, _site_pause_start_period=False,
+                      offline_parallel_stop_reads=False):
+    if type(offline_parallel_stop_reads) is not bool:
+        raise TypeError('finite_parallel_stop_reads_requires_boolean')
+    if offline_parallel_stop_reads and (
+            not offline_pause_comparison or not pause_comparison
+            or offline_stop_start_period is not True or settings.ip != '127.0.0.1'):
+        raise ValueError('finite_parallel_stop_reads_requires_offline_pause')
     if type(_site_pause_start_period) is not bool:
         raise TypeError('finite_site_pause_start_period_requires_boolean')
     if _site_pause_start_period and (not pause_comparison or offline_pause_comparison or offline_stop_start_period):
@@ -441,6 +450,8 @@ async def _run_window(settings, recorder, client_factory, authorization_check, h
         offline_pause_comparison=offline_pause_comparison,
         site_pause_comparison=pause_comparison and not offline_pause_comparison,
         site_pause_start_period=_site_pause_start_period,
+        offline_parallel_stop_reads=offline_parallel_stop_reads,
+        stop_snapshot_read_policy='six_fields_parallel' if offline_parallel_stop_reads else 'serial',
         stop_sampling_policy='start_period_20ms' if offline_stop_start_period or _site_pause_start_period else 'fixed_delay_after_read_20ms',
         tail_complete=False, displacement_consistent=False, displacement_samples=0, cleanup_errors=[], interrupted=False,
         read_remote_result_unknown=False, read_calls=[], native_connection_release_verified=False,
@@ -526,6 +537,9 @@ async def _run_window(settings, recorder, client_factory, authorization_check, h
                    ('move_pvat', termination_method, 'kinematics_inverse', 'kinematics_forward')):
             raise AdmissionRejected('finite_scope_capability_missing')
         client_type = _FinitePauseScopeClient if pause_comparison else FiniteScopeClient
+        if offline_parallel_stop_reads:
+            from app.commissioning.finite_stop_parallel import ParallelStopScopeClient
+            client_type = ParallelStopScopeClient
         proxy = client_type(native, motion_permission, stop_permission, hot, owner, clock,
                                  parallel_fk=parallel_fk_audit,parallel_motion_reads=parallel_motion_reads,
                                  native_write_check=write_check,deadline_clock=deadline_clock)
@@ -538,6 +552,9 @@ async def _run_window(settings, recorder, client_factory, authorization_check, h
         adapter_type = _FinitePauseComparisonAdapter if pause_comparison else FiniteWindowDiagnosticAdapter
         if _site_pause_start_period:
             adapter_type = _FiniteSamplingPauseAdapter
+        if offline_parallel_stop_reads:
+            from app.commissioning.finite_stop_parallel import ParallelStopPauseAdapter
+            adapter_type = ParallelStopPauseAdapter
         adapter_options = dict(offline_stop_start_period=offline_stop_start_period) if pause_comparison else {}
         adapter = adapter_type(settings, client_factory=factory, clock=clock,
                                                sleep=sleep, event_callback=recorder.write_event,

@@ -783,6 +783,9 @@ class RealLebaiAdapter:
             transaction.verification_started_ns = self._clock()
         started_ns = transaction.verification_started_ns
         stable_since_ns = transaction.stable_since_ns
+        diagnostics["verification_started_ns"] = started_ns
+        diagnostics["verification_deadline_ns"] = started_ns + 500_000_000
+        diagnostics["stable_since_ns"] = stable_since_ns
         stable_anchor: LebaiSnapshot | None = transaction.stable_anchor
         try:
             while True:
@@ -839,6 +842,7 @@ class RealLebaiAdapter:
                         stable_anchor = snapshot
                         transaction.stable_since_ns = stable_since_ns
                         transaction.stable_anchor = stable_anchor
+                        diagnostics["stable_since_ns"] = stable_since_ns
                     elif (now_ns - stable_since_ns >= 300_000_000
                           and (transaction.confirmed or now_ns - started_ns < 500_000_000)):
                         if self._motion_calls.unknown_methods & self._stop_blocking_motion_methods:
@@ -853,6 +857,7 @@ class RealLebaiAdapter:
                     stable_anchor = None
                     transaction.stable_since_ns = None
                     transaction.stable_anchor = None
+                    diagnostics["stable_since_ns"] = None
                     transaction.confirmed = False
                 if now_ns - started_ns >= 500_000_000:
                     self._latched_fault = "stop_incomplete"
