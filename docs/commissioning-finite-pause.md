@@ -59,3 +59,19 @@
 上表的单次连接、+Z 0.05 mm/≤80 ms、IK1/FK4、唯一暂停、全部字段读取、100/60 ms及200/300/500 ms判据、两秒只读尾段、禁止恢复/回退/重试均沿用。新增策略只影响两轮读取之间的等待，不保证完成时刻或物理制动边界。报告额外标记 `site_pause_start_period=true`，同时保留原故障和实际写入计数。
 
 本轮只批准离线实现及验证。真实尝试仍需新的明确范围、有效期和现场条件；若上次暂停后仍为PAUSED，保留状态，不要为满足IDLE预检而点击启动或恢复。清理保留轨迹属于另一项现场决定。
+
+## 独立并发停止快照入口（2026-10-19）
+
+入口为 `scripts/real_robot_finite_pause_parallel.py`，默认只预览：
+
+```powershell
+.venv/Scripts/python.exe scripts/real_robot_finite_pause_parallel.py --config <现场配置路径> --output <全新输出目录>
+```
+
+它绑定独立范围 `one_finite_z50um_window_and_reserved_parallel_sampling_pause` 和确认语句 `I_APPROVE_ONE_FINITE_Z50UM_WINDOW_AND_ONE_PARALLEL_SAMPLING_PAUSE_NO_RESUME`。预览固定 `stop_snapshot_read_policy=six_fields_parallel`、`stop_sampling_policy=start_period_20ms`，写入顺序及次数仍为唯一有限段和一次预留暂停。默认预览不加载SDK、不连接、不创建执行目录；无有效期材料不能执行。
+
+连接检查仍在前；状态、急停、关节/TCP反馈、工具、夹爪、任务编号六字段使用独立读所有权并发；全部已知完成后才查询保留任务的状态。原八项读取均保留，RUNNING、漂移、未决或迟到读仍不能通过。重复采样只替换已知完成的旧组；失败的组保留隔离，不能被晚到回复或后续新组覆盖。普通反馈和两秒尾段保持原读取方式。
+
+该入口复用共享读实现，但使用独立site适配器和runner。原Fake开关仍只接受字面127.0.0.1、Fake标签及显式注入；原暂停/起点周期入口拒绝新的私有策略关键字。新旧预览和token不能互用，网页/VR默认停止方式不变。源码哈希包含完整后端、原生SDK及本入口的辅助脚本链；全量SHA仍在新快照/运动租约前完成，实际PVAT入口沿用固定文件身份/元数据、配置及期限检查。
+
+上表+Z 0.05 mm/≤80 ms、IK1/FK4、100/60 ms、200/300/500 ms、0.001 rad准备位容差及原工作区/限速均不变；无停止回退、恢复、额外目标或重试。新增精确验证起点和稳定锚点只用于报告原事务计时。并发采样的离线通过不代表真实目标跟随、停止可靠性或连续控制已验收，任何现场连接和写入仍须新的具体授权及当前现场条件。

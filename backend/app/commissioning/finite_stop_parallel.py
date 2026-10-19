@@ -1,8 +1,8 @@
-"""Explicit injected-Fake comparison only; no site runner or CLI selects it."""
+"""Owned stop snapshots shared by distinct Fake and separately admitted scopes."""
 from contextlib import contextmanager
 
 from app.commissioning.finite_window_run import (
-    _FinitePauseScopeClient, _FinitePauseComparisonAdapter,
+    _FinitePauseScopeClient, _FinitePauseComparisonAdapter, _FiniteSamplingPauseAdapter,
 )
 from app.commissioning.idle_stop_baseline import AdmissionRejected
 
@@ -28,12 +28,8 @@ class ParallelStopScopeClient(_FinitePauseScopeClient):
             self._snapshot_context.reset(token)
 
 
-class ParallelStopPauseAdapter(_FinitePauseComparisonAdapter):
+class _ParallelStopSnapshotMixin:
     def __init__(self, settings, **kwargs):
-        if (settings.ip != '127.0.0.1' or kwargs.get('backend_label') != 'LEBAI_FAKE'
-                or kwargs.get('offline_stop_start_period') is not True
-                or not callable(kwargs.get('client_factory'))):
-            raise ValueError('finite_parallel_stop_reads_requires_offline_pause')
         self._stop_read_guard = None
         super().__init__(settings, **kwargs)
 
@@ -77,3 +73,25 @@ class ParallelStopPauseAdapter(_FinitePauseComparisonAdapter):
                 raise AdmissionRejected('finite_parallel_stop_read_not_admitted')
             self._stop_read_guard()
         super()._before_snapshot_install(snapshot, read)
+
+
+class ParallelStopPauseAdapter(_ParallelStopSnapshotMixin, _FinitePauseComparisonAdapter):
+    """The original Fake-only selector remains restricted to literal loopback."""
+    def __init__(self, settings, **kwargs):
+        if (settings.ip != '127.0.0.1' or kwargs.get('backend_label') != 'LEBAI_FAKE'
+                or kwargs.get('offline_stop_start_period') is not True
+                or not callable(kwargs.get('client_factory'))):
+            raise ValueError('finite_parallel_stop_reads_requires_offline_pause')
+        super().__init__(settings, **kwargs)
+
+
+class SiteParallelStopPauseAdapter(_ParallelStopSnapshotMixin, _FiniteSamplingPauseAdapter):
+    """Selected by the independently authorized runner, never the Fake flag."""
+    def __init__(self, settings, **kwargs):
+        from app.commissioning.finite_pause_window import validate_settings
+        validate_settings(settings)
+        if (kwargs.get('backend_label') != 'LEBAI'
+                or kwargs.get('offline_stop_start_period', False) is not False
+                or not callable(kwargs.get('client_factory'))):
+            raise ValueError('finite_site_parallel_stop_scope_required')
+        super().__init__(settings, **kwargs)

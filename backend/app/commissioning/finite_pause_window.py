@@ -30,6 +30,8 @@ def validate_settings(settings):
 
 async def run_pause_window(settings, recorder, client_factory, authorization_check, hot_check,
                            *, clock, write_check, **kwargs):
+    if '_site_parallel_stop_reads' in kwargs:
+        raise ValueError('finite_pause_parallel_scope_required')
     if '_site_pause_start_period' in kwargs:
         raise ValueError('finite_pause_sampling_scope_required')
     validate_settings(settings)

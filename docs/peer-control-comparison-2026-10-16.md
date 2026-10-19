@@ -888,3 +888,23 @@ Fake摘要：`.tmp/static-cleanup-identity-20261019/real-code-scale-20261019T081
 最终回环明细：`.tmp/static-cleanup-identity-20261019/offline-margin-followup/sdk-parallel-results-v2.json`，SHA-256为c94c8ce5a9e50162598f0a4617b97a30e868437121001586d403b5f11f8b4f54；前次9场景结果保留为sdk-parallel-results.json，SHA-256为8634170743b3eb94f8aa88ec6b730681d06b28bb38a5ff32b0e3397e78f7d28f。两份均为本机合成诊断，不提交。
 
 当前仅离线候选完成。历史现场stop_unverified/stop_incomplete、50 µm目标实际跟随缺失、速度审计失败均未清除。旧现场授权已消耗，暂停后的控制器不得自动启动/恢复；新连接、清理或运动仍需新的现场范围和条件确认。用户原总结和原始资料未修改，未推送。
+
+## 2026-10-19：并发停止快照的独立入口离线接线
+
+用户通过call_73286764b14e4a8b81780995414f8e3a明确认可连续完成独立入口及离线验证；未授权新真机连接或动作。本轮新增finite_pause_parallel runner及real_robot_finite_pause_parallel.py，默认只预览、独立范围/确认语句、配置和完整运行时哈希绑定、QPC事件循环及排他输出消费。固定范围保持+Z 50 µm/≤80 ms、IK1/FK4、最多一次预留pause_move、原100/60 ms及200/300/500 ms、两秒只读尾段，没有增加幅度或开放连续控制。
+
+共享并发读实现提取为mixin，原Fake类的字面127.0.0.1/Fake标签/起点周期/显式工厂检查保留。新site类另行验证50 µm配置、原请求限速及私有IPv4；仅新runner选择它。旧暂停和起点周期runner在准入前拒绝新私有策略关键字（包括False），旧预览/token不能授权新入口，新材料也不能授权旧入口。生产网页和原入口默认策略不变。
+
+新增34项首先全部失败于缺少入口/runner或旧scope未明确拒绝新参数；实现后这34项和原Fake22项共56项通过。补齐严格布尔私有选择器、旧入口False关键字及非QPC事件循环拒绝，最终新增43项。包含原有限段、暂停、采样、静止清理、停止事务/时序/优先级/快照所有权和各CLI的495项定向回归全部通过（80.99秒），未运行后端全集或前端构建。本次扩展没有出现额外失败；上一阶段旧漂移用例的首轮提前退出记录仍保留，不因本次通过而删除。
+
+对实际117个运行时文件的完整SHA/metadata核验执行一次进程内Fake完整CLI：所有约81–161 ms的全量哈希均在运动租约前；运动反馈年龄44.085 ms，实际Fake PVAT1/pause1/stop0，原停止验证、两秒尾段及整体判据通过，无故障。工厂只返回Fake，本机RPC表在此合成检查中固定为0；SDK未导入、网络/发现调用为0。摘要为`.tmp/finite-pause-parallel-20261019/real-code-scale-20261019T090250115545Z/summary.json`，SHA-256为12b2702dbcf47a97a4e496dfc8f2ce8b2bab7c8d44b5b416b67c533245691574。它不是现场物理跟随或停止证据。
+
+新site适配器的停止读取另通过相同原生SDK连接自有127.0.0.1随机端口完成9场景回环；配置地址192.168.10.20在该探针中仅是合成标签，注入工厂明确只连接自己创建的loopback listener。协议仅允许停止验证读取及一次pause_move，未发送PVAT、IK/FK或其它写入，不能称为原生完整运动链验收。串行/并发正常场景通过，持续RUNNING、晚FINISHED、漂移和晚生效仍stop_incomplete；读错误、读迟到和暂停迟到仍stop_unverified，晚到读未安装，所有本机引用均释放。
+
+回环结果`.tmp/finite-pause-parallel-20261019/sdk-loopback/sdk-parallel-results-v2.json`，SHA-256为6acdcacf9695b79b95fa88d9891b13a65d674691d0853ef83ac6fd6fb7ccc05c，绑定当前共享读模块、新runner、有限段runner和基础适配器源码哈希。准备探针时一次PowerShell引号解析失败，未启动Python或SDK；改用保存的Python脚本生成探针后执行，产品代码未因此放宽。
+
+原始资料、配置和所有合成执行材料保留本机；新入口仍需新的现场范围及条件授权，旧材料和已消耗的授权不能复用。上次PAUSED/目视静止的收尾不自动变成新的IDLE或运动许可，任何清理、恢复或移动不得自动追加。历史停止/实际跟随/速度审计问题全部保留，未推送，用户原总结未改。
+
+独立只读复核未发现P1/P2，确认新旧scope/token双向隔离、默认预览零执行、输出一次消费、源码/配置身份链及新MRO的读取所有权和取消/迟到保护；新两测试文件及原Fake22项共65项通过（12.85秒），复核未连接设备或导入SDK。
+
+离线待审材料为`.tmp/finite-pause-parallel-20261019/pending/scope.md`及preview.json；预览SHA-256为302256e99dae4a4f6feb236607b7c5d3da910887d9001faaad4eb1f9f2ca8e86，当前117个运行时文件及原配置SHA均核对一致，SDK未导入、执行目录不存在、有效期为null，不可据此启动。后续先根据当天现场状态选择范围；本轮没有申请或消耗新的真机授权。
