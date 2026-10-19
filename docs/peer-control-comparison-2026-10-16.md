@@ -929,3 +929,26 @@ SDK初始化及一次连接已进入并返回。连接及预检两组原始状�
 | analysis.json（只读离线派生） | 525dd3d21e025ed718d4d0d54f54a1054463c434de8742812c04465a7ac52fbc |
 
 清理待审材料：`.tmp/finite-pause-parallel-20261019/cleanup-pending-20261019T091535583148Z/scope.md`及preview.json，预览SHA-256为977789d9a97cba821cfed4293fcf5be6b70563de69a6c8d4f1670cb37aa80af3，113个当前运行时文件与原配置一致，SDK未导入、执行目录不存在、无有效期，未执行。历史运动中停止、实际跟随及速度审计问题继续保留；本轮无产品代码修改、pytest或前端构建，原始资料留本机，用户原总结未改，未推送。
+
+## 2026-10-19：并发入口拒绝后的单次静止清理通过
+
+用户通过call_e21cfaa689764339a7ac8f32af004106确认现场仍满足并批准一次既有静止清理。代码3d9a9b9（产品8ffc7a5）、113个运行时文件、原配置与已审预览977789d9a97cba821cfed4293fcf5be6b70563de69a6c8d4f1670cb37aa80af3一致，本机RPC0。北京时间18:23:58生成新材料，仅输出目录和有效期变化，最晚18:33:58启动；唯一Python排他标记后执行一次，实际启动18:24:14，无自动重试。
+
+一次SDK连接后，重新确认PAUSED、保留任务FINISHED、零报告关节速度及原全部预检，再实际进入一次stop_move。原生SDK await为8.5522 ms，包含本机写前权限检查的代理await为18.5342 ms，均为QPC差值；不是物理停止时间。stop_entry_rejection=null，无其它写入或运动目标。
+
+原串行停止验证读取6组stationary样本，距原验证起点约47、109、172、234、297、359 ms；第一组PAUSED/FINISHED，其后5组IDLE/FINISHED，稳定跨度约312 ms，在原500 ms内通过，原200 ms及300 ms条件不变。这组记录使用粗粒度monotonic时钟，不能作亚毫秒物理时序解释。尾段10组均IDLE/FINISHED，验证及尾段报告关节位置最大变化0、最大报告速度0。
+
+complete=true、stop_confirmed=true、sdk_stop_entries=1、latched_fault=null、hardware_stop_verified=false；无未知读取或清理异常，本机引用释放且进程退出后RPC0，原生控制器连接释放仍未验证。子进程与外层均退出0。未使用新并发停止采样，也未执行PVAT、IK/FK、夹爪、Home、准备位移动、复位、恢复或抓包。
+
+这次仅验收静止清理，不证明历史运动中停止、50 µm实际跟随、速度反馈审计或连续网页/VR控制已经通过。结束后立即请求用户确认全程静止、异常及急停情况；本节写入时该目视收尾回复待收到，不能从软件样本代替。授权已消耗，未追加任何连接或动作，下一次运动仍须新的具体范围与当前现场批准。
+
+私有目录：`.tmp/finite-pause-parallel-20261019/cleanup-approved-20261019T102358014625Z/`。
+
+| 文件 | SHA-256 |
+| --- | --- |
+| preview.json | cf5fce9a2ef912998b8e6b0ff541f59251ecec673f4aa8cee223e38d1b190a0c |
+| result/result.json | 496628e7a0c1dd689a9a8c24f7a20470b7e9ae96389240d9d5fd7e5c40bb7ff7 |
+| result/sessions/20261019T102416Z-18a248b2/session.jsonl | 241b53bda950709e07abde1b0752eea552efc948f77452c99b0ad2bb5fe89dc0 |
+| analysis.json（只读离线派生，收尾待确认） | c22d25dc7032446958074d50f2d6d698b102b912e603b7ef8a9585caea6834c3 |
+
+本轮无产品代码修改、pytest或前端构建；原始资料和配置留本机，用户原总结未改，未推送。
