@@ -43,3 +43,19 @@
 候选保留原串行读取和全部判据，仅将读完后固定等待20 ms改为相邻读取起点至少间隔20 ms；慢读取不再追加等待，但仍让出事件循环以处理取消。报告用 `stop_sampling_policy` 区分 `start_period_20ms` 与原 `fixed_delay_after_read_20ms`。原停止路径和现场暂停入口继续使用后者。
 
 合成慢读取模型中，原调度在502 ms失败，候选在494 ms取得304 ms稳定区间；这不是现场日志重放或物理制动证据。RUNNING、持续漂移、迟到RPC、未知读取及取消仍不能整体通过，旧现场 `stop_incomplete` 保留。
+
+## 独立起点周期采样入口（2026-10-19）
+
+新增 `scripts/real_robot_finite_pause_sampling.py`，固定使用上述起点周期采样；原 `real_robot_finite_pause.py` 和网页默认仍使用读完后固定等待。旧入口不能通过私有参数选择新策略，原 Fake 选项仍只允许字面127.0.0.1和可信工厂。
+
+新入口默认只预览。例如：
+
+```powershell
+.venv/Scripts/python.exe scripts/real_robot_finite_pause_sampling.py --config <现场配置路径> --output <全新输出目录>
+```
+
+预览范围为 `one_finite_z50um_window_and_reserved_start_period_pause`，确认语句为 `I_APPROVE_ONE_FINITE_Z50UM_WINDOW_AND_ONE_START_PERIOD_PAUSE_NO_RESUME`，明确绑定 `stop_sampling_policy=start_period_20ms`。新旧暂停预览和确认语句不能互换，策略或其它配置变化后须重新核对材料。默认预览不产生执行目录、不加载SDK，也不取得现场授权。
+
+上表的单次连接、+Z 0.05 mm/≤80 ms、IK1/FK4、唯一暂停、全部字段读取、100/60 ms及200/300/500 ms判据、两秒只读尾段、禁止恢复/回退/重试均沿用。新增策略只影响两轮读取之间的等待，不保证完成时刻或物理制动边界。报告额外标记 `site_pause_start_period=true`，同时保留原故障和实际写入计数。
+
+本轮只批准离线实现及验证。真实尝试仍需新的明确范围、有效期和现场条件；若上次暂停后仍为PAUSED，保留状态，不要为满足IDLE预检而点击启动或恢复。清理保留轨迹属于另一项现场决定。

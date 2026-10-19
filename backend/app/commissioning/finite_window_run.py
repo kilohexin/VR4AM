@@ -341,6 +341,14 @@ class _FinitePauseScopeClient(FiniteScopeClient):
             self.native_completed_ns = time.perf_counter_ns()
 
 
+async def _wait_stop_start_period(adapter, read_started_ns):
+    deadline_ns = read_started_ns + 20_000_000
+    # Always yield, including a slow read. Recheck an early timer wakeup.
+    await adapter._sleep(max(0., (deadline_ns - adapter._clock()) / 1e9))
+    while (remaining_ns := deadline_ns - adapter._clock()) > 0:
+        await adapter._sleep(remaining_ns / 1e9)
+
+
 class _FinitePauseComparisonAdapter(FiniteWindowDiagnosticAdapter):
     _motion_stop_rpc_method = 'pause_move'
 
@@ -357,12 +365,14 @@ class _FinitePauseComparisonAdapter(FiniteWindowDiagnosticAdapter):
     async def _wait_for_next_stop_sample(self, read_started_ns):
         if not self._offline_stop_start_period:
             return await super()._wait_for_next_stop_sample(read_started_ns)
-        deadline_ns = read_started_ns + 20_000_000
-        # Always yield, including a slow read. Recheck an early timer wakeup;
-        # neither extra reads nor a non-yielding loop may bypass the period.
-        await self._sleep(max(0., (deadline_ns - self._clock()) / 1e9))
-        while (remaining_ns := deadline_ns - self._clock()) > 0:
-            await self._sleep(remaining_ns / 1e9)
+        await _wait_stop_start_period(self, read_started_ns)
+
+
+class _FiniteSamplingPauseAdapter(_FinitePauseComparisonAdapter):
+    """Selected only by the separately admitted sampling runner."""
+
+    async def _wait_for_next_stop_sample(self, read_started_ns):
+        await _wait_stop_start_period(self, read_started_ns)
 
 
 def _rest(sample, now_ns):
@@ -398,7 +408,11 @@ async def _run_window(settings, recorder, client_factory, authorization_check, h
                       parallel_fk_audit=False, ready_joint_tolerance_rad=READY_Q_TOLERANCE_RAD,
                       parallel_motion_reads=False, prelease_feedback_fk=False, deadline_clock=None,
                       observe_motion=False, pause_comparison=False, offline_pause_comparison=False,
-                      offline_stop_start_period=False):
+                      offline_stop_start_period=False, _site_pause_start_period=False):
+    if type(_site_pause_start_period) is not bool:
+        raise TypeError('finite_site_pause_start_period_requires_boolean')
+    if _site_pause_start_period and (not pause_comparison or offline_pause_comparison or offline_stop_start_period):
+        raise ValueError('finite_site_pause_sampling_scope_invalid')
     if type(offline_stop_start_period) is not bool:
         raise TypeError('finite_stop_start_period_requires_boolean')
     if offline_stop_start_period and (
@@ -426,7 +440,8 @@ async def _run_window(settings, recorder, client_factory, authorization_check, h
         termination_entries=0, termination_method='pause_move' if pause_comparison else 'stop_move',
         offline_pause_comparison=offline_pause_comparison,
         site_pause_comparison=pause_comparison and not offline_pause_comparison,
-        stop_sampling_policy='start_period_20ms' if offline_stop_start_period else 'fixed_delay_after_read_20ms',
+        site_pause_start_period=_site_pause_start_period,
+        stop_sampling_policy='start_period_20ms' if offline_stop_start_period or _site_pause_start_period else 'fixed_delay_after_read_20ms',
         tail_complete=False, displacement_consistent=False, displacement_samples=0, cleanup_errors=[], interrupted=False,
         read_remote_result_unknown=False, read_calls=[], native_connection_release_verified=False,
         local_resources_released=False, process_exit_required=True, pvat_remote_result_unknown=False,
@@ -521,6 +536,8 @@ async def _run_window(settings, recorder, client_factory, authorization_check, h
         _callback(authorization_check)
         await recorder.start()
         adapter_type = _FinitePauseComparisonAdapter if pause_comparison else FiniteWindowDiagnosticAdapter
+        if _site_pause_start_period:
+            adapter_type = _FiniteSamplingPauseAdapter
         adapter_options = dict(offline_stop_start_period=offline_stop_start_period) if pause_comparison else {}
         adapter = adapter_type(settings, client_factory=factory, clock=clock,
                                                sleep=sleep, event_callback=recorder.write_event,
