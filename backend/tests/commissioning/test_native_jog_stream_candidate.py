@@ -350,3 +350,18 @@ async def test_first_packet_does_not_adopt_already_moving_robot():
         assert c.write_calls == []
     finally:
         await close(a)
+
+
+async def test_input_gap_cannot_reopen_stream_ahead_of_delayed_watchdog():
+    a, c, clock, _ = await connected()
+    try:
+        offer(a, clock, 1)
+        await a.dispatch_latest()
+        clock.advance_ms(100)
+        # No event-loop yield: the newly arriving API call beats the watchdog.
+        with pytest.raises(BackendCommandError):
+            offer(a, clock, 2)
+        await a.revoke_stream(StopReason.GRIP_RELEASED)
+        assert a.native_jog_entries == 1 and a._gate.revoked
+    finally:
+        await close(a)

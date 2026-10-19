@@ -32,6 +32,9 @@ class JogStreamGate:
         if self.revoked or not self.started_ns <= now < self.session_deadline_ns:
             self.revoke()
             raise ValueError('native_jog_stream_closed')
+        if now >= self.deadline_ns:
+            self.revoke()
+            raise ValueError('native_jog_stream_input_expired')
         return now
 
     def _validate(self, packet, signature):

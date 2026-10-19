@@ -135,3 +135,16 @@ def test_mutated_packet_cannot_enter_gate_as_valid_input(field, value):
     object.__setattr__(p, field, value)
     with pytest.raises(ValueError):
         g.offer(p)
+
+
+def test_new_input_cannot_revive_consumed_input_after_expiry_before_watchdog_runs():
+    g, clock = gate()
+    p = packet(1)
+    g.offer(p)
+    g.take_latest()
+    g.mark_entered(p)
+    g.finish(p)
+    clock[0] += 100_000_000
+    with pytest.raises(ValueError, match='expired'):
+        g.offer(packet(2, clock[0]))
+    assert g.revoked
