@@ -1,6 +1,6 @@
 """Internal one-submission ownership shared by explicit diagnostic adapters."""
 from collections.abc import Callable
-from app.commissioning.native_jog_packet import validate_packet
+from app.commissioning.native_jog_packet import validate_packet_diagnostic
 from app.robots.base import BackendCommandError
 from app.robots.lebai_adapter import RealLebaiAdapter
 from app.robots.lebai_motion_calls import OwnedMotionCalls
@@ -57,7 +57,7 @@ class _SingleJogSubmission(RealLebaiAdapter):
         sequence, completion = read.sequence, snapshot.read_completed_ns
         entered = False
 
-        def require_current():
+        def require_current(boundary):
             if not self._submission_authorized():
                 raise BackendCommandError('native_jog_authority_revoked')
             if self.settings is not self._jog_settings:
@@ -76,24 +76,26 @@ class _SingleJogSubmission(RealLebaiAdapter):
             result = self._preflight_from_snapshot(snapshot)
             if not result.ready:
                 raise BackendCommandError(result.reason or 'preflight_not_ready')
-            validate_packet(packet, limits=self._jog_limits, actual_p=snapshot.actual_tcp.p,
+            validate_packet_diagnostic(packet, boundary=boundary+'_before_model',
+                limits=self._jog_limits, actual_p=snapshot.actual_tcp.p,
                 snapshot_ns=snapshot.captured_ns, now_ns=self._clock(),
                 generation=generation, config_sha256=self._jog_sha)
             if self._model_region_guard is not None:
                 self._model_region_guard.validate(packet, snapshot, settings=self.settings,
                     limits=self._jog_limits, config_sha256=self._jog_sha)
                 # Local model work cannot renew the input or snapshot lease.
-                validate_packet(packet, limits=self._jog_limits, actual_p=snapshot.actual_tcp.p,
+                validate_packet_diagnostic(packet, boundary=boundary+'_after_model',
+                    limits=self._jog_limits, actual_p=snapshot.actual_tcp.p,
                     snapshot_ns=snapshot.captured_ns, now_ns=self._clock(),
                     generation=generation, config_sha256=self._jog_sha)
 
-        require_current()
+        require_current('submission')
         async with self._sdk_lock:
-            require_current()
+            require_current('sdk_lock')
 
             async def operation():
                 nonlocal entered
-                require_current()  # Inside owned task, at actual SDK boundary.
+                require_current('owned_entry')  # Inside owned task, at actual SDK boundary.
                 a,v,t,frame = packet.sdk_arguments()
                 entered = True
                 self.native_jog_entries += 1

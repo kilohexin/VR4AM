@@ -119,6 +119,82 @@ def validate_packet(packet, *, limits, actual_p, snapshot_ns, now_ns,
             raise ValueError('outside nominal planning box/reserve')
 
 
+_DIAGNOSTIC_BOUNDARIES = frozenset((
+    'site_motion_permission', 'submission_before_model', 'submission_after_model',
+    'sdk_lock_before_model', 'sdk_lock_after_model',
+    'owned_entry_before_model', 'owned_entry_after_model',
+))
+_LOCAL_REJECTIONS = {
+    'expired or mismatched packet identity': 'native_jog_packet_identity_or_expiry',
+    'motion exceeds limits or is neutral': 'native_jog_packet_motion_limits',
+    'outside nominal planning box/reserve': 'native_jog_packet_outside_planning_box',
+}
+_LOCAL_CODES = frozenset((*_LOCAL_REJECTIONS.values(),
+    'native_jog_snapshot_stale', 'native_jog_snapshot_future',
+    'native_jog_input_stale', 'native_jog_input_future'))
+
+
+class _LocalValidationError(ValueError):
+    """Evidence from a known local call only; retain legacy ValueError text."""
+    def __init__(self, message, evidence):
+        super().__init__(message)
+        self._local_evidence = tuple(evidence.items())
+
+
+def local_validation_diagnostic(error):
+    # Never promote vendor text/attributes, subclasses or arbitrary payloads.
+    if type(error) is not _LocalValidationError:
+        return None
+    entries = getattr(error, '_local_evidence', None)
+    if (type(entries) is not tuple or len(entries) != 6
+            or any(type(row) is not tuple or len(row) != 2 or type(row[0]) is not str
+                for row in entries)):
+        return None
+    details = dict(entries)
+    if (type(details.get('code')) is not str or details['code'] not in _LOCAL_CODES
+            or type(details.get('boundary')) is not str
+            or details['boundary'] not in _DIAGNOSTIC_BOUNDARIES
+            or set(details) != {'schema','code','boundary','checked_ns',
+                'snapshot_age_ns','input_age_ns'}
+            or type(details['schema']) is not int or details['schema'] != 1
+            or any(type(details[k]) is not int or abs(details[k]) > 2**63-1
+                for k in ('checked_ns','snapshot_age_ns','input_age_ns'))):
+        return None
+    return details
+
+
+def validate_packet_diagnostic(packet, *, boundary, **kwargs):
+    """Run the original validator once, using its original sampled timestamp.
+
+    Format diagnostics only after a known local rejection. This wrapper cannot
+    authorize a packet, sample a new clock, or renew either freshness lease.
+    """
+    try:
+        return validate_packet(packet, **kwargs)
+    except ValueError as error:
+        if (type(error) is not ValueError or type(boundary) is not str
+                or boundary not in _DIAGNOSTIC_BOUNDARIES):
+            raise
+        now, stamp = kwargs['now_ns'], kwargs['snapshot_ns']
+        if (type(packet) is not NativeJogPacket
+                or any(type(v) is not int or not 0 <= v <= 2**63-1
+                    for v in (now,stamp,packet.input_ns))):
+            raise
+        message = str(error)
+        code = _LOCAL_REJECTIONS.get(message)
+        if message == 'future or stale input/snapshot':
+            # Match the original validator's order; do not check new criteria.
+            for subject, value in (('snapshot',stamp),('input',packet.input_ns)):
+                if not 0 <= now-value < FRESH_NS:
+                    code = 'native_jog_'+subject+('_future' if now<value else '_stale')
+                    break
+        if code is None:
+            raise
+        evidence = dict(schema=1,code=code,boundary=boundary,checked_ns=now,
+            snapshot_age_ns=now-stamp,input_age_ns=now-packet.input_ns)
+        raise _LocalValidationError(message,evidence) from None
+
+
 def validate_inflight_input(packet, *, now_ns, generation, config_sha256):
     """Existing RPC authority only; this cannot admit another native write.
 

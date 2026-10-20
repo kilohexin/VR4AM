@@ -6,7 +6,8 @@ import re
 
 from app.commissioning.native_jog_site_scope import SiteJogScope, SiteJogDiagnosticAdapter
 from app.commissioning.native_jog_site_client import SiteJogClient, FEEDBACK_READ_POLICY
-from app.commissioning.native_jog_packet import NativeJogPacket,plan_jog,validate_packet,validate_inflight_input
+from app.commissioning.native_jog_packet import (NativeJogPacket,plan_jog,
+    validate_packet_diagnostic,validate_inflight_input,local_validation_diagnostic)
 from app.commissioning.finite_motion_observation import MotionObservation, MotionReference
 from app.commissioning.idle_stop_baseline import AdmissionRejected, validate_idle_sample, validate_position_continuity
 from app.commissioning.paused_stop_cleanup import _cached_sample, _geometry
@@ -17,6 +18,9 @@ from app.robots.base import StopReason, BackendCommandError
 
 def _safe_reason(error):
     # Only local reason codes, never arbitrary vendor exception text.
+    local = local_validation_diagnostic(error)
+    if local is not None:
+        return local['code']
     reason=str(error)
     if (isinstance(error,(AdmissionRejected,ValueError,BackendCommandError))
             and re.fullmatch(r'[a-z0-9_:.]{1,128}',reason)
@@ -69,6 +73,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
     if type(scope) is not SiteJogScope or not callable(client_factory):
         raise ValueError('native_jog_explicit_scope_and_factory_required')
     report = {} if report is None else report
+    report.pop('local_validation_rejection',None)
     report.update(complete=False, mode=report.get('runtime','SIMULATION'), hardware_verified=False,
         joint_bounds_verified=False, braking_verified=False, continuous_control_admitted=False,
         stop_confirmed=False, original_stop_confirmed=False, latched_fault=None,
@@ -114,7 +119,8 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         if proxy.speedl_entries==0:
             guard.validate(packet,snapshot,settings=scope.settings,
                 limits=scope.limits,config_sha256=scope.config_sha256)
-            validate_packet(packet, limits=scope.limits, actual_p=snapshot.actual_tcp.p,
+            validate_packet_diagnostic(packet, boundary='site_motion_permission',
+                limits=scope.limits, actual_p=snapshot.actual_tcp.p,
                 snapshot_ns=snapshot.captured_ns, now_ns=clock(), generation=adapter._pump.generation,
                 config_sha256=scope.config_sha256)
             if fk_completed is None or not 0 <= clock()-fk_completed < 100_000_000:
@@ -304,6 +310,11 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
             report['error_type'] = type(primary).__name__
             report['primary_rejection'] = _safe_reason(primary)
             report['rejection_phase'] = rejection_phase
+        local = local_validation_diagnostic(primary)
+        if local is None and adapter is not None:
+            local = local_validation_diagnostic(adapter._site_authority_error)
+        if local is not None:
+            report['local_validation_rejection'] = local
         report['complete'] = (primary is None and not report['cleanup_errors']
             and report['speedl_entries'] == report['stop_entries'] == 1 and report['stop_confirmed']
             and report['tail_complete'] and report['motion_observation'].get('outcome') == 'returned')
