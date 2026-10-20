@@ -128,12 +128,7 @@ class _ModelRegionGuardCore:
                 or math.hypot(*packet.velocity_mps) > self.limits.max_speed_mps):
             raise ValueError('native_jog_region_packet_mismatch')
         actual, target = _components(snapshot.actual_q, 6), _components(snapshot.target_q, 6)
-        for q in (actual, target):
-            if any(abs(v-ref) > cap for v, ref, cap in zip(q, self.reference_q, self.initial_offset_rad, strict=True)):
-                raise ValueError('native_jog_region_reference_changed')
-        for field_name in ('actual_qd', 'actual_qdd', 'target_qd', 'target_qdd'):
-            if any(v != 0 for v in _components(getattr(snapshot, field_name), 6)):
-                raise ValueError('native_jog_region_initial_motion_reported')
+        self._validate_start_state(actual, target, snapshot)
         setting = snapshot.tcp_setting
         if not _pose_matches(setting.p, setting.q, self.tool.translation_m,
                 self.tool.rotation_xyzw, 1e-9, 1e-6):
@@ -143,6 +138,14 @@ class _ModelRegionGuardCore:
                 _components(self.tool.rotation_xyzw,4))
             if not _pose_matches(pose.p, pose.q,model_p,model_q,.0001,.1):
                 raise ValueError('native_jog_region_feedback_mismatch')
+
+    def _validate_start_state(self, actual, target, snapshot):
+        for q in (actual, target):
+            if any(abs(v-ref) > cap for v, ref, cap in zip(q, self.reference_q, self.initial_offset_rad, strict=True)):
+                raise ValueError('native_jog_region_reference_changed')
+        for field_name in ('actual_qd', 'actual_qdd', 'target_qd', 'target_qdd'):
+            if any(v != 0 for v in _components(getattr(snapshot, field_name), 6)):
+                raise ValueError('native_jog_region_initial_motion_reported')
 
 
 @dataclass(frozen=True)

@@ -47,7 +47,7 @@ class MdhTool:
         object.__setattr__(self, 'rotation_xyzw', q)
 
 
-def mdh_tcp_jacobian(q, tool: MdhTool):
+def _mdh_geometry(q, tool: MdhTool):
     """Return fresh base-frame TCP transform and geometric J (linear, angular).
 
     Encoder angles are used directly, without the GLB shoulder offset. Linear
@@ -80,7 +80,37 @@ def mdh_tcp_jacobian(q, tool: MdhTool):
     ]).T
     if not np.isfinite(transform).all() or not np.isfinite(jacobian).all():
         raise ValueError('nonfinite theoretical MDH result')
+    return transform, jacobian, origins, axes
+
+
+def mdh_tcp_jacobian(q, tool: MdhTool):
+    """Fresh base-frame transform and geometric J; no admission authority."""
+    transform, jacobian, _, _ = _mdh_geometry(q, tool)
     return transform, jacobian
+
+
+def mdh_tcp_jacobian_rate(q, qd, tool: MdhTool):
+    """Analytic dJ/dt for the same fixed-tool theoretical MDH chain.
+
+    Joint i's axis and origin depend only on preceding joints. A tool's
+    rotation does not change base-frame angular velocity. All arrays are
+    fresh; this describes a reported mathematical state, not a controller.
+    """
+    qd = _components(qd, 6)
+    transform, jacobian, origins, axes = _mdh_geometry(q, tool)
+    pdot = jacobian[:3] @ np.array(qd)
+    columns = []
+    for i, (origin, axis) in enumerate(zip(origins, axes, strict=True)):
+        zdot, odot = np.zeros(3), np.zeros(3)
+        for k in range(i):
+            zdot += np.cross(axes[k], axis)*qd[k]
+            odot += np.cross(axes[k], origin-origins[k])*qd[k]
+        columns.append(np.r_[np.cross(zdot, transform[:3, 3]-origin)
+            + np.cross(axis, pdot-odot), zdot])
+    derivative = np.array(columns).T
+    if not np.isfinite(derivative).all():
+        raise ValueError('nonfinite theoretical MDH rate')
+    return transform, jacobian, derivative
 
 
 def assess_translation_reference(q, tool: MdhTool, *, cartesian_speed_mps,

@@ -1,11 +1,12 @@
 """Loopback-only protocol continuation, NOT physical continuous-motion admission.
 
-The existing theoretical guard still requires zero reported initial rates.
-MOVING/known-ID synthetic feedback exercises ownership, not a moving robot.
+The original guard requires zero reported initial rates. An explicitly supplied
+moving guard can check changing theoretical feedback; neither admits a robot.
 """
 import asyncio
 
 from app.commissioning.native_jog_model_guard import ModelJogRegionGuard
+from app.commissioning.native_jog_moving_guard import MovingModelJogRegionGuard
 from app.commissioning.native_jog_packet import NativeJogLimits, validate_packet, _sha
 from app.commissioning.native_jog_stream_gate import JogStreamGate
 from app.robots.base import BackendCommandError, StopReason
@@ -33,7 +34,8 @@ class LoopbackJogStreamAdapter(RealLebaiAdapter):
                  event_callback, model_region_guard, backend_label='LEBAI_FAKE'):
         if (settings.ip != '127.0.0.1' or settings.mode != 'control'
                 or not callable(client_factory) or backend_label != 'LEBAI_FAKE'
-                or type(limits) is not NativeJogLimits or type(model_region_guard) is not ModelJogRegionGuard):
+                or type(limits) is not NativeJogLimits
+                or type(model_region_guard) not in (ModelJogRegionGuard, MovingModelJogRegionGuard)):
             raise ValueError('native_jog_stream_explicit_loopback_model_required')
         _sha(config_sha256)
         model_region_guard.require_binding(settings, limits, config_sha256)
@@ -139,6 +141,12 @@ class LoopbackJogStreamAdapter(RealLebaiAdapter):
             raise BackendCommandError('native_jog_stream_result_unknown')
         if self._latched_fault is not None:
             raise BackendCommandError(self._latched_fault)
+        if not self._known_ids or snapshot.raw_robot_state in ('IDLE', 5):
+            # A moving-start model is for owned MOVING continuation only.
+            # Do not adopt motion hidden behind an IDLE label or first entry.
+            if any(v != 0 for name in ('actual_qd','actual_qdd','target_qd','target_qdd')
+                    for v in getattr(snapshot,name)):
+                raise BackendCommandError('native_jog_stream_initial_motion_reported')
         if not self._known_ids:
             preflight = self._preflight_from_snapshot(snapshot)
             if not preflight.ready:
