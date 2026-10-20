@@ -14,6 +14,24 @@ from app.commissioning.native_jog_mdh import MdhTool
 from app.config import LebaiSettings
 from app.robots.base import BackendCommandError
 
+RUNTIME_PRECHECK_POLICY = 'single_pre_pair_scan_original_native_write_scan'
+
+
+@dataclass(frozen=True)
+class _RuntimePrecheck:
+    adapter: object
+    scope: object
+    settings: object
+    limits: object
+    config_sha256: str
+    client: object
+    owner: object
+    generation: int
+    snapshot_owner: object
+    read_sequence: int
+    native_reads: object
+    read_entries: int
+
 
 def permission(callback):
     value = callback()
@@ -97,6 +115,10 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
         self._site_factory_used = False
         self._site_snapshot_tasks = set()
         self._site_authority_error = None
+        self._runtime_precheck_requested = False
+        self._runtime_precheck_issued = False
+        self._runtime_precheck_consumed = False
+        self._runtime_precheck = None
 
         async def factory(ip):
             scope.check()
@@ -126,6 +148,77 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
             raise ValueError('native_jog_configuration_changed')
         super()._require_model_binding()
 
+    def _runtime_binding(self):
+        return _RuntimePrecheck(self,self._site_scope,self.settings,self._jog_limits,
+            self._jog_sha,self._client,asyncio.current_task(),self._pump.generation,
+            self._snapshot_calls,self._snapshot_read_sequence,
+            self._client.native_reads,self._client.read_entries)
+
+    def precheck_jog_runtime(self):
+        """One metadata scan before the unique FK/fresh-snapshot pair.
+
+        This is no motion permission and cannot replace the proxy's actual
+        native write check. Unused/failed proofs never permit fallback.
+        """
+        from app.commissioning.native_jog_site_client import SiteJogClient
+        if self._runtime_precheck_requested or self._jog_consumed:
+            self._runtime_precheck = None
+            raise ValueError('native_jog_precheck_consumed')
+        self._runtime_precheck_requested = True
+        if (type(self._client) is not SiteJogClient or self._client._feedback_pair is not None
+                or asyncio.current_task() is not self._client.owner
+                or not self._pump.is_current(self._pump.generation)
+                or self._snapshot_calls.closed):
+            raise ValueError('native_jog_precheck_not_admitted')
+        self._client.require_clear_read_gate()
+        before = self._runtime_binding()
+        self._site_scope.hot()
+        if self._runtime_binding() != before:
+            raise ValueError('native_jog_precheck_binding_changed')
+        self._client.require_clear_read_gate()
+        self._runtime_precheck = before
+        self._runtime_precheck_issued = True
+
+    def _consume_runtime_precheck(self):
+        proof,self._runtime_precheck = self._runtime_precheck,None
+        self._runtime_precheck_consumed = True
+        if (type(proof) is not _RuntimePrecheck
+                or proof.adapter is not self
+                or proof.scope is not self._site_scope or proof.settings is not self.settings
+                or proof.limits is not self._jog_limits or proof.config_sha256 != self._jog_sha
+                or proof.client is not self._client or proof.owner is not asyncio.current_task()
+                or self._client.owner is not proof.owner
+                or proof.generation != self._pump.generation
+                or not self._pump.is_current(proof.generation)
+                or proof.snapshot_owner is not self._snapshot_calls or self._snapshot_calls.closed
+                or proof.read_sequence+1 != self._snapshot_read_sequence):
+            raise ValueError('native_jog_precheck_binding_changed')
+        client = self._client
+        client.require_clear_read_gate()
+        pair = client._feedback_pair
+        read = self._latest_snapshot_read
+        group = pair.get('snapshot_group') if pair is not None else None
+        if (pair is None or pair['owner'] is not proof.owner
+                or pair['active'] or pair['report']['outcome'] != 'returned'
+                or group is None or not pair.get('snapshot_returned')
+                or read is None or read.sequence != self._snapshot_read_sequence
+                or self._snapshot is None or self._snapshot.read_purpose != 'motion'
+                or read.snapshot is not self._snapshot
+                or client.native_reads is not proof.native_reads):
+            raise ValueError('native_jog_precheck_pair_not_matching')
+        # Exactly the paired FK plus that group's actual native fields. This
+        # also fences direct raw reads which do not change adapter sequence.
+        methods = set(group.get('native_used',())) | {'kinematics_forward'}
+        rows = client.native_reads[proof.read_entries:]
+        if (client.read_entries != proof.read_entries+len(methods)
+                or len(rows) != len(methods) or {r['method'] for r in rows} != methods
+                or any(r['outcome'] != 'returned' or r['remote_result_unknown'] for r in rows)):
+            raise ValueError('native_jog_precheck_extra_read')
+
+    def runtime_precheck_report(self):
+        return dict(policy=RUNTIME_PRECHECK_POLICY,requested=self._runtime_precheck_requested,
+            issued=self._runtime_precheck_issued,consumed=self._runtime_precheck_consumed)
+
     async def submit_jog(self, packet, *, authorize):
         if self._jog_consumed:
             raise BackendCommandError('native_jog_submission_consumed')
@@ -145,7 +238,10 @@ class SiteJogDiagnosticAdapter(_SingleJogSubmission):
                 raise
         try:
             try:
-                self._site_scope.hot()
+                if self._runtime_precheck_requested:
+                    self._consume_runtime_precheck()
+                else:
+                    self._site_scope.hot()  # Legacy direct callers retain their scan.
             except Exception as error:
                 self._jog_consumed=True
                 if self._site_authority_error is None:self._site_authority_error=error

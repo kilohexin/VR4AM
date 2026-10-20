@@ -292,6 +292,19 @@ async def test_old_single_phase_preview_cannot_authorize_inflight_policy(context
     assert not p['output'].exists()
 
 
+@pytest.mark.parametrize('old_policy',[None,'submission_scan_after_fresh_feedback'])
+async def test_old_preview_cannot_authorize_relocated_runtime_precheck(context,old_policy):
+    e,p,kw,c=context;old=e.preview(p)
+    if old_policy is None:old.pop('runtime_precheck_policy')
+    else:old['runtime_precheck_policy']=old_policy
+    kw['approved'].write_text(json.dumps(old));kw['expected_hash']=e.sha(kw['approved'])
+    factory=AsyncMock(return_value=c)
+    with pytest.raises(ValueError,match='preview_changed'):
+        await e.execute(p,**kw,client_factory=factory)
+    assert not p['output'].exists()
+    factory.assert_not_called()
+
+
 async def test_full_runtime_hash_finishes_after_loading_and_before_fk_lease(context,monkeypatch):
     e,p,kw,c=context;events=[];original=e.runtime_hashes;fk=c.kinematics_forward;speed=c.speedl
     def hashes():events.append('hash');return original()

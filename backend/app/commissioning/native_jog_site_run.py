@@ -74,6 +74,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         raise ValueError('native_jog_explicit_scope_and_factory_required')
     report = {} if report is None else report
     report.pop('local_validation_rejection',None)
+    report.pop('runtime_precheck',None)
     report.update(complete=False, mode=report.get('runtime','SIMULATION'), hardware_verified=False,
         joint_bounds_verified=False, braking_verified=False, continuous_control_admitted=False,
         stop_confirmed=False, original_stop_confirmed=False, latched_fault=None,
@@ -188,6 +189,8 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         anchor = _cached_sample(adapter)
         validate_idle_sample(anchor,clock()); _geometry(adapter)
         scope.check()  # Cold checks finish before the fresh motion snapshot lease.
+        phase = 'runtime_precheck'
+        adapter.precheck_jog_runtime()
         old = adapter._snapshot
         pair_client,pair_owner,pair_generation = adapter._client,adapter._snapshot_calls,adapter._pump.generation
         phase = 'feedback_pair'
@@ -278,6 +281,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
             report['tail_complete'] = tail_ok and tail_samples > 0
             report['tail_samples'] = tail_samples
         if adapter is not None:
+            report['runtime_precheck'] = adapter.runtime_precheck_report()
             if adapter._site_authority_error is not None:
                 report['authority_rejection']=_safe_reason(adapter._site_authority_error)
             report['original_stop_confirmed'] = bool(adapter._stop_transaction and adapter._stop_transaction.confirmed)

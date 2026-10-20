@@ -135,6 +135,7 @@ def preview(plan):
         requires_fresh_onsite_authorization=True,sdk_binary_sha256=SDK_SHA,
         snapshot_order='preflight_parallel_six_then_motion_parallel_six',
         motion_authorization_policy='feedback_at_entry_original_input_until_rpc_terminal',
+        runtime_precheck_policy='single_pre_pair_scan_original_native_write_scan',
         read_scheduling_policy=FEEDBACK_READ_POLICY,
         read_authorization_policy='inputs_and_expiry_each_read_and_permission_runtime_at_group_submission_native_write_and_return',
         event_clock='time.perf_counter_ns',
