@@ -5,7 +5,7 @@ import time
 import re
 
 from app.commissioning.native_jog_site_scope import SiteJogScope, SiteJogDiagnosticAdapter
-from app.commissioning.native_jog_site_client import SiteJogClient
+from app.commissioning.native_jog_site_client import SiteJogClient, FEEDBACK_READ_POLICY
 from app.commissioning.native_jog_packet import NativeJogPacket,plan_jog,validate_packet,validate_inflight_input
 from app.commissioning.finite_motion_observation import MotionObservation, MotionReference
 from app.commissioning.idle_stop_baseline import AdmissionRejected, validate_idle_sample, validate_position_continuity
@@ -85,6 +85,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
     packet_binding = None
     snapshot_binding = None
     fk_completed = None
+    pair_client = pair_owner = pair_generation = None
     primary = None
     interruption = None
     phase = 'admission'
@@ -98,6 +99,8 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         # Caller owns input authorization: the adapter at each authority gate,
         # or motion_permission at the native proxy. Do not read twice per gate.
         if (closed or packet is None or snapshot is None or adapter._snapshot is not snapshot
+                or adapter._client is not pair_client or adapter._snapshot_calls is not pair_owner
+                or adapter._pump.generation != pair_generation
                 or owner.done() or owner.cancelling() or deadline-clock() < 5_000_000_000
                 or getattr(recorder,'fatal_error',None) is not None
                 or getattr(recorder,'dropped_normal_events',0)):
@@ -180,11 +183,18 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         validate_idle_sample(anchor,clock()); _geometry(adapter)
         scope.check()  # Cold checks finish before the fresh motion snapshot lease.
         old = adapter._snapshot
-        phase = 'feedback_fk'
-        fk = pose_from_lebai(await proxy.kinematics_forward(list(old.actual_q)))
-        fk_completed = clock()
-        phase = 'motion_snapshot'
-        snapshot = await adapter._read_snapshot(read_purpose='motion')
+        pair_client,pair_owner,pair_generation = adapter._client,adapter._snapshot_calls,adapter._pump.generation
+        phase = 'feedback_pair'
+        fk_raw,fk_completed,snapshot = await proxy.feedback_pair(old.actual_q,
+            lambda:adapter._read_snapshot(read_purpose='motion'))
+        fk = pose_from_lebai(fk_raw)
+        read=adapter._latest_snapshot_read
+        if (adapter._client is not pair_client or adapter._snapshot_calls is not pair_owner
+                or adapter._pump.generation!=pair_generation or not adapter._pump.is_current(pair_generation)
+                or read is None or read.client is not pair_client or read.owner is not pair_owner
+                or read.generation!=pair_generation or read.snapshot is not snapshot
+                or adapter._snapshot is not snapshot):
+            raise AdmissionRejected('native_jog_feedback_pair_owner_changed')
         report['feedback_fk'] = dict(age_ms=(clock()-fk_completed)/1e6,
             q_identical=tuple(snapshot.actual_q)==tuple(old.actual_q),
             tool_identical=snapshot.tcp_setting==old.tcp_setting,
@@ -198,7 +208,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
         validate_idle_sample(fresh,clock());validate_position_continuity(fresh,anchor);_geometry(adapter)
         now = clock()
         packet = plan_jog((0,0,1),1,limits=scope.limits,actual_p=snapshot.actual_tcp.p,
-            snapshot_ns=snapshot.captured_ns,now_ns=now,generation=adapter._pump.generation,
+            snapshot_ns=snapshot.captured_ns,now_ns=now,generation=pair_generation,
             sequence=1,input_ns=now,input_expires_ns=now+100_000_000,duration_s=.08,
             config_sha256=scope.config_sha256)
         packet_binding=_packet_values(packet)
@@ -278,6 +288,7 @@ async def run_site_window(scope, recorder, client_factory, *, clock=time.perf_co
             for row in native_reads:
                 if row['outcome']=='entered':row['remote_result_unknown']=True
             report.update(speedl_entries=proxy.speedl_entries,stop_entries=proxy.sdk_stop_entries,
+                feedback_read_pair=proxy.feedback_pair_report(),read_scheduling_policy=FEEDBACK_READ_POLICY,
                 speedl_started_ns=proxy.speedl_started_ns, speedl_call=copy.deepcopy(proxy.speedl_call),
                 speedl_remote_result_unknown=proxy.speedl_remote_result_unknown,
                 fk_entries=proxy.special_entries['kinematics_forward'],

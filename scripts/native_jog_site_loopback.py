@@ -26,7 +26,8 @@ HOST='127.0.0.1'
 Q=(0.,-1.2,1.8,-.6,1.,0.)
 TOOL=MdhTool((0.,0.,.175),(0.,0.,0.,1.))
 CASES=('normal','preflight_read_delay_20ms','speedl_late_100ms','stop_late_250ms','observation_stuck',
-    'feedback_ages_reply_35ms','revoked_during_speedl','late_effect_after_stop')
+    'feedback_ages_reply_35ms','revoked_during_speedl','late_effect_after_stop',
+    'paired_fk_snapshot_25ms','paired_fk_late_250ms')
 READS={'get_robot_state','get_estop_reason','get_kin_data','get_tcp','get_claw','get_running_motion','get_kin_factor'}
 
 
@@ -99,6 +100,10 @@ class Peer(LoopbackPeer):
 
     async def reply(self,connection,row):
         method=row['method']
+        if method=='get_forward_kin' and self.case=='paired_fk_late_250ms':await asyncio.sleep(.25)
+        if self.case=='paired_fk_snapshot_25ms' and not self.speed_seen:
+            if method=='get_forward_kin' or method in READS and any(
+                    r['method']=='get_forward_kin' for r in self.records):await asyncio.sleep(.025)
         if (self.case=='preflight_read_delay_20ms' and not self.speed_seen
                 and method in READS|{'get_motion_state'}):await asyncio.sleep(.02)
         if method=='speed_linear' and self.case in ('speedl_late_100ms','late_effect_after_stop'):
@@ -139,6 +144,16 @@ def matches_expected_case(result):
     speeds=sum(r['method']=='speed_linear' for r in records)
     stops=sum(r['method']=='stop_move' for r in records)
     if not result['local_connection_closed'] or result['protocol_errors']:return False
+    if result['case']=='paired_fk_late_250ms':
+        pair=result.get('feedback_read_pair',{})
+        fks=[r for r in records if r['method']=='get_forward_kin']
+        return (result['complete'] is False and speeds==stops==0 and result['speedl_entries']==result['stop_entries']==0
+            and result['fk_entries']==1 and result['latched_fault'] is None
+            and result.get('primary_rejection') in ('native_jog_feedback_pair_timeout','paused_cleanup_read_timeout')
+            and result.get('rejection_phase')=='feedback_pair' and result.get('read_remote_result_unknown') is True
+            and pair.get('outcome')=='failed' and len(fks)==1
+            and type(pair.get('completed_ns')) is int and type(fks[0].get('send_completed_ns')) is int
+            and fks[0]['send_completed_ns']>pair['completed_ns'])
     if result['case']=='preflight_read_delay_20ms':
         preflight=result.get('preflight',{})
         return (result['complete'] is False and speeds==stops==0
@@ -153,6 +168,15 @@ def matches_expected_case(result):
         and stop['send_completed_ns']<speed['send_completed_ns'])
     known_speed=(result.get('speedl_call',{}).get('outcome')=='returned'
         and result.get('speedl_remote_result_unknown') is False)
+    if result['case']=='paired_fk_snapshot_25ms':
+        fks=[r for r in records if r['method']=='get_forward_kin']
+        overlapping=(len(fks)==1 and any(r['method']=='get_kin_data'
+            and type(r.get('send_completed_ns')) is int and type(fks[0].get('send_completed_ns')) is int
+            and fks[0]['received_ns']<r['send_completed_ns']
+            and r['received_ns']<fks[0]['send_completed_ns'] for r in records))
+        return (result['complete'] is True and result['stop_confirmed'] is True and known_speed
+            and result['fk_entries']==1 and result.get('feedback_read_pair',{}).get('outcome')=='returned'
+            and overlapping)
     failed=(result['complete'] is False and result['latched_fault']=='stop_unverified')
     if result['case']=='normal':return result['complete'] is True and result['stop_confirmed'] is True and known_speed
     if result['case']=='feedback_ages_reply_35ms':
@@ -208,14 +232,30 @@ async def one_case(sdk,case):
                 aged=False
                 def age_feedback():
                     nonlocal aged
-                    if not aged and any(r['method']=='get_forward_kin' for r in peer.records):
-                        aged=True;time.sleep(.065)
+                    fks=[r for r in peer.records if r['method']=='get_forward_kin'
+                        and type(r.get('send_completed_ns')) is int]
+                    snapshot_reply=(len(fks)==1 and any(r['method']=='get_kin_data'
+                        and r['received_ns']>=fks[0]['received_ns']
+                        and type(r.get('send_completed_ns')) is int for r in peer.records))
+                    # Age the mathematical result at the snapshot boundary,
+                    # before packet/input creation. Ageing the input as well
+                    # would test a different, correctly rejected condition.
+                    if not aged and snapshot_reply:
+                        aged=True
+                        # Aim for a known FK age rather than adding a fixed
+                        # sleep to whatever scheduling delay already elapsed.
+                        remaining=(fks[0]['send_completed_ns']+60_000_000-time.perf_counter_ns())/1e9
+                        if remaining>0:time.sleep(remaining)
                 scope=replace(scope,hot_check=age_feedback,read_check=lambda:None)
             elif case=='revoked_during_speedl':
                 def revoke():
                     if peer.speed_seen:raise ValueError('native_jog_loopback_revoked')
                 scope=replace(scope,read_check=revoke)
             result=await run_site_window(scope,NoopRecorder(),factory,clock=time.perf_counter_ns,report=report)
+            if case=='paired_fk_late_250ms' and peer._tasks:
+                # Preserve the actual late server reply after local rejection.
+                # No new reads or calls are authorized during this wait.
+                await asyncio.wait(tuple(peer._tasks),timeout=.4)
         finally:
             await peer.close()
             if client is not None:await asyncio.wait_for(client.wait_disconnect(),2)

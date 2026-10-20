@@ -14,6 +14,16 @@ from tests.commissioning.test_readonly_jog_jacobian import JacobianClient
 
 SOURCE=Path(__file__).resolve().parents[3]/'scripts/real_robot_native_jog_window.py'
 
+
+async def test_serial_read_preview_cannot_authorize_paired_reads(context):
+    e,p,kw,c=context
+    old=e.preview(p);old.pop('read_scheduling_policy',None)
+    kw['approved'].write_text(json.dumps(old));kw['expected_hash']=e.sha(kw['approved'])
+    factory=AsyncMock(return_value=c)
+    with pytest.raises(ValueError):await e.execute(p,**kw,client_factory=factory)
+    factory.assert_not_called()
+    assert not p['output'].exists()
+
 @pytest.fixture
 async def context(tmp_path,monkeypatch):
     spec=importlib.util.spec_from_file_location('native_site_entry',SOURCE)

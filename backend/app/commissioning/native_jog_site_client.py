@@ -6,10 +6,19 @@ motion route is denied; speedl and the reserved stop have dedicated entries.
 import asyncio
 import copy
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 from app.commissioning.finite_window_run import FiniteScopeClient
 from app.commissioning.idle_stop_baseline import AdmissionRejected
 from app.commissioning.native_jog_site_scope import SiteJogScope, permission
+from app.commissioning.paused_stop_cleanup import BoundedStopOnlyClient
+from app.commissioning.native_jog_mdh import _components
+
+FEEDBACK_READ_POLICY = 'one_fk_paired_with_one_fresh_motion_snapshot_independent_owners'
+
+
+class _PairedFKOwner(BoundedStopOnlyClient):
+    READS = frozenset({'kinematics_forward'})
 
 
 class _ReadSurface:
@@ -27,7 +36,8 @@ class _ReadSurface:
             p.read_guard()  # Local authorization work cannot extend the total deadline.
             group=p._snapshot_context.get()
             active=p._active_snapshot_group
-            if active is not None:
+            paired_fk = p._pair_native_entry(name,args,kwargs)
+            if active is not None and not paired_fk:
                 if group is not active or not active['active']:
                     p.read_gate_closed=True
                     raise AdmissionRejected('native_jog_snapshot_native_foreign')
@@ -90,12 +100,146 @@ class SiteJogClient(FiniteScopeClient):
         self._stop_permission_check = stop_permission
         self._snapshot_owner_archive = []
         self.snapshot_groups = []
+        self._feedback_pair = None
+        self._feedback_context = ContextVar('native_jog_feedback_pair',default=None)
+
+    def _pair_require(self,pair,*,authorize=False):
+        BoundedStopOnlyClient.read_guard(self)
+        # Actual native fields already run scope.read in _ReadSurface; the
+        # snapshot group also checks its boundary. Do not repeat file/input
+        # work on every ownership poll. The math owner and join still check it.
+        if authorize:self._jog_scope.read()
+        if (self._feedback_pair is not pair or not pair['active']
+                or self._native is not pair['native'] or self.client is not pair['surface']
+                or self.owner is not pair['owner'] or self.speedl_attempted):
+            self.read_gate_closed=True
+            raise AdmissionRejected('native_jog_feedback_pair_revoked')
+
+    def read_guard(self):
+        super().read_guard()
+        pair=self._feedback_pair
+        if pair is not None and pair['active']:
+            context=self._feedback_context.get()
+            if context is None or context[0] is not pair or context[1] not in ('fk','snapshot'):
+                self.read_gate_closed=True
+                raise AdmissionRejected('native_jog_feedback_pair_foreign_read')
+            self._pair_require(pair)
+
+    def _pair_native_entry(self,name,args,kwargs):
+        pair=self._feedback_pair
+        if pair is None or not pair['active']:return False
+        self._pair_require(pair)
+        context=self._feedback_context.get()
+        role=context[1] if context is not None and context[0] is pair else None
+        if role=='fk':
+            if (name!='kinematics_forward' or asyncio.current_task() is not pair['fk_owner'].pending_read
+                    or len(args)!=1 or kwargs or _components(args[0],6)!=pair['q']):
+                self.read_gate_closed=True
+                raise AdmissionRejected('native_jog_feedback_pair_foreign_math')
+            return True
+        if (role!='snapshot' or self._active_snapshot_group is None
+                or self._snapshot_context.get() is not pair.get('snapshot_group')
+                or name not in BoundedStopOnlyClient.READS):
+            self.read_gate_closed=True
+            raise AdmissionRejected('native_jog_feedback_pair_foreign_snapshot')
+        return False
+
+    async def read(self,name,invoke):
+        pair=self._feedback_pair
+        if pair is not None and pair['active']:
+            self.read_guard()
+            if self._feedback_context.get()[1]!='snapshot' or name not in BoundedStopOnlyClient.READS:
+                self.read_gate_closed=True
+                raise AdmissionRejected('native_jog_feedback_pair_method_not_admitted')
+        return await super().read(name,invoke)
+
+    async def feedback_pair(self,joints,snapshot_reader):
+        self.require_clear_read_gate()
+        if (self._feedback_pair is not None or asyncio.current_task() is not self.owner
+                or not callable(snapshot_reader) or self.special_entries['kinematics_forward']
+                or self.speedl_attempted):
+            self.read_gate_closed=True
+            raise AdmissionRejected('native_jog_feedback_pair_consumed_or_foreign')
+        q=_components(joints,6)
+        pair=dict(active=True,native=self._native,surface=self.client,owner=self.owner,q=q,
+            report=dict(started_ns=self.clock(),outcome='entered',policy=FEEDBACK_READ_POLICY))
+        self._feedback_pair=pair
+        child=pair['fk_owner']=_PairedFKOwner(self.client,lambda:None,
+            lambda:self._pair_require(pair,authorize=True),self.owner,deadline_clock=self.clock)
+        child.read_deadline_ns=self.read_deadline_ns
+        child.read_calls=self.read_calls
+        async def fk():
+            token=self._feedback_context.set((pair,'fk'))
+            try:
+                value=await child.read('kinematics_forward',lambda:self.client.kinematics_forward(list(q)))
+                rows=[r for r in self.native_reads if r['method']=='kinematics_forward']
+                if (len(rows)!=1 or rows[0]['outcome']!='returned'
+                        or rows[0]['started_ns']<pair['report']['started_ns']
+                        or type(rows[0].get('completed_ns')) is not int):
+                    raise AdmissionRejected('native_jog_feedback_pair_math_completion_not_owned')
+                # Local parsing/authorization after the native reply cannot
+                # make an old mathematical result younger.
+                pair['report']['fk_completed_ns']=rows[0]['completed_ns']
+                return value
+            finally:self._feedback_context.reset(token)
+        async def snapshot():
+            token=self._feedback_context.set((pair,'snapshot'))
+            try:
+                result=await snapshot_reader()
+                if not pair.get('snapshot_group') or not pair.get('snapshot_returned'):
+                    raise AdmissionRejected('native_jog_feedback_pair_snapshot_not_owned')
+                pair['report']['snapshot_completed_ns']=self.clock()
+                return result
+            finally:self._feedback_context.reset(token)
+        tasks=[asyncio.create_task(fk(),name='native-jog-paired-fk'),
+            asyncio.create_task(snapshot(),name='native-jog-paired-snapshot')]
+        pair['tasks']=tasks
+        for task in tasks:task.add_done_callback(lambda done:None if done.cancelled() else done.exception())
+        try:
+            done,_=await asyncio.wait(tasks,timeout=min(.2,max(0.,(self.read_deadline_ns-self.clock())/1e9)),
+                return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:task.result()
+            if len(done)!=2:raise AdmissionRejected('native_jog_feedback_pair_timeout')
+            self._pair_require(pair,authorize=True)
+            if child.read_gate_closed or child.read_remote_result_unknown:
+                raise AdmissionRejected('native_jog_feedback_pair_math_not_clear')
+            pair['report']['outcome']='returned'
+            return tasks[0].result(),pair['report']['fk_completed_ns'],tasks[1].result()
+        except BaseException:
+            self.read_gate_closed=True
+            pair['report']['outcome']='failed'
+            self.read_remote_result_unknown |= (child.read_remote_result_unknown
+                or child.pending_read is not None and not child.pending_read.done())
+            for task in tasks:
+                if not task.done() and not task.cancelling():task.cancel()
+            raise
+        finally:
+            pair['active']=False
+            pair['report']['completed_ns']=self.clock()
+
+    def feedback_pair_report(self):
+        pair=self._feedback_pair
+        if pair is None:return dict(policy=FEEDBACK_READ_POLICY,outcome='not_started')
+        child=pair['fk_owner']
+        return dict(**pair['report'],math_remote_result_unknown=bool(child.read_remote_result_unknown
+            or child.pending_read is not None and not child.pending_read.done()),
+            math_gate_closed=child.read_gate_closed)
 
     def _snapshot_read_pending(self):
         return (super()._snapshot_read_pending() or any(child.pending_read is not None
             and not child.pending_read.done() for child in self._snapshot_owner_archive))
 
     def require_clear_read_gate(self):
+        pair=self._feedback_pair
+        if pair is not None:
+            startup=(pair['active'] and self._feedback_context.get() is not None
+                and self._feedback_context.get()[0] is pair and self._feedback_context.get()[1]=='snapshot'
+                and pair.get('snapshot_group') is None)
+            if not startup and (pair['active'] or pair['report']['outcome']!='returned'
+                    or pair['fk_owner'].read_gate_closed or pair['fk_owner'].read_remote_result_unknown
+                    or pair['fk_owner'].pending_read is not None and not pair['fk_owner'].pending_read.done()):
+                self.read_gate_closed=True
+                raise AdmissionRejected('native_jog_feedback_pair_not_clear')
         if any(child.read_gate_closed or child.read_remote_result_unknown
                 for child in self._snapshot_owner_archive):
             self.read_gate_closed=True
@@ -117,7 +261,13 @@ class SiteJogClient(FiniteScopeClient):
         row=dict(purpose=purpose,started_ns=self.clock(),outcome='entered')
         self.snapshot_groups.append(row)
         try:
-            with super()._parallel_snapshot_scope(guard):yield
+            with super()._parallel_snapshot_scope(guard):
+                pair=self._feedback_pair
+                if pair is not None and pair['active']:
+                    if purpose!='motion':raise AdmissionRejected('native_jog_feedback_pair_wrong_snapshot')
+                    pair['snapshot_group']=self._active_snapshot_group
+                yield
+                if pair is not None and pair['active']:pair['snapshot_returned']=True
             row['outcome']='returned'
         except BaseException:
             self.read_gate_closed=True
@@ -143,6 +293,9 @@ class SiteJogClient(FiniteScopeClient):
         return await self.read('get_velocity_factor', self.client.get_velocity_factor)
 
     async def speedl(self, a, v, t, frame):
+        if self._feedback_pair is not None and self._feedback_pair['active']:
+            self.read_gate_closed=True
+            raise AdmissionRejected('native_jog_feedback_pair_not_clear')
         if self.speedl_attempted:
             raise AdmissionRejected('native_jog_speedl_consumed')
         self.speedl_attempted = True

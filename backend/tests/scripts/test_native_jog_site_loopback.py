@@ -4,6 +4,30 @@ import pytest
 from scripts import native_jog_site_loopback as probe
 
 
+def test_paired_delay_case_requires_native_read_intervals_to_overlap():
+    result=dict(case='paired_fk_snapshot_25ms',complete=True,stop_confirmed=True,
+        local_connection_closed=True,protocol_errors=[],speedl_entries=1,stop_entries=1,
+        fk_entries=1,speedl_call=dict(outcome='returned'),speedl_remote_result_unknown=False,
+        feedback_read_pair=dict(outcome='returned'),rpc_records=[
+            dict(method='get_forward_kin',received_ns=10,send_completed_ns=40),
+            dict(method='get_kin_data',received_ns=20,send_completed_ns=50),
+            dict(method='speed_linear'),dict(method='stop_move')])
+    assert probe.matches_expected_case(result)
+    result['rpc_records'][1]['received_ns']=41
+    assert not probe.matches_expected_case(result)
+
+
+def test_late_paired_fk_needs_exact_zero_motion_and_unknown_read_evidence():
+    result=dict(case='paired_fk_late_250ms',complete=False,stop_confirmed=False,latched_fault=None,
+        local_connection_closed=True,protocol_errors=[],speedl_entries=0,stop_entries=0,fk_entries=1,
+        primary_rejection='native_jog_feedback_pair_timeout',rejection_phase='feedback_pair',
+        read_remote_result_unknown=True,feedback_read_pair=dict(outcome='failed',completed_ns=200),
+        rpc_records=[dict(method='get_forward_kin',received_ns=10,send_completed_ns=250)])
+    assert probe.matches_expected_case(result)
+    result['read_remote_result_unknown']=False
+    assert not probe.matches_expected_case(result)
+
+
 @pytest.mark.parametrize('method',['move_pvat','move_joint','stop_sys','pause_move','set_claw'])
 def test_owned_peer_denies_other_commands(method):
     with pytest.raises(ValueError):probe.parse_request(json.dumps(dict(jsonrpc='2.0',id=1,method=method,params=[{}])))
