@@ -33,3 +33,7 @@
 | --- | --- |
 | `result/result.json` | `9df651a560ab459095d9a7eb2bc511f31189a7f536bf61d968c61728d31e67a1` |
 | `result/sessions/`下唯一`session.jsonl` | `04501be963c13d85824189726ce530cf3eca01f05de887e81bb65fe9365489c0` |
+
+## 2026-10-20 离线后续
+
+上述唯一 FK／新快照配对读取现已在专用单次入口完成，实现提交 `a9dec1c`。定向回归、源码规模 Fake、自有 SDK 回环及保留的失败记录见 [本阶段报告](native-jog-feedback-pair-offline-2026-10-20.md)。这不改写本页现场拒绝结论；尚未执行新版本现场验收，历史停止与跟随问题继续保留。
