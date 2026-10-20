@@ -43,3 +43,5 @@
 | `result/sessions/20261020T081432Z-ef1b2746/session.jsonl` | `60b1efc5b93800be1b1248dcefe9298785fba25dacd5c4b1daaa8fbbb4fd8e7c` |
 
 同目录保存 `authorization.json`、`execution-attempt.json`、`process-exit.json`、`offline-analysis.json`、`onsite-closure.json`、`scope-consumed.json` 和核对脚本断言修正说明。关联的零写入运动准入拒绝见 [此前现场记录](native-jog-feedback-pair-site-2026-10-20.md)。
+
+随后已按新软件设计批准完成独立单次程序回位入口的离线实现，见 [入口与验证报告](ready-return-entry-offline-2026-10-20.md)。未连接真机，未改变本次静止清理结果或原准备位容差；实际回位仍须独立现场授权。
