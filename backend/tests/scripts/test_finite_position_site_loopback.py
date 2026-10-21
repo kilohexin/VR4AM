@@ -15,3 +15,9 @@ def test_loopback_rejects_endpoint_overrides():
     m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
     for args in (['--ip','172.16.2.162'],['--host','0.0.0.0'],['--port','5866']):
         with pytest.raises(SystemExit):m.parser().parse_args(args)
+
+
+def test_loopback_includes_independent_read_latency_case():
+    spec=importlib.util.spec_from_file_location('single_position_latency_loopback',SOURCE)
+    m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    assert 'read_latency' in m.CASES

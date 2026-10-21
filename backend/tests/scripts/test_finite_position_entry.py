@@ -67,6 +67,8 @@ async def test_default_preview_is_zero_access(context,monkeypatch,capsys):
     assert row['natural_arrival_does_not_send_stop'] and not p['output'].exists() and not c.write_calls
     assert row['input_ttl_ms'] is None and row['held_input_ttl_ms']==100
     assert row['planning_timeout_ms']==1000 and row['entry_policy']=='fresh_identical_start_after_planning'
+    assert row['snapshot_read_policy']=='owned_six_fields_parallel'
+    assert row['readonly_authorization_policy']=='full_at_group_boundaries_binding_and_cancellation_per_read'
 
 
 @pytest.mark.parametrize('kind',['confirm','expiry','hash','preview','config','ready_pose','reference_survey','runtime','rpc'])

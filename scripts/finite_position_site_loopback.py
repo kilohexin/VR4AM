@@ -18,7 +18,7 @@ from app.commissioning.finite_position_site import MdhPositionModel,run_single_p
 from app.commissioning.qpc_event_loop import new_qpc_loop
 from app.recording.noop import NoopRecorder
 
-CASES=('normal','no_actual_progress','move_reply_late','stop_reply_late','late_effect')
+CASES=('normal','read_latency','no_actual_progress','move_reply_late','stop_reply_late','late_effect')
 MODEL=MdhPositionModel.from_settings(loopback_settings())
 
 
@@ -81,7 +81,11 @@ class Peer(BasePeer):
         finally:self.case=old
 
     async def reply(self,connection,row):
-        self.advance();m=row['method'];p=row['params'][0]
+        m=row['method'];p=row['params'][0]
+        if self.case=='read_latency' and m in ('get_robot_state','get_estop_reason','get_kin_data',
+                'get_tcp','get_claw','get_running_motion','get_motion_state'):
+            await asyncio.sleep(.015)
+        self.advance()
         if m=='move_joint':
             self.start=self.q;self.goal=tuple(p['pose']['joint']['joint'])
             if self.case!='late_effect':self.motion_start=time.perf_counter();self.active=True
@@ -137,7 +141,11 @@ async def run_case(case,output):
                 control=replace(loopback_settings().control,max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2))
             report=await run_single_position(settings,recorder,factory,lambda:None,config_sha256='a'*64,model=MODEL)
             if peer._tasks:await asyncio.wait(tuple(peer._tasks),timeout=.6)
-            expected=(report['complete'] and peer.moves==1 and peer.stops==0) if case=='normal' else (not report['complete'] and peer.moves==1 and peer.stops==1)
+            expected=(report['complete'] and peer.moves==1 and peer.stops==0) if case in ('normal','read_latency') else (not report['complete'] and peer.moves==1 and peer.stops==1)
+            if case=='read_latency':
+                delayed=[r for r in peer.records if r['method'] in ('get_robot_state','get_estop_reason','get_kin_data',
+                    'get_tcp','get_claw','get_running_motion','get_motion_state')]
+                expected &= bool(delayed) and all(r.get('reply_started_ns',0)-r['received_ns']>=15_000_000 for r in delayed)
             if case in ('move_reply_late','stop_reply_late','late_effect'):expected &= report['latched_fault']=='stop_unverified'
             result=dict(case=case,expected_outcome_observed=bool(expected and not peer.errors),
                 real_robot_connections=0,offline_only=True,hardware_verified=False,sdk=identity,

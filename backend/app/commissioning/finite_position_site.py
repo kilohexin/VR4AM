@@ -14,6 +14,7 @@ from scipy.spatial.transform import Rotation
 from app.commissioning.native_jog_mdh import MdhTool,mdh_tcp_jacobian,mdh_tcp_jacobian_rate
 from app.commissioning.native_jog_site_scope import site_address,permission
 from app.commissioning.paused_stop_cleanup import BoundedStopOnlyClient
+from app.commissioning.position_snapshot_groups import PositionSnapshotGroups
 from app.control.finite_position_types import PositionIntent,INPUT_NS
 from app.robots.base import StopReason
 from app.robots.finite_position_adapter import _FinitePositionCore
@@ -65,7 +66,7 @@ class MdhPositionModel:
         return np.array(_directional_rate(q,tuple(x/speed for x in qd),self.tool))*speed
 
 
-class _SingleClient(BoundedStopOnlyClient):
+class _SingleClient(PositionSnapshotGroups,BoundedStopOnlyClient):
     READS=BoundedStopOnlyClient.READS|{'kinematics_inverse','kinematics_forward','get_velocity_factor'}
 
     def __init__(self,native,stop,read,write,owner,clock):
@@ -101,6 +102,37 @@ class _SingleClient(BoundedStopOnlyClient):
 class _SiteAdapter(_FinitePositionCore):
     # Explicit standalone use only; never select the web session coordinator.
     position_candidate=False
+
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        self._position_group_guard=None;self._finite_snapshot_wrappers=set()
+
+    async def _read_snapshot_impl(self,read,**kwargs):
+        purpose=kwargs['read_purpose'];client=self._client
+        scope=getattr(client,'position_snapshot_scope',None)
+        if purpose=='stop_verification' or not callable(scope):
+            return await super()._read_snapshot_impl(read,**kwargs)
+        owner,generation=self._snapshot_calls,self._pump.generation
+        def guard():
+            if (client is not self._client or read.client is not client or owner is not self._snapshot_calls
+                    or owner.closed or owner.unknown_methods or self._pump.generation!=generation):
+                raise ValueError('position_snapshot_binding_changed')
+        if self._position_group_guard is not None:raise ValueError('position_snapshot_group_busy')
+        self._position_group_guard=guard
+        try:
+            with scope(guard,purpose):return await super()._read_snapshot_impl(read,**kwargs)
+        finally:self._position_group_guard=None
+
+    async def _read_snapshot_fields(self,client,latencies,deadline_ns,**kwargs):
+        if self._position_group_guard is None:
+            return await super()._read_snapshot_fields(client,latencies,deadline_ns,**kwargs)
+        from app.commissioning.finite_diagnostic import FiniteWindowDiagnosticAdapter
+        return await FiniteWindowDiagnosticAdapter._parallel_snapshot_fields(self,client,latencies,deadline_ns,
+            check=self._position_group_guard,include_raw_kinematics=kwargs['include_raw_kinematics'])
+
+    def _before_snapshot_install(self,snapshot,read):
+        if self._position_group_guard is not None:self._client.verify_position_snapshot_group()
+        return super()._before_snapshot_install(snapshot,read)
 
     async def connect(self):
         self._site_connecting=True
@@ -140,6 +172,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
     model_binding=copy.deepcopy((model.model_sha256,model.tool))
     reserve=deadline+5_000_000_000;adapter=proxy=None;plan=None;started=False;motion_done=False
     report=dict(complete=False,hardware_verified=False,continuous_control_admitted=False,
+        snapshot_read_policy='owned_six_fields_parallel',snapshot_groups=[],
         motion_time_stop_verified=False,natural_arrival_confirmed=False,tail_complete=False,
         connect_entries=0,movej_entries=0,stop_entries=0,ik_entries=0,fk_entries=0,
         local_resources_released=False,native_connection_release_verified=False,process_exit_required=True,
@@ -244,6 +277,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
         if proxy is not None:
             proxy.read_gate_closed=True
             report.update(movej_entries=proxy.movej_entries,stop_entries=proxy.sdk_stop_entries,
+                snapshot_groups=copy.deepcopy(proxy.snapshot_groups),
                 ik_entries=proxy.math_entries['kinematics_inverse'],fk_entries=proxy.math_entries['kinematics_forward'],
                 read_entries=len(proxy.read_calls),read_calls=copy.deepcopy(proxy.read_calls),
                 remote_unknown=report['remote_unknown'] or proxy.movej_unknown or proxy.read_remote_result_unknown)
