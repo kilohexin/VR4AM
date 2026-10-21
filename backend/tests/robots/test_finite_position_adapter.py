@@ -44,6 +44,28 @@ async def test_finished_without_actual_progress_is_rejected():
     await a.disconnect()
 
 
+@pytest.mark.parametrize('kind,complete',[('single',True),('sustained',False),('large',False),('target',False)])
+async def test_bounded_acceleration_feedback_is_wired_into_step_monitoring(kind,complete):
+    a,c,clock,p=await prepared();original=c.get_kin_data;reads=0
+    async def data():
+        nonlocal reads
+        result=await original()
+        if c.start_ns is not None:
+            reads+=1
+            field='target_joint_acc' if kind=='target' else 'actual_joint_acc'
+            value=.201 if kind=='target' else .401 if kind=='large' else .3
+            if kind=='single' and reads!=1:value=0.
+            result[field]=[value,0.,0.,0.,0.,0.]
+        return result
+    c.get_kin_data=data;await clock.sleep(.001)
+    try:
+        r=await execute(a,p)
+        assert r.complete==complete
+        assert [x[0] for x in c.write_calls]==(['movej'] if complete else ['movej','stop_move'])
+        if not complete:assert r.reason=='position_reported_rate_limit'
+    finally:await a.disconnect()
+
+
 @pytest.mark.parametrize('fraction,complete',[(.8,True),(.49,False)])
 async def test_partial_following_obeys_new_arrival_contract_without_extra_targets(fraction,complete):
     a,c,_,p=await prepared();advance=c.advance

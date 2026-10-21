@@ -17,6 +17,7 @@ from scripts.real_robot_ready_return import close_loop_bounded
 from app.commissioning.finite_position_site import MdhPositionModel,run_single_position,MAX_READS
 from app.control.finite_position_types import (PLAN_NS,MAX_STEP_M,MIN_PROGRESS_M,MAX_ENDPOINT_ERROR_M,
     JOINT_ENDPOINT_TOLERANCE_RAD,INPUT_DEADZONE)
+from app.robots.finite_position_acceleration import PositionAccelerationMonitor
 
 CONFIRM='I_APPROVE_ONE_2MM_FINITE_POSITION_Z_NATURAL_ARRIVAL_AND_RESERVED_FAULT_STOP'
 sha=identity.sha
@@ -93,6 +94,7 @@ def preview(p):
         max_endpoint_error_m=MAX_ENDPOINT_ERROR_M,min_progress_m=MIN_PROGRESS_M,max_cross_fraction=.2,
         joint_endpoint_tolerance_rad=JOINT_ENDPOINT_TOLERANCE_RAD,held_input_deadzone=INPUT_DEADZONE,
         held_input_policy='fixed_step_unit_direction_above_deadzone',
+        **PositionAccelerationMonitor(min(.2,p['settings'].control.max_joint_acceleration_radps2)).policy(),
         ready_tolerance_rad=.001,max_joint_speed_radps=p['settings'].control.max_joint_speed_radps,
         max_joint_acceleration_radps2=p['settings'].control.max_joint_acceleration_radps2,
         motion_authorized=False,hardware_verified=False,factory_calibrated=False,motion_time_stop_verified=False,

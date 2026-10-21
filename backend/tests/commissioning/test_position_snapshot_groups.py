@@ -13,7 +13,8 @@ async def test_independent_fifteen_ms_fields_fit_freshness_without_raising_ttl()
         async def delayed(method=original):await asyncio.sleep(.015);return await method()
         setattr(c,name,delayed)
     r,c,_=await run(data)
-    assert r['complete'],r
+    assert r['complete'],{key:r.get(key) for key in ('reason','error_type','movej_entries',
+        'stop_entries','latched_fault','remote_unknown','native_entry_feedback_age_ms','snapshot_groups')}
     assert r['movej_entries']==1 and r['stop_entries']==0 and r['tail_complete']
     assert r['snapshot_read_policy']=='owned_six_fields_parallel'
 

@@ -67,6 +67,7 @@ async def test_one_fixed_two_mm_z_natural_arrival_without_stop_or_continuation()
     assert [x[0] for x in c.write_calls]==['movej'] and c.write_calls[0][-2:]==(0.,0.)
     assert r['natural_arrival_confirmed'] and not r['hardware_verified'] and not r['continuous_control_admitted']
     assert math.dist(r['target_p'],r['start_p'])==pytest.approx(.002)
+    assert r['actual_acceleration_instant_limit_radps2']==.4
 
 
 @pytest.mark.parametrize('damage',['paused','pose','tool','factor','moving'])

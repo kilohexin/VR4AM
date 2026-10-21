@@ -10,6 +10,7 @@ from app.robots.base import StopReason,BackendCommandError
 from app.robots.lebai_adapter import RealLebaiAdapter
 from app.robots.lebai_codec import pose_to_lebai,pose_from_lebai,joint_vector
 from app.robots.finite_position_plan import build_position_target,audit_position_path,evaluate_position_arrival,FRACTIONS,angle
+from app.robots.finite_position_acceleration import PositionAccelerationMonitor
 from app.schemas.messages import Pose,BackendState
 
 
@@ -28,8 +29,10 @@ class _FinitePositionCore(RealLebaiAdapter):
         self.position_model=position_model;self.position_binding=None
         self._position_plan=None;self._position_plan_observer=None
         self.position_busy=False;self.position_aborted=False
+        self._position_acceleration=PositionAccelerationMonitor(min(.2,settings.control.max_joint_acceleration_radps2))
         self._position_config=digest(asdict(settings))
         self._position_sources={Path(__file__),Path(__file__).with_name('finite_position_plan.py'),
+            Path(__file__).with_name('finite_position_acceleration.py'),
             Path(__file__).parents[1]/'control/finite_position_types.py'}
         self._position_identity=self._source_identity()
         self._position_metadata=self._source_metadata()
@@ -48,6 +51,7 @@ class _FinitePositionCore(RealLebaiAdapter):
         self.position_binding=PositionBinding(self._client,generation,self._position_config,
             digest(asdict(self.settings.expected_tcp)))
         self.position_aborted=False
+        self._position_acceleration.reset()
         return self.position_binding
 
     def _position_health(self,binding):
@@ -69,8 +73,9 @@ class _FinitePositionCore(RealLebaiAdapter):
         if not self._joints_inside_limits(s.target_q):raise ValueError('position_joint_outside_soft_limits')
         limits=self.settings.control
         if (any(abs(x)>limits.max_joint_speed_radps for v in (s.actual_qd,s.target_qd) for x in v)
-                or any(abs(x)>limits.max_joint_acceleration_radps2 for v in (s.actual_qdd,s.target_qdd) for x in v)):
+                or any(abs(x)>self._position_acceleration.limit for x in s.target_qdd)):
             raise ValueError('position_reported_rate_limit')
+        self._position_acceleration.observe(s.actual_qdd,captured_ns=s.captured_ns,now_ns=self._clock())
 
     def _position_entry_snapshot(self,plan):
         latest=self._snapshot

@@ -18,6 +18,7 @@ from app.commissioning.position_snapshot_groups import PositionSnapshotGroups
 from app.control.finite_position_types import PositionIntent,INPUT_NS,MAX_STEP_M
 from app.robots.base import StopReason
 from app.robots.finite_position_adapter import _FinitePositionCore
+from app.robots.finite_position_acceleration import PositionAccelerationMonitor
 from app.robots.finite_position_plan import evaluate_position_arrival
 from app.schemas.messages import BackendState
 
@@ -185,6 +186,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
     model_binding=copy.deepcopy((model.model_sha256,model.tool))
     reserve=deadline+5_000_000_000;adapter=proxy=None;plan=None;started=False;motion_done=False
     report=dict(complete=False,hardware_verified=False,continuous_control_admitted=False,
+        **PositionAccelerationMonitor(min(.2,settings.control.max_joint_acceleration_radps2)).policy(),
         snapshot_read_policy='owned_six_fields_parallel',snapshot_groups=[],
         motion_time_stop_verified=False,natural_arrival_confirmed=False,tail_complete=False,
         connect_entries=0,movej_entries=0,stop_entries=0,ik_entries=0,fk_entries=0,
