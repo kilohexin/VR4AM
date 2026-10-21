@@ -146,6 +146,22 @@ async def test_late_native_move_cannot_clear_unknown_or_cause_a_second_motion():
     finally:release.set();await asyncio.sleep(0)
 
 
+async def test_unresolved_stop_is_preserved_in_terminal_report():
+    data=fixture();c=data[1];c.no_progress=True;release=asyncio.Event()
+    async def late_stop():
+        c.write_calls.append(('stop_move',))
+        while not release.is_set():
+            try:await release.wait()
+            except asyncio.CancelledError:pass
+    c.stop_move=late_stop
+    try:
+        r,c,_=await asyncio.wait_for(run(data),3)
+        assert not r['complete'] and r['latched_fault']=='stop_unverified'
+        assert r.get('stop_result_unknown') is True and r['remote_unknown'] is True
+        assert [x[0] for x in c.write_calls]==['movej','stop_move']
+    finally:release.set();await asyncio.sleep(0)
+
+
 async def test_model_change_during_inverse_never_reaches_native_motion():
     data=fixture();c=data[1];model=data[-1];original=c.kinematics_inverse
     async def changed(*args):

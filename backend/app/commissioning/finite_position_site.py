@@ -189,7 +189,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
         motion_time_stop_verified=False,natural_arrival_confirmed=False,tail_complete=False,
         connect_entries=0,movej_entries=0,stop_entries=0,ik_entries=0,fk_entries=0,
         local_resources_released=False,native_connection_release_verified=False,process_exit_required=True,
-        latched_fault=None,remote_unknown=False,cleanup_errors=[])
+        latched_fault=None,remote_unknown=False,stop_result_unknown=False,cleanup_errors=[])
 
     def health():
         if asdict(settings)!=binding:raise ValueError('position_site_configuration_changed')
@@ -294,8 +294,12 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
             if proxy is None or proxy.movej_entries==0:
                 adapter._motion_accepted=adapter._motion_write_stop_required=False
             report['latched_fault']=adapter._latched_fault
+            transaction=adapter._stop_transaction
+            report['stop_result_unknown']=transaction is not None and transaction.unresolved
             try:await adapter.disconnect()
             except BaseException as error:report['cleanup_errors'].append(type(error).__name__)
+            report['stop_result_unknown'] |= transaction is not None and transaction.unresolved
+            report['remote_unknown'] |= report['stop_result_unknown']
             report['local_resources_released']=adapter._client is None and not adapter._pump.running
         if proxy is not None:
             proxy.read_gate_closed=True
