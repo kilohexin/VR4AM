@@ -16,15 +16,15 @@ from app.schemas.messages import Pose,BackendState
 def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
 
 
-class FinitePositionAdapter(RealLebaiAdapter):
-    position_candidate=True
+class _FinitePositionCore(RealLebaiAdapter):
+    """Shared executor. Requires an explicit injected factory; no native loader."""
+    position_candidate=False
     _stop_blocking_motion_methods=frozenset({'movej','move_pvat','set_claw'})
     _immediate_stop_latch_methods=frozenset({'movej','move_pvat'})
 
     def __init__(self,settings,*,client_factory=None,backend_label=None,position_model=None,**kwargs):
-        if (settings.ip!='digital-twin' or backend_label!='LEBAI_FAKE'
-                or client_factory is None or position_model is None):
-            raise ValueError('position_offline_injection_required')
+        if client_factory is None or position_model is None:
+            raise ValueError('position_explicit_injection_required')
         self.position_model=position_model;self.position_binding=None
         self._position_plan=None;self.position_busy=False;self.position_aborted=False
         self._position_config=digest(asdict(settings))
@@ -138,7 +138,8 @@ class FinitePositionAdapter(RealLebaiAdapter):
                     self._motion_accepted=self._motion_write_stop_required=True
                     return await self._client.movej(list(plan.goal_joints),plan.joint_acceleration,plan.joint_speed,0.,0.)
                 motion_id=await self._motion_calls.call('movej',send,.2,
-                    revoked=lambda:self.position_aborted,entered=lambda:entered)
+                    revoked=lambda:self.position_aborted,entered=lambda:entered and self._position_native_entered(),
+                    native_result_unknown=self._position_native_unknown)
             if type(motion_id) is not int or motion_id<=0:raise ValueError('position_invalid_motion_id')
             end=entry_ns+STEP_NS
             while self._clock()<end:
@@ -146,6 +147,7 @@ class FinitePositionAdapter(RealLebaiAdapter):
                 s=await self._read_snapshot(read_purpose='position_progress')
                 monitor_authorize();self._position_health(binding)
                 state=await self._position_math('get_motion_state',lambda:self._client.get_motion_state(motion_id),monitor_authorize)
+                if self._clock()>=end:raise ValueError('position_completion_timeout')
                 final=self._position_sample(s,str(state).upper())
                 if not 0<=self._clock()-final.captured_ns<INPUT_NS:raise ValueError('position_feedback_expired')
                 self._position_feedback_limits(s)
@@ -169,6 +171,8 @@ class FinitePositionAdapter(RealLebaiAdapter):
                 await self._sleep(.02)
             raise ValueError(reason or 'position_completion_timeout')
         except BaseException as error:
+            if entered and not self._position_native_entered():
+                entered=False;self._motion_accepted=self._motion_write_stop_required=False
             reason=str(error) if str(error).startswith('position_') else 'position_step_failed'
             unknown=bool(self._motion_calls.unknown_methods)
             if entered and binding.connection is self._client:
@@ -200,3 +204,19 @@ class FinitePositionAdapter(RealLebaiAdapter):
     async def set_gripper(self,*args,**kwargs):
         if self.position_busy:raise BackendCommandError('position_busy')
         return await super().set_gripper(*args,**kwargs)
+
+    def _position_native_entered(self):return True
+
+    def _position_native_unknown(self):return None
+
+
+class FinitePositionAdapter(_FinitePositionCore):
+    """Public demo selector remains Fake-only; no production registration."""
+    position_candidate=True
+
+    def __init__(self,settings,*,client_factory=None,backend_label=None,position_model=None,**kwargs):
+        if (settings.ip!='digital-twin' or backend_label!='LEBAI_FAKE'
+                or client_factory is None or position_model is None):
+            raise ValueError('position_offline_injection_required')
+        super().__init__(settings,client_factory=client_factory,backend_label=backend_label,
+            position_model=position_model,**kwargs)

@@ -200,3 +200,18 @@ async def test_prepare_home_and_claw_reject_while_position_step_owns_motion():
         assert c.write_calls==[]
     finally:
         release.set();await task;await a.disconnect()
+
+
+async def test_final_read_crossing_completion_deadline_cannot_certify_arrival():
+    a,c,clock,p=await prepared();advance=c.advance;state=c.get_motion_state
+    def late_finish():
+        advance()
+        if c.start_ns is not None and clock.now_ns()-c.start_ns<1_860_000_000:
+            c.robot_state='MOVING';c.motion_state='RUNNING';c.running_motion=7
+    async def delayed(*args):
+        await clock.sleep(.04);return await state(*args)
+    c.advance=late_finish;c.get_motion_state=delayed
+    try:
+        r=await execute(a,p)
+        assert not r.complete and [x[0] for x in c.write_calls]==['movej','stop_move']
+    finally:await a.disconnect()
