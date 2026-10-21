@@ -1,6 +1,144 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "FinitePositionStatus": {
+  "additionalProperties": false,
+  "properties": {
+    "policy": {
+      "const": "finite_position_offline",
+      "default": "finite_position_offline",
+      "title": "Policy",
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "inactive",
+        "ready",
+        "planning",
+        "executing",
+        "draining",
+        "hold",
+        "fault"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "generation": {
+      "title": "Generation",
+      "type": "integer"
+    },
+    "entered_steps": {
+      "title": "Entered Steps",
+      "type": "integer"
+    },
+    "motion_id": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Motion Id"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    },
+    "hardware_verified": {
+      "const": false,
+      "default": false,
+      "title": "Hardware Verified",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "phase",
+    "generation",
+    "entered_steps"
+  ],
+  "title": "FinitePositionStatus",
+  "type": "object"
+},
+    "FinitePositionInputMessage": {
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "const": 1,
+      "title": "V",
+      "type": "integer"
+    },
+    "type": {
+      "const": "finite_position_input",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Session Id",
+      "type": "string"
+    },
+    "generation": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "seq": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Seq",
+      "type": "integer"
+    },
+    "kind": {
+      "enum": [
+        "held",
+        "release"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "vector": {
+      "maxItems": 3,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "title": "Vector",
+      "type": "array"
+    }
+  },
+  "required": [
+    "v",
+    "type",
+    "session_id",
+    "generation",
+    "seq",
+    "kind",
+    "vector"
+  ],
+  "title": "FinitePositionInputMessage",
+  "type": "object"
+},
     "GripperCancelMessage": {
       "type":"object","additionalProperties":false,
       "properties":{"v":{"const":1},"type":{"const":"gripper_cancel"},
@@ -470,6 +608,7 @@
     "RobotStateMessage": {
       "additionalProperties": false,
       "properties": {
+        "finite_position": {"anyOf":[{"$ref":"#/$defs/FinitePositionStatus"},{"type":"null"}],"default":null},
         "manual_input_ready":{"type":"boolean","default":false},
         "preparation_required":{"type":"boolean","default":false},
         "preparation_unlocked":{"type":"boolean","default":false},

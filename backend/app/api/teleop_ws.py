@@ -15,6 +15,7 @@ from app.rehearsal.report import HARDWARE_PENDING, RehearsalReportStore
 from app.robots.base import BackendCommandError
 from app.schemas.messages import (
     ClientMessage,
+    FinitePositionInputMessage,
     GripperRequestMessage,
     GripperCancelMessage,
     ClientControlMessage,
@@ -134,6 +135,8 @@ def _parse_message(payload: Any) -> ClientMessage:
     if not isinstance(payload, dict):
         raise ValueError("message_must_be_object")
     message_type = payload.get("type")
+    if message_type=='finite_position_input':
+        return FinitePositionInputMessage.model_validate(payload)
     if message_type == "vr_frame":
         return VRFrame.model_validate(payload)
     if message_type == 'gripper_request':
@@ -357,6 +360,12 @@ async def _receive_operator_messages(
         if isinstance(message, VRFrame):
             app.state.latest.publish(message, control.clock.now_ns())
             start_sender.set()
+            continue
+
+        if isinstance(message,FinitePositionInputMessage):
+            try:control.accept_position_input(message,control.clock.now_ns())
+            except (RuntimeError,ValueError):
+                await _send_json(websocket,dict(v=1,type='position_input_rejected',reason='not_authorized'),send_lock)
             continue
 
         if isinstance(message,GripperRequestMessage):

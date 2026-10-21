@@ -155,11 +155,14 @@ class RobotControl:
         prepare_on_arm: bool = False,
         explicit_preparation: bool = False,
         prepare_options: HomeOptions | None = None,
+        finite_position_session=None,
     ) -> None:
         self.backend = backend
         self.latest = latest
         self.clock = clock
         self.recorder = recorder
+        self.finite_position_session=finite_position_session
+        self._finite_position_enabled=getattr(backend,'position_candidate',False) is True
         if type(prepare_on_arm) is not bool:
             raise ValueError('invalid_prepare_on_arm')
         if prepare_on_arm and getattr(backend, 'supports_prepare_on_arm', False) is not True:
@@ -539,6 +542,7 @@ class RobotControl:
             # Recheck ordinary teleoperation preflight after arrival; the
             # recovery's singularity exception grants no joystick authority.
             await self._arm_without_prepare(ensure_prepared=ensure_current)
+            if self._finite_position_enabled:self._install_position_session()
         except asyncio.CancelledError:
             if motion_started:
                 await self._stop_failed_home_motion()
@@ -556,6 +560,9 @@ class RobotControl:
             self._recovery_phase = None
 
     async def disarm(self) -> None:
+        if self.finite_position_session is not None:
+            await self.finite_position_session.abort(StopReason.GRIP_RELEASED)
+            self.finite_position_session=None
         if self.machine.mode in {TeleopMode.STALE, TeleopMode.FAULT}:
             return
         self._disarm_in_progress = True
@@ -587,6 +594,8 @@ class RobotControl:
             self._disarm_in_progress = False
 
     async def home(self) -> HomeResult:
+        if self.finite_position_session is not None and self.finite_position_session.busy:
+            raise RuntimeError('position_busy')
         async with self._recovery_lock:
             return await self._home_locked()
 
@@ -827,6 +836,8 @@ class RobotControl:
         self.machine.disconnect()
 
     async def stop(self) -> None:
+        if self.finite_position_session is not None:
+            await self.finite_position_session.abort(StopReason.SHUTDOWN)
         async with self._lifecycle_lock:
             if self._shutdown_stopped:
                 return
@@ -955,6 +966,15 @@ class RobotControl:
             return
         if (self._disconnecting or self._disarm_in_progress
                 or self._recovery_lock.locked() or self._grip_stop_in_progress):
+            return
+        if self._finite_position_enabled and self.finite_position_session is not None:
+            session=self.finite_position_session
+            await session.advance()
+            phase=session.view().phase
+            if phase=='executing':self.machine.observe_grip(True)
+            elif phase in ('ready','draining','hold'):self.machine.observe_grip(False)
+            if phase=='fault' and self._fault is None:
+                await self._enter_fault(session.view().reason or 'position_fault')
             return
         if await self._consume_grip_release():
             return
@@ -1519,6 +1539,25 @@ class RobotControl:
             self._latch_backend_fault(state.fault)
         return state
 
+    def _install_position_session(self):
+        from app.control.finite_position_session import FinitePositionSession
+        binding=self.backend.bind_position_generation(self._control_generation)
+        def authorized():
+            if (self._control_generation!=binding.generation or self._fault or self._shutdown_started
+                    or self._disconnecting or self._disarm_in_progress or self._recovery_lock.locked()
+                    or self.machine.mode not in {TeleopMode.ARMED,TeleopMode.ACTIVE,TeleopMode.HOLD}):
+                raise ValueError('position_authority_revoked')
+        self.finite_position_session=FinitePositionSession(self.backend,binding,clock=self.clock.now_ns,
+            recorder=self.recorder,authorize=authorized)
+
+    def accept_position_input(self,message,received_ns):
+        from app.control.finite_position_types import PositionIntent
+        session=self.finite_position_session
+        if not self._finite_position_enabled or session is None:
+            raise ValueError('position_not_prepared')
+        session.offer(PositionIntent(message.session_id,message.generation,message.seq,received_ns,
+            message.kind,message.vector))
+
     def _compose_state_message(self, state: RobotStateMessage) -> RobotStateMessage:
         """Overlay current control metadata without I/O or control transitions.
 
@@ -1551,8 +1590,17 @@ class RobotControl:
                     and not self._pending_stop_completion and not self._stop_unverified,
                 "preparation_required": self._explicit_preparation,
                 "preparation_unlocked": self._preparation_unlocked(),
+                "finite_position": self._position_status_message(),
             }
         )
+
+    def _position_status_message(self):
+        if not self._finite_position_enabled:return None
+        from dataclasses import asdict
+        from app.control.finite_position_types import PositionView
+        from app.schemas.messages import FinitePositionStatus
+        view=self.finite_position_session.view() if self.finite_position_session is not None else PositionView(generation=self._control_generation)
+        return FinitePositionStatus(**asdict(view))
 
     async def _record_state_message(self, message: RobotStateMessage) -> None:
         """Record the composed message and retain the existing failure response."""
@@ -1584,6 +1632,8 @@ class RobotControl:
             self._advance_control_generation()
 
     async def command_gripper(self, value: float, *, is_current: Callable[[], bool] | None = None) -> None:
+        if self.finite_position_session is not None and self.finite_position_session.busy:
+            raise RuntimeError('position_busy')
         if self._explicit_gripper_current is not None:
             raise RuntimeError('gripper_command_busy')
         self._explicit_gripper_current = is_current or (lambda: True)
@@ -1916,6 +1966,8 @@ class RobotControl:
 
     def _advance_control_generation(self) -> None:
         self._control_generation += 1
+        if self.finite_position_session is not None:
+            self.backend.position_aborted=True
         self._preparation_unlock=None
         self._last_target_input_ns = None
         self._last_target_step_ns = None

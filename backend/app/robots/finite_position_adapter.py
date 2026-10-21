@@ -17,6 +17,7 @@ def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True).encode(
 
 
 class FinitePositionAdapter(RealLebaiAdapter):
+    position_candidate=True
     _stop_blocking_motion_methods=frozenset({'movej','move_pvat','set_claw'})
     _immediate_stop_latch_methods=frozenset({'movej','move_pvat'})
 
@@ -154,6 +155,10 @@ class FinitePositionAdapter(RealLebaiAdapter):
     async def prepare(self,*args,**kwargs):
         if self.position_busy:raise BackendCommandError('position_busy')
         return await super().prepare(*args,**kwargs)
+
+    async def stop(self,reason):
+        self.position_aborted=True
+        return await super().stop(reason)
 
     async def home(self,*args,**kwargs):
         if self.position_busy:raise BackendCommandError('position_busy')

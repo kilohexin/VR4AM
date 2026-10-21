@@ -82,7 +82,19 @@ def build_backend(
     offline_parallel_segment_fk: bool = False,
     offline_parallel_snapshot_reads: bool = False,
     offline_observer_priority: bool = False,
+    offline_finite_position: bool = False,
+    offline_position_model=None,
 ) -> RobotBackend:
+    if type(offline_finite_position) is not bool:raise ValueError('invalid_finite_position_selection')
+    if offline_finite_position:
+        if (backend_label!='LEBAI_FAKE' or settings.backend!='lebai' or settings.lebai is None
+                or settings.lebai.ip!='digital-twin' or settings.segmented_target is not None
+                or settings.transactional_target is not None or stop_diagnostic_sampling
+                or client_factory is connect_real_client):
+            raise ValueError('position_offline_injection_required')
+        from app.robots.finite_position_adapter import FinitePositionAdapter
+        return FinitePositionAdapter(settings.lebai,client_factory=client_factory,
+            backend_label=backend_label,position_model=offline_position_model,event_callback=recorder.write_event)
     if type(offline_observer_priority) is not bool:
         raise ValueError('invalid_offline_observer_priority')
     if offline_observer_priority and (backend_label!='LEBAI_FAKE'
@@ -213,6 +225,8 @@ def create_app(
     offline_parallel_segment_fk: bool = False,
     offline_parallel_snapshot_reads: bool = False,
     offline_observer_priority: bool = False,
+    offline_finite_position: bool = False,
+    offline_position_model=None,
 ) -> FastAPI:
     runtime_settings = settings if settings is not None else Settings.load()
     runtime_backend = backend_label or (
@@ -235,6 +249,8 @@ def create_app(
             offline_parallel_segment_fk=offline_parallel_segment_fk,
             offline_parallel_snapshot_reads=offline_parallel_snapshot_reads,
             offline_observer_priority=offline_observer_priority,
+            offline_finite_position=offline_finite_position,
+            offline_position_model=offline_position_model,
         )
         latest = LatestVRFrame()
         preparation_enabled = bool(

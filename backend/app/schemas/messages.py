@@ -141,7 +141,39 @@ class TargetControlStatus(StrictMessage):
         return self
 
 
+class FinitePositionInputMessage(StrictMessage):
+    v: Literal[1]
+    type: Literal['finite_position_input']
+    session_id: str = Field(min_length=1,max_length=128)
+    generation: int = Field(strict=True,ge=0,le=2**53-1)
+    seq: int = Field(strict=True,ge=0,le=2**53-1)
+    kind: Literal['held','release']
+    vector: Vec3
+
+    @field_validator('vector',mode='before')
+    @classmethod
+    def strict_vector(cls,value):
+        from app.control.finite_position_types import vector
+        return vector(value,3)
+
+    @model_validator(mode='after')
+    def release_is_zero(self):
+        if self.kind=='release' and any(self.vector):raise ValueError('position_release_vector')
+        return self
+
+
+class FinitePositionStatus(StrictMessage):
+    policy: Literal['finite_position_offline']='finite_position_offline'
+    phase: Literal['inactive','ready','planning','executing','draining','hold','fault']
+    generation: int
+    entered_steps: int
+    motion_id: int|None=None
+    reason: str|None=None
+    hardware_verified: Literal[False]=False
+
+
 class RobotStateMessage(StrictMessage):
+    finite_position: FinitePositionStatus|None=None
     manual_input_ready: bool = Field(default=False,strict=True)
     preparation_required: bool = Field(default=False,strict=True)
     preparation_unlocked: bool = Field(default=False,strict=True)
@@ -381,6 +413,7 @@ class OfflineRehearsalFinishMessage(StrictMessage):
 
 ClientMessage = (
     VRFrame
+    | FinitePositionInputMessage
     | GripperRequestMessage
     | GripperCancelMessage
     | SetSimulationScaleMessage
