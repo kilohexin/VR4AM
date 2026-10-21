@@ -114,3 +114,38 @@ async def test_revoked_external_authority_between_plan_and_send_is_zero_write():
         await s.advance();await s.worker
         assert c.write_calls==[] and s.phase=='fault'
     finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
+@pytest.mark.parametrize('stage',['planning','entry','executing'])
+@pytest.mark.parametrize('damage',['fatal_error','dropped_normal_events'])
+async def test_recorder_failure_revokes_each_stage(stage,damage):
+    s,a,c,clock=await fixture();original=a.plan_step;inverse=c.kinematics_inverse
+    def fail_recording():setattr(s.recorder,damage,1)
+    async def bad_math(*args):
+        fail_recording();return await inverse(*args)
+    async def bad_entry(*args,**kwargs):
+        p=await original(*args,**kwargs);fail_recording();return p
+    if stage=='planning':c.kinematics_inverse=bad_math
+    if stage=='entry':a.plan_step=bad_entry
+    try:
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
+        if stage=='executing':
+            await drive(s,clock,until=lambda:bool(c.write_calls));fail_recording()
+            await drive(s,clock,until=lambda:s.phase=='fault')
+        else:await s.advance();await s.worker
+        assert s.phase=='fault'
+        assert [x[0] for x in c.write_calls]==(['movej','stop_move'] if stage=='executing' else [])
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
+async def test_fixed_session_deadline_aborts_even_after_explicit_release():
+    s,a,c,clock=await fixture()
+    try:
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
+        await drive(s,clock,until=lambda:bool(c.write_calls))
+        s.offer(PositionIntent('web',1,2,clock.now_ns(),'release',(0.,)*3))
+        s.gate.deadline_ns=clock.now_ns()+50_000_000
+        await drive(s,clock,until=lambda:s.phase=='fault')
+        assert s.reason=='position_session_expired'
+        assert [x[0] for x in c.write_calls]==['movej','stop_move']
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()

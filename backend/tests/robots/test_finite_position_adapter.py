@@ -187,3 +187,16 @@ async def test_zero_reported_speed_does_not_certify_a_wandering_endpoint():
         r=await execute(a,p)
         assert not r.complete and [x[0] for x in c.write_calls]==['movej','stop_move']
     finally:await a.disconnect()
+
+
+async def test_prepare_home_and_claw_reject_while_position_step_owns_motion():
+    a,c,_,p=await prepared();entered=asyncio.Event();release=asyncio.Event();original=c.movej
+    async def blocked(*args):
+        entered.set();await release.wait();return await original(*args)
+    c.movej=blocked;task=asyncio.create_task(execute(a,p));await entered.wait()
+    try:
+        for method in (a.prepare,a.home,a.set_gripper):
+            with pytest.raises(Exception,match='position_busy'):await method(None)
+        assert c.write_calls==[]
+    finally:
+        release.set();await task;await a.disconnect()
