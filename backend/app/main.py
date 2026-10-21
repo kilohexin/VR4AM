@@ -84,6 +84,7 @@ def build_backend(
     offline_observer_priority: bool = False,
     offline_finite_position: bool = False,
     offline_position_model=None,
+    offline_position_clock=None,
 ) -> RobotBackend:
     if type(offline_finite_position) is not bool:raise ValueError('invalid_finite_position_selection')
     if offline_finite_position:
@@ -94,7 +95,8 @@ def build_backend(
             raise ValueError('position_offline_injection_required')
         from app.robots.finite_position_adapter import FinitePositionAdapter
         return FinitePositionAdapter(settings.lebai,client_factory=client_factory,
-            backend_label=backend_label,position_model=offline_position_model,event_callback=recorder.write_event)
+            backend_label=backend_label,position_model=offline_position_model,event_callback=recorder.write_event,
+            **({'clock':offline_position_clock.now_ns} if offline_position_clock is not None else {}))
     if type(offline_observer_priority) is not bool:
         raise ValueError('invalid_offline_observer_priority')
     if offline_observer_priority and (backend_label!='LEBAI_FAKE'
@@ -227,6 +229,7 @@ def create_app(
     offline_observer_priority: bool = False,
     offline_finite_position: bool = False,
     offline_position_model=None,
+    offline_position_clock=None,
 ) -> FastAPI:
     runtime_settings = settings if settings is not None else Settings.load()
     runtime_backend = backend_label or (
@@ -251,6 +254,7 @@ def create_app(
             offline_observer_priority=offline_observer_priority,
             offline_finite_position=offline_finite_position,
             offline_position_model=offline_position_model,
+            offline_position_clock=offline_position_clock,
         )
         latest = LatestVRFrame()
         preparation_enabled = bool(
@@ -262,7 +266,7 @@ def create_app(
         control = RobotControl(
             backend=backend,
             latest=latest,
-            clock=MonotonicClock(),
+            clock=offline_position_clock if offline_finite_position and offline_position_clock is not None else MonotonicClock(),
             recorder=recorder,
             mapper=_build_mapper(runtime_settings),
             limiter=_build_limiter(runtime_settings, runtime_backend),

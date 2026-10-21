@@ -24,6 +24,8 @@ def audit_position_path(start,goal_joints,*,fk_samples,settings,model):
     if not np.isfinite(dq).all() or distance>settings.control.max_joint_step_rad:
         raise ValueError('position_joint_jump')
     if distance<1e-12:raise ValueError('position_no_joint_progress')
+    validate_path=getattr(model,'validate_path',None)
+    if callable(validate_path):validate_path(start.actual_q,goal_joints,settings)
     direction=dq/distance
     lo=np.array(settings.soft_joint_min_rad)+settings.joint_limit_margin_rad
     hi=np.array(settings.soft_joint_max_rad)-settings.joint_limit_margin_rad

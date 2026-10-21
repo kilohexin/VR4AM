@@ -31,11 +31,15 @@ class FinitePositionAdapter(RealLebaiAdapter):
         self._position_sources={Path(__file__),Path(__file__).with_name('finite_position_plan.py'),
             Path(__file__).parents[1]/'control/finite_position_types.py'}
         self._position_identity=self._source_identity()
+        self._position_metadata=self._source_metadata()
         super().__init__(settings,client_factory=client_factory,backend_label=backend_label,**kwargs)
 
     def _source_identity(self):
         return tuple((str(p),p.stat().st_size,p.stat().st_mtime_ns,hashlib.sha256(p.read_bytes()).hexdigest())
             for p in sorted(self._position_sources))
+
+    def _source_metadata(self):
+        return tuple((str(p),s.st_size,s.st_mtime_ns,s.st_ino) for p in sorted(self._position_sources) for s in (p.stat(),))
 
     def bind_position_generation(self,generation):
         if self.position_busy or self._latched_fault or self._motion_calls.unknown_methods:
@@ -51,8 +55,31 @@ class FinitePositionAdapter(RealLebaiAdapter):
                 or self.position_aborted or self._snapshot_calls.closed
                 or self._motion_calls.unknown_methods or self._snapshot_calls.unknown_methods
                 or digest(asdict(self.settings))!=self._position_config
-                or self._source_identity()!=self._position_identity):
+                or self._source_metadata()!=self._position_metadata):
             raise ValueError('position_binding_unavailable')
+        self._check_known_snapshot_fault(self._client,self._pump.generation)
+        if self._snapshot is not None:
+            fault=self._motion_boundary_fault(self._snapshot)
+            if fault:raise ValueError('position_'+fault)
+
+    def _position_feedback_limits(self,s):
+        fault=self._motion_boundary_fault(s)
+        if fault:raise ValueError('position_'+fault)
+        if not self._joints_inside_limits(s.target_q):raise ValueError('position_joint_outside_soft_limits')
+        limits=self.settings.control
+        if (any(abs(x)>limits.max_joint_speed_radps for v in (s.actual_qd,s.target_qd) for x in v)
+                or any(abs(x)>limits.max_joint_acceleration_radps2 for v in (s.actual_qdd,s.target_qdd) for x in v)):
+            raise ValueError('position_reported_rate_limit')
+
+    def _position_entry_snapshot(self,plan):
+        latest=self._snapshot
+        if latest is None:raise ValueError('position_feedback_missing')
+        self._position_feedback_limits(latest)
+        if (tuple(latest.actual_q)!=plan.start.actual_q or tuple(latest.target_q)!=plan.start.target_q
+                or tuple(latest.actual_tcp.p)!=plan.start.tcp_p or tuple(latest.actual_tcp.q)!=plan.start.tcp_q
+                or latest.robot_state!=BackendState.IDLE
+                or any(abs(x)>1e-8 for v in (latest.actual_qd,latest.actual_qdd,latest.target_qd,latest.target_qdd) for x in v)):
+            raise ValueError('position_observer_changed')
 
     def _position_sample(self,s,task_state=None):
         return PositionSample(self.position_binding,self._snapshot_read_sequence,s.captured_ns,
@@ -84,7 +111,8 @@ class FinitePositionAdapter(RealLebaiAdapter):
             pose=pose_from_lebai(raw);fk.append((tuple(pose.p),tuple(pose.q)))
         if math.dist(fk[-1][0],p)>1e-5 or angle(fk[-1][1],q)>1e-4:
             raise ValueError('position_ik_endpoint_mismatch')
-        audit=audit_position_path(start,goal,fk_samples=tuple(fk),settings=self.settings,model=self.position_model)
+        audit=await asyncio.to_thread(audit_position_path,start,goal,fk_samples=tuple(fk),
+            settings=self.settings,model=self.position_model)
         await self._emit_event(dict(kind='finite_position_plan',input_seq=intent.seq,
             start_tcp=list(start.tcp_p),target_tcp=list(p),goal_joints=list(goal),audit=asdict(audit)))
         authorize();self._position_health(binding)
@@ -94,7 +122,7 @@ class FinitePositionAdapter(RealLebaiAdapter):
         return self._position_plan
 
     async def execute_step(self,plan,*,before_entry,monitor_authorize,on_entered):
-        entered=False;owned=False;entry_ns=None;motion_id=None;final=None;reason=None;stable=None;good=0;last=None
+        entered=False;owned=False;entry_ns=None;motion_id=None;final=None;reason=None;stable=None;anchor=None;good=0;last=None
         binding=plan.binding
         try:
             if plan is not self._position_plan or self.position_busy:raise ValueError('position_plan_obsolete')
@@ -104,8 +132,9 @@ class FinitePositionAdapter(RealLebaiAdapter):
                 async def send():
                     nonlocal entered,entry_ns
                     self._position_health(binding);before_entry()
+                    self._position_entry_snapshot(plan)
                     if not 0<=self._clock()-plan.start.captured_ns<INPUT_NS:raise ValueError('position_snapshot_expired')
-                    self._begin_motion_epoch();entered=True;entry_ns=self._clock();on_entered()
+                    on_entered();self._begin_motion_epoch();entered=True;entry_ns=self._clock()
                     self._motion_accepted=self._motion_write_stop_required=True
                     return await self._client.movej(list(plan.goal_joints),plan.joint_acceleration,plan.joint_speed,0.,0.)
                 motion_id=await self._motion_calls.call('movej',send,.2,
@@ -119,12 +148,16 @@ class FinitePositionAdapter(RealLebaiAdapter):
                 state=await self._position_math('get_motion_state',lambda:self._client.get_motion_state(motion_id),monitor_authorize)
                 final=self._position_sample(s,str(state).upper())
                 if not 0<=self._clock()-final.captured_ns<INPUT_NS:raise ValueError('position_feedback_expired')
+                self._position_feedback_limits(s)
                 if s.running_motion not in (None,motion_id):raise ValueError('position_foreign_task')
                 if str(state).upper() not in ('RUNNING','FINISHED'):raise ValueError('position_task_failed')
                 check=evaluate_position_arrival(plan,final,motion_id=motion_id)
                 if check is None:
-                    if last is None or final.captured_ns-last>=INPUT_NS:stable=final.captured_ns;good=0
-                    if stable is None:stable=final.captured_ns
+                    if (last is None or final.captured_ns-last>=INPUT_NS or anchor is None
+                            or math.dist(final.tcp_p,anchor.tcp_p)>min(1e-5,math.dist(plan.target_p,plan.start.tcp_p)*.02)
+                            or max(abs(a-b) for a,b in zip(final.actual_q,anchor.actual_q))>1e-5):
+                        stable=final.captured_ns;good=0;anchor=final
+                    if stable is None:stable=final.captured_ns;anchor=final
                     good+=1
                     if good>=3 and final.captured_ns-stable>=100_000_000:
                         self._motion_accepted=self._motion_write_stop_required=False

@@ -1,4 +1,6 @@
 import {
+  isFinitePositionInputMessage,
+  type FinitePositionInputMessage,
   isArmFeedbackMessage,
   isGripperResultMessage,
   type GripperRequestMessage,
@@ -79,6 +81,10 @@ export class TeleopSocket {
 
   sendFrame(frame: VRFrame): void {
     this.send(frame);
+  }
+
+  sendPositionInput(message:FinitePositionInputMessage):void {
+    if(isFinitePositionInputMessage(message))this.send(message);
   }
 
   sendControl(message: ClientControlMessage): void {
@@ -196,7 +202,7 @@ export class TeleopSocket {
     }, delay);
   }
 
-  private send(message: VRFrame | ClientControlMessage | OfflineRehearsalClientMessage | SetSimulationScaleMessage | GripperRequestMessage | GripperCancelMessage): void {
+  private send(message: VRFrame | ClientControlMessage | OfflineRehearsalClientMessage | SetSimulationScaleMessage | GripperRequestMessage | GripperCancelMessage | FinitePositionInputMessage): void {
     if (this.socket?.readyState !== OPEN_READY_STATE) return;
     this.socket.send(JSON.stringify(message));
   }

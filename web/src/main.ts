@@ -14,6 +14,7 @@ import {TeleopSocket} from './transport/teleopSocket';
 import {ArmPanel} from './ui/armPanel';
 import {Hud} from './ui/hud';
 import {HoldControlPanel} from './ui/holdControlPanel';
+import {FinitePositionInput} from './ui/finitePositionInput';
 import {SimulationSettingsPanel} from './ui/simulationSettingsPanel';
 import {LatencyTracker} from './ui/latency';
 import {DiagnosticsPanel, DiagnosticsUpdateCoordinator} from './ui/diagnosticsPanel';
@@ -50,6 +51,8 @@ let holdPanel:HoldControlPanel;
 let lastManualFrame:VRFrame|null=null;
 let desktopSequence=0;
 let lastRobotStateReceivedMs=Number.NEGATIVE_INFINITY;
+let positionGeneration:number|null=null;
+let positionStopSuppressed=false;
 
 const socket = new TeleopSocket(
   resolveTeleopSocketUrl(window.location, import.meta.env.VITE_TELEOP_WS_URL),
@@ -65,6 +68,7 @@ const socket = new TeleopSocket(
     armPanel?.setConnectionStatus(status);
     xrController?.setConstraint(null);
     if (status.state !== 'connected') {
+      positionGeneration=null;
       latestGrip = false;
       pendingScaleRequestId = null;
       latestRobotState = null;
@@ -100,9 +104,13 @@ const socket = new TeleopSocket(
   (message)=>holdPanel?.onGripperResult(message),
 );
 
+const positionInput=new FinitePositionInput(message=>socket.sendPositionInput(message),(reason)=>{
+ if(!positionStopSuppressed&&connectionState)socket.sendControl({v:1,type:'disarm',request_id:`finite-abort-${reason??'cancel'}-${Date.now()}`});
+});
+
 armPanel = new ArmPanel(
   hud.actionContainer,
-  (message) => {if(message.type==='disarm')holdPanel?.cancel();socket.sendControl(message);},
+  (message) => {if(message.type==='disarm'){positionStopSuppressed=true;holdPanel?.cancel();positionStopSuppressed=false;}socket.sendControl(message);},
   () => void (xrController.isActive ? xrController.exitVR() : xrController.enterVR()),
   (snapshot) => { scene?.setArmSafetyState(snapshot); refreshHoldPanel(); },
 );
@@ -112,7 +120,11 @@ holdPanel=new HoldControlPanel(hud.desktopControlContainer,(message)=>socket.sen
   if(connectionState&&lastManualFrame&&xrState!=='active')
    sendFrame({...lastManualFrame,client_mono_ms:performance.now(),
     visibility:document.visibilityState==='visible'?'visible':'hidden'},'manual');
- },requestId=>socket.cancelGripper(requestId));
+ },requestId=>socket.cancelGripper(requestId),(vector,event,reason)=>{
+  if(event==='held')positionInput.offer(vector);
+  else if(event==='release')positionInput.release();
+  else positionInput.abort(reason);
+ });
 
 scene = new SimulationScene(hud.sceneContainer, {
   stateBuffer,
@@ -200,7 +212,12 @@ function sendFrameToSocket(frame: VRFrame): void {
 }
 
 function onRobotState(state: RobotStateMessage): void {
+  if(state.backend==='LEBAI_FAKE'&&state.finite_position&&state.finite_position.generation!==positionGeneration){
+    positionGeneration=state.finite_position.generation;
+    positionInput.reset(`web-finite-${crypto.randomUUID()}`,positionGeneration);
+  }
   lastRobotStateReceivedMs=performance.now();
+  if(state.finite_position)positionInput.observe(state.finite_position.phase);
   latestRobotState = structuredClone(state);
   const constraint = state.constraint ?? null;
   const recoveryPhase = state.recovery_phase ?? null;

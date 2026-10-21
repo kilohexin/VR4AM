@@ -21,7 +21,8 @@ class FinitePositionSession:
         if intent.seq<=self._last_seq or self._session not in (None,intent.session_id):
             raise ValueError('position_input_rejected')
         if self.phase=='hold' and not self.busy:
-            if intent.kind=='release':self._rearm=True
+            if intent.kind=='release':
+                self._rearm=True;self._last_seq=intent.seq;self._session=intent.session_id;return
             elif self._rearm:
                 self.gate=PositionGate(self.binding,clock=self.clock);self.phase='ready';self.reason=None;self._rearm=False
         self.gate.offer(intent);self._last_seq=intent.seq;self._session=intent.session_id
@@ -32,6 +33,8 @@ class FinitePositionSession:
         if self.closed or self.gate.reason:raise ValueError('position_session_revoked')
         now=self.clock()
         if self.gate.deadline_ns is not None and now>=self.gate.deadline_ns:
+            if not self.busy and self.gate.released:
+                self.phase='hold';self._rearm=True;return
             raise ValueError('position_session_expired')
         if not self.gate.released and self.gate.latest is not None:
             if not 0<=now-self.gate.latest.received_ns<INPUT_NS:raise ValueError('position_input_expired')
@@ -41,10 +44,12 @@ class FinitePositionSession:
 
     async def _run_step(self,intent):
         try:
-            plan=await self.adapter.plan_step(intent,authorize=lambda:self.gate.require_entry(intent))
+            def entry_authorize():
+                self._monitor();self.gate.require_entry(intent)
+            plan=await self.adapter.plan_step(intent,authorize=entry_authorize)
             def entered():
-                self.gate.mark_entered(intent);self.phase='executing'
-            result=await self.adapter.execute_step(plan,before_entry=lambda:self.gate.require_entry(intent),
+                entry_authorize();self.gate.mark_entered(intent);self.phase='executing'
+            result=await self.adapter.execute_step(plan,before_entry=entry_authorize,
                 monitor_authorize=self._monitor,on_entered=entered)
             self.motion_id=result.motion_id
             if not result.complete:
@@ -77,10 +82,12 @@ class FinitePositionSession:
             self.reason=str(error) if str(error).startswith('position_') else 'position_revoked'
             await self.abort(StopReason.STALE);return
         if self.worker is not None:return
+        if self.phase=='hold':return
         if self.gate.entered_steps>=10:self.phase='hold';return
         intent=self.gate.take_latest()
         if intent is not None:
-            self.phase='planning';self.worker=asyncio.create_task(self._run_step(intent),name='finite-position-step')
+            self.phase='planning';self.reason=None
+            self.worker=asyncio.create_task(self._run_step(intent),name='finite-position-step')
 
     async def abort(self,reason):
         if self.closed:return

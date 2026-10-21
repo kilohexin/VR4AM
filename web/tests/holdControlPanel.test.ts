@@ -11,19 +11,35 @@ function frame(t:number):VRFrame{return {v:1,type:'vr_frame',session_id:'manual'
 function pointer(type:string,x=100,y=100,id=7):Event{const e=new Event(type,{bubbles:true});Object.assign(e,{pointerId:id,button:0,clientX:x,clientY:y});return e;}
 const cleanup:Array<()=>void>=[];
 afterEach(()=>{cleanup.splice(0).forEach(f=>f());Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});});
-function rig(){const root=document.createElement('div');document.body.append(root);let now=0;
+function rig(candidate=false){const root=document.createElement('div');document.body.append(root);let now=0;
+ const base:RobotStateMessage=candidate?{...state,finite_position:{policy:'finite_position_offline',phase:'ready',generation:1,entered_steps:0,motion_id:null,reason:null,hardware_verified:false}}:state;
  const send=vi.fn(),release=vi.fn(),cancel=vi.fn();
- const panel=new HoldControlPanel(root,send,()=>now,release,cancel);
+ const position=vi.fn();
+ const panel=new HoldControlPanel(root,send,()=>now,release,cancel,position);
  const find=(selector:string)=>root.querySelector<HTMLButtonElement>(selector)!;
  for(const b of root.querySelectorAll<HTMLButtonElement>('button')){
   b.setPointerCapture=vi.fn();b.hasPointerCapture=vi.fn(()=>false);b.releasePointerCapture=vi.fn();
   b.getBoundingClientRect=()=>({x:0,y:0,left:0,top:0,right:200,bottom:200,width:200,height:200,toJSON:()=>({})});
  }
- const step=(t:number,mode:RobotStateMessage['mode']='ACTIVE')=>{now=t;panel.update({...state,mode},true,t);return panel.applyFrame(frame(t));};
- panel.update(state,true);cleanup.push(()=>{panel.dispose();root.remove();});
- return {root,panel,send,release,cancel,find,step,clock:(t:number)=>{now=t;}};
+ const step=(t:number,mode:RobotStateMessage['mode']='ACTIVE')=>{now=t;panel.update({...base,mode},true,t);return panel.applyFrame(frame(t));};
+ panel.update(base,true);cleanup.push(()=>{panel.dispose();root.remove();});
+ return {root,panel,send,release,cancel,position,find,step,clock:(t:number)=>{now=t;}};
 }
+
+it.each(['pointerup','pointercancel','lostpointercapture','blur'])('finite candidate separates %s from normal release',event=>{
+ const r=rig(true),stick=r.find('[data-joystick]');stick.dispatchEvent(pointer('pointerdown',180,100));
+ const output=r.panel.applyFrame(frame(0));expect(output.right.grip).toBe(false);
+ expect(r.position.mock.calls[0][1]).toBe('held');
+ if(event==='blur')window.dispatchEvent(new Event('blur'));else stick.dispatchEvent(pointer(event));
+ expect(r.position.mock.calls.at(-1)![1]).toBe(event==='pointerup'?'release':'abort');
+ expect(r.release).not.toHaveBeenCalled();
+});
 describe('joystick and progressive claw',()=>{
+ it('aborts on blur after normal release while the current step drains',()=>{
+  const r=rig(true),stick=r.find('[data-joystick]');stick.dispatchEvent(pointer('pointerdown',180,100));r.panel.applyFrame(frame(0));
+  stick.dispatchEvent(pointer('pointerup'));r.position.mockClear();window.dispatchEvent(new Event('blur'));
+  expect(r.position.mock.calls.at(-1)?.[1]).toBe('abort');
+ });
  it('uses proportional XY, waits for ACTIVE and releases immediately',()=>{
   const r=rig(),stick=r.find('[data-joystick]');expect(stick).not.toBeNull();
   stick.dispatchEvent(pointer('pointerdown',180,100));expect(r.panel.applyFrame(frame(0)).right.grip).toBe(true);

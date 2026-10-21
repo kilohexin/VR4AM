@@ -23,6 +23,7 @@ export class HoldControlPanel {
   private clawLastSent = 0;
   private clawLastSendMs = Number.NEGATIVE_INFINITY;
   private disposed = false;
+  private positionCandidate=false;
   private readonly status: HTMLElement;
   private readonly feedback: HTMLElement;
   private readonly opening: HTMLElement;
@@ -33,7 +34,8 @@ export class HoldControlPanel {
     private readonly send: (m: GripperRequestMessage) => void,
     private readonly now: () => number = () => performance.now(),
     private readonly onRelease: () => void = () => {},
-    private readonly cancelRequest: (requestId: string) => void = () => {}) {
+    private readonly cancelRequest: (requestId: string) => void = () => {},
+    private readonly positionIntent:(vector:Vec3,event:'held'|'release'|'abort',reason?:string)=>void=()=>{}) {
     root.classList.add('hold-control-panel');
     root.innerHTML = `<h2>手动操纵</h2>
       <div class="joystick-layout">
@@ -76,13 +78,15 @@ export class HoldControlPanel {
   }
 
   update(state: RobotStateMessage | null, available: boolean, receivedAt = this.now()): void {
+    this.positionCandidate=state?.backend==='LEBAI_FAKE'&&state.finite_position?.policy==='finite_position_offline';
+    this.stick.setAttribute('aria-label',this.positionCandidate?'平面摇杆：拖动控制左右前后，松开后完成当前小步':'平面摇杆：拖动控制左右前后，松开停止');
     this.state = state;
     this.receivedAt = receivedAt;
     this.enabled = available && state !== null && state.manual_input_ready === true && !state.fault
       && !state.recovery_phase && ['ARMED', 'ACTIVE', 'HOLD'].includes(state.mode)
       && ['IDLE', 'MOVING'].includes(state.robot_state);
     if (!this.enabled) {
-      this.cancel(); this.pending = null;
+      this.cancel('unavailable'); this.pending = null;
       this.position = this.rotation = null; this.previousTime = null;
     }
     if (state) {
@@ -102,8 +106,12 @@ export class HoldControlPanel {
     const delta = this.previousTime === null ? 0 : time - this.previousTime;
     this.previousTime = time;
     const fresh = this.fresh() && frame.tracking_valid && frame.visibility === 'visible';
-    if (!fresh || delta < 0 || delta > 100) this.cancel();
-    if (this.motionHeld() && this.state?.mode === 'ACTIVE') {
+    if (!fresh || delta < 0 || delta > 100) this.cancel(!fresh?'feedback_or_tracking':'frame_gap');
+    if(this.positionCandidate&&this.motionHeld()&&fresh){
+      const v:Vec3=this.action==='joystick'?[this.xy.x,this.xy.y,0]:[0,0,this.action==='z+'?1:-1];
+      this.positionIntent(v,'held');
+    }
+    if (!this.positionCandidate&&this.motionHeld() && this.state?.mode === 'ACTIVE') {
       // delta is milliseconds; bounded 20-ms integration, as for VR frames.
       const seconds = Math.min(20, Math.max(0, delta)) / 1000;
       if (this.action === 'joystick') {
@@ -126,7 +134,7 @@ export class HoldControlPanel {
     }
     this.refresh();
     return {...frame, right: {...frame.right, p: this.position.toArray() as Vec3,
-      q: this.rotation!.toArray() as Quat, grip: this.motionHeld() && fresh, trigger: 0}};
+      q: this.rotation!.toArray() as Quat, grip: !this.positionCandidate&&this.motionHeld() && fresh, trigger: 0}};
   }
 
   onGripperResult(result: GripperResultMessage): void {
@@ -136,7 +144,11 @@ export class HoldControlPanel {
     this.refresh();
   }
 
-  cancel = (): void => {
+  cancel = (reason:unknown='cancel'): void => {
+    this.finishGesture('abort',typeof reason==='string'?reason:reason instanceof Event?reason.type:'cancel');
+  };
+
+  private finishGesture(event:'release'|'abort',reason?:string):void {
     const held = this.motionHeld();
     const button = this.capture, id = this.pointer;
     this.action = null; this.pointer = null; this.capture = null; this.xy = {x: 0, y: 0};
@@ -144,8 +156,10 @@ export class HoldControlPanel {
     if (this.pending && !this.pendingCancelled) {this.pendingCancelled = true; this.cancelRequest(this.pending);}
     if (button && id !== null) {try {if (button.hasPointerCapture(id)) button.releasePointerCapture(id);} catch {}}
     this.refresh();
-    if (held) this.onRelease();
-  };
+    if (held || (event==='abort'&&this.positionCandidate)) {
+      if(this.positionCandidate)this.positionIntent([0,0,0],event,reason);else this.onRelease();
+    }
+  }
 
   dispose(): void {
     if (this.disposed) return;
@@ -160,21 +174,23 @@ export class HoldControlPanel {
     && (this.action !== 'joystick' || Math.hypot(this.xy.x, this.xy.y) > 0);}
   private clawReady(): boolean {return this.fresh() && this.state?.robot_state === 'IDLE' && this.state.mode !== 'ACTIVE';}
   private refresh(): void {
-    const movingWithoutGesture = this.state?.mode === 'ACTIVE' && !this.motionHeld();
+    const finiteBusy=this.positionCandidate&&['planning','executing','draining'].includes(this.state?.finite_position?.phase??'');
+    const movingWithoutGesture = !this.positionCandidate&&this.state?.mode === 'ACTIVE' && !this.motionHeld();
     for (const button of this.root.querySelectorAll<HTMLButtonElement>('[data-joystick],[data-hold]')) {
       button.disabled = !this.fresh() || this.pending !== null || movingWithoutGesture
         || this.action === 'open' || this.action === 'close'
-        || (!!button.dataset.hold?.startsWith('spin') && !this.state?.target_control?.tool_spin_supported);
+        || (!!button.dataset.hold?.startsWith('spin') && (this.positionCandidate||!this.state?.target_control?.tool_spin_supported));
       button.classList.toggle('is-held', button === this.capture);
     }
     for (const button of this.root.querySelectorAll<HTMLButtonElement>('[data-claw]')) {
-      button.disabled = !this.clawReady() || this.motionHeld()
+      button.disabled = !this.clawReady() || this.motionHeld() || finiteBusy
         || (this.pending !== null && button !== this.capture);
       button.classList.toggle('is-held', button === this.capture);
     }
-    this.status.textContent = !this.enabled ? '先解锁，再点击进入准备姿态' : this.motionHeld() ? '摇杆松开回中停止；坐标固定于机械臂基座'
+    this.status.textContent = !this.enabled ? '先解锁，再点击进入准备姿态' : this.positionCandidate&&this.state?.finite_position?.phase==='draining'?'松开后正在完成当前小步'
+      : this.motionHeld() ? (this.positionCandidate?'长按有限小步；松开后完成当前小步':'摇杆松开回中停止；坐标固定于机械臂基座')
       : this.action === 'open' || this.action === 'close' ? `目标开口 ${((1 - this.clawTarget) * 100).toFixed(0)}% · 松开保持`
-      : this.pending ? '等待上次夹爪请求收尾；不自动重发' : '摇杆控制平面；升降、自转和夹爪长按操作';
+      : this.pending ? '等待上次夹爪请求收尾；不自动重发' : this.positionCandidate?'长按摇杆或升降；松开后完成当前小步':'摇杆控制平面；升降、自转和夹爪长按操作';
   }
   private moveStick(e: PointerEvent): void {
     const box = this.stick.getBoundingClientRect(), radius = Math.max(1, Math.min(box.width, box.height) / 2);
@@ -206,9 +222,11 @@ export class HoldControlPanel {
   private onMove = (e: PointerEvent): void => {
     if (e.pointerId !== this.pointer || this.action !== 'joystick') return;
     const held = this.motionHeld(); this.moveStick(e);
-    if (held && !this.motionHeld()) this.onRelease();
+    if (held && !this.motionHeld()) {
+      if(this.positionCandidate)this.positionIntent([0,0,0],'release');else this.onRelease();
+    }
   };
-  private onUp = (e: PointerEvent): void => {if (e.pointerId === this.pointer) this.cancel();};
+  private onUp = (e: PointerEvent): void => {if (e.pointerId === this.pointer) this.finishGesture(e.type==='pointerup'?'release':'abort');};
   private onVisibility = (): void => {if (document.visibilityState !== 'visible') this.cancel();};
   private onFocus = (e: FocusEvent): void => {if (e.target instanceof Node && !this.root.contains(e.target)) this.cancel();};
 }

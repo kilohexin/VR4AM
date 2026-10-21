@@ -560,14 +560,14 @@ class RobotControl:
             self._recovery_phase = None
 
     async def disarm(self) -> None:
-        if self.finite_position_session is not None:
-            await self.finite_position_session.abort(StopReason.GRIP_RELEASED)
-            self.finite_position_session=None
         if self.machine.mode in {TeleopMode.STALE, TeleopMode.FAULT}:
             return
         self._disarm_in_progress = True
         self.last_target = None
         try:
+            if self.finite_position_session is not None:
+                await self.finite_position_session.abort(StopReason.GRIP_RELEASED)
+                self.finite_position_session=None
             if self.machine.mode == TeleopMode.ACTIVE:
                 self.mapper.clear()
             try:
@@ -805,6 +805,9 @@ class RobotControl:
         # collect a revoked pursuit or prepare another target.
         self._disconnecting += 1
         try:
+            if self.finite_position_session is not None:
+                await self.finite_position_session.abort(StopReason.DISCONNECT)
+                self.finite_position_session=None
             await self._disconnect_session()
         finally:
             self._disconnecting -= 1
@@ -837,6 +840,7 @@ class RobotControl:
 
     async def stop(self) -> None:
         if self.finite_position_session is not None:
+            self._shutdown_started=True
             await self.finite_position_session.abort(StopReason.SHUTDOWN)
         async with self._lifecycle_lock:
             if self._shutdown_stopped:
@@ -872,8 +876,16 @@ class RobotControl:
                     self._deadline_rebase_requested = False
                     self._deadline_compensation_ns = 0
                 lateness_ns = now_ns - next_deadline_ns
+                if (self._finite_position_enabled and self.finite_position_session is not None
+                        and not self._recovery_lock.locked() and lateness_ns>OVERRUN_NS):
+                    # This offline position candidate has no PVAT stream to
+                    # catch up. Its independent input/entry/completion deadlines
+                    # remain active in Session/Adapter; never replay missed ticks.
+                    self.backend._schedule_sdk_diagnostic(dict(kind='finite_position_scheduler_late',
+                        lateness_ns=lateness_ns,stream_catchup=False,input_deadline_ms=100))
+                    next_deadline_ns=now_ns;self._consecutive_overruns=0;lateness_ns=0
                 latest = self.latest.snapshot()
-                no_client_frame = (
+                no_client_frame = self._position_idle_deadline_rebase() or (
                     self.machine.mode in {TeleopMode.DISCONNECTED, TeleopMode.READY}
                     and latest is None
                 )
@@ -1539,6 +1551,15 @@ class RobotControl:
             self._latch_backend_fault(state.fault)
         return state
 
+    def _position_idle_deadline_rebase(self):
+        return bool(self._finite_position_enabled and self.machine.mode in {TeleopMode.READY,TeleopMode.DISARMED}
+            and not self._fault and not self._stop_unverified and not self._pending_stop_completion
+            and not self._recovery_lock.locked() and not self._recovery_phase
+            and self.finite_position_session is None and not self.backend.position_busy
+            and not self.backend._motion_accepted and not self.backend._motion_write_stop_required
+            and not self.backend._latched_fault and not self.backend._motion_calls.unknown_methods
+            and not self.backend._snapshot_calls.unknown_methods)
+
     def _install_position_session(self):
         from app.control.finite_position_session import FinitePositionSession
         binding=self.backend.bind_position_generation(self._control_generation)
@@ -1547,6 +1568,9 @@ class RobotControl:
                     or self._disconnecting or self._disarm_in_progress or self._recovery_lock.locked()
                     or self.machine.mode not in {TeleopMode.ARMED,TeleopMode.ACTIVE,TeleopMode.HOLD}):
                 raise ValueError('position_authority_revoked')
+            received=self.latest.snapshot()
+            if received is not None and (not received.frame.tracking_valid or received.frame.visibility!='visible'):
+                raise ValueError('position_input_unavailable')
         self.finite_position_session=FinitePositionSession(self.backend,binding,clock=self.clock.now_ns,
             recorder=self.recorder,authorize=authorized)
 

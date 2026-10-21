@@ -68,6 +68,15 @@ async def test_post_entry_revoke_stops_once_without_reusing_plan():
     await a.disconnect()
 
 
+async def test_final_entry_callback_rejection_has_zero_native_writes():
+    a,c,_,p=await prepared()
+    def reject():raise ValueError('position_entry_revoked')
+    try:
+        r=await execute(a,p,on_entered=reject)
+        assert not r.entered and not r.complete and c.write_calls==[]
+    finally:await a.disconnect()
+
+
 async def test_real_target_and_missing_injection_rejected_without_connect():
     s,_,_=fixture()
     with pytest.raises(ValueError):api().FinitePositionAdapter(replace(s,ip='172.16.2.162'))
@@ -111,3 +120,70 @@ async def test_foreign_task_rejected_without_second_target():
     assert not r.complete and r.reason=='position_foreign_task'
     assert [x[0] for x in c.write_calls]==['movej','stop_move']
     await a.disconnect()
+
+
+async def test_path_audit_does_not_block_release_processing(monkeypatch):
+    import threading
+    m=api();a,c,_,_=await prepared();order=[];released=threading.Event();started=threading.Event();original=m.audit_position_path
+    def slow_audit(*args,**kwargs):
+        started.set();released.wait(.15);order.append('audit_done');return original(*args,**kwargs)
+    async def release():
+        while not started.is_set():await asyncio.sleep(0)
+        order.append('release_processed');released.set()
+    monkeypatch.setattr(m,'audit_position_path',slow_audit)
+    intent=PositionIntent('web',1,2,a._clock(),'held',(1.,0.,0.))
+    task=asyncio.create_task(release())
+    try:
+        try:await a.plan_step(intent,authorize=lambda:None)
+        except ValueError:pass
+        await task
+        assert order==['release_processed','audit_done']
+    finally:released.set();await a.disconnect()
+
+
+@pytest.mark.parametrize('damage,reason',[
+    ('workspace','position_tcp_outside_startup_envelope'),('joint','position_joint_outside_soft_limits'),
+    ('speed','position_reported_rate_limit'),('acceleration','position_reported_rate_limit')])
+async def test_inflight_feedback_limits_abort_before_natural_finish(damage,reason):
+    a,c,clock,p=await prepared();original=c.get_kin_data
+    async def damaged():
+        value=await original()
+        if c.write_calls and c.write_calls[-1][0]=='movej':
+            if damage=='workspace':value['actual_tcp_pose']={**value['actual_tcp_pose'],'x':.6}
+            if damage=='joint':value['actual_joint_pose']=[2.99,-1.,1.,0.,1.57,0.]
+            if damage=='speed':value['actual_joint_speed']=[.3,0.,0.,0.,0.,0.]
+            if damage=='acceleration':value['actual_joint_acc']=[1.,0.,0.,0.,0.,0.]
+        return value
+    c.get_kin_data=damaged
+    try:
+        r=await execute(a,p)
+        assert not r.complete and r.reason==reason
+        assert [x[0] for x in c.write_calls]==['movej','stop_move']
+    finally:await a.disconnect()
+
+
+async def test_new_observer_pose_invalidates_previously_planned_step():
+    a,c,_,p=await prepared()
+    c.kin_data['actual_joint_pose'][0]+=.00001
+    await a._read_snapshot(read_purpose='observer')
+    try:
+        r=await execute(a,p)
+        assert not r.entered and r.reason=='position_observer_changed' and c.write_calls==[]
+    finally:await a.disconnect()
+
+
+async def test_zero_reported_speed_does_not_certify_a_wandering_endpoint():
+    a,c,_,p=await prepared();original=c.get_kin_data;count=0
+    async def wandering():
+        nonlocal count
+        data=await original()
+        if c.start_ns is not None and c.motion_state=='FINISHED':
+            count+=1;offset=.00004*(1 if count%2 else -1)
+            data['actual_joint_pose']=[p.goal_joints[0]+offset,*p.goal_joints[1:]]
+            data['actual_tcp_pose']={**data['actual_tcp_pose'],'x':p.target_p[0]+offset}
+        return data
+    c.get_kin_data=wandering
+    try:
+        r=await execute(a,p)
+        assert not r.complete and [x[0] for x in c.write_calls]==['movej','stop_move']
+    finally:await a.disconnect()

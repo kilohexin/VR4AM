@@ -4,6 +4,31 @@ export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
 export type JointVector = [number, number, number, number, number, number];
 
+export interface FinitePositionInputMessage {
+ v:1;type:'finite_position_input';session_id:string;generation:number;seq:number;
+ kind:'held'|'release';vector:Vec3;
+}
+export interface FinitePositionStatus {
+ policy:'finite_position_offline';phase:'inactive'|'ready'|'planning'|'executing'|'draining'|'hold'|'fault';
+ generation:number;entered_steps:number;motion_id:number|null;reason:string|null;hardware_verified:false;
+}
+export function isFinitePositionInputMessage(value:unknown):value is FinitePositionInputMessage {
+ if(!isRecord(value)||!hasExactKeys(value,['v','type','session_id','generation','seq','kind','vector']))return false;
+ return value.v===1&&value.type==='finite_position_input'&&typeof value.session_id==='string'
+  &&value.session_id.length>0&&value.session_id.length<=128&&Number.isSafeInteger(value.generation)
+  &&Number(value.generation)>=0&&Number.isSafeInteger(value.seq)&&Number(value.seq)>=0
+  &&(value.kind==='held'||value.kind==='release')&&isVec3(value.vector)
+  &&(value.kind!=='release'||value.vector.every(x=>x===0));
+}
+export function isFinitePositionStatus(value:unknown):value is FinitePositionStatus {
+ if(!isRecord(value)||!hasExactKeys(value,['policy','phase','generation','entered_steps','motion_id','reason','hardware_verified']))return false;
+ return value.policy==='finite_position_offline'&&['inactive','ready','planning','executing','draining','hold','fault'].includes(String(value.phase))
+  &&Number.isSafeInteger(value.generation)&&Number(value.generation)>=0&&Number.isSafeInteger(value.entered_steps)
+  &&Number(value.entered_steps)>=0&&Number(value.entered_steps)<=10&&value.hardware_verified===false
+  &&(value.motion_id===null||(Number.isSafeInteger(value.motion_id)&&Number(value.motion_id)>0))
+  &&(value.reason===null||typeof value.reason==='string');
+}
+
 export interface Pose {
   p: Vec3;
   q: Quat;
@@ -60,6 +85,7 @@ export interface TargetControlStatus {
 }
 
 export interface RobotStateMessage {
+  finite_position?: FinitePositionStatus|null;
   manual_input_ready?: boolean;
   preparation_required?: boolean;
   preparation_unlocked?: boolean;
@@ -667,7 +693,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
       [
         'ack_seq', 'sample_age_ms', 'fault', 'constraint', 'recovery_phase', 'backend',
         'real_robot_mode', 'preflight_ready', 'preflight_reason',
-        'translation_scale', 'target_control', 'manual_input_ready', 'preparation_required', 'preparation_unlocked',
+        'translation_scale', 'target_control', 'manual_input_ready', 'preparation_required', 'preparation_unlocked','finite_position',
       ],
     ) ||
     value.v !== PROTOCOL_VERSION ||
@@ -684,6 +710,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
 
   if (Object.hasOwn(value,'target_control') && value.target_control !== null
       && !isTargetControlStatus(value.target_control)) return false;
+  if(Object.hasOwn(value,'finite_position')&&value.finite_position!==null&&!isFinitePositionStatus(value.finite_position))return false;
   for (const key of ['preparation_required', 'preparation_unlocked']) {
     if (Object.hasOwn(value,key) && typeof value[key] !== 'boolean') return false;
   }

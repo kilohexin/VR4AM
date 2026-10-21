@@ -21,7 +21,7 @@ async def fixture():
 async def drive(s,clock,*,hold=False,until=lambda:False):
     for i in range(3000):
         if hold:s.offer(PositionIntent('web',1,s._last_seq+1,clock.now_ns(),'held',(1.,0.,0.)))
-        await s.advance();await clock.sleep(.001);await asyncio.sleep(0)
+        await s.advance();await clock.sleep(.001);await asyncio.sleep(.001)
         if until():return
     assert False,'session did not settle'
 
@@ -67,7 +67,7 @@ async def test_repress_and_reverse_never_queue_a_second_inflight_goal():
         assert len(c.write_calls)==1
         for _ in range(300):
             s.offer(PositionIntent('web',1,s._last_seq+1,clock.now_ns(),'held',(-1.,0.,0.)))
-            await s.advance();await clock.sleep(.001);await asyncio.sleep(0)
+            await s.advance();await clock.sleep(.001);await asyncio.sleep(.001)
             if len(c.write_calls)==2:break
         assert [x[0] for x in c.write_calls]==['movej','movej']
         assert abs(c.write_calls[1][1][0])<1e-9
@@ -83,4 +83,34 @@ async def test_ten_step_limit_requires_release_before_new_session():
             s.offer(PositionIntent('web',1,s._last_seq+1,clock.now_ns(),'held',(1.,0.,0.)))
             await s.advance();await clock.sleep(.001)
         assert len(c.write_calls)==10
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
+async def test_completed_released_session_can_idle_then_accept_a_new_gesture():
+    s,a,c,clock=await fixture()
+    try:
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
+        await drive(s,clock,until=lambda:bool(c.write_calls))
+        s.offer(PositionIntent('web',1,2,clock.now_ns(),'release',(0.,)*3))
+        await drive(s,clock,until=lambda:s.view().phase=='ready' and not s.busy)
+        await clock.sleep(11);await s.advance()
+        assert s.phase=='hold' and not s.closed and [x[0] for x in c.write_calls]==['movej']
+        s.offer(PositionIntent('web',1,3,clock.now_ns(),'held',(-1.,0.,0.)))
+        await drive(s,clock,hold=True,until=lambda:len(c.write_calls)==2)
+        assert len(c.write_calls)==2
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
+async def test_revoked_external_authority_between_plan_and_send_is_zero_write():
+    s,a,c,clock=await fixture();allowed=True;original=a.plan_step
+    def authorize():
+        if not allowed:raise ValueError('position_authority_revoked')
+    async def revoke_after_plan(*args,**kwargs):
+        nonlocal allowed
+        plan=await original(*args,**kwargs);allowed=False;return plan
+    s.authorize=authorize;a.plan_step=revoke_after_plan
+    try:
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
+        await s.advance();await s.worker
+        assert c.write_calls==[] and s.phase=='fault'
     finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
