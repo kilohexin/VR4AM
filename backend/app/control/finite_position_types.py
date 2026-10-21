@@ -73,6 +73,14 @@ class PositionSample:
     task_state: str|None
     fault: str|None
 
+    def __post_init__(self):
+        integer(self.sequence);integer(self.captured_ns)
+        for name in ('actual_q','target_q','actual_qd','actual_qdd','target_qd','target_qdd'):
+            object.__setattr__(self,name,vector(getattr(self,name),6))
+        object.__setattr__(self,'tcp_p',vector(self.tcp_p,3))
+        object.__setattr__(self,'tcp_q',vector(self.tcp_q,4))
+        if abs(math.hypot(*self.tcp_q)-1)>1e-6:raise ValueError('position_invalid_quaternion')
+
 
 @dataclass(frozen=True)
 class PathAudit:
@@ -101,6 +109,16 @@ class PositionPlan:
     created_ns: int
     evidence: PathAudit
 
+    def __post_init__(self):
+        integer(self.intent_seq);integer(self.created_ns)
+        object.__setattr__(self,'target_p',vector(self.target_p,3))
+        object.__setattr__(self,'target_q',vector(self.target_q,4))
+        object.__setattr__(self,'goal_joints',vector(self.goal_joints,6))
+        if (self.binding is not self.start.binding
+                or self.joint_speed!=self.evidence.joint_speed
+                or self.joint_acceleration!=self.evidence.joint_acceleration):
+            raise ValueError('position_invalid_plan_binding')
+
 
 @dataclass(frozen=True)
 class PositionResult:
@@ -120,4 +138,3 @@ class PositionView:
     motion_id: int|None=None
     reason: str|None=None
     hardware_verified: bool=False
-

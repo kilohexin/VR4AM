@@ -1,0 +1,164 @@
+"""Explicit Fake-injected finite movej candidate. No native connection factory."""
+import asyncio
+import hashlib
+import json
+import math
+from dataclasses import asdict
+from pathlib import Path
+from app.control.finite_position_types import *
+from app.robots.base import StopReason,BackendCommandError
+from app.robots.lebai_adapter import RealLebaiAdapter
+from app.robots.lebai_codec import pose_to_lebai,pose_from_lebai,joint_vector
+from app.robots.finite_position_plan import build_position_target,audit_position_path,evaluate_position_arrival,FRACTIONS,angle
+from app.schemas.messages import Pose,BackendState
+
+
+def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
+
+
+class FinitePositionAdapter(RealLebaiAdapter):
+    _stop_blocking_motion_methods=frozenset({'movej','move_pvat','set_claw'})
+    _immediate_stop_latch_methods=frozenset({'movej','move_pvat'})
+
+    def __init__(self,settings,*,client_factory=None,backend_label=None,position_model=None,**kwargs):
+        if (settings.ip!='digital-twin' or backend_label!='LEBAI_FAKE'
+                or client_factory is None or position_model is None):
+            raise ValueError('position_offline_injection_required')
+        self.position_model=position_model;self.position_binding=None
+        self._position_plan=None;self.position_busy=False;self.position_aborted=False
+        self._position_config=digest(asdict(settings))
+        self._position_sources={Path(__file__),Path(__file__).with_name('finite_position_plan.py'),
+            Path(__file__).parents[1]/'control/finite_position_types.py'}
+        self._position_identity=self._source_identity()
+        super().__init__(settings,client_factory=client_factory,backend_label=backend_label,**kwargs)
+
+    def _source_identity(self):
+        return tuple((str(p),p.stat().st_size,p.stat().st_mtime_ns,hashlib.sha256(p.read_bytes()).hexdigest())
+            for p in sorted(self._position_sources))
+
+    def bind_position_generation(self,generation):
+        if self.position_busy or self._latched_fault or self._motion_calls.unknown_methods:
+            raise ValueError('position_binding_unavailable')
+        self.position_binding=PositionBinding(self._client,generation,self._position_config,
+            digest(asdict(self.settings.expected_tcp)))
+        self.position_aborted=False
+        return self.position_binding
+
+    def _position_health(self,binding):
+        if (binding is not self.position_binding or binding.connection is not self._client
+                or self._client is None or self._disconnecting or self._latched_fault
+                or self.position_aborted or self._snapshot_calls.closed
+                or self._motion_calls.unknown_methods or self._snapshot_calls.unknown_methods
+                or digest(asdict(self.settings))!=self._position_config
+                or self._source_identity()!=self._position_identity):
+            raise ValueError('position_binding_unavailable')
+
+    def _position_sample(self,s,task_state=None):
+        return PositionSample(self.position_binding,self._snapshot_read_sequence,s.captured_ns,
+            s.actual_q,s.target_q,s.actual_qd,s.actual_qdd,s.target_qd,s.target_qdd,
+            tuple(s.actual_tcp.p),tuple(s.actual_tcp.q),s.robot_state,s.running_motion,
+            task_state if task_state is not None else s.motion_state,s.estop)
+
+    async def _position_math(self,name,operation,authorize):
+        async with self._sdk_lock:
+            authorize();self._position_health(self.position_binding)
+            return await self._snapshot_calls.call(name,operation,.2,revoked=lambda:self.position_aborted)
+
+    async def plan_step(self,intent,*,authorize):
+        binding=self.position_binding;self._position_health(binding);authorize()
+        if self.position_busy:raise ValueError('position_busy')
+        self._position_plan=None
+        s=await self._read_snapshot(read_purpose='position_plan');authorize()
+        if not self._preflight_from_snapshot(s).ready:raise ValueError('position_preflight')
+        if any(abs(x)>1e-8 for v in (s.actual_qd,s.actual_qdd,s.target_qd,s.target_qdd) for x in v):
+            raise ValueError('position_initial_not_stable')
+        start=self._position_sample(s);p,q=build_position_target(start,intent)
+        raw=await self._position_math('kinematics_inverse',lambda:self._client.kinematics_inverse(
+            pose_to_lebai(Pose(p=p,q=q)),list(s.actual_q)),authorize)
+        if raw is None:raise ValueError('position_ik_unreachable')
+        goal=joint_vector(raw,'position_ik_invalid');fk=[]
+        for fraction in FRACTIONS:
+            joints=[a+(b-a)*fraction for a,b in zip(start.actual_q,goal)]
+            raw=await self._position_math('kinematics_forward',lambda:self._client.kinematics_forward(joints),authorize)
+            pose=pose_from_lebai(raw);fk.append((tuple(pose.p),tuple(pose.q)))
+        if math.dist(fk[-1][0],p)>1e-5 or angle(fk[-1][1],q)>1e-4:
+            raise ValueError('position_ik_endpoint_mismatch')
+        audit=audit_position_path(start,goal,fk_samples=tuple(fk),settings=self.settings,model=self.position_model)
+        await self._emit_event(dict(kind='finite_position_plan',input_seq=intent.seq,
+            start_tcp=list(start.tcp_p),target_tcp=list(p),goal_joints=list(goal),audit=asdict(audit)))
+        authorize();self._position_health(binding)
+        if not 0<=self._clock()-start.captured_ns<INPUT_NS:raise ValueError('position_snapshot_expired')
+        self._position_plan=PositionPlan(binding,intent.seq,start,p,q,goal,audit.joint_speed,
+            audit.joint_acceleration,self._clock(),audit)
+        return self._position_plan
+
+    async def execute_step(self,plan,*,before_entry,monitor_authorize,on_entered):
+        entered=False;owned=False;entry_ns=None;motion_id=None;final=None;reason=None;stable=None;good=0;last=None
+        binding=plan.binding
+        try:
+            if plan is not self._position_plan or self.position_busy:raise ValueError('position_plan_obsolete')
+            self._position_plan=None;self._position_health(binding);before_entry()
+            self.position_busy=True;owned=True
+            async with self._sdk_lock:
+                async def send():
+                    nonlocal entered,entry_ns
+                    self._position_health(binding);before_entry()
+                    if not 0<=self._clock()-plan.start.captured_ns<INPUT_NS:raise ValueError('position_snapshot_expired')
+                    self._begin_motion_epoch();entered=True;entry_ns=self._clock();on_entered()
+                    self._motion_accepted=self._motion_write_stop_required=True
+                    return await self._client.movej(list(plan.goal_joints),plan.joint_acceleration,plan.joint_speed,0.,0.)
+                motion_id=await self._motion_calls.call('movej',send,.2,
+                    revoked=lambda:self.position_aborted,entered=lambda:entered)
+            if type(motion_id) is not int or motion_id<=0:raise ValueError('position_invalid_motion_id')
+            end=entry_ns+STEP_NS
+            while self._clock()<end:
+                monitor_authorize();self._position_health(binding)
+                s=await self._read_snapshot(read_purpose='position_progress')
+                monitor_authorize();self._position_health(binding)
+                state=await self._position_math('get_motion_state',lambda:self._client.get_motion_state(motion_id),monitor_authorize)
+                final=self._position_sample(s,str(state).upper())
+                if not 0<=self._clock()-final.captured_ns<INPUT_NS:raise ValueError('position_feedback_expired')
+                if s.running_motion not in (None,motion_id):raise ValueError('position_foreign_task')
+                if str(state).upper() not in ('RUNNING','FINISHED'):raise ValueError('position_task_failed')
+                check=evaluate_position_arrival(plan,final,motion_id=motion_id)
+                if check is None:
+                    if last is None or final.captured_ns-last>=INPUT_NS:stable=final.captured_ns;good=0
+                    if stable is None:stable=final.captured_ns
+                    good+=1
+                    if good>=3 and final.captured_ns-stable>=100_000_000:
+                        self._motion_accepted=self._motion_write_stop_required=False
+                        return PositionResult(True,motion_id,True,False,final,None)
+                else:
+                    stable=None;good=0;reason=check
+                    if final.task_state=='FINISHED' and check!='position_not_finished':raise ValueError(check)
+                last=final.captured_ns
+                await self._sleep(.02)
+            raise ValueError(reason or 'position_completion_timeout')
+        except BaseException as error:
+            reason=str(error) if str(error).startswith('position_') else 'position_step_failed'
+            unknown=bool(self._motion_calls.unknown_methods)
+            if entered and binding.connection is self._client:
+                try:await asyncio.shield(self.stop(StopReason.FAULT))
+                except BaseException:pass
+                if unknown:self._latched_fault='stop_unverified'
+            if isinstance(error,asyncio.CancelledError):raise
+            return PositionResult(False,motion_id if type(motion_id) is int else None,entered,unknown,final,
+                self._latched_fault or reason)
+        finally:
+            if owned:
+                self.position_busy=False
+                self._schedule_sdk_diagnostic(dict(kind='finite_position_step',input_seq=plan.intent_seq,
+                    entered=entered,entry_ns=entry_ns,motion_id=motion_id if type(motion_id) is int else None,
+                    reason=reason,unknown=bool(self._motion_calls.unknown_methods)))
+
+    async def prepare(self,*args,**kwargs):
+        if self.position_busy:raise BackendCommandError('position_busy')
+        return await super().prepare(*args,**kwargs)
+
+    async def home(self,*args,**kwargs):
+        if self.position_busy:raise BackendCommandError('position_busy')
+        return await super().home(*args,**kwargs)
+
+    async def set_gripper(self,*args,**kwargs):
+        if self.position_busy:raise BackendCommandError('position_busy')
+        return await super().set_gripper(*args,**kwargs)
