@@ -72,7 +72,8 @@ class _SingleClient(PositionSnapshotGroups,BoundedStopOnlyClient):
     def __init__(self,native,stop,read,write,owner,clock):
         super().__init__(native,stop,read,owner,deadline_clock=clock)
         self.write=write;self.movej_entries=0;self.movej_attempted=False;self.movej_unknown=False
-        self.movej_returned=False;self.fixed_move=None
+        self.movej_returned=False;self.fixed_move=None;self.native_entry_check=None
+        self.write_checks=[];self.native_entry_feedback_age_ms=None
         self.math_entries=dict(kinematics_inverse=0,kinematics_forward=0,get_velocity_factor=0)
 
     async def read(self,name,invoke):
@@ -86,9 +87,21 @@ class _SingleClient(PositionSnapshotGroups,BoundedStopOnlyClient):
     async def movej(self,q,a,v,t,r):
         if self.movej_attempted:raise ValueError('position_site_move_consumed')
         self.movej_attempted=True
-        self.write();self.require_clear_read_gate()
+        check=dict(started_ns=self.deadline_clock(),outcome='entered')
+        self.write_checks.append(check)
+        try:
+            self.write();self.require_clear_read_gate()
+            check['outcome']='returned'
+        except BaseException:
+            check['outcome']='rejected'
+            raise
+        finally:check['completed_ns']=self.deadline_clock()
         if self.fixed_move is None or (tuple(q),a,v,t,r)!=self.fixed_move:
             raise ValueError('position_site_move_changed')
+        if not callable(self.native_entry_check):raise ValueError('position_site_native_entry_check_missing')
+        # The complete write check itself consumes time. Never send using an
+        # age check performed before that work or the final read-owner barrier.
+        self.native_entry_check()
         self.movej_entries+=1
         try:
             result=await self.client.movej(list(q),a,v,t,r);self.movej_returned=True;return result
@@ -197,10 +210,19 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
 
     def entry():
         permit()
-        if write_authorize is not None:permission(write_authorize)
         # This CLI authorizes one fixed target, not a streaming held-input lease.
         # Scope expiry and revocation apply throughout; the adapter re-reads the start.
         if intent is None:raise ValueError('position_site_input_missing')
+
+    def native_write():
+        entry()
+        if write_authorize is not None:permission(write_authorize)
+
+    def final_entry():
+        entry();adapter._position_health(plan.binding);adapter._position_entry_snapshot(plan)
+        age=clock()-plan.start.captured_ns
+        proxy.native_entry_feedback_age_ms=age/1e6
+        if not 0<=age<INPUT_NS:raise ValueError('position_snapshot_expired')
 
     def stop():
         if proxy is None or proxy.movej_entries!=1 or clock()>=reserve:
@@ -211,7 +233,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
         permit()
         if report['connect_entries'] or ip!=settings.ip:raise ValueError('position_site_connection_consumed')
         report['connect_entries']+=1;native=await client_factory(ip);permit()
-        proxy=_SingleClient(native,stop,read,entry,owner,clock);proxy.read_deadline_ns=reserve
+        proxy=_SingleClient(native,stop,read,native_write,owner,clock);proxy.read_deadline_ns=reserve
         return proxy
 
     async def event(row,stamp):await recorder.write_event(row,stamp)
@@ -243,6 +265,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
             intent=PositionIntent('standalone-single-position',1,1,clock(),'held',(0.,0.,1.))
             plan=await adapter.plan_step(intent,authorize=entry)
             proxy.fixed_move=(plan.goal_joints,plan.joint_acceleration,plan.joint_speed,0.,0.)
+            proxy.native_entry_check=final_entry
             result=await adapter.execute_step(plan,before_entry=entry,monitor_authorize=permit,on_entered=lambda:None)
             report.update(natural_arrival_confirmed=result.complete,motion_id=result.motion_id,
                 reason=result.reason,remote_unknown=result.remote_unknown,
@@ -278,6 +301,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
             proxy.read_gate_closed=True
             report.update(movej_entries=proxy.movej_entries,stop_entries=proxy.sdk_stop_entries,
                 snapshot_groups=copy.deepcopy(proxy.snapshot_groups),
+                write_checks=copy.deepcopy(proxy.write_checks),native_entry_feedback_age_ms=proxy.native_entry_feedback_age_ms,
                 ik_entries=proxy.math_entries['kinematics_inverse'],fk_entries=proxy.math_entries['kinematics_forward'],
                 read_entries=len(proxy.read_calls),read_calls=copy.deepcopy(proxy.read_calls),
                 remote_unknown=report['remote_unknown'] or proxy.movej_unknown or proxy.read_remote_result_unknown)

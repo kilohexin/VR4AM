@@ -84,6 +84,7 @@ def preview(p):
         allowed_writes=['movej','stop_move'],feedback_ttl_ms=100,input_ttl_ms=None,movej_rpc_timeout_ms=200,
         input_policy='one_fixed_authorized_target_until_scope_deadline',planning_timeout_ms=PLAN_NS/1e6,
         snapshot_read_policy='owned_six_fields_parallel',readonly_authorization_policy='full_at_group_boundaries_binding_and_cancellation_per_read',
+        write_check_policy='one_full_native_entry_check_followed_by_fresh_feedback_check',
         entry_policy='fresh_identical_start_after_planning',held_input_ttl_ms=100,
         completion_timeout_s=2,stable_samples=3,stable_span_ms=100,readonly_tail_s=2,total_budget_s=20,
         normal_budget_s=15,cleanup_reserve_s=5,stop_rpc_timeout_ms=200,stop_stable_ms=300,stop_verification_ms=500,

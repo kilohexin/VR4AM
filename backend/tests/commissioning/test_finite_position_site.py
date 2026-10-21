@@ -182,3 +182,39 @@ async def test_static_math_initialization_precedes_first_sdk_read():
     def observed(*args):order.append(not c.read_calls);return original(*args)
     model.jdot=observed;r,c,_=await run(data)
     assert r['complete'] and order[0] is True
+
+
+async def test_full_write_identity_check_runs_once_at_native_entry_not_during_math():
+    data=fixture();clock=data[2];checks=[]
+    def full_check():checks.append(clock.now_ns());clock.advance_ms(35)
+    r,c,_=await run(data,write_authorize=full_check)
+    assert r['complete'],r
+    assert len(checks)==1 and [x[0] for x in c.write_calls]==['movej']
+    assert r['native_entry_feedback_age_ms']>=35 and len(r['write_checks'])==1
+
+
+@pytest.mark.parametrize('delay_ms,admitted',[(99,True),(100,False)])
+async def test_freshness_is_rechecked_after_full_native_write_validation(delay_ms,admitted):
+    data=fixture();clock=data[2]
+    def full_check():clock.advance_ms(delay_ms)
+    r,c,_=await run(data,write_authorize=full_check)
+    assert r['complete'] is admitted,r
+    assert r['native_entry_feedback_age_ms']==delay_ms
+    assert [x[0] for x in c.write_calls]==(['movej'] if admitted else [])
+    if not admitted:
+        assert r['reason']=='position_snapshot_expired' and not r['remote_unknown']
+        assert r['movej_entries']==r['stop_entries']==0
+
+
+@pytest.mark.parametrize('change',['revoke','model'])
+async def test_change_during_full_write_validation_cannot_reach_native_sdk(change):
+    data=fixture();allowed=True
+    def authorize():
+        if not allowed:raise ValueError('position_site_test_revoked')
+    def full_check():
+        nonlocal allowed
+        if change=='revoke':allowed=False
+        else:data[-1].model_sha256='0'*64
+    r,c,_=await run(data,authorize=authorize,write_authorize=full_check)
+    assert not r['complete'] and r['movej_entries']==r['stop_entries']==0 and not c.write_calls
+    assert not r['remote_unknown'] and not r['latched_fault']
