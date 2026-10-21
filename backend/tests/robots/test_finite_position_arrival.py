@@ -33,3 +33,20 @@ async def test_nonfinite_feedback_cannot_pass_arrival_contract():
     try:
         with pytest.raises(ValueError):replace(p.start,tcp_p=(float('nan'),0.,.4))
     finally:await a.disconnect()
+
+
+@pytest.mark.parametrize('fraction,expected',[
+    (.1292,'position_no_actual_progress'),
+    (.75,'position_endpoint_error'),
+    (.9,None),
+])
+async def test_finished_target_at_goal_does_not_replace_actual_tcp_progress(fraction,expected):
+    """A finished task and achieved target joints cannot certify actual arrival."""
+    a,_,_,plan=await prepared()
+    try:
+        actual=tuple(start+fraction*(goal-start)
+            for start,goal in zip(plan.start.tcp_p,plan.target_p))
+        sample=replace(plan.start,tcp_p=actual,actual_q=plan.goal_joints,
+            target_q=plan.goal_joints,task_state='FINISHED',robot_state='IDLE')
+        assert evaluate_position_arrival(plan,sample,motion_id=7)==expected
+    finally:await a.disconnect()
