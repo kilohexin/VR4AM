@@ -16,8 +16,8 @@ async def test_arrival_cannot_be_claimed_from_task_status_alone(kind,expected):
         s=replace(plan.start,tcp_p=plan.target_p,actual_q=plan.goal_joints,task_state='FINISHED')
         if kind=='no_progress':s=replace(s,tcp_p=plan.start.tcp_p)
         if kind=='reverse':s=replace(s,tcp_p=(.2995,0.,.4))
-        if kind=='lateral':s=replace(s,tcp_p=(.3005,.00011,.4))
-        if kind=='error':s=replace(s,tcp_p=(.3007,0.,.4))
+        if kind=='lateral':s=replace(s,tcp_p=(.302,.00041,.4))
+        if kind=='error':s=replace(s,tcp_p=(.30251,0.,.4))
         if kind=='running':s=replace(s,task_state='RUNNING')
         if kind=='paused':s=replace(s,robot_state='HOLD')
         if kind=='foreign':s=replace(s,running_id=999)
@@ -37,7 +37,8 @@ async def test_nonfinite_feedback_cannot_pass_arrival_contract():
 
 @pytest.mark.parametrize('fraction,expected',[
     (.1292,'position_no_actual_progress'),
-    (.75,'position_endpoint_error'),
+    (.74,'position_endpoint_error'),
+    (.75,None),
     (.9,None),
 ])
 async def test_finished_target_at_goal_does_not_replace_actual_tcp_progress(fraction,expected):
@@ -49,4 +50,27 @@ async def test_finished_target_at_goal_does_not_replace_actual_tcp_progress(frac
         sample=replace(plan.start,tcp_p=actual,actual_q=plan.goal_joints,
             target_q=plan.goal_joints,task_state='FINISHED',robot_state='IDLE')
         assert evaluate_position_arrival(plan,sample,motion_id=7)==expected
+    finally:await a.disconnect()
+
+
+@pytest.mark.parametrize('progress,error',[(.00099,'position_no_actual_progress'),
+    (.00149,'position_endpoint_error'),(.0015,None),(.002,None)])
+async def test_two_mm_arrival_requires_real_progress_and_half_mm_endpoint(progress,error):
+    a,_,_,p=await prepared()
+    try:
+        start=p.start.tcp_p
+        p=replace(p,target_p=(start[0]+.002,*start[1:]))
+        s=replace(p.start,tcp_p=(start[0]+progress,*start[1:]),
+            actual_q=p.goal_joints,target_q=p.goal_joints,task_state='FINISHED')
+        assert evaluate_position_arrival(p,s,motion_id=7)==error
+    finally:await a.disconnect()
+
+
+@pytest.mark.parametrize('joint_error,expected',[(.0015,None),(.0018,'position_joint_endpoint')])
+async def test_arrival_joint_tolerance_is_one_tenth_degree(joint_error,expected):
+    a,_,_,p=await prepared()
+    try:
+        actual=list(p.goal_joints);actual[0]+=joint_error
+        s=replace(p.start,tcp_p=p.target_p,actual_q=tuple(actual),task_state='FINISHED')
+        assert evaluate_position_arrival(p,s,motion_id=7)==expected
     finally:await a.disconnect()

@@ -21,3 +21,12 @@ it('can abort a draining obligation after normal release, once only',()=>{
  input.reset('web',1);input.offer([1,0,0]);input.release();input.abort();input.abort();
  expect(stop).toHaveBeenCalledTimes(1);
 });
+
+it('uses a deadzone then sends a unit direction, with center as normal release',()=>{
+ const send=vi.fn(),stop=vi.fn(),input=new FinitePositionInput(send,stop);input.reset('web',1);
+ input.offer([.15,0,0]);expect(send).not.toHaveBeenCalled();
+ input.offer([.16,0,0]);expect(send.mock.calls[0][0].vector).toEqual([1,0,0]);
+ input.offer([.1,.1,0]);expect(send.mock.calls[1][0]).toMatchObject({kind:'release',vector:[0,0,0]});
+ expect(stop).not.toHaveBeenCalled();
+ input.offer([.3,.4,0]);expect(send.mock.calls[2][0].vector).toEqual([.6,.8,0]);
+});

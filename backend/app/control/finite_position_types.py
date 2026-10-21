@@ -2,7 +2,11 @@
 from dataclasses import dataclass
 import math
 
-MAX_STEP_M=.0005
+MAX_STEP_M=.002
+INPUT_DEADZONE=.15
+MIN_PROGRESS_M=.001
+MAX_ENDPOINT_ERROR_M=.0005
+JOINT_ENDPOINT_TOLERANCE_RAD=math.radians(.1)
 INPUT_NS=100_000_000
 PLAN_NS=1_000_000_000
 SESSION_NS=10_000_000_000
@@ -51,7 +55,8 @@ class PositionIntent:
         if self.kind not in ('held','release'):raise ValueError('position_invalid_kind')
         v=vector(self.vector,3);length=math.hypot(*v)
         if self.kind=='release' and length:raise ValueError('position_release_vector')
-        if length>1:v=tuple(x/length for x in v)
+        if length<=INPUT_DEADZONE:v=(0.,0.,0.);length=0.
+        else:v=tuple(x/length for x in v)
         object.__setattr__(self,'vector',v)
         if not length:object.__setattr__(self,'kind','release')
 

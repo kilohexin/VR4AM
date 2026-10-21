@@ -1,5 +1,6 @@
 import {Quaternion, Vector3} from 'three';
 import type {GripperRequestMessage, GripperResultMessage, RobotStateMessage, VRFrame, Vec3, Quat} from '../protocol/messages';
+import {FINITE_POSITION_DEADZONE} from './finitePositionInput';
 
 type Action = 'joystick' | 'z+' | 'z-' | 'spin+' | 'spin-' | 'open' | 'close';
 const CLAW_RATE = .15;
@@ -188,17 +189,17 @@ export class HoldControlPanel {
       button.classList.toggle('is-held', button === this.capture);
     }
     this.status.textContent = !this.enabled ? '先解锁，再点击进入准备姿态' : this.positionCandidate&&this.state?.finite_position?.phase==='draining'?'松开后正在完成当前小步'
-      : this.motionHeld() ? (this.positionCandidate?'长按有限小步；松开后完成当前小步':'摇杆松开回中停止；坐标固定于机械臂基座')
+      : this.motionHeld() ? (this.positionCandidate?'长按每步 2 mm；松开后完成当前小步':'摇杆松开回中停止；坐标固定于机械臂基座')
       : this.action === 'open' || this.action === 'close' ? `目标开口 ${((1 - this.clawTarget) * 100).toFixed(0)}% · 松开保持`
-      : this.pending ? '等待上次夹爪请求收尾；不自动重发' : this.positionCandidate?'长按摇杆或升降；松开后完成当前小步':'摇杆控制平面；升降、自转和夹爪长按操作';
+      : this.pending ? '等待上次夹爪请求收尾；不自动重发' : this.positionCandidate?'每步 2 mm；长按摇杆或升降，松开完成当前步':'摇杆控制平面；升降、自转和夹爪长按操作';
   }
   private moveStick(e: PointerEvent): void {
     const box = this.stick.getBoundingClientRect(), radius = Math.max(1, Math.min(box.width, box.height) / 2);
     let x = (e.clientX - box.left - box.width / 2) / radius;
     let y = -(e.clientY - box.top - box.height / 2) / radius;
     const distance = Math.hypot(x, y);
-    if (distance <= .15) x = y = 0;
-    else {const scale = Math.min(1, (distance - .15) / .85) / distance; x *= scale; y *= scale;}
+    if (distance <= FINITE_POSITION_DEADZONE) x = y = 0;
+    else {const scale = (this.positionCandidate?Math.min(1,distance):Math.min(1, (distance - .15) / .85)) / distance; x *= scale; y *= scale;}
     this.xy = {x, y};
     this.knob.style.transform = `translate(calc(-50% + ${x * 44}px), calc(-50% - ${y * 44}px))`;
   }

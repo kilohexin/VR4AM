@@ -59,13 +59,14 @@ async def run(data=None,**kwargs):
     return result,c,connections
 
 
-async def test_one_fixed_half_mm_z_natural_arrival_without_stop_or_continuation():
+async def test_one_fixed_two_mm_z_natural_arrival_without_stop_or_continuation():
     r,c,connections=await run()
     assert r['complete'],r
     assert len(connections)==1 and r['movej_entries']==1 and r['stop_entries']==0
     assert r['ik_entries']==1 and r['fk_entries']==5 and r['tail_complete']
     assert [x[0] for x in c.write_calls]==['movej'] and c.write_calls[0][-2:]==(0.,0.)
     assert r['natural_arrival_confirmed'] and not r['hardware_verified'] and not r['continuous_control_admitted']
+    assert math.dist(r['target_p'],r['start_p'])==pytest.approx(.002)
 
 
 @pytest.mark.parametrize('damage',['paused','pose','tool','factor','moving'])

@@ -2,7 +2,8 @@
 import math
 import numpy as np
 from scipy.spatial.transform import Rotation
-from app.control.finite_position_types import MAX_STEP_M,PathAudit
+from app.control.finite_position_types import (MAX_STEP_M,MIN_PROGRESS_M,MAX_ENDPOINT_ERROR_M,
+    JOINT_ENDPOINT_TOLERANCE_RAD,PathAudit)
 
 FRACTIONS=(0.,.25,.5,.75,1.)
 
@@ -74,11 +75,11 @@ def evaluate_position_arrival(plan,sample,*,motion_id):
     actual=np.array(sample.tcp_p)-plan.start.tcp_p
     progress=float(actual@delta/length)
     cross=float(np.linalg.norm(actual-progress*delta/length))
-    if progress<length*.7:return 'position_no_actual_progress'
+    if progress<MIN_PROGRESS_M-1e-12:return 'position_no_actual_progress'
     if cross>length*.2:return 'position_lateral_deviation'
-    if math.dist(sample.tcp_p,plan.target_p)>length*.2:return 'position_endpoint_error'
+    if math.dist(sample.tcp_p,plan.target_p)>MAX_ENDPOINT_ERROR_M+1e-12:return 'position_endpoint_error'
     if angle(sample.tcp_q,plan.target_q)>math.radians(.1):return 'position_orientation_error'
-    if max(abs(x-y) for x,y in zip(sample.actual_q,plan.goal_joints))>.001:return 'position_joint_endpoint'
+    if max(abs(x-y) for x,y in zip(sample.actual_q,plan.goal_joints))>JOINT_ENDPOINT_TOLERANCE_RAD:return 'position_joint_endpoint'
     if any(abs(x)>.002 for x in sample.actual_qd):return 'position_not_stable'
     return None
 

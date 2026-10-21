@@ -1,5 +1,7 @@
 import type {FinitePositionInputMessage,Vec3} from '../protocol/messages';
 
+export const FINITE_POSITION_DEADZONE=.15;
+
 /** No timer, pending target or reconnect replay. Real UI frames supply freshness. */
 export class FinitePositionInput {
  private sessionId='';private generation=0;private seq=0;private held=false;private outstanding=false;private sawBusy=false;
@@ -9,9 +11,9 @@ export class FinitePositionInput {
  }
  offer(vector:Vec3):void {
   if(!this.sessionId||!vector.every(Number.isFinite))return;
-  const length=Math.hypot(...vector);if(!length){this.release();return;}
+  const length=Math.hypot(...vector);if(length<=FINITE_POSITION_DEADZONE){this.release();return;}
   this.held=true;this.outstanding=true;this.send({v:1,type:'finite_position_input',session_id:this.sessionId,
-   generation:this.generation,seq:++this.seq,kind:'held',vector:vector.map(x=>x/Math.max(1,length)) as Vec3});
+   generation:this.generation,seq:++this.seq,kind:'held',vector:vector.map(x=>x/length) as Vec3});
  }
  release():void {
   if(!this.held)return;this.held=false;

@@ -56,7 +56,7 @@ async def test_held_continues_from_new_feedback_with_single_inflight():
         s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
         await drive(s,clock,hold=True,until=lambda:len(c.write_calls)>=2)
         goals=[x[1][0] for x in c.write_calls if x[0]=='movej']
-        assert len(goals)==2 and abs(goals[0]-.0005)<1e-9 and abs(goals[1]-.001)<1e-9
+        assert len(goals)==2 and abs(goals[0]-.002)<1e-9 and abs(goals[1]-.004)<1e-9
         assert s.view().entered_steps==2
     finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
 

@@ -25,6 +25,14 @@ def test_release_leaves_no_next_goal():
     assert g.take_latest() is None
 
 
+def test_reentering_deadzone_revokes_unsent_plan_without_a_next_goal():
+    m,g,_=fixture();offer(m,g);plan=g.take_latest()
+    center=offer(m,g,2,vector=(.1,.1,0.))
+    assert center.kind=='release' and g.released
+    with pytest.raises(ValueError,match='entry_revoked'):g.require_entry(plan)
+    g.finish();assert g.take_latest() is None
+
+
 def test_release_preserves_inflight_but_forbids_continuation():
     m,g,_=fixture();offer(m,g);p=g.take_latest();g.mark_entered(p)
     offer(m,g,2,'release',(0.,)*3)

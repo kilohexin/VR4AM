@@ -18,12 +18,27 @@ def sample():
         (.3,0.,.4),(0.,0.,0.,1.),BackendState.IDLE,None,'FINISHED',None)
 
 
-def test_diagonal_target_is_half_millimetre():
+def test_diagonal_target_is_two_millimetres():
     s=sample();p,q=api().build_position_target(s,PositionIntent('web',1,1,0,'held',(1.,1.,1.)))
-    assert math.isclose(math.dist(p,s.tcp_p),.0005,abs_tol=1e-12) and q==s.tcp_q
+    assert math.isclose(math.dist(p,s.tcp_p),.002,abs_tol=1e-12) and q==s.tcp_q
 
 
-def test_extremely_small_nonzero_input_is_hold():
+@pytest.mark.parametrize('direction',[(.16,0.,0.),(.5,0.,0.),(1.,0.,0.),(1.,1.,1.)])
+def test_above_deadzone_always_builds_fixed_two_mm_goal(direction):
+    s=sample();intent=PositionIntent('web',1,1,0,'held',direction)
+    p,q=api().build_position_target(s,intent)
+    assert math.isclose(math.dist(p,s.tcp_p),.002,abs_tol=1e-12)
+    assert math.isclose(math.hypot(*intent.vector),1.,abs_tol=1e-12)
+    assert q==s.tcp_q
+
+
+@pytest.mark.parametrize('direction',[(0.,0.,0.),(.15,0.,0.),(.1,.1,0.)])
+def test_deadzone_is_normal_release_not_a_tiny_goal(direction):
+    intent=PositionIntent('web',1,1,0,'held',direction)
+    assert intent.kind=='release' and intent.vector==(0.,0.,0.)
+
+
+def test_deadzone_release_cannot_build_a_motion_target():
     with pytest.raises(ValueError,match='unresolvable'):
         api().build_position_target(sample(),PositionIntent('web',1,1,0,'held',(1e-12,0.,0.)))
 

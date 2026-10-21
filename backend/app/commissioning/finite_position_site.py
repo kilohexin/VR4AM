@@ -15,13 +15,13 @@ from app.commissioning.native_jog_mdh import MdhTool,mdh_tcp_jacobian,mdh_tcp_ja
 from app.commissioning.native_jog_site_scope import site_address,permission
 from app.commissioning.paused_stop_cleanup import BoundedStopOnlyClient
 from app.commissioning.position_snapshot_groups import PositionSnapshotGroups
-from app.control.finite_position_types import PositionIntent,INPUT_NS
+from app.control.finite_position_types import PositionIntent,INPUT_NS,MAX_STEP_M
 from app.robots.base import StopReason
 from app.robots.finite_position_adapter import _FinitePositionCore
 from app.robots.finite_position_plan import evaluate_position_arrival
 from app.schemas.messages import BackendState
 
-DISTANCE_M=.0005
+DISTANCE_M=MAX_STEP_M
 MAX_READS=512
 
 

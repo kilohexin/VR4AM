@@ -14,7 +14,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'backend'))
 from scripts.finite_position_loopback import Peer as BasePeer,parse_request as base_parse,Q,_sdk_identity,owned_port
 from scripts.application_stop_loopback_probe import fixture_result,loopback_settings
-from app.commissioning.finite_position_site import MdhPositionModel,run_single_position
+from app.commissioning.finite_position_site import MdhPositionModel,run_single_position,DISTANCE_M
 from app.commissioning.qpc_event_loop import new_qpc_loop
 from app.recording.noop import NoopRecorder
 
@@ -45,7 +45,7 @@ def parse_request(raw):
                 or any(type(v) not in (int,float) or not np.isfinite(v) for v in (*p.values(),*r.values()))):
             raise ValueError('invalid owned inverse pose')
         initial=wire(Q)
-        if (max(abs(p[k]-initial['position'][k]-(.0005 if k=='z' else 0.)) for k in p)>1e-8
+        if (max(abs(p[k]-initial['position'][k]-(DISTANCE_M if k=='z' else 0.)) for k in p)>1e-8
                 or max(abs(r[k]-initial['rotation']['euler_zyx'][k]) for k in r)>1e-8):
             raise ValueError('outside fixed synthetic +Z target')
         normalized['params'][0]['pose']['cart']['position']=dict(x=.3,y=0.,z=.4)

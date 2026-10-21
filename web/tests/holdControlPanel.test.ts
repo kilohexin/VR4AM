@@ -35,6 +35,16 @@ it.each(['pointerup','pointercancel','lostpointercapture','blur'])('finite candi
  expect(r.release).not.toHaveBeenCalled();
 });
 describe('joystick and progressive claw',()=>{
+ it('finite candidate preserves the 15 percent geometric deadzone without double scaling',()=>{
+  const r=rig(true),stick=r.find('[data-joystick]');
+  stick.dispatchEvent(pointer('pointerdown',115,100));r.panel.applyFrame(frame(0));
+  expect(r.position).not.toHaveBeenCalled();
+  stick.dispatchEvent(pointer('pointermove',116,100));r.step(20,'ARMED');
+  expect(r.position.mock.calls.at(-1)![0][0]).toBeCloseTo(.16);
+  expect(r.root.textContent).toContain('2 mm');
+  stick.dispatchEvent(pointer('pointermove',100,100));
+  expect(r.position.mock.calls.at(-1)![1]).toBe('release');
+ });
  it('aborts on blur after normal release while the current step drains',()=>{
   const r=rig(true),stick=r.find('[data-joystick]');stick.dispatchEvent(pointer('pointerdown',180,100));r.panel.applyFrame(frame(0));
   stick.dispatchEvent(pointer('pointerup'));r.position.mockClear();window.dispatchEvent(new Event('blur'));

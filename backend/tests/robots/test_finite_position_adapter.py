@@ -32,7 +32,7 @@ async def test_one_move_reaches_goal_without_stop():
     a,c,clock,p=await prepared();r=await execute(a,p)
     assert r.complete and r.entered and not r.remote_unknown
     assert [x[0] for x in c.write_calls]==['movej']
-    assert abs(r.final_sample.tcp_p[0]-.3005)<1e-9
+    assert abs(r.final_sample.tcp_p[0]-.302)<1e-9
     assert clock.now_ns()>=300_000_000
     await a.disconnect()
 
@@ -42,6 +42,26 @@ async def test_finished_without_actual_progress_is_rejected():
     assert not r.complete and 'progress' in r.reason
     assert [x[0] for x in c.write_calls]==['movej','stop_move']
     await a.disconnect()
+
+
+@pytest.mark.parametrize('fraction,complete',[(.8,True),(.49,False)])
+async def test_partial_following_obeys_new_arrival_contract_without_extra_targets(fraction,complete):
+    a,c,_,p=await prepared();advance=c.advance
+    def partial():
+        advance()
+        if c.start_ns is None:return
+        actual=tuple(start+fraction*(now-start)
+            for start,now in zip(c.start,c.kin_data['actual_joint_pose']))
+        tcp,_=c.model.forward(actual)
+        c.kin_data['actual_joint_pose']=list(actual)
+        c.kin_data['actual_tcp_pose']=dict(x=tcp[0],y=tcp[1],z=tcp[2],rz=0.,ry=0.,rx=0.)
+    c.advance=partial
+    try:
+        result=await execute(a,p)
+        assert result.complete==complete
+        assert [x[0] for x in c.write_calls]==(['movej'] if complete else ['movej','stop_move'])
+        assert not result.remote_unknown
+    finally:await a.disconnect()
 
 
 @pytest.mark.parametrize('damage',['stale','revoked','tool','plan_copy'])
