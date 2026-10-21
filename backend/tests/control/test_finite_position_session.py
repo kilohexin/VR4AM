@@ -37,6 +37,19 @@ async def test_held_release_drains_without_second_move():
     finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
 
 
+async def test_fresh_held_updates_during_slow_planning_continue_then_release_without_stop():
+    s,a,c,clock=await fixture();forward=c.kinematics_forward
+    async def slow(q):await clock.sleep(.025);return await forward(q)
+    c.kinematics_forward=slow
+    try:
+        await drive(s,clock,hold=True,until=lambda:len(c.write_calls)>=2)
+        assert [x[0] for x in c.write_calls]==['movej','movej']
+        s.offer(PositionIntent('web',1,s._last_seq+1,clock.now_ns(),'release',(0.,)*3))
+        await drive(s,clock,until=lambda:s.phase=='ready' and not s.busy)
+        assert [x[0] for x in c.write_calls]==['movej','movej'] and not a._latched_fault
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
 async def test_held_continues_from_new_feedback_with_single_inflight():
     s,a,c,clock=await fixture()
     try:

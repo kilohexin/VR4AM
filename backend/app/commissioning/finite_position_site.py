@@ -165,8 +165,9 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
     def entry():
         permit()
         if write_authorize is not None:permission(write_authorize)
-        if intent is None or not 0<=clock()-intent.received_ns<INPUT_NS:
-            raise ValueError('position_site_input_expired')
+        # This CLI authorizes one fixed target, not a streaming held-input lease.
+        # Scope expiry and revocation apply throughout; the adapter re-reads the start.
+        if intent is None:raise ValueError('position_site_input_missing')
 
     def stop():
         if proxy is None or proxy.movej_entries!=1 or clock()>=reserve:

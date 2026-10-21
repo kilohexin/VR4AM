@@ -82,12 +82,13 @@ async def test_bad_preflight_never_writes(damage):
     assert not r['complete'] and r['movej_entries']==r['stop_entries']==0 and c.write_calls==[]
 
 
-async def test_read_delay_expires_before_send_and_never_retries():
+async def test_slow_planning_refreshes_start_and_naturally_finishes_without_stop():
     data=fixture();s,c,clock,recorder,model=data;original=c.kinematics_forward
     async def slow(q):await clock.sleep(.025);return await original(q)
     c.kinematics_forward=slow;r,c,_=await run(data)
-    assert not r['complete'] and r['movej_entries']==r['stop_entries']==0
-    assert r['fk_entries']<=5 and not c.write_calls
+    assert r['complete'],r
+    assert r['movej_entries']==1 and r['stop_entries']==0 and r['fk_entries']==5
+    assert [x[0] for x in c.write_calls]==['movej']
 
 
 @pytest.mark.parametrize('damage',['no_progress','foreign'])

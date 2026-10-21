@@ -60,6 +60,15 @@ def test_same_direction_updates_do_not_starve_plan_but_reverse_does():
     with pytest.raises(ValueError):g.require_entry(p)
 
 
+def test_fresh_real_updates_can_authorize_a_plan_older_than_input_ttl():
+    m,g,now=fixture();offer(m,g);p=g.take_latest()
+    for seq in range(2,6):
+        now[0]+=40_000_000;offer(m,g,seq,stamp=now[0]);g.require_entry(p)
+    assert now[0]==160_000_000
+    now[0]+=100_000_000
+    with pytest.raises(ValueError):g.require_entry(p)
+
+
 def test_completion_requires_newer_input_after_finish():
     m,g,now=fixture();offer(m,g);p=g.take_latest();g.mark_entered(p)
     now[0]=20;offer(m,g,2,stamp=20);g.finish()

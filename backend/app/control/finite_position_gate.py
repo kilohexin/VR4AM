@@ -45,7 +45,6 @@ class PositionGate:
         if (intent is not self.active or self._entered or self.entered_steps>=10
                 or self.released or self.latest is None or self.latest.vector!=intent.vector
                 or self._taken_barrier!=self._barrier
-                or not 0<=now-intent.received_ns<INPUT_NS
                 or not 0<=now-self.latest.received_ns<INPUT_NS):
             raise ValueError('position_entry_revoked')
 

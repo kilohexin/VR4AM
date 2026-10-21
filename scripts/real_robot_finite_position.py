@@ -15,6 +15,7 @@ sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'backend'))
 from scripts import real_robot_native_jog_window as identity
 from scripts.real_robot_ready_return import close_loop_bounded
 from app.commissioning.finite_position_site import MdhPositionModel,run_single_position,MAX_READS
+from app.control.finite_position_types import PLAN_NS
 
 CONFIRM='I_APPROVE_ONE_FINITE_POSITION_Z_NATURAL_ARRIVAL_AND_RESERVED_FAULT_STOP'
 sha=identity.sha
@@ -80,7 +81,9 @@ def preview(p):
         settings_binding=json.loads(json.dumps(asdict(p['settings']))),model_sha256=p['model'].model_sha256,
         authorization_expires_utc=p['authorization_expires_utc'],distance_m=.0005,direction=[0.,0.,1.],
         max_connections=1,max_movej_entries=1,max_stop_entries=1,max_ik_calls=1,max_fk_calls=5,max_read_entries=MAX_READS,
-        allowed_writes=['movej','stop_move'],feedback_ttl_ms=100,input_ttl_ms=100,movej_rpc_timeout_ms=200,
+        allowed_writes=['movej','stop_move'],feedback_ttl_ms=100,input_ttl_ms=None,movej_rpc_timeout_ms=200,
+        input_policy='one_fixed_authorized_target_until_scope_deadline',planning_timeout_ms=PLAN_NS/1e6,
+        entry_policy='fresh_identical_start_after_planning',held_input_ttl_ms=100,
         completion_timeout_s=2,stable_samples=3,stable_span_ms=100,readonly_tail_s=2,total_budget_s=20,
         normal_budget_s=15,cleanup_reserve_s=5,stop_rpc_timeout_ms=200,stop_stable_ms=300,stop_verification_ms=500,
         native_time_argument=0,native_blend_radius=0,natural_arrival_does_not_send_stop=True,

@@ -17,10 +17,12 @@ def main():
     args=parser().parse_args()
     import uvicorn
     from app.digital_twin.finite_position_demo import create_finite_position_demo_app
+    from app.digital_twin.offline_timing import offline_timer_period
     from app.commissioning.qpc_event_loop import new_qpc_loop
     app=create_finite_position_demo_app(args.web_directory)
     server=uvicorn.Server(uvicorn.Config(app,host='127.0.0.1',port=8769,log_level='info'))
-    with asyncio.Runner(loop_factory=new_qpc_loop) as runner:runner.run(server.serve())
+    with offline_timer_period():
+        with asyncio.Runner(loop_factory=new_qpc_loop) as runner:runner.run(server.serve())
 
 
 if __name__=='__main__':main()

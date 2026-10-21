@@ -26,7 +26,8 @@ class _FinitePositionCore(RealLebaiAdapter):
         if client_factory is None or position_model is None:
             raise ValueError('position_explicit_injection_required')
         self.position_model=position_model;self.position_binding=None
-        self._position_plan=None;self.position_busy=False;self.position_aborted=False
+        self._position_plan=None;self._position_plan_observer=None
+        self.position_busy=False;self.position_aborted=False
         self._position_config=digest(asdict(settings))
         self._position_sources={Path(__file__),Path(__file__).with_name('finite_position_plan.py'),
             Path(__file__).parents[1]/'control/finite_position_types.py'}
@@ -75,11 +76,22 @@ class _FinitePositionCore(RealLebaiAdapter):
         latest=self._snapshot
         if latest is None:raise ValueError('position_feedback_missing')
         self._position_feedback_limits(latest)
-        if (tuple(latest.actual_q)!=plan.start.actual_q or tuple(latest.target_q)!=plan.start.target_q
+        if (self._position_plan_observer is None
+                or not self._position_same_inputs(self._position_plan_observer,latest)
+                or self.position_model.model_sha256!=plan.evidence.model_sha256
+                or tuple(latest.actual_q)!=plan.start.actual_q or tuple(latest.target_q)!=plan.start.target_q
                 or tuple(latest.actual_tcp.p)!=plan.start.tcp_p or tuple(latest.actual_tcp.q)!=plan.start.tcp_q
                 or latest.robot_state!=BackendState.IDLE
                 or any(abs(x)>1e-8 for v in (latest.actual_qd,latest.actual_qdd,latest.target_qd,latest.target_qdd) for x in v)):
             raise ValueError('position_observer_changed')
+
+    @staticmethod
+    def _position_same_inputs(before,after):
+        # Timing may change; every controller input to this fixed plan must not.
+        names=('robot_state','estop','actual_q','actual_qd','actual_qdd','target_q',
+            'target_qd','target_qdd','actual_tcp','target_tcp','actual_flange',
+            'tcp_setting','running_motion','raw_running_motion','motion_state','gripper')
+        return all(getattr(before,name)==getattr(after,name) for name in names)
 
     def _position_sample(self,s,task_state=None):
         return PositionSample(self.position_binding,self._snapshot_read_sequence,s.captured_ns,
@@ -95,31 +107,49 @@ class _FinitePositionCore(RealLebaiAdapter):
     async def plan_step(self,intent,*,authorize):
         binding=self.position_binding;self._position_health(binding);authorize()
         if self.position_busy:raise ValueError('position_busy')
-        self._position_plan=None
-        s=await self._read_snapshot(read_purpose='position_plan');authorize()
-        if not self._preflight_from_snapshot(s).ready:raise ValueError('position_preflight')
-        if any(abs(x)>1e-8 for v in (s.actual_qd,s.actual_qdd,s.target_qd,s.target_qdd) for x in v):
-            raise ValueError('position_initial_not_stable')
-        start=self._position_sample(s);p,q=build_position_target(start,intent)
-        raw=await self._position_math('kinematics_inverse',lambda:self._client.kinematics_inverse(
-            pose_to_lebai(Pose(p=p,q=q)),list(s.actual_q)),authorize)
-        if raw is None:raise ValueError('position_ik_unreachable')
-        goal=joint_vector(raw,'position_ik_invalid');fk=[]
-        for fraction in FRACTIONS:
-            joints=[a+(b-a)*fraction for a,b in zip(start.actual_q,goal)]
-            raw=await self._position_math('kinematics_forward',lambda:self._client.kinematics_forward(joints),authorize)
-            pose=pose_from_lebai(raw);fk.append((tuple(pose.p),tuple(pose.q)))
-        if math.dist(fk[-1][0],p)>1e-5 or angle(fk[-1][1],q)>1e-4:
-            raise ValueError('position_ik_endpoint_mismatch')
-        audit=await asyncio.to_thread(audit_position_path,start,goal,fk_samples=tuple(fk),
-            settings=self.settings,model=self.position_model)
-        await self._emit_event(dict(kind='finite_position_plan',input_seq=intent.seq,
-            start_tcp=list(start.tcp_p),target_tcp=list(p),goal_joints=list(goal),audit=asdict(audit)))
-        authorize();self._position_health(binding)
-        if not 0<=self._clock()-start.captured_ns<INPUT_NS:raise ValueError('position_snapshot_expired')
-        self._position_plan=PositionPlan(binding,intent.seq,start,p,q,goal,audit.joint_speed,
-            audit.joint_acceleration,self._clock(),audit)
-        return self._position_plan
+        self._position_plan=None;self._position_plan_observer=None
+        began=self._clock();model_identity=self.position_model.model_sha256
+        def live():
+            authorize();self._position_health(binding)
+            if self.position_model.model_sha256!=model_identity:raise ValueError('position_model_changed')
+            if not 0<=self._clock()-began<PLAN_NS:raise ValueError('position_planning_expired')
+        try:
+            async with asyncio.timeout(PLAN_NS/1e9):
+                s=await self._read_snapshot(read_purpose='position_plan');live()
+                if not self._preflight_from_snapshot(s).ready:raise ValueError('position_preflight')
+                if not 0<=self._clock()-s.captured_ns<INPUT_NS:raise ValueError('position_snapshot_expired')
+                if any(abs(x)>1e-8 for v in (s.actual_qd,s.actual_qdd,s.target_qd,s.target_qdd) for x in v):
+                    raise ValueError('position_initial_not_stable')
+                start=self._position_sample(s);p,q=build_position_target(start,intent)
+                raw=await self._position_math('kinematics_inverse',lambda:self._client.kinematics_inverse(
+                    pose_to_lebai(Pose(p=p,q=q)),list(s.actual_q)),live)
+                if raw is None:raise ValueError('position_ik_unreachable')
+                goal=joint_vector(raw,'position_ik_invalid');fk=[]
+                for fraction in FRACTIONS:
+                    joints=[a+(b-a)*fraction for a,b in zip(start.actual_q,goal)]
+                    raw=await self._position_math('kinematics_forward',lambda:self._client.kinematics_forward(joints),live)
+                    pose=pose_from_lebai(raw);fk.append((tuple(pose.p),tuple(pose.q)))
+                if math.dist(fk[-1][0],p)>1e-5 or angle(fk[-1][1],q)>1e-4:
+                    raise ValueError('position_ik_endpoint_mismatch')
+                audit=await asyncio.to_thread(audit_position_path,start,goal,fk_samples=tuple(fk),
+                    settings=self.settings,model=self.position_model)
+                live()
+                await self._emit_event(dict(kind='finite_position_plan',input_seq=intent.seq,
+                    start_tcp=list(start.tcp_p),target_tcp=list(p),goal_joints=list(goal),audit=asdict(audit),
+                    planning_timeout_ms=PLAN_NS/1e6,entry_policy='fresh_identical_start_after_planning'))
+                live()
+                fresh=await self._read_snapshot(read_purpose='position_revalidate');live()
+                if not self._position_same_inputs(s,fresh):raise ValueError('position_observer_changed')
+                if not self._preflight_from_snapshot(fresh).ready:raise ValueError('position_preflight')
+                self._position_feedback_limits(fresh)
+                if not 0<=self._clock()-fresh.captured_ns<INPUT_NS:raise ValueError('position_snapshot_expired')
+                # The renewed timestamp is backed by a new read, never assigned to old feedback.
+                self._position_plan_observer=fresh
+                self._position_plan=PositionPlan(binding,intent.seq,self._position_sample(fresh),p,q,goal,
+                    audit.joint_speed,audit.joint_acceleration,self._clock(),audit)
+                return self._position_plan
+        except TimeoutError:
+            raise ValueError('position_planning_expired') from None
 
     async def execute_step(self,plan,*,before_entry,monitor_authorize,on_entered):
         entered=False;owned=False;entry_ns=None;motion_id=None;final=None;reason=None;stable=None;anchor=None;good=0;last=None

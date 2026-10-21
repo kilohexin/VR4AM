@@ -65,6 +65,8 @@ async def test_default_preview_is_zero_access(context,monkeypatch,capsys):
     assert row['distance_m']==.0005 and row['max_movej_entries']==row['max_stop_entries']==1
     assert row['max_ik_calls']==1 and row['max_fk_calls']==5 and not row['motion_authorized']
     assert row['natural_arrival_does_not_send_stop'] and not p['output'].exists() and not c.write_calls
+    assert row['input_ttl_ms'] is None and row['held_input_ttl_ms']==100
+    assert row['planning_timeout_ms']==1000 and row['entry_policy']=='fresh_identical_start_after_planning'
 
 
 @pytest.mark.parametrize('kind',['confirm','expiry','hash','preview','config','ready_pose','reference_survey','runtime','rpc'])
