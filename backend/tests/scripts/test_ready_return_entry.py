@@ -107,6 +107,118 @@ def test_reference_damage_is_rejected_before_admission(context,kind):
     with pytest.raises(ValueError):e.prepare(p['config'],p['start_session'],p['ready_pose'],p['output'])
 
 
+def readonly_reference(context):
+    """A completed, sealed read-only survey; it is not a stop confirmation."""
+    e,p,kw,c,clock=context
+    folder=e.ROOT/'survey';output=folder/'execution';output.mkdir(parents=True)
+    q=list(p['start_q']);tcp=dict(p=[.3,0,.4],q=[0,0,0,1])
+    tool=dict(p=[p['settings'].expected_tcp.x,p['settings'].expected_tcp.y,
+                 p['settings'].expected_tcp.z],q=[0,0,0,1])
+    observation=dict(state='IDLE',q=q,qd=[0.]*6,qdd=[0.]*6,tcp=tcp,tcp_setting=tool)
+    sdk_tcp=dict(x=.3,y=0.,z=.4,rx=0.,ry=0.,rz=0.)
+    kin=dict(actual_joint_pose=q,target_joint_pose=q,actual_joint_speed=[0.]*6,
+        actual_joint_acc=[0.]*6,target_joint_speed=[0.]*6,target_joint_acc=[0.]*6,
+        actual_tcp_pose=sdk_tcp)
+    rows=[]
+    def row(method,raw=None):
+        rows.append(dict(method=method,entered=True,outcome='returned',
+            remote_result_unknown=False,raw=raw))
+    row('connect')
+    def group():
+        for method,raw in [('is_connected',True),('get_robot_state','IDLE'),
+            ('get_estop_reason',0),('get_running_motion',0),('get_kin_data',kin),
+            ('get_tcp',asdict(p['settings'].expected_tcp)),('get_robot_state','IDLE')]:row(method,raw)
+    group();row('kinematics_forward',sdk_tcp);row('kinematics_inverse',q)
+    for _ in range(3):row('kinematics_forward',sdk_tcp)
+    group()
+    report=dict(schema=1,runtime='LIVE_READONLY',complete=True,kinematics_consistent=True,
+        motion_authorized=False,hardware_stop_verified=False,pending_remote_result_unknown=False,
+        initial=observation,final=observation,calls=rows)
+    path=output/'result.json';path.write_text(json.dumps(report))
+    scope=dict(schema=1,scope='one_readonly_fk_ik_survey_no_robot_writes',mode='readonly',
+        target_ip=p['settings'].ip,output=str(output),allowed_writes=[],max_connections=1,
+        max_total_calls_including_connect=24,max_ik_calls=1,max_fk_calls=4)
+    preview=folder/'preview.json';preview.write_text(json.dumps(scope))
+    admission=output/'admission.json';admission.write_text(json.dumps(dict(scope=scope,
+        approved_preview_sha256=e.sha(preview))))
+    return path,report,admission,preview
+
+
+def test_readonly_reference_preserves_saved_target_and_stop_uncertainty(context):
+    e,p,kw,c,clock=context;path,_,admission,preview=readonly_reference(context)
+    fresh=e.prepare(p['config'],path,p['ready_pose'],p['output'])
+    v=e.preview(fresh)
+    assert fresh['start_q']==p['start_q']
+    assert v['target_q_rad']==list(p['settings'].teleop_ready_q)
+    assert v['reference_kind']=='completed_readonly_survey'
+    assert not v['motion_time_stop_verified'] and not v['motion_authorized']
+    assert v['prior_stop_uncertainty_cleared'] is False
+    assert str(admission) in fresh['input_hashes'] and str(preview) in fresh['input_hashes']
+
+
+async def test_readonly_start_executes_existing_return_once_without_routine_stop(context):
+    e,p,kw,c,clock=context;path,r,_,_=readonly_reference(context)
+    # A small settled servo error is permitted by the unchanged live start check.
+    for call in r['calls']:
+        if call['method']=='get_kin_data':
+            call['raw']['target_joint_pose']=list(call['raw']['actual_joint_pose'])
+            call['raw']['target_joint_pose'][4]+=.0001
+    path.write_text(json.dumps(r))
+    fresh=e.prepare(p['config'],path,p['ready_pose'],p['output'],expires=kw['expires'])
+    kw['approved'].write_text(json.dumps(e.preview(fresh)))
+    kw['expected_hash']=e.sha(kw['approved'])
+    result=await e.execute(fresh,**kw,client_factory=AsyncMock(return_value=c),
+        clock=clock.now_ns,sleep=clock.sleep)
+    assert result['complete'],result
+    assert result['movej_entries']==1 and result['stop_entries']==0
+
+
+@pytest.mark.parametrize('file_index',[0,1])
+async def test_changed_readonly_seal_never_connects(context,file_index):
+    e,p,kw,c,clock=context;path,_,admission,preview=readonly_reference(context)
+    fresh=e.prepare(p['config'],path,p['ready_pose'],p['output'],expires=kw['expires'])
+    kw['approved'].write_text(json.dumps(e.preview(fresh)));kw['expected_hash']=e.sha(kw['approved'])
+    (admission,preview)[file_index].write_text('{}')
+    factory=AsyncMock(return_value=c)
+    with pytest.raises(ValueError):
+        await e.execute(fresh,**kw,client_factory=factory,clock=clock.now_ns,sleep=clock.sleep)
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize('damage',['incomplete','simulation','unknown','paused','moving_q',
+    'target_q','target_speed','tool','write','address','seal','missing_call','failed_call',
+    'tcp_mismatch','raw_tcp_missing','fk_payload','ik_payload'])
+def test_readonly_reference_rejects_damage_before_sdk(context,damage):
+    e,p,kw,c,clock=context;path,r,admission,preview=readonly_reference(context)
+    if damage=='incomplete':r['complete']=False
+    elif damage=='simulation':r['runtime']='SIMULATION'
+    elif damage=='unknown':r['pending_remote_result_unknown']=True
+    elif damage=='paused':r['final']['state']='PAUSED'
+    elif damage=='moving_q':r['final']['qd'][0]=.001
+    elif damage in ('target_q','target_speed'):
+        raw=next(x['raw'] for x in r['calls'] if x['method']=='get_kin_data')
+        key='target_joint_pose' if damage=='target_q' else 'target_joint_speed'
+        raw[key]=list(raw[key]);raw[key][0]+=.01
+    elif damage=='tool':r['final']['tcp_setting']['p'][2]+=.01
+    elif damage in ('write','address'):
+        a=json.loads(admission.read_text())
+        if damage=='write':a['scope']['allowed_writes']=['stop_move']
+        else:a['scope']['target_ip']='192.168.42.2'
+        preview.write_text(json.dumps(a['scope']));a['approved_preview_sha256']=e.sha(preview)
+        admission.write_text(json.dumps(a))
+    elif damage=='seal':preview.write_text('{}')
+    elif damage=='missing_call':r['calls'].pop()
+    elif damage=='tcp_mismatch':r['final']['tcp']['p'][2]+=.01
+    elif damage=='raw_tcp_missing':
+        del next(x['raw'] for x in r['calls'] if x['method']=='get_kin_data')['actual_tcp_pose']
+    elif damage=='fk_payload':next(x for x in r['calls'] if x['method']=='kinematics_forward')['raw']={}
+    elif damage=='ik_payload':next(x for x in r['calls'] if x['method']=='kinematics_inverse')['raw']=[0.]*5
+    else:r['calls'][-1]['remote_result_unknown']=True
+    path.write_text(json.dumps(r))
+    with pytest.raises(ValueError,match='ready_return_reference_rejected'):
+        e.prepare(p['config'],path,p['ready_pose'],p['output'])
+
+
 def test_cli_process_exits_with_a_cancellation_resistant_abandoned_task(tmp_path):
     # Only loop-shutdown behavior: no native loader, connection or controller.
     code='''

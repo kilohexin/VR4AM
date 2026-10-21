@@ -1,10 +1,12 @@
 """Default preview; independently approved one prepare movej, never a Home."""
 import argparse
 import asyncio
+from collections import Counter
 from dataclasses import asdict
 from datetime import UTC,datetime,timedelta
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -27,8 +29,74 @@ def runtime_hashes():
     return paths
 
 
+def readonly_reference(settings,path,hashes):
+    """Accept a sealed completed observation as a start, never as stop proof.
+
+    The live runner still rereads and matches this start before its sole movej.
+    No state or fault in a preceding session is changed by parsing this file.
+    """
+    from app.schemas.messages import Pose
+    from app.robots.lebai_codec import pose_from_lebai
+    from app.commissioning.readonly_kinematics import _angle
+    admission=path.parent/'admission.json';approved=path.parent.parent/'preview.json'
+    for item in (admission,approved):hashes[str(item)]=sha(item)
+    value=json.loads(path.read_bytes());seal=json.loads(admission.read_bytes())
+    scope=json.loads(approved.read_bytes())
+    if (seal['approved_preview_sha256']!=hashes[str(approved)] or seal['scope']!=scope
+            or scope['scope']!='one_readonly_fk_ik_survey_no_robot_writes'
+            or scope['mode']!='readonly' or scope['target_ip']!=settings.ip
+            or Path(scope['output']).resolve()!=path.parent
+            or scope['allowed_writes']!=[] or scope['max_connections']!=1
+            or scope['max_total_calls_including_connect']!=24
+            or scope['max_ik_calls']!=1 or scope['max_fk_calls']!=4
+            or value['runtime']!='LIVE_READONLY' or value['complete'] is not True
+            or value['kinematics_consistent'] is not True
+            or value['motion_authorized'] is not False
+            or value['hardware_stop_verified'] is not False
+            or value['pending_remote_result_unknown'] is not False):raise ValueError
+    rows=value['calls'];counts=Counter(x['method'] for x in rows)
+    motion_queries=counts.pop('get_motion_state',0)
+    if (counts!=Counter(connect=1,is_connected=2,get_robot_state=4,get_estop_reason=2,
+            get_running_motion=2,get_kin_data=2,get_tcp=2,kinematics_inverse=1,kinematics_forward=4)
+            or not 0<=motion_queries<=2 or len(rows)>24
+            or any(x['entered'] is not True or x['outcome']!='returned'
+                or x['remote_result_unknown'] is not False for x in rows)):raise ValueError
+    raw=lambda name:[x['raw'] for x in rows if x['method']==name]
+    # Validate required mathematical payloads; they are not used as motion or
+    # stop evidence by this return entry (whose live preflight is independent).
+    for payload in raw('kinematics_forward'):pose_from_lebai(payload)
+    _q(raw('kinematics_inverse')[0])
+    if (any(x is not True for x in raw('is_connected'))
+            or any(not ((type(x) is int and x==5) or (type(x) is str and x=='IDLE'))
+                for x in raw('get_robot_state'))
+            or any(not ((type(x) is int and x==0) or (type(x) is str and x.lower() in ('none','0')))
+                for x in raw('get_estop_reason'))
+            or any(type(x) is not int or x<0 for x in raw('get_running_motion'))
+            or sum(x>0 for x in raw('get_running_motion'))!=motion_queries
+            or any(x!='FINISHED' for x in raw('get_motion_state'))):raise ValueError
+    initial,final=value['initial'],value['final'];start=_q(final['q'])
+    expected=pose_from_lebai(asdict(settings.expected_tcp))
+    for observation,kin,tool in zip((initial,final),raw('get_kin_data'),raw('get_tcp'),strict=True):
+        observed_pose=Pose.model_validate(observation['tcp'])
+        raw_pose=pose_from_lebai(kin['actual_tcp_pose'])
+        if math.dist(observed_pose.p,raw_pose.p)>1e-9 or _angle(observed_pose.q,raw_pose.q)>1e-6:
+            raise ValueError
+        if (observation['state']!='IDLE' or _q(observation['q'])!=start
+                or _q(kin['actual_joint_pose'])!=start
+                or max(abs(a-b) for a,b in zip(_q(kin['target_joint_pose']),start,strict=True))>.001
+                or any(_q(observation[key])!=(0.,)*6 for key in ('qd','qdd'))
+                or any(_q(kin[key])!=(0.,)*6 for key in ('actual_joint_speed','actual_joint_acc',
+                    'target_joint_speed','target_joint_acc'))):raise ValueError
+        for setting in (Pose.model_validate(observation['tcp_setting']),pose_from_lebai(tool)):
+            if math.dist(setting.p,expected.p)>1e-9 or _angle(setting.q,expected.q)>1e-6:raise ValueError
+    a,b=(Pose.model_validate(x['tcp']) for x in (initial,final))
+    if math.dist(a.p,b.p)>1e-5 or _angle(a.q,b.q)>.001:raise ValueError
+    return start,b
+
+
 def prepare(config,start_session,ready_pose,output,*,expires=None):
     from app.config import Settings,REAL_ROBOT_CONFIRMATION
+    from app.robots.base import BackendCommandError
     from app.schemas.messages import Pose
     config,start_session,ready_pose=(Path(x).resolve(strict=True) for x in (config,start_session,ready_pose))
     output=Path(output).resolve()
@@ -56,28 +124,33 @@ def prepare(config,start_session,ready_pose,output,*,expires=None):
                 or _q(selected['q_rad'])!=s.teleop_ready_q
                 or selected['tool_tcp_setting']!=asdict(s.expected_tcp)):
             raise ValueError
-        rows=[json.loads(line) for line in start_session.read_bytes().splitlines()]
-        summaries=[x for x in rows if x.get('kind')=='paused_stop_cleanup_result']
-        if (len(summaries)!=1 or summaries[0].get('runtime')!='LIVE_STATIC_DIAGNOSTIC'
-                or summaries[0].get('complete') is not True or summaries[0].get('sdk_stop_entries')!=1
-                or summaries[0].get('read_remote_result_unknown') is not False
-                or summaries[0].get('latched_fault') is not None):raise ValueError
-        samples=[x for x in rows if x.get('kind')=='stop_observation_sample']
-        if not samples or [x['sequence'] for x in samples]!=list(range(1,len(samples)+1)):
-            raise ValueError
-        last=samples[-1]['state'];start=_q(last['actual_q'])
-        if (last['raw_robot_state']!='IDLE' or last['motion_state']!='FINISHED'
-                or _q(last['target_q'])!=start
-                or any(_q(last[k])!=(0.,)*6 for k in ('actual_qd','actual_qdd','target_qd'))):
-            raise ValueError
-        pose=Pose.model_validate(last['actual_tcp'])
+        reference_kind='successful_static_cleanup'
+        if start_session.suffix.lower()=='.json':
+            reference_kind='completed_readonly_survey'
+            start,pose=readonly_reference(s,start_session,hashes)
+        else:
+            rows=[json.loads(line) for line in start_session.read_bytes().splitlines()]
+            summaries=[x for x in rows if x.get('kind')=='paused_stop_cleanup_result']
+            if (len(summaries)!=1 or summaries[0].get('runtime')!='LIVE_STATIC_DIAGNOSTIC'
+                    or summaries[0].get('complete') is not True or summaries[0].get('sdk_stop_entries')!=1
+                    or summaries[0].get('read_remote_result_unknown') is not False
+                    or summaries[0].get('latched_fault') is not None):raise ValueError
+            samples=[x for x in rows if x.get('kind')=='stop_observation_sample']
+            if not samples or [x['sequence'] for x in samples]!=list(range(1,len(samples)+1)):
+                raise ValueError
+            last=samples[-1]['state'];start=_q(last['actual_q'])
+            if (last['raw_robot_state']!='IDLE' or last['motion_state']!='FINISHED'
+                    or _q(last['target_q'])!=start
+                    or any(_q(last[k])!=(0.,)*6 for k in ('actual_qd','actual_qdd','target_qd'))):
+                raise ValueError
+            pose=Pose.model_validate(last['actual_tcp'])
         if any(not lo<=x<=hi for lo,x,hi in zip(s.startup_tcp_min_m,pose.p,s.startup_tcp_max_m,strict=True)):
             raise ValueError
-    except (ValueError,KeyError,TypeError,AttributeError):
+    except (OSError,ValueError,KeyError,TypeError,AttributeError,BackendCommandError):
         raise ValueError('ready_return_reference_rejected') from None
     if any(sha(p)!=h for p,h in hashes.items()):raise ValueError('ready_return_inputs_changed_during_prepare')
     return dict(config=config,start_session=start_session,ready_pose=ready_pose,output=output,
-        settings=s,start_q=start,input_hashes=hashes,runtime_hashes=runtime_hashes(),
+        settings=s,start_q=start,reference_kind=reference_kind,input_hashes=hashes,runtime_hashes=runtime_hashes(),
         authorization_expires_utc=expires)
 
 
@@ -100,7 +173,8 @@ def preview(p):
         sdk_binary_sha256=identity.SDK_SHA,runtime_bytes_rehashed_at_write=False,
         metadata_preserving_tampering_detected_at_write=False,
         runtime_policy='full_sha_after_load_before_fresh_reads_metadata_at_write',
-        evidence_policy='saved_operator_target_and_last_successful_static_cleanup_sample')
+        reference_kind=p['reference_kind'],prior_stop_uncertainty_cleared=False,
+        evidence_policy='saved_operator_target_and_bound_start_reference_live_rechecked')
 
 
 def metadata(paths):
