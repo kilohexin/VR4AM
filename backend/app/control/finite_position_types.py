@@ -24,12 +24,13 @@ class PositionArrivalPolicy:
     completion_ns: int
     tail_tcp_drift_m: float
     tail_joint_drift_rad: float
+    tail_velocity_radps: float
 
 
 STRICT_ARRIVAL=PositionArrivalPolicy('strict',MAX_ENDPOINT_ERROR_M,math.radians(.1),
-    .00001,.00001,100_000_000,STEP_NS,.00001,.00001)
+    .00001,.00001,100_000_000,STEP_NS,.00001,.00001,.002)
 COARSE_GRASP_ARRIVAL=PositionArrivalPolicy('coarse_grasp',.001,math.radians(.2),
-    .0001,math.radians(.02),200_000_000,5_000_000_000,.001,JOINT_ENDPOINT_TOLERANCE_RAD)
+    .0001,math.radians(.02),200_000_000,5_000_000_000,.001,JOINT_ENDPOINT_TOLERANCE_RAD,.02)
 
 
 def position_arrival_policy(name):

@@ -206,6 +206,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
     reserve=deadline+5_000_000_000;adapter=proxy=None;plan=None;started=False;motion_done=False
     report=dict(complete=False,hardware_verified=False,continuous_control_admitted=False,
         arrival_policy=asdict(policy),max_read_entries=position_read_limit(policy.name),
+        tail_observation_kind='bounded_goal_and_rate_observation',tail_physical_standstill_verified=False,
         **PositionAccelerationMonitor(min(.2,settings.control.max_joint_acceleration_radps2)).policy(),
         snapshot_read_policy='owned_six_fields_parallel',snapshot_groups=[],
         motion_time_stop_verified=False,natural_arrival_confirmed=False,tail_complete=False,
@@ -302,7 +303,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
                 permit()
                 if not 0<=clock()-current.captured_ns<INPUT_NS:
                     raise ValueError('position_site_tail_feedback_expired')
-                if (evaluate_position_arrival(plan,current,motion_id=result.motion_id) is not None
+                if (evaluate_position_arrival(plan,current,motion_id=result.motion_id,tail=True) is not None
                         or math.dist(current.tcp_p,result.final_sample.tcp_p)>policy.tail_tcp_drift_m
                         or max(abs(a-b) for a,b in zip(current.actual_q,result.final_sample.actual_q))>policy.tail_joint_drift_rad):
                     motion_done=False;raise ValueError('position_site_tail_not_stable')

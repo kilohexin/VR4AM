@@ -247,6 +247,28 @@ async def test_tail_uses_the_bound_goal_tolerance_for_coarse_only(monkeypatch,po
     assert [x[0] for x in c.write_calls]==(['movej'] if complete else ['movej','stop_move'])
 
 
+@pytest.mark.parametrize('policy,rate,complete',[
+    ('strict',.009587379924285258,False),
+    ('coarse_grasp',.009587379924285258,True),
+    ('coarse_grasp',.020001,False)])
+async def test_tail_rate_observation_has_explicit_separate_bounds(monkeypatch,policy,rate,complete):
+    import copy
+    data=fixture();c=data[1];m=api();phase=None
+    original_read=m._SiteAdapter._read_snapshot;original_kin=c.get_kin_data
+    async def observed(self,*args,**kwargs):
+        nonlocal phase
+        phase=kwargs.get('read_purpose');return await original_read(self,*args,**kwargs)
+    async def kin():
+        value=copy.deepcopy(await original_kin())
+        if phase=='single_position_tail':value['actual_joint_speed'][0]=rate
+        return value
+    monkeypatch.setattr(m._SiteAdapter,'_read_snapshot',observed);c.get_kin_data=kin
+    r,c,_=await run(data,arrival_policy=policy)
+    assert r['complete']==complete,r
+    assert r['natural_arrival_confirmed']
+    assert [x[0] for x in c.write_calls]==(['movej'] if complete else ['movej','stop_move'])
+
+
 def test_theoretical_cache_reuses_only_pure_math_and_returns_fresh_arrays(monkeypatch):
     m=api();model=fixture()[-1];q=(.123,-1.1,1.2,.1,1.3,.2)
     point=m.mdh_tcp_jacobian;rate=m.mdh_tcp_jacobian_rate;calls=[]

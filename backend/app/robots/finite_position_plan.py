@@ -66,7 +66,7 @@ def audit_position_path(start,goal_joints,*,fk_samples,settings,model):
     raise ValueError('position_model_rates')
 
 
-def evaluate_position_arrival(plan,sample,*,motion_id):
+def evaluate_position_arrival(plan,sample,*,motion_id,tail=False):
     if sample.binding is not plan.binding: return 'position_binding_changed'
     if sample.fault:return 'position_feedback_fault'
     if sample.running_id not in (None,motion_id):return 'position_foreign_task'
@@ -80,7 +80,8 @@ def evaluate_position_arrival(plan,sample,*,motion_id):
     if angle(sample.tcp_q,plan.target_q)>plan.arrival_policy.orientation_error_rad:return 'position_orientation_error'
     if math.dist(sample.tcp_p,plan.target_p)>plan.arrival_policy.endpoint_error_m+1e-12:return 'position_endpoint_error'
     if max(abs(x-y) for x,y in zip(sample.actual_q,plan.goal_joints))>JOINT_ENDPOINT_TOLERANCE_RAD:return 'position_joint_endpoint'
-    if any(abs(x)>.002 for x in sample.actual_qd):return 'position_not_stable'
+    velocity_limit=plan.arrival_policy.tail_velocity_radps if tail else .002
+    if any(abs(x)>velocity_limit for x in sample.actual_qd):return 'position_not_stable'
     return None
 
 

@@ -95,6 +95,7 @@ def preview(p):
         arrival_policy=asdict(policy),stable_tcp_drift_m=policy.stable_tcp_drift_m,
         stable_joint_drift_rad=policy.stable_joint_drift_rad,max_orientation_error_deg=math.degrees(policy.orientation_error_rad),
         tail_tcp_drift_m=policy.tail_tcp_drift_m,tail_joint_drift_rad=policy.tail_joint_drift_rad,
+        tail_velocity_tolerance_radps=policy.tail_velocity_radps,
         readonly_tail_s=2,total_budget_s=20,
         normal_budget_s=15,cleanup_reserve_s=5,stop_rpc_timeout_ms=200,stop_stable_ms=300,stop_verification_ms=500,
         native_time_argument=0,native_blend_radius=0,natural_arrival_does_not_send_stop=True,
