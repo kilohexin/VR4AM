@@ -8,6 +8,7 @@ from dataclasses import asdict
 
 from app.commissioning.joint_move_speed import JointMoveSpeedAudit
 from app.commissioning.paused_stop_cleanup import BoundedStopOnlyClient, _geometry
+from app.commissioning.position_snapshot_groups import PositionSnapshotGroups
 from app.robots.base import HomeOptions, StopReason
 from app.robots.lebai_adapter import RealLebaiAdapter
 from app.schemas.messages import BackendState
@@ -41,9 +42,14 @@ def _reason(error):
                               'preflight_not_ready:','snapshot_','home_timeout'))) else 'ready_return_failed'
 
 
-class _PrepareClient(BoundedStopOnlyClient):
+class _PrepareReadClient(BoundedStopOnlyClient):
+    read_entry_limit=MAX_READS
+
+
+class _PrepareClient(PositionSnapshotGroups,BoundedStopOnlyClient):
     READS=BoundedStopOnlyClient.READS|{'get_velocity_factor'}
     read_entry_limit=MAX_READS
+    snapshot_read_client_type=_PrepareReadClient
 
     def __init__(self,native,stop_permission,read_permission,write_permission,initial,owner,clock):
         super().__init__(native,stop_permission,read_permission,owner,deadline_clock=clock)
@@ -82,6 +88,39 @@ class _PrepareClient(BoundedStopOnlyClient):
             raise
 
 
+class _PrepareAdapter(RealLebaiAdapter):
+    """Owned snapshot groups for this isolated return; stop reads stay serial."""
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        self._prepare_group_guard=None;self._finite_snapshot_wrappers=set()
+
+    async def _read_snapshot_impl(self,read,**kwargs):
+        if kwargs['read_purpose']=='stop_verification':
+            return await super()._read_snapshot_impl(read,**kwargs)
+        client=self._client;owner=self._snapshot_calls;generation=self._pump.generation
+        def guard():
+            if (client is not self._client or read.client is not client or owner is not self._snapshot_calls
+                    or owner.closed or owner.unknown_methods or generation!=self._pump.generation):
+                raise ValueError('ready_return_snapshot_binding_changed')
+        if self._prepare_group_guard is not None:raise ValueError('ready_return_snapshot_group_busy')
+        self._prepare_group_guard=guard
+        try:
+            with client.position_snapshot_scope(guard,kwargs['read_purpose']):
+                return await super()._read_snapshot_impl(read,**kwargs)
+        finally:self._prepare_group_guard=None
+
+    async def _read_snapshot_fields(self,client,latencies,deadline_ns,**kwargs):
+        if self._prepare_group_guard is None:
+            return await super()._read_snapshot_fields(client,latencies,deadline_ns,**kwargs)
+        from app.commissioning.finite_diagnostic import FiniteWindowDiagnosticAdapter
+        return await FiniteWindowDiagnosticAdapter._parallel_snapshot_fields(self,client,latencies,deadline_ns,
+            check=self._prepare_group_guard,include_raw_kinematics=kwargs['include_raw_kinematics'])
+
+    def _before_snapshot_install(self,snapshot,read):
+        if self._prepare_group_guard is not None:self._client.verify_position_snapshot_group()
+        return super()._before_snapshot_install(snapshot,read)
+
+
 async def run_ready_return(settings,start_q,recorder,client_factory,authorize,*,
                            read_authorize=None,write_authorize=None,clock=time.perf_counter_ns,
                            sleep=asyncio.sleep,report=None):
@@ -99,7 +138,8 @@ async def run_ready_return(settings,start_q,recorder,client_factory,authorize,*,
         continuous_control_admitted=False,native_connection_release_verified=False,
         recording_closed_verified=False,process_exit_required=True,
         local_resources_released=False,tail_complete=False,latched_fault=None,
-        options=asdict(OPTIONS),read_calls=[],cleanup_errors=[])
+        options=asdict(OPTIONS),read_calls=[],cleanup_errors=[],
+        snapshot_read_policy='owned_six_fields_parallel_except_stop',snapshot_groups=[])
     adapter=proxy=None;settled=False;interrupted=False;started_recorder=False
     audit=JointMoveSpeedAudit(.05)
 
@@ -166,7 +206,7 @@ async def run_ready_return(settings,start_q,recorder,client_factory,authorize,*,
 
     try:
         permission();await recorder.start();started_recorder=True
-        adapter=RealLebaiAdapter(settings,client_factory=factory,clock=clock,sleep=sleep,event_callback=event)
+        adapter=_PrepareAdapter(settings,client_factory=factory,clock=clock,sleep=sleep,event_callback=event)
         async with asyncio.timeout(85.):
             await adapter.connect();await preflight();initial()
             if await proxy.get_velocity_factor()!=100:raise ValueError('ready_return_velocity_factor_changed')
@@ -210,6 +250,7 @@ async def run_ready_return(settings,start_q,recorder,client_factory,authorize,*,
                 movej_remote_result_unknown=proxy.movej_unknown,movej_call=copy.deepcopy(proxy.movej_call),
                 movej_entry_rejection=proxy.movej_entry_rejection,
                 read_calls=copy.deepcopy(proxy.read_calls),read_remote_result_unknown=proxy.read_remote_result_unknown)
+            report['snapshot_groups']=copy.deepcopy(proxy.snapshot_groups)
             if not proxy.movej_entries and proxy.movej_entry_rejection:
                 report['error']=proxy.movej_entry_rejection
             if proxy.movej_unknown:report.update(complete=False,latched_fault='stop_unverified')

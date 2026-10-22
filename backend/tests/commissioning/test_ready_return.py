@@ -53,6 +53,99 @@ async def test_one_exact_prepare_and_audit_without_stop_or_other_motion():
     assert r['local_resources_released'] and not r['native_connection_release_verified']
 
 
+async def test_ready_snapshots_read_six_owned_fields_concurrently():
+    data=fixture();c=data[2];active=set();maximum=0
+    for name in ('get_robot_state','get_estop_reason','get_kin_data','get_tcp','get_claw','get_running_motion'):
+        original=getattr(c,name)
+        async def observed(method=original,label=name):
+            nonlocal maximum
+            active.add(label);maximum=max(maximum,len(active))
+            try:await asyncio.sleep(0);return await method()
+            finally:active.remove(label)
+        setattr(c,name,observed)
+    report,c,_=await run(data)
+    assert report['complete'],report
+    assert maximum==6
+    assert report['snapshot_read_policy']=='owned_six_fields_parallel_except_stop'
+    assert all(x['outcome']=='returned' and len(x['methods'])==6 for x in report['snapshot_groups'])
+    assert {'connection','preflight','prepare','home','state'}.intersection(
+        x['purpose'] for x in report['snapshot_groups'])
+    assert report['movej_entries']==1 and report['stop_entries']==0
+
+
+async def test_ready_parallel_group_rechecks_authorization_before_snapshot_install():
+    data=fixture();c=data[2];original=c.get_tcp;allowed=True
+    async def revoke():
+        nonlocal allowed
+        result=await original();allowed=False;return result
+    c.get_tcp=revoke
+    def permit():
+        if not allowed:raise ValueError('ready_return_test_revoked')
+    report,c,_=await run(data,authorize=permit)
+    assert not report['complete'] and not c.write_calls
+    assert report['snapshot_groups'][0]['outcome']=='failed'
+    assert report['movej_entries']==report['stop_entries']==0
+
+
+async def test_ready_write_still_rejects_feedback_aged_by_local_write_check():
+    data=fixture();clock=data[3]
+    def expensive_write():clock.advance_ms(101)
+    report,c,_=await run(data,write_authorize=expensive_write)
+    assert not report['complete'] and not c.write_calls
+    assert report['movej_entry_rejection']=='ready_return_initial_state_or_freshness'
+
+
+async def test_ready_failed_parallel_group_retains_unknown_after_uncancellable_read():
+    data=fixture();c=data[2];entered=asyncio.Event();release=asyncio.Event()
+    async def late():
+        entered.set()
+        while not release.is_set():
+            try:await release.wait()
+            except asyncio.CancelledError:pass
+        return c.kin_data
+    async def failed():
+        await entered.wait();raise ValueError('synthetic_read_failure')
+    c.get_kin_data=late;c.get_tcp=failed
+    try:
+        report,c,_=await asyncio.wait_for(run(data),3.)
+        assert not report['complete'] and not c.write_calls
+        assert report['read_remote_result_unknown']
+        assert report['snapshot_groups'][0]['outcome']=='failed'
+        sealed=copy.deepcopy(report);release.set()
+        for _ in range(8):await asyncio.sleep(0)
+        assert report==sealed and report['read_remote_result_unknown']
+    finally:
+        release.set()
+        for _ in range(8):await asyncio.sleep(0)
+
+
+async def test_ready_parallel_optimization_keeps_stop_verification_serial():
+    data=fixture();c=data[2];allowed=True;stopping=False;active=set();maximum=0
+    original_move=c.movej;original_stop=c.stop_move
+    async def moved(*args):
+        nonlocal allowed
+        value=await original_move(*args);allowed=False;return value
+    async def stopped():
+        nonlocal stopping
+        stopping=True;return await original_stop()
+    c.movej=moved;c.stop_move=stopped
+    for name in ('get_robot_state','get_estop_reason','get_kin_data','get_tcp','get_claw','get_running_motion'):
+        original=getattr(c,name)
+        async def observed(method=original,label=name):
+            nonlocal maximum
+            if not stopping:return await method()
+            active.add(label);maximum=max(maximum,len(active))
+            try:await asyncio.sleep(0);return await method()
+            finally:active.remove(label)
+        setattr(c,name,observed)
+    def permit():
+        if not allowed:raise ValueError('ready_return_test_revoked')
+    report,c,_=await run(data,authorize=permit)
+    assert not report['complete'] and maximum==1
+    assert report['movej_entries']==report['stop_entries']==1
+    assert not any(x['purpose']=='stop_verification' for x in report['snapshot_groups'])
+
+
 @pytest.mark.parametrize('step_rad',[.00002,.000005])
 async def test_preparation_cannot_settle_while_position_drifts_with_zero_reported_speed(monkeypatch,step_rad):
     data=fixture();c=data[2];original=c.get_kin_data;count=0
@@ -263,7 +356,8 @@ async def test_one_permission_poll_per_read_guard_when_same_callback_is_supplied
         nonlocal count
         count+=1
     def guard(self):
-        before=count;old(self);polls.append(count-before)
+        before=count;group=self._position_group_context.get();old(self)
+        if group is None:polls.append(count-before)
     monkeypatch.setattr(m._PrepareClient,'read_guard',guard)
     r,c,_=await run(authorize=permission,read_authorize=permission)
     assert r['complete'] and polls and set(polls)=={1}

@@ -81,7 +81,8 @@ class PositionSnapshotGroups:
             self.read_gate_closed=True;raise ValueError('position_snapshot_group_duplicate')
         group['used'].add(name);group['row']['methods'].append(name)
         def authorize():self._position_group_live(group)
-        child=BoundedStopOnlyClient(self.client,lambda:None,authorize,self.owner,deadline_clock=self.deadline_clock)
+        child_type=getattr(type(self),'snapshot_read_client_type',BoundedStopOnlyClient)
+        child=child_type(self.client,lambda:None,authorize,self.owner,deadline_clock=self.deadline_clock)
         child.method=name;child.native_item=None
         child.read_deadline_ns=self.read_deadline_ns;child.read_calls=self.read_calls
         self._position_children.append(child)

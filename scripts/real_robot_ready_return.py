@@ -175,7 +175,8 @@ def preview(p):
         metadata_preserving_tampering_detected_at_write=False,
         runtime_policy='full_sha_after_load_before_fresh_reads_metadata_at_write',
         reference_kind=p['reference_kind'],prior_stop_uncertainty_cleared=False,
-        evidence_policy='saved_operator_target_and_bound_start_reference_live_rechecked')
+        evidence_policy='saved_operator_target_and_bound_start_reference_live_rechecked',
+        snapshot_read_policy='owned_six_fields_parallel_except_stop')
 
 
 def metadata(paths):

@@ -63,6 +63,7 @@ def test_preview_has_fixed_scope_and_no_execution(context,monkeypatch,capsys):
     assert v['max_fk_calls']==v['max_ik_calls']==0
     assert v['options']['position_tolerance_rad']==pytest.approx(__import__('math').radians(.1))
     assert v['start_tolerance_rad']==v['options']['position_tolerance_rad']
+    assert v['snapshot_read_policy']=='owned_six_fields_parallel_except_stop'
     assert v['stop_rpc_timeout_ms']==200 and v['stop_stable_ms']==300 and v['stop_verification_ms']==500
     assert not v['motion_authorized'] and not v['automatic_retry'] and not p['output'].exists()
 
