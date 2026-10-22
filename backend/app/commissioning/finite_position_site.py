@@ -303,8 +303,8 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
                 if not 0<=clock()-current.captured_ns<INPUT_NS:
                     raise ValueError('position_site_tail_feedback_expired')
                 if (evaluate_position_arrival(plan,current,motion_id=result.motion_id) is not None
-                        or math.dist(current.tcp_p,result.final_sample.tcp_p)>policy.stable_tcp_drift_m
-                        or max(abs(a-b) for a,b in zip(current.actual_q,result.final_sample.actual_q))>policy.stable_joint_drift_rad):
+                        or math.dist(current.tcp_p,result.final_sample.tcp_p)>policy.tail_tcp_drift_m
+                        or max(abs(a-b) for a,b in zip(current.actual_q,result.final_sample.actual_q))>policy.tail_joint_drift_rad):
                     motion_done=False;raise ValueError('position_site_tail_not_stable')
                 await sleep(.1)
             motion_done=True;report.update(tail_complete=True,complete=True)

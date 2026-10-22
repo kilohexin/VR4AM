@@ -90,6 +90,8 @@ async def test_coarse_profile_is_explicit_in_the_bound_preview(context):
     assert row['max_orientation_error_deg']==pytest.approx(.2)
     assert row['stable_span_ms']==200 and row['stable_tcp_drift_m']==.0001
     assert row['stable_joint_drift_rad']==pytest.approx(__import__('math').radians(.02))
+    assert row['tail_tcp_drift_m']==.001
+    assert row['tail_joint_drift_rad']==pytest.approx(__import__('math').radians(.1))
     assert row['max_read_entries']==4096
     assert row['feedback_ttl_ms']==100 and row['movej_rpc_timeout_ms']==200
     assert row['max_movej_entries']==1 and row['distance_m']==.002

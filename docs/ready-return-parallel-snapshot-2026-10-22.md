@@ -54,3 +54,15 @@
 最终十个受影响测试文件共 208 项通过（37.14 秒），输出 `.tmp/grasp-delivery-20261022/coarse-arrival-final.txt`。覆盖小幅误差接受、新范围越界、5秒固定超时、固定锚点漂移、200 ms 稳定时长、策略变更拒绝、严格批准不能复用、4096次预算及原准备位/阶段门回归。先前预算门测试发现达到上限未关闭读取门，已修复并包含在最终通过结果中。
 
 原生 SDK 自有 `127.0.0.1` 六场景全部符合预期，零真实连接：正常和15 ms读取延迟自然到位、零停止；无实际进展仍失败；迟到运动回复、迟到停止回复、停止后晚生效保持 `stop_unverified`。材料 `.tmp/grasp-delivery-20261022/coarse-native-loopback-01/`，汇总 `coarse-native-loopback.txt`。独立源码复核未发现 Important/Critical 问题。尚未重新执行真实机械臂验收，也没有接通真机网页连续控制。
+
+## 容错模式的第二次两阶段现场结果与尾段对齐
+
+用户通过 `call_140a5ddddb9a4ba4b18a09a0d6eb5956` 新批准完整两阶段范围，执行代码 `9d38b43`，材料 `.tmp/grasp-delivery-20261022/coarse-grasp-two-stage-site-20261022T034722390929Z/`。第一阶段再次完整通过，一次 movej、零停止，终端结果 SHA256 `ad124eb433ed0cf1d5582043a0def6b3ac108b8a03ca07c79ca62548224df888`；严格阶段门通过且进程 exit=0、RPC=0后才执行第二阶段。
+
+第二阶段一次 movej，`natural_arrival_confirmed=true`，写前反馈48.354 ms；但 `tail_complete=false`，整体失败原因 `position_site_tail_not_stable`。到位后第二组尾段反馈相对最终到位样本位移约0.107623 mm，超出该版本尾段0.1 mm锚点；同时终点误差从0.570247 mm下降至0.463160 mm，关节漂移约0.010986°。尾段样本仍IDLE/FINISHED、报告速度为0。随后唯一一次异常停止，SDK await13.153 ms、六组样本后原停止验证confirmed，无故障锁存或未知结果，进程退出且RPC=0。该次整体结果不重判成功，SHA256 `38ccad95365d1973ad8dfa4b1271bbee63ac7918fcc3230f3e2636f8685a885a`。用户通过 `call_abf0b45e5c724592be548725a813b9ff` 确认完全静止、无异常、未使用急停，已封存收尾。
+
+后续离线修复将稳定观察与尾段容错分开：自然到位前仍要求固定锚点0.1 mm/0.02°、至少三组新反馈跨200 ms；容错模式的两秒尾段允许相对固定到位样本TCP漂移1 mm、关节漂移0.1°，同时每组仍须满足原进展/横向限制、终点1 mm、姿态0.2°、关节目标0.1°、报告稳定速度0.002 rad/s、IDLE/FINISHED、新鲜度、工作区与速度/加速度监督。没有滚动移动锚点。尾段是有界位姿观察，不证明物理零漂移；严格模式仍为原10 μm/0.00001 rad尾段限制。
+
+新尾段字段属于冻结策略并写入批准预览，旧批准材料不能复用。六个受影响测试文件128项通过（21.81秒），输出 `.tmp/grasp-delivery-20261022/coarse-tail-alignment.txt`，包含严格模式拒绝150 μm、容错模式接受150 μm、容错模式仍拒绝1.01 mm尾段位移。独立源码复核未发现 Important/Critical 问题，真实机械臂尚未执行此修复。
+
+该修复的原生SDK自有127.0.0.1六场景均符合预期，材料 `.tmp/grasp-delivery-20261022/coarse-tail-native-loopback-01/`，汇总 `coarse-tail-native-loopback.txt`；正常/15 ms读取延迟自然到位零停止，无进展和三种迟到/晚生效场景继续拒绝并保留原锁存。没有真实机器人连接。
