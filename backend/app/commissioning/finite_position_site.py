@@ -15,7 +15,7 @@ from app.commissioning.native_jog_mdh import MdhTool,mdh_tcp_jacobian,mdh_tcp_ja
 from app.commissioning.native_jog_site_scope import site_address,permission
 from app.commissioning.paused_stop_cleanup import BoundedStopOnlyClient
 from app.commissioning.position_snapshot_groups import PositionSnapshotGroups
-from app.control.finite_position_types import PositionIntent,INPUT_NS,MAX_STEP_M
+from app.control.finite_position_types import PositionIntent,INPUT_NS,MAX_STEP_M,JOINT_ENDPOINT_TOLERANCE_RAD
 from app.robots.base import StopReason
 from app.robots.finite_position_adapter import _FinitePositionCore
 from app.robots.finite_position_acceleration import PositionAccelerationMonitor
@@ -259,8 +259,8 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
             await adapter.connect();adapter.bind_position_generation(1)
             sample=await adapter._read_snapshot(read_purpose='single_position_preflight')
             if (not adapter._preflight_from_snapshot(sample).ready
-                    or max(abs(a-b) for a,b in zip(sample.actual_q,settings.teleop_ready_q))>.001
-                    or max(abs(a-b) for a,b in zip(sample.target_q,settings.teleop_ready_q))>.001
+                    or max(abs(a-b) for a,b in zip(sample.actual_q,settings.teleop_ready_q))>JOINT_ENDPOINT_TOLERANCE_RAD
+                    or max(abs(a-b) for a,b in zip(sample.target_q,settings.teleop_ready_q))>JOINT_ENDPOINT_TOLERANCE_RAD
                     or any(x!=0 for v in (sample.actual_qd,sample.actual_qdd,sample.target_qd,sample.target_qdd) for x in v)):
                 raise ValueError('position_site_initial_state')
             if await proxy.get_velocity_factor()!=100:raise ValueError('position_site_velocity_factor')

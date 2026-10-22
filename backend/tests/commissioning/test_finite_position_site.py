@@ -70,6 +70,28 @@ async def test_one_fixed_two_mm_z_natural_arrival_without_stop_or_continuation()
     assert r['actual_acceleration_instant_limit_radps2']==.4
 
 
+@pytest.mark.parametrize('error_deg',[.076904296875,.1])
+async def test_stationary_ready_offset_within_endpoint_tolerance_can_execute(error_deg):
+    data=fixture();s,c,clock,recorder,model=data
+    q=list(s.teleop_ready_q);q[3]+=math.radians(error_deg);p,rotation=model.forward(q)
+    for side in ('actual','target'):
+        c.kin_data[side+'_joint_pose']=list(q)
+        c.kin_data[side+'_tcp_pose']=pose_to_lebai(Pose(p=p,q=rotation))
+    r,c,_=await run(data)
+    assert r['complete'],{k:r.get(k) for k in ('reason','error_type','movej_entries','stop_entries')}
+    assert r['movej_entries']==1 and r['stop_entries']==0
+
+
+@pytest.mark.parametrize('side',['actual','target'])
+async def test_ready_offset_above_point_one_degree_is_zero_motion(side):
+    data=fixture();s,c,clock,recorder,model=data
+    q=list(s.teleop_ready_q);q[3]+=math.radians(.10001)
+    c.kin_data[side+'_joint_pose']=q
+    r,c,_=await run(data)
+    assert not r['complete'] and not c.write_calls
+    assert r['movej_entries']==r['stop_entries']==0
+
+
 @pytest.mark.parametrize('damage',['paused','pose','tool','factor','moving'])
 async def test_bad_preflight_never_writes(damage):
     data=fixture();s,c,clock,recorder,model=data

@@ -65,6 +65,7 @@ async def test_default_preview_is_zero_access(context,monkeypatch,capsys):
     assert row['distance_m']==.002 and row['max_movej_entries']==row['max_stop_entries']==1
     assert row['min_progress_m']==.001 and row['max_endpoint_error_m']==.0005
     assert row['joint_endpoint_tolerance_rad']==pytest.approx(__import__('math').radians(.1))
+    assert row['ready_tolerance_rad']==row['joint_endpoint_tolerance_rad']
     assert row['held_input_deadzone']==.15
     assert row['actual_acceleration_policy']=='bounded_transient_at_point_two_strict_below'
     assert row['actual_acceleration_sustained_limit_radps2']==.2

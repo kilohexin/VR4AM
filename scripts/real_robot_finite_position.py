@@ -95,7 +95,7 @@ def preview(p):
         joint_endpoint_tolerance_rad=JOINT_ENDPOINT_TOLERANCE_RAD,held_input_deadzone=INPUT_DEADZONE,
         held_input_policy='fixed_step_unit_direction_above_deadzone',
         **PositionAccelerationMonitor(min(.2,p['settings'].control.max_joint_acceleration_radps2)).policy(),
-        ready_tolerance_rad=.001,max_joint_speed_radps=p['settings'].control.max_joint_speed_radps,
+        ready_tolerance_rad=JOINT_ENDPOINT_TOLERANCE_RAD,max_joint_speed_radps=p['settings'].control.max_joint_speed_radps,
         max_joint_acceleration_radps2=p['settings'].control.max_joint_acceleration_radps2,
         motion_authorized=False,hardware_verified=False,factory_calibrated=False,motion_time_stop_verified=False,
         continuous_control_admitted=False,automatic_retry=False,automatic_home=False,automatic_resume=False,
