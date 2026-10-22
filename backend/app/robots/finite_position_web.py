@@ -17,7 +17,7 @@ class _WebClient:
     def __init__(self,native,authorize,entry_check,claw_entry_check):
         self.native=native;self.authorize=authorize;self.entry_check=entry_check
         self.claw_entry_check=claw_entry_check
-        self.move_entries=0;self.move_unknown=False;self.move_returned=True
+        self.move_entries=0;self.claw_entries=0;self.move_unknown=False;self.move_returned=True
 
     def __getattr__(self,name):
         if name in self.READS:return getattr(self.native,name)
@@ -41,9 +41,11 @@ class _WebClient:
 
     async def set_claw(self,*args):
         self.authorize()
+        def entering():
+            self.claw_entry_check();self.claw_entries+=1
         guarded=getattr(self.native,'_position_guarded_claw',None)
-        if callable(guarded):return await guarded(args,self.claw_entry_check)
-        self.claw_entry_check()
+        if callable(guarded):return await guarded(args,entering)
+        entering()
         return await self.native.set_claw(*args)
 
     async def stop_move(self):
@@ -129,6 +131,17 @@ class RealFinitePositionAdapter(_FinitePositionCore):
         if self._snapshot is None:raise BackendCommandError('position_feedback_missing')
         if not 0<=self._clock()-self._snapshot.captured_ns<INPUT_NS:
             raise BackendCommandError('position_snapshot_expired')
+
+    def web_idle_close_safe(self):
+        """Narrow proof for page-close draining before this connection actuates."""
+        return bool(self._client is not None and self._client.move_entries==0
+            and self._client.claw_entries==0 and not self.position_busy
+            and self._web_prepare_authorize is None and self._web_entry_plan is None
+            and not self._gripper_active and not self._motion_accepted
+            and not self._motion_write_stop_required and not self._latched_fault
+            and not self._snapshot_calls.unknown_methods and not self._motion_calls.unknown_methods
+            and not self._motion_calls.tasks and self._snapshot is not None
+            and self._snapshot.robot_state.value=='IDLE' and self._snapshot.running_motion is None)
 
     async def prepare(self,options,on_phase,*,authorize=None):
         if self._web_prepare_authorize is not None:raise BackendCommandError('position_busy')

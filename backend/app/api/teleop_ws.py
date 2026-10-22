@@ -45,6 +45,8 @@ async def state_sender(
     websocket: WebSocket,
     control: RobotControl,
     send_lock: asyncio.Lock | None = None,
+    *, close_requested: asyncio.Event | None = None,
+    read_pending: asyncio.Event | None = None,
 ) -> None:
     send_lock = send_lock or asyncio.Lock()
     app_state = getattr(getattr(websocket, "app", None), "state", None)
@@ -58,9 +60,15 @@ async def state_sender(
     period_s = 1.0 / state_hz
     clock = asyncio.get_running_loop().time
     while True:
+        if close_requested is not None and close_requested.is_set():return
         async with send_lock:
+            if close_requested is not None and close_requested.is_set():return
             started = clock()
-            state = await control.state_message()
+            if read_pending is not None:read_pending.set()
+            try:state = await control.state_message()
+            finally:
+                if read_pending is not None:read_pending.clear()
+            if close_requested is not None and close_requested.is_set():return
             await websocket.send_json(state.model_dump(mode="json"))
         # The configured period includes reading/encoding/sending. Sleeping a
         # full period after that work ages feedback beyond the settling gate.
@@ -77,9 +85,12 @@ async def _delayed_state_sender(
     control: RobotControl,
     start_sender: asyncio.Event,
     send_lock: asyncio.Lock,
+    *, close_requested: asyncio.Event | None = None,
+    read_pending: asyncio.Event | None = None,
 ) -> None:
     await start_sender.wait()
-    await state_sender(websocket, control, send_lock)
+    if close_requested is None:await state_sender(websocket, control, send_lock)
+    else:await state_sender(websocket, control, send_lock,close_requested=close_requested,read_pending=read_pending)
 
 
 async def diagnostics_sender(
@@ -318,13 +329,17 @@ async def _receive_messages(
     owner_token: object | None = None,
     rehearsal_active: asyncio.Event | None = None,
     rehearsal_messages=None,
+    *,
+    close_requested: asyncio.Event | None = None,
 ) -> None:
     async def send(payload):
         await _send_json(websocket,payload,send_lock)
-    jobs=OperatorJobs(control,send,allowed=lambda: rehearsal_active is None or not rehearsal_active.is_set())
+    jobs=OperatorJobs(control,send,allowed=lambda:
+        (close_requested is None or not close_requested.is_set())
+        and (rehearsal_active is None or not rehearsal_active.is_set()))
     try:
         await _receive_operator_messages(websocket,control,start_sender,send_lock,
-            owner_token,rehearsal_active,rehearsal_messages,jobs)
+            owner_token,rehearsal_active,rehearsal_messages,jobs,close_requested=close_requested)
     finally:
         with anyio.CancelScope(shield=True):
             await jobs.close()
@@ -343,13 +358,19 @@ async def _receive_operator_messages(
         | OfflineRehearsalFinishMessage
     ] | None = None,
     jobs: OperatorJobs | None = None,
+    *,
+    close_requested: asyncio.Event | None = None,
 ) -> None:
     app = websocket.app
     assert jobs is not None
     while True:
+        if close_requested is not None and close_requested.is_set():
+            return
         jobs.check_error()
         try:
             payload = await websocket.receive_json()
+            if close_requested is not None and close_requested.is_set():
+                return
             message = _parse_message(payload)
         except WebSocketDisconnect:
             return
@@ -554,6 +575,28 @@ async def _receive_operator_messages(
             )
 
 
+async def _drain_idle_web_close(control,tasks,sender,close_requested,read_pending):
+    """Let only existing zero-actuation reads/static stops reach original bounds.
+
+    This does not extend an RPC deadline or start a new read cycle. The
+    single server's outer cleanup bound remains in force if a task won't exit.
+    """
+    control._advance_control_generation()  # revoke UI authority before any wait
+    close_requested.set()
+    loop=asyncio.get_running_loop();deadline=loop.time()+1.
+    remaining=set(tasks)
+    while remaining:
+        remaining={task for task in remaining if not task.done()}
+        protected={task for task in remaining if (task is sender and read_pending.is_set())
+            or task in control._backend_stop_owners}
+        for task in remaining-protected:
+            if not task.cancelling():task.cancel()
+        if not protected or loop.time()>=deadline:break
+        await asyncio.wait(protected,timeout=min(.005,deadline-loop.time()))
+    for task in remaining:
+        if not task.done() and not task.cancelling():task.cancel()
+
+
 async def _run_coupled_session(
     websocket: WebSocket,
     control: RobotControl,
@@ -564,6 +607,10 @@ async def _run_coupled_session(
 ) -> None:
     session_trace = session_trace or SessionTrace(control)
     start_sender = asyncio.Event()
+    close_guard=getattr(getattr(control,'backend',None),'web_idle_close_safe',None)
+    idle_web=callable(close_guard)
+    close_requested=asyncio.Event() if idle_web else None
+    read_pending=asyncio.Event() if idle_web else None
     send_lock = asyncio.Lock()
     rehearsal_messages: asyncio.Queue[
         OfflineRehearsalBeginMessage
@@ -579,11 +626,13 @@ async def _run_coupled_session(
             owner_token,
             rehearsal_active,
             rehearsal_messages,
+            **({'close_requested':close_requested} if idle_web else {}),
         ),
         name="teleop-receiver",
     )
     sender = asyncio.create_task(
-        _delayed_state_sender(websocket, control, start_sender, send_lock),
+        _delayed_state_sender(websocket, control, start_sender, send_lock,
+            **({'close_requested':close_requested,'read_pending':read_pending} if idle_web else {})),
         name="teleop-state-50hz",
     )
     tasks: list[asyncio.Task[None]] = [receiver, sender]
@@ -643,15 +692,28 @@ async def _run_coupled_session(
                     else "wait_error" if wait_error is not None else "peer_completed"
                 ),
             )
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            with anyio.CancelScope(shield=True):
-                results = await asyncio.gather(
-                    *tasks,
-                    return_exceptions=True,
-                )
-                session_trace.mark("tasks_joined")
+            drain_idle=(idle_web and wait_error is None and close_guard()
+                and control.mode in {TeleopMode.READY,TeleopMode.DISARMED}
+                and getattr(control,'_fault',None) is None)
+            try:
+                if drain_idle:
+                    with anyio.CancelScope(shield=True):
+                        await _drain_idle_web_close(control,tasks,sender,close_requested,read_pending)
+            except BaseException as error:
+                if wait_error is None:wait_error=error
+            finally:
+                # Raw Task.cancel() can interrupt an AnyIO shield. Always join
+                # children before disconnect cleanup and owner release.
+                for task in tasks:
+                    if not task.done():task.cancel()
+                with anyio.CancelScope(shield=True):
+                    joined=asyncio.gather(*tasks,return_exceptions=True)
+                    while not joined.done():
+                        try:await asyncio.shield(joined)
+                        except asyncio.CancelledError as error:
+                            if wait_error is None:wait_error=error
+                    results=joined.result()
+                    session_trace.mark("tasks_joined")
         finally:
             for task in tasks:
                 sender_tasks.discard(task)

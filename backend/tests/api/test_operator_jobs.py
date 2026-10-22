@@ -4,6 +4,17 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
 
+@pytest.mark.parametrize('action',['arm','prepare'])
+async def test_queued_operation_rechecks_close_authority_before_start(action):
+    from app.api.operator_jobs import OperatorJobs
+    closed=asyncio.Event();operation=AsyncMock()
+    jobs=OperatorJobs(SimpleNamespace(**{action:operation}),AsyncMock(),allowed=lambda:not closed.is_set())
+    await getattr(jobs,action)(SimpleNamespace(request_id='queued'))
+    closed.set()
+    await jobs.join()
+    operation.assert_not_awaited()
+    await jobs.close()
+
 async def test_release_can_revoke_claw_while_preflight_is_awaiting():
     from app.api.operator_jobs import OperatorJobs
     entered,finish=asyncio.Event(),asyncio.Event()

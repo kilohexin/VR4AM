@@ -87,6 +87,8 @@ class OperatorJobs:
         async def run():
             try:
                 try:
+                    if not self.open or not self.allowed():
+                        return
                     await operation()
                 except RuntimeError:
                     if self.open:
