@@ -79,6 +79,51 @@ async def test_explicit_coarse_profile_uses_the_same_single_motion_contract():
     assert r['tail_complete'] and r['natural_arrival_confirmed']
 
 
+@pytest.mark.parametrize('policy,persistent,complete',[
+    ('strict',False,False),('coarse_grasp',False,True),('coarse_grasp',True,False)])
+@pytest.mark.parametrize('purpose',['single_position_preflight','position_plan'])
+async def test_valid_nonzero_initial_acceleration_may_be_observed_but_never_zeroed(monkeypatch,policy,persistent,complete,purpose):
+    import copy
+    data=fixture();c=data[1];m=api();phase=None;count=0
+    original_read=m._SiteAdapter._read_snapshot;original_kin=c.get_kin_data
+    async def observed(self,*args,**kwargs):
+        nonlocal phase
+        phase=kwargs.get('read_purpose');return await original_read(self,*args,**kwargs)
+    async def kin():
+        nonlocal count
+        value=copy.deepcopy(await original_kin())
+        if phase==purpose:
+            count+=1
+            if persistent or count==1:value['actual_joint_acc'][0]=.09587379924285253
+        return value
+    monkeypatch.setattr(m._SiteAdapter,'_read_snapshot',observed);c.get_kin_data=kin
+    r,c,_=await run(data,arrival_policy=policy)
+    assert r['complete']==complete,r
+    assert count==(1 if policy=='strict' else 5 if persistent else 2)
+    assert [x[0] for x in c.write_calls]==(['movej'] if complete else [])
+
+
+async def test_initial_observation_does_not_read_again_after_its_fixed_deadline(monkeypatch):
+    import copy
+    data=fixture();c=data[1];clock=data[2];m=api();phase=None;count=0
+    original_read=m._SiteAdapter._read_snapshot;original_kin=c.get_kin_data;original_sleep=clock.sleep
+    async def observed(self,*args,**kwargs):
+        nonlocal phase
+        phase=kwargs.get('read_purpose');return await original_read(self,*args,**kwargs)
+    async def kin():
+        nonlocal count
+        value=copy.deepcopy(await original_kin())
+        if phase=='single_position_preflight':count+=1;value['actual_joint_acc'][0]=.09587379924285253
+        return value
+    async def late(seconds):
+        await original_sleep(seconds)
+        if phase=='single_position_preflight':clock.advance_ms(1100)
+    monkeypatch.setattr(m._SiteAdapter,'_read_snapshot',observed);c.get_kin_data=kin;clock.sleep=late
+    r,c,_=await run(data,arrival_policy='coarse_grasp')
+    assert not r['complete'] and r['reason']=='position_initial_observation_expired'
+    assert count==1 and not c.write_calls
+
+
 async def test_coarse_snapshot_children_share_the_extended_fixed_budget():
     data=fixture();s,c,clock,_,_=data
     proxy=api()._CoarseSingleClient(c,lambda:None,lambda:None,lambda:None,asyncio.current_task(),clock.now_ns)

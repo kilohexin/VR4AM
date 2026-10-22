@@ -29,6 +29,7 @@ class _FinitePositionCore(RealLebaiAdapter):
         self.position_model=position_model;self.position_binding=None
         self.position_arrival_policy=position_arrival_policy(arrival_policy)
         self._position_policy_binding=self.position_arrival_policy
+        self.position_initial_observations=[]
         self._position_plan=None;self._position_plan_observer=None
         self.position_busy=False;self.position_aborted=False
         self._position_acceleration=PositionAccelerationMonitor(min(.2,settings.control.max_joint_acceleration_radps2))
@@ -112,6 +113,31 @@ class _FinitePositionCore(RealLebaiAdapter):
             authorize();self._position_health(self.position_binding)
             return await self._snapshot_calls.call(name,operation,.2,revoked=lambda:self.position_aborted)
 
+    async def _position_quiet_snapshot(self,purpose,authorize):
+        """Observe valid completed reads; never rewrite a reported rate to zero."""
+        coarse=self.position_arrival_policy.name=='coarse_grasp'
+        until=self._clock()+QUIET_OBSERVATION_NS
+        for index in range(QUIET_OBSERVATION_READS if coarse else 1):
+            authorize();self._position_health(self.position_binding)
+            if coarse and self._clock()>=until:raise ValueError('position_initial_observation_expired')
+            s=await self._read_snapshot(read_purpose=purpose)
+            authorize();self._position_health(self.position_binding)
+            if coarse and self._clock()>=until:raise ValueError('position_initial_observation_expired')
+            nonzero=any(x!=0 for values in (s.actual_qd,s.actual_qdd,s.target_qd,s.target_qdd) for x in values)
+            self.position_initial_observations.append(dict(purpose=purpose,captured_ns=s.captured_ns,
+                sample=index+1,original_zero_rate_condition_met=not nonzero))
+            if not coarse or not nonzero:return s
+            # Errors, unknown/pending calls, foreign/running tasks, changed tools
+            # and stale samples never qualify for another observation.
+            if (s.robot_state!=BackendState.IDLE or s.estop is not None or s.running_motion is not None
+                    or s.motion_state not in (None,'FINISHED')
+                    or any(x!=0 for values in (s.target_qd,s.target_qdd) for x in values)
+                    or not self._preflight_from_snapshot(s).ready
+                    or not 0<=self._clock()-s.captured_ns<INPUT_NS):return s
+            self._position_feedback_limits(s)
+            if index==QUIET_OBSERVATION_READS-1:return s
+            await self._sleep(QUIET_OBSERVATION_INTERVAL_S)
+
     async def plan_step(self,intent,*,authorize):
         binding=self.position_binding;self._position_health(binding);authorize()
         if self.position_busy:raise ValueError('position_busy')
@@ -123,7 +149,7 @@ class _FinitePositionCore(RealLebaiAdapter):
             if not 0<=self._clock()-began<PLAN_NS:raise ValueError('position_planning_expired')
         try:
             async with asyncio.timeout(PLAN_NS/1e9):
-                s=await self._read_snapshot(read_purpose='position_plan');live()
+                s=await self._position_quiet_snapshot('position_plan',live);live()
                 if not self._preflight_from_snapshot(s).ready:raise ValueError('position_preflight')
                 if not 0<=self._clock()-s.captured_ns<INPUT_NS:raise ValueError('position_snapshot_expired')
                 if any(abs(x)>1e-8 for v in (s.actual_qd,s.actual_qdd,s.target_qd,s.target_qdd) for x in v):

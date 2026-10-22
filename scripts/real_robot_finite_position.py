@@ -17,7 +17,8 @@ from scripts import real_robot_native_jog_window as identity
 from scripts.real_robot_ready_return import close_loop_bounded
 from app.commissioning.finite_position_site import MdhPositionModel,run_single_position,MAX_READS,position_read_limit
 from app.control.finite_position_types import (PLAN_NS,MAX_STEP_M,MIN_PROGRESS_M,MAX_ENDPOINT_ERROR_M,
-    JOINT_ENDPOINT_TOLERANCE_RAD,INPUT_DEADZONE,position_arrival_policy)
+    JOINT_ENDPOINT_TOLERANCE_RAD,INPUT_DEADZONE,position_arrival_policy,
+    QUIET_OBSERVATION_NS,QUIET_OBSERVATION_READS,QUIET_OBSERVATION_INTERVAL_S)
 from app.robots.finite_position_acceleration import PositionAccelerationMonitor
 
 CONFIRM='I_APPROVE_ONE_2MM_FINITE_POSITION_Z_NATURAL_ARRIVAL_AND_RESERVED_FAULT_STOP'
@@ -96,6 +97,11 @@ def preview(p):
         stable_joint_drift_rad=policy.stable_joint_drift_rad,max_orientation_error_deg=math.degrees(policy.orientation_error_rad),
         tail_tcp_drift_m=policy.tail_tcp_drift_m,tail_joint_drift_rad=policy.tail_joint_drift_rad,
         tail_velocity_tolerance_radps=policy.tail_velocity_radps,
+        initial_zero_rate_policy='bounded_observe_original_condition' if policy.name=='coarse_grasp' else 'single_read',
+        initial_observation_purposes=['single_position_preflight','position_plan'],
+        initial_observation_max_samples=QUIET_OBSERVATION_READS if policy.name=='coarse_grasp' else 1,
+        initial_observation_timeout_s=QUIET_OBSERVATION_NS/1e9 if policy.name=='coarse_grasp' else 0,
+        initial_observation_interval_s=QUIET_OBSERVATION_INTERVAL_S if policy.name=='coarse_grasp' else 0,
         readonly_tail_s=2,total_budget_s=20,
         normal_budget_s=15,cleanup_reserve_s=5,stop_rpc_timeout_ms=200,stop_stable_ms=300,stop_verification_ms=500,
         native_time_argument=0,native_blend_radius=0,natural_arrival_does_not_send_stop=True,

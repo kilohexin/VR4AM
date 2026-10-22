@@ -279,7 +279,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
             clock=clock,sleep=sleep,event_callback=event,arrival_policy=policy.name)
         async with asyncio.timeout(15.):
             await adapter.connect();adapter.bind_position_generation(1)
-            sample=await adapter._read_snapshot(read_purpose='single_position_preflight')
+            sample=await adapter._position_quiet_snapshot('single_position_preflight',permit)
             if (not adapter._preflight_from_snapshot(sample).ready
                     or max(abs(a-b) for a,b in zip(sample.actual_q,settings.teleop_ready_q))>JOINT_ENDPOINT_TOLERANCE_RAD
                     or max(abs(a-b) for a,b in zip(sample.target_q,settings.teleop_ready_q))>JOINT_ENDPOINT_TOLERANCE_RAD
@@ -314,6 +314,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
         if not motion_done:await asyncio.shield(stop_once())
     finally:
         if adapter is not None:
+            report['initial_rate_observations']=copy.deepcopy(adapter.position_initial_observations)
             report['remote_unknown'] |= bool(adapter._snapshot_calls.unknown_methods)
             if proxy is None or proxy.movej_entries==0:
                 adapter._motion_accepted=adapter._motion_write_stop_required=False
