@@ -9,7 +9,7 @@ export interface FinitePositionInputMessage {
  kind:'held'|'release';vector:Vec3;
 }
 export interface FinitePositionStatus {
- policy:'finite_position_offline';phase:'inactive'|'ready'|'planning'|'executing'|'draining'|'hold'|'fault';
+ policy:'finite_position_offline'|'finite_position_web';phase:'inactive'|'ready'|'planning'|'executing'|'draining'|'hold'|'fault';
  generation:number;entered_steps:number;motion_id:number|null;reason:string|null;hardware_verified:false;
 }
 export function isFinitePositionInputMessage(value:unknown):value is FinitePositionInputMessage {
@@ -22,7 +22,7 @@ export function isFinitePositionInputMessage(value:unknown):value is FinitePosit
 }
 export function isFinitePositionStatus(value:unknown):value is FinitePositionStatus {
  if(!isRecord(value)||!hasExactKeys(value,['policy','phase','generation','entered_steps','motion_id','reason','hardware_verified']))return false;
- return value.policy==='finite_position_offline'&&['inactive','ready','planning','executing','draining','hold','fault'].includes(String(value.phase))
+ return (value.policy==='finite_position_offline'||value.policy==='finite_position_web')&&['inactive','ready','planning','executing','draining','hold','fault'].includes(String(value.phase))
   &&Number.isSafeInteger(value.generation)&&Number(value.generation)>=0&&Number.isSafeInteger(value.entered_steps)
   &&Number(value.entered_steps)>=0&&Number(value.entered_steps)<=10&&value.hardware_verified===false
   &&(value.motion_id===null||(Number.isSafeInteger(value.motion_id)&&Number(value.motion_id)>0))

@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "properties": {
     "policy": {
-      "const": "finite_position_offline",
+      "enum": ["finite_position_offline", "finite_position_web"],
       "default": "finite_position_offline",
       "title": "Policy",
       "type": "string"

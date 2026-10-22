@@ -212,7 +212,7 @@ function sendFrameToSocket(frame: VRFrame): void {
 }
 
 function onRobotState(state: RobotStateMessage): void {
-  if(state.backend==='LEBAI_FAKE'&&state.finite_position&&state.finite_position.generation!==positionGeneration){
+  if(state.finite_position&&state.finite_position.generation!==positionGeneration){
     positionGeneration=state.finite_position.generation;
     positionInput.reset(`web-finite-${crypto.randomUUID()}`,positionGeneration);
   }

@@ -35,6 +35,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 def build_recorder(
     settings: Settings,
     runtime_backend: RuntimeBackend | None = None,
+    *, target_strategy: str | None = None,
 ) -> RecorderSink:
     if settings.backend == "simulator":
         return NoopRecorder()
@@ -58,6 +59,9 @@ def build_recorder(
         metadata['segment_settling'] = asdict(settings.segmented_target.settling)
         metadata['segment_hardware_verified'] = False
         metadata['prepare_on_arm'] = settings.segmented_target.prepare_on_arm
+    if target_strategy is not None:
+        metadata['target_strategy']=target_strategy
+        metadata['finite_position_arrival_policy']='coarse_grasp'
     if runtime == "LEBAI_FAKE":
         metadata.update(
             {
@@ -85,7 +89,21 @@ def build_backend(
     offline_finite_position: bool = False,
     offline_position_model=None,
     offline_position_clock=None,
+    real_finite_position: bool = False,
+    real_position_authorize=None,
+    real_position_model=None,
 ) -> RobotBackend:
+    if type(real_finite_position) is not bool:raise ValueError('invalid_real_finite_position_selection')
+    if real_finite_position:
+        if (offline_finite_position or backend_label!='LEBAI' or settings.backend!='lebai'
+                or settings.lebai is None or settings.segmented_target is not None
+                or settings.transactional_target is not None or stop_diagnostic_sampling
+                or not callable(real_position_authorize) or real_position_model is None):
+            raise ValueError('position_web_explicit_selection_required')
+        from app.robots.finite_position_web import RealFinitePositionAdapter
+        return RealFinitePositionAdapter(settings.lebai,client_factory=client_factory,
+            position_model=real_position_model,authorize=real_position_authorize,
+            event_callback=recorder.write_event)
     if type(offline_finite_position) is not bool:raise ValueError('invalid_finite_position_selection')
     if offline_finite_position:
         if (backend_label!='LEBAI_FAKE' or settings.backend!='lebai' or settings.lebai is None
@@ -230,6 +248,9 @@ def create_app(
     offline_finite_position: bool = False,
     offline_position_model=None,
     offline_position_clock=None,
+    real_finite_position: bool = False,
+    real_position_authorize=None,
+    real_position_model=None,
 ) -> FastAPI:
     runtime_settings = settings if settings is not None else Settings.load()
     runtime_backend = backend_label or (
@@ -240,7 +261,8 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         diagnostics = DiagnosticsStore()
         recorder = DiagnosticsRecorder(
-            build_recorder(runtime_settings, runtime_backend),
+            build_recorder(runtime_settings, runtime_backend,
+                **({'target_strategy':'finite_position_web'} if real_finite_position else {})),
             diagnostics,
         )
         backend = build_backend(
@@ -255,6 +277,9 @@ def create_app(
             offline_finite_position=offline_finite_position,
             offline_position_model=offline_position_model,
             offline_position_clock=offline_position_clock,
+            real_finite_position=real_finite_position,
+            real_position_authorize=real_position_authorize,
+            real_position_model=real_position_model,
         )
         latest = LatestVRFrame()
         preparation_enabled = bool(
@@ -274,6 +299,7 @@ def create_app(
             segmented_settings=runtime_settings.segmented_target,
             prepare_on_arm=preparation_enabled,
             explicit_preparation=preparation_enabled,
+            prepare_options=HomeOptions(.05,60.,math.radians(.1),.02,.3) if real_finite_position else None,
             constraint_clear_ms=runtime_settings.constraint_clear_ms,
             home_options=HomeOptions(
                 max_speed_radps=runtime_settings.home_joint_speed_radps,

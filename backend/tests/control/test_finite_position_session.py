@@ -37,6 +37,24 @@ async def test_held_release_drains_without_second_move():
     finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
 
 
+async def test_new_released_and_drained_gesture_gets_own_fixed_window():
+    s,a,c,clock=await fixture()
+    try:
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
+        await drive(s,clock,until=lambda:bool(c.write_calls))
+        s.offer(PositionIntent('web',1,2,clock.now_ns(),'release',(0.,)*3))
+        await drive(s,clock,until=lambda:s.phase=='ready' and not s.busy)
+        old=s.gate.deadline_ns
+        await clock.sleep(8.)
+        s.offer(PositionIntent('web',1,3,clock.now_ns(),'held',(-1.,0.,0.)))
+        assert s.gate.deadline_ns==clock.now_ns()+10_000_000_000 and s.gate.deadline_ns>old
+        with pytest.raises(ValueError):s.offer(PositionIntent('web',1,2,clock.now_ns(),'held',(1.,0.,0.)))
+        deadline=s.gate.deadline_ns
+        s.offer(PositionIntent('web',1,4,clock.now_ns(),'held',(-1.,0.,0.)))
+        assert s.gate.deadline_ns==deadline  # held updates cannot extend it
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
 async def test_fresh_held_updates_during_slow_planning_continue_then_release_without_stop():
     s,a,c,clock=await fixture();forward=c.kinematics_forward
     async def slow(q):await clock.sleep(.025);return await forward(q)

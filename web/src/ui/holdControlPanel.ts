@@ -79,7 +79,8 @@ export class HoldControlPanel {
   }
 
   update(state: RobotStateMessage | null, available: boolean, receivedAt = this.now()): void {
-    this.positionCandidate=state?.backend==='LEBAI_FAKE'&&state.finite_position?.policy==='finite_position_offline';
+    this.positionCandidate=(state?.backend==='LEBAI_FAKE'&&state.finite_position?.policy==='finite_position_offline')
+      ||(state?.backend==='LEBAI'&&state.finite_position?.policy==='finite_position_web');
     this.stick.setAttribute('aria-label',this.positionCandidate?'平面摇杆：拖动控制左右前后，松开后完成当前小步':'平面摇杆：拖动控制左右前后，松开停止');
     this.state = state;
     this.receivedAt = receivedAt;

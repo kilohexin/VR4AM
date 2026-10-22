@@ -11,6 +11,14 @@ class DiagnosticsRecorder:
         self.store = store
         self.dropped_nonblocking_events = 0
 
+    @property
+    def fatal_error(self):
+        return getattr(self.primary,'fatal_error',None)
+
+    @property
+    def dropped_normal_events(self):
+        return getattr(self.primary,'dropped_normal_events',0)+self.dropped_nonblocking_events
+
     def try_write_event(self, event: object, server_mono_ns: int) -> bool:
         """Keep a bounded memory trace even if best-effort file enqueue fails."""
         accepted = try_record_event_nowait(self.primary, event, server_mono_ns)

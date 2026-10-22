@@ -20,6 +20,15 @@ class FinitePositionSession:
         if self.closed or self.phase=='fault':raise ValueError('position_session_closed')
         if intent.seq<=self._last_seq or self._session not in (None,intent.session_id):
             raise ValueError('position_input_rejected')
+        if (self.phase=='ready' and not self.busy and self.gate.released
+                and self.gate.started_ns is not None and intent.kind=='held'):
+            # A fresh gesture after release AND known completion starts its
+            # own fixed window. Never renew while planning/executing/draining.
+            if intent.received_ns<self.gate._last_stamp:raise ValueError('position_input_rejected')
+            gate=PositionGate(self.binding,clock=self.clock)
+            gate.offer(intent)
+            self.gate=gate;self._last_seq=intent.seq;self._session=intent.session_id
+            return
         if self.phase=='hold' and not self.busy:
             if intent.kind=='release':
                 self._rearm=True;self._last_seq=intent.seq;self._session=intent.session_id;return

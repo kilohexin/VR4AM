@@ -1624,7 +1624,7 @@ class RobotControl:
         from app.control.finite_position_types import PositionView
         from app.schemas.messages import FinitePositionStatus
         view=self.finite_position_session.view() if self.finite_position_session is not None else PositionView(generation=self._control_generation)
-        return FinitePositionStatus(**asdict(view))
+        return FinitePositionStatus(**asdict(view),policy=getattr(self.backend,'position_policy','finite_position_offline'))
 
     async def _record_state_message(self, message: RobotStateMessage) -> None:
         """Record the composed message and retain the existing failure response."""
