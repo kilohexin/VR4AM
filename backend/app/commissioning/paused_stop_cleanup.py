@@ -74,7 +74,7 @@ class BoundedStopOnlyClient(StopOnlyClient):
 
     async def read(self, name, invoke):
         self.read_guard()
-        if (name not in self.READS or len(self.read_calls) >= MAX_READ_ENTRIES
+        if (name not in self.READS or len(self.read_calls) >= getattr(type(self),'read_entry_limit',MAX_READ_ENTRIES)
                 or self.pending_read is not None and not self.pending_read.done()):
             self.read_gate_closed = True
             raise AdmissionRejected('paused_cleanup_read_budget_or_pending')

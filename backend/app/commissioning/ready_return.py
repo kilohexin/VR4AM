@@ -13,7 +13,10 @@ from app.robots.lebai_adapter import RealLebaiAdapter
 from app.schemas.messages import BackendState
 
 OPTIONS = HomeOptions(.05, 60., .001, .02, .3)
-MAX_READS = 512
+# A 60s prepare can poll every 20ms: up to nine independent reads per poll,
+# plus connection/preflight, the 2s tail and reserved fault-stop verification.
+# The former 512-field limit could expire before a settling motion completed.
+MAX_READS = 32768
 
 
 def _q(value):
@@ -39,6 +42,7 @@ def _reason(error):
 
 class _PrepareClient(BoundedStopOnlyClient):
     READS=BoundedStopOnlyClient.READS|{'get_velocity_factor'}
+    read_entry_limit=MAX_READS
 
     def __init__(self,native,stop_permission,read_permission,write_permission,initial,owner,clock):
         super().__init__(native,stop_permission,read_permission,owner,deadline_clock=clock)

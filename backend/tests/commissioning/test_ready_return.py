@@ -52,6 +52,46 @@ async def test_one_exact_prepare_and_audit_without_stop_or_other_motion():
     assert r['local_resources_released'] and not r['native_connection_release_verified']
 
 
+@pytest.mark.parametrize('step_rad',[.00002,.000005])
+async def test_preparation_cannot_settle_while_position_drifts_with_zero_reported_speed(monkeypatch,step_rad):
+    data=fixture();c=data[2];original=c.get_kin_data;count=0
+    monkeypatch.setattr(module(),'OPTIONS',replace(module().OPTIONS,timeout_s=.6))
+    async def drifting():
+        nonlocal count
+        value=await original()
+        if c.write_calls and c.write_calls[-1][0]=='movej':
+            count+=1
+            # Always inside the original 0.001 rad target tolerance, with a
+            # quantized zero speed. The measured position is never at rest.
+            value['actual_joint_pose'][3]=data[0].teleop_ready_q[3]+(count%20)*step_rad
+        return value
+    c.get_kin_data=drifting
+    result,c,_=await run(data)
+    assert not result['complete'],result
+    assert not result.get('post_preflight_ready',False)
+    assert result['movej_entries']==1 and result['stop_entries']==1
+
+
+async def test_preparation_waits_until_drift_ends_then_returns_without_stop():
+    data=fixture();c=data[2];clock=data[3];original=c.get_kin_data;first=None;count=0
+    async def settling():
+        nonlocal first,count
+        value=await original()
+        if c.write_calls:
+            if first is None:first=clock.now_ns()
+            count+=1
+            offset=(count%20)*.00002 if clock.now_ns()-first<600_000_000 else 0.
+            value['actual_joint_pose'][3]=data[0].teleop_ready_q[3]+offset
+        return value
+    c.get_kin_data=settling
+    result,c,_=await run(data)
+    assert result['complete'],{k:result.get(k) for k in ('error','error_type','movej_entries',
+        'stop_entries','speed_audit','duration_s','tail_complete','post_preflight_ready')}
+    assert result['duration_s']>=2.9  # 0.6s drift, 0.3s stable, 2s tail.
+    assert result['movej_entries']==1 and result['stop_entries']==0
+    assert 512<len(result['read_calls'])<=module().MAX_READS
+
+
 @pytest.mark.parametrize('damage',['paused','start','tool','actual_rate','target_rate','factor','estop','running'])
 async def test_bad_initial_reading_has_zero_move_and_zero_stop(damage):
     data=fixture();s,q,c,clock,recorder=data

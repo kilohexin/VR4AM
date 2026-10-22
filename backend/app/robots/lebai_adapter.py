@@ -1078,6 +1078,7 @@ class RealLebaiAdapter:
                 self._schedule_sdk_diagnostic(lifecycle)
         started_ns = self._clock()
         stable_since_ns: int | None = None
+        stable_anchor_q: JointVector | None = None
         stabilizing = False
         while True:
             require_current()
@@ -1125,8 +1126,20 @@ class RealLebaiAdapter:
             if within_tolerance:
                 if stable_since_ns is None:
                     stable_since_ns = now_ns
+                    stable_anchor_q = snapshot.actual_q
                     stabilizing = True
                     on_phase("stabilizing")
+                elif require_finished_idle and stable_anchor_q is not None and max(
+                    abs(actual - anchor) for actual, anchor in zip(
+                        snapshot.actual_q, stable_anchor_q, strict=True,
+                    )
+                ) > min(0.00001, options.position_tolerance_rad * 0.01):
+                    # A slow crossing of the target is not settled. Reported
+                    # speed may quantize to zero while joint feedback changes.
+                    # Compare with a fixed window anchor, not the previous
+                    # sample, so repeated small changes cannot accumulate.
+                    stable_since_ns = now_ns
+                    stable_anchor_q = snapshot.actual_q
                 elif (
                     now_ns - stable_since_ns
                     >= int(options.stable_seconds * 1_000_000_000)
@@ -1135,6 +1148,7 @@ class RealLebaiAdapter:
                     return
             else:
                 stable_since_ns = None
+                stable_anchor_q = None
                 if stabilizing:
                     stabilizing = False
                     on_phase("homing")
