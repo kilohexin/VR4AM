@@ -12,7 +12,8 @@ from app.robots.base import HomeOptions, StopReason
 from app.robots.lebai_adapter import RealLebaiAdapter
 from app.schemas.messages import BackendState
 
-OPTIONS = HomeOptions(.05, 60., .001, .02, .3)
+READY_TOLERANCE_RAD = math.radians(.1)
+OPTIONS = HomeOptions(.05, 60., READY_TOLERANCE_RAD, .02, .3)
 # A 60s prepare can poll every 20ms: up to nine independent reads per poll,
 # plus connection/preflight, the 2s tail and reserved fault-stop verification.
 # The former 512-field limit could expire before a settling motion completed.
@@ -130,7 +131,7 @@ async def run_ready_return(settings,start_q,recorder,client_factory,authorize,*,
                 or s.estop or s.running_motion is not None or s.motion_state not in (None,'FINISHED')
                 or not 0<=clock()-s.captured_ns<100_000_000):
             raise ValueError('ready_return_initial_state_or_freshness')
-        if any(max(abs(a-b) for a,b in zip(q,start_q,strict=True))>.001 for q in (s.actual_q,s.target_q)):
+        if any(max(abs(a-b) for a,b in zip(q,start_q,strict=True))>READY_TOLERANCE_RAD for q in (s.actual_q,s.target_q)):
             raise ValueError('ready_return_initial_pose_changed')
         if any(x!=0 for v in (s.actual_qd,s.actual_qdd,s.target_qd,s.target_qdd) for x in v):
             raise ValueError('ready_return_initial_motion_reported')
@@ -179,7 +180,7 @@ async def run_ready_return(settings,start_q,recorder,client_factory,authorize,*,
                 permission();await adapter.get_state();s=adapter._snapshot
                 _geometry(adapter)
                 if (s.robot_state is not BackendState.IDLE or s.estop or s.running_motion is not None
-                        or max(abs(a-b) for a,b in zip(s.actual_q,target,strict=True))>.001
+                        or max(abs(a-b) for a,b in zip(s.actual_q,target,strict=True))>OPTIONS.position_tolerance_rad
                         or any(abs(x)>.02 for x in s.actual_qd)):
                     raise ValueError('ready_return_tail_not_settled')
                 await sleep(.1)

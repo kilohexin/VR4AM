@@ -15,7 +15,7 @@ import time
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'backend'))
 from scripts import real_robot_native_jog_window as identity
-from app.commissioning.ready_return import OPTIONS,MAX_READS,_q,run_ready_return
+from app.commissioning.ready_return import OPTIONS,MAX_READS,READY_TOLERANCE_RAD,_q,run_ready_return
 
 CONFIRM='I_APPROVE_ONE_EXISTING_PREPARE_TO_SAVED_READY_NO_HOME_NO_RETRY'
 sha=identity.sha
@@ -25,7 +25,8 @@ existing_rpc_connections=identity.existing_rpc_connections
 
 def runtime_hashes():
     paths=identity.runtime_hashes()
-    paths[Path(__file__).resolve().relative_to(ROOT).as_posix()]=sha(__file__)
+    for path in (Path(__file__).resolve(),Path(__file__).with_name('ready_then_position_gate.py').resolve()):
+        paths[path.relative_to(ROOT).as_posix()]=sha(path)
     return paths
 
 
@@ -164,7 +165,7 @@ def preview(p):
         allowed_writes=['movej','stop_move'],max_movej_entries=1,max_stop_entries=1,
         max_read_entries=MAX_READS,max_fk_calls=0,max_ik_calls=0,options=asdict(OPTIONS),
         acceleration_radps2=.2,blend_radius=0.,movej_rpc_timeout_ms=200,
-        start_tolerance_rad=.001,feedback_ttl_ms=100,total_budget_s=90,cleanup_reserve_s=5,
+        start_tolerance_rad=READY_TOLERANCE_RAD,feedback_ttl_ms=100,total_budget_s=90,cleanup_reserve_s=5,
         stop_rpc_timeout_ms=200,stop_stable_ms=300,stop_verification_ms=500,readonly_tail_s=2,
         natural_arrival_does_not_send_stop=True,automatic_retry=False,automatic_home=False,
         automatic_resume=False,automatic_next_motion=False,motion_authorized=False,

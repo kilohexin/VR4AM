@@ -44,6 +44,86 @@ async def test_finished_without_actual_progress_is_rejected():
     await a.disconnect()
 
 
+async def test_finished_task_with_lagging_endpoint_waits_for_actual_settling():
+    a,c,clock,p=await prepared();original=c.advance
+    def delayed_actual():
+        original()
+        if c.start_ns is None:return
+        elapsed=clock.now_ns()-c.start_ns
+        if 200_000_000<=elapsed<500_000_000:
+            actual=tuple(start+.7*(goal-start) for start,goal in zip(c.start,c.goal))
+            point,_=c.model.forward(actual)
+            c.kin_data['actual_joint_pose']=list(actual)
+            c.kin_data['actual_tcp_pose']=dict(x=point[0],y=point[1],z=point[2],rz=0.,ry=0.,rx=0.)
+    c.advance=delayed_actual
+    try:
+        result=await execute(a,p)
+        assert result.complete,result
+        assert [x[0] for x in c.write_calls]==['movej']
+        assert clock.now_ns()>=600_000_000
+    finally:await a.disconnect()
+
+
+async def test_finished_task_endpoint_lag_still_fails_at_original_deadline():
+    a,c,clock,p=await prepared();original=c.advance
+    def lagging():
+        original()
+        if c.start_ns is None:return
+        actual=tuple(start+.7*(goal-start) for start,goal in zip(c.start,c.goal))
+        point,_=c.model.forward(actual)
+        c.kin_data['actual_joint_pose']=list(actual)
+        c.kin_data['actual_tcp_pose']=dict(x=point[0],y=point[1],z=point[2],rz=0.,ry=0.,rx=0.)
+    c.advance=lagging
+    try:
+        result=await execute(a,p)
+        assert not result.complete
+        assert clock.now_ns()>=2_000_000_000
+        assert [x[0] for x in c.write_calls]==['movej','stop_move']
+    finally:await a.disconnect()
+
+
+@pytest.mark.parametrize('kind',['joint','speed'])
+async def test_finished_task_waits_for_joint_and_speed_settling(kind):
+    a,c,clock,p=await prepared();original=c.advance
+    def settling():
+        original()
+        if c.start_ns is None:return
+        waiting=200_000_000<=clock.now_ns()-c.start_ns<500_000_000
+        if kind=='joint' and waiting:c.kin_data['actual_joint_pose'][3]+=.003
+        c.kin_data['actual_joint_speed']=[.005 if kind=='speed' and waiting else 0.,0.,0.,0.,0.,0.]
+    c.advance=settling
+    try:
+        result=await execute(a,p)
+        assert result.complete,result
+        assert [x[0] for x in c.write_calls]==['movej']
+        assert clock.now_ns()>=600_000_000
+    finally:await a.disconnect()
+
+
+@pytest.mark.parametrize('kind',['overshoot','orientation','lateral'])
+async def test_waiting_for_endpoint_does_not_delay_geometric_violation(kind):
+    import math
+    a,c,clock,p=await prepared();original=c.advance
+    def unsafe():
+        original()
+        if c.start_ns is None or clock.now_ns()-c.start_ns<200_000_000:return
+        fraction=1.3 if kind=='overshoot' else .7
+        actual=tuple(start+fraction*(goal-start) for start,goal in zip(c.start,c.goal))
+        point,_=c.model.forward(actual)
+        c.kin_data['actual_joint_pose']=list(actual)
+        c.kin_data['actual_tcp_pose']=dict(x=point[0],y=point[1]+(.0005 if kind=='lateral' else 0.),
+            z=point[2],rz=math.radians(.2) if kind=='orientation' else 0.,ry=0.,rx=0.)
+    c.advance=unsafe
+    expected={'overshoot':'position_endpoint_error','orientation':'position_orientation_error',
+        'lateral':'position_lateral_deviation'}[kind]
+    try:
+        result=await execute(a,p)
+        assert not result.complete and result.reason==expected
+        assert clock.now_ns()<2_000_000_000
+        assert [x[0] for x in c.write_calls]==['movej','stop_move']
+    finally:await a.disconnect()
+
+
 @pytest.mark.parametrize('kind,complete',[('single',True),('sustained',False),('large',False),('target',False)])
 async def test_bounded_acceleration_feedback_is_wired_into_step_monitoring(kind,complete):
     a,c,clock,p=await prepared();original=c.get_kin_data;reads=0

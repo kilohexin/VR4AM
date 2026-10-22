@@ -201,7 +201,18 @@ class _FinitePositionCore(RealLebaiAdapter):
                         return PositionResult(True,motion_id,True,False,final,None)
                 else:
                     stable=None;good=0;reason=check
-                    if final.task_state=='FINISHED' and check!='position_not_finished':raise ValueError(check)
+                    settling=check in ('position_endpoint_error','position_joint_endpoint','position_not_stable')
+                    if check=='position_endpoint_error':
+                        delta=tuple(b-a for a,b in zip(plan.start.tcp_p,plan.target_p))
+                        length=math.hypot(*delta)
+                        progress=sum((p-a)*d for p,a,d in zip(final.tcp_p,plan.start.tcp_p,delta))/length
+                        settling=progress<=length+1e-12  # Trailing the goal, never excess overshoot.
+                    # FINISHED describes the controller task, not physical
+                    # arrival. Give known trailing/settling feedback the rest
+                    # of the original STEP_NS; all boundaries still run each
+                    # iteration and no additional target is submitted.
+                    if final.task_state=='FINISHED' and check!='position_not_finished' and not settling:
+                        raise ValueError(check)
                 last=final.captured_ns
                 await self._sleep(.02)
             raise ValueError(reason or 'position_completion_timeout')

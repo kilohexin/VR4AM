@@ -27,7 +27,7 @@ existing_rpc_connections=identity.existing_rpc_connections
 
 def runtime_hashes():
     values=identity.runtime_hashes()
-    for name in ('real_robot_finite_position.py','real_robot_ready_return.py'):
+    for name in ('real_robot_finite_position.py','real_robot_ready_return.py','ready_then_position_gate.py'):
         p=Path(__file__).with_name(name).resolve();values[p.relative_to(ROOT).as_posix()]=sha(p)
     return values
 

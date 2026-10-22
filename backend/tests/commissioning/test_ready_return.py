@@ -3,6 +3,7 @@ import asyncio
 import copy
 import importlib
 import importlib.util
+import math
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
@@ -90,6 +91,43 @@ async def test_preparation_waits_until_drift_ends_then_returns_without_stop():
     assert result['duration_s']>=2.9  # 0.6s drift, 0.3s stable, 2s tail.
     assert result['movej_entries']==1 and result['stop_entries']==0
     assert 512<len(result['read_calls'])<=module().MAX_READS
+
+
+async def test_ready_goal_accepts_stationary_point_one_degree_contract_without_stop(monkeypatch):
+    data=fixture();c=data[2];original=c.movej
+    monkeypatch.setattr(module(),'OPTIONS',replace(module().OPTIONS,timeout_s=.6))
+    async def offset(*args):
+        result=await original(*args)
+        c.kin_data['actual_joint_pose'][3]+=.0013422331893999662
+        return result
+    c.movej=offset
+    result,c,_=await run(data)
+    assert result['complete'],{k:result.get(k) for k in ('error','movej_entries','stop_entries')}
+    assert result['tail_complete'] and result['stop_entries']==0
+
+
+async def test_ready_frozen_start_uses_same_point_one_degree_match():
+    data=fixture();c=data[2]
+    for side in ('actual','target'):c.kin_data[side+'_joint_pose'][3]+=.0013422331893999662
+    result,c,_=await run(data)
+    assert result['complete'],{k:result.get(k) for k in ('error','movej_entries','stop_entries')}
+    assert result['movej_entries']==1 and result['stop_entries']==0
+
+
+@pytest.mark.parametrize('phase',['initial','goal'])
+async def test_ready_error_above_point_one_degree_is_still_rejected(monkeypatch,phase):
+    data=fixture();c=data[2];original=c.movej
+    monkeypatch.setattr(module(),'OPTIONS',replace(module().OPTIONS,timeout_s=.6))
+    offset=math.radians(.10001)
+    if phase=='initial':
+        for side in ('actual','target'):c.kin_data[side+'_joint_pose'][3]+=offset
+    else:
+        async def outside(*args):
+            result=await original(*args);c.kin_data['actual_joint_pose'][3]+=offset;return result
+        c.movej=outside
+    result,c,_=await run(data)
+    assert not result['complete']
+    assert result['movej_entries']==result['stop_entries']==(0 if phase=='initial' else 1)
 
 
 @pytest.mark.parametrize('damage',['paused','start','tool','actual_rate','target_rate','factor','estop','running'])
