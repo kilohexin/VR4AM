@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import UTC,datetime,timedelta
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -14,9 +15,9 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'backend'))
 from scripts import real_robot_native_jog_window as identity
 from scripts.real_robot_ready_return import close_loop_bounded
-from app.commissioning.finite_position_site import MdhPositionModel,run_single_position,MAX_READS
+from app.commissioning.finite_position_site import MdhPositionModel,run_single_position,MAX_READS,position_read_limit
 from app.control.finite_position_types import (PLAN_NS,MAX_STEP_M,MIN_PROGRESS_M,MAX_ENDPOINT_ERROR_M,
-    JOINT_ENDPOINT_TOLERANCE_RAD,INPUT_DEADZONE)
+    JOINT_ENDPOINT_TOLERANCE_RAD,INPUT_DEADZONE,position_arrival_policy)
 from app.robots.finite_position_acceleration import PositionAccelerationMonitor
 
 CONFIRM='I_APPROVE_ONE_2MM_FINITE_POSITION_Z_NATURAL_ARRIVAL_AND_RESERVED_FAULT_STOP'
@@ -32,7 +33,8 @@ def runtime_hashes():
     return values
 
 
-def prepare(config,reference_survey,ready_pose,output,*,expires=None):
+def prepare(config,reference_survey,ready_pose,output,*,expires=None,arrival_policy='strict'):
+    position_arrival_policy(arrival_policy)
     from app.config import Settings,REAL_ROBOT_CONFIRMATION
     from app.robots.lebai_codec import pose_from_lebai
     from app.commissioning.native_jog_site_scope import site_address
@@ -74,24 +76,28 @@ def prepare(config,reference_survey,ready_pose,output,*,expires=None):
     if any(sha(p)!=h for p,h in hashes.items()):raise ValueError('position_site_inputs_changed_during_prepare')
     return dict(config=config,reference_survey=reference_survey,reference_admission=admission,ready_pose=ready_pose,
         output=output,settings=s,model=model,input_hashes=hashes,runtime_hashes=runtime_hashes(),
-        authorization_expires_utc=expires)
+        authorization_expires_utc=expires,arrival_policy=arrival_policy)
 
 
 def preview(p):
+    policy=position_arrival_policy(p['arrival_policy'])
     return dict(schema=1,scope='one_finite_position_z_natural_arrival',target_ip=p['settings'].ip,
         output=str(p['output']),input_hashes=p['input_hashes'],runtime_hashes=p['runtime_hashes'],
         settings_binding=json.loads(json.dumps(asdict(p['settings']))),model_sha256=p['model'].model_sha256,
         authorization_expires_utc=p['authorization_expires_utc'],distance_m=MAX_STEP_M,direction=[0.,0.,1.],
-        max_connections=1,max_movej_entries=1,max_stop_entries=1,max_ik_calls=1,max_fk_calls=5,max_read_entries=MAX_READS,
+        max_connections=1,max_movej_entries=1,max_stop_entries=1,max_ik_calls=1,max_fk_calls=5,max_read_entries=position_read_limit(policy.name),
         allowed_writes=['movej','stop_move'],feedback_ttl_ms=100,input_ttl_ms=None,movej_rpc_timeout_ms=200,
         input_policy='one_fixed_authorized_target_until_scope_deadline',planning_timeout_ms=PLAN_NS/1e6,
         snapshot_read_policy='owned_six_fields_parallel',readonly_authorization_policy='full_at_group_boundaries_binding_and_cancellation_per_read',
         write_check_policy='one_full_native_entry_check_followed_by_fresh_feedback_check',
         entry_policy='fresh_identical_start_after_planning',held_input_ttl_ms=100,
-        completion_timeout_s=2,stable_samples=3,stable_span_ms=100,readonly_tail_s=2,total_budget_s=20,
+        completion_timeout_s=policy.completion_ns/1e9,stable_samples=3,stable_span_ms=policy.stable_span_ns/1e6,
+        arrival_policy=asdict(policy),stable_tcp_drift_m=policy.stable_tcp_drift_m,
+        stable_joint_drift_rad=policy.stable_joint_drift_rad,max_orientation_error_deg=math.degrees(policy.orientation_error_rad),
+        readonly_tail_s=2,total_budget_s=20,
         normal_budget_s=15,cleanup_reserve_s=5,stop_rpc_timeout_ms=200,stop_stable_ms=300,stop_verification_ms=500,
         native_time_argument=0,native_blend_radius=0,natural_arrival_does_not_send_stop=True,
-        max_endpoint_error_m=MAX_ENDPOINT_ERROR_M,min_progress_m=MIN_PROGRESS_M,max_cross_fraction=.2,
+        max_endpoint_error_m=policy.endpoint_error_m,min_progress_m=MIN_PROGRESS_M,max_cross_fraction=.2,
         joint_endpoint_tolerance_rad=JOINT_ENDPOINT_TOLERANCE_RAD,held_input_deadzone=INPUT_DEADZONE,
         held_input_policy='fixed_step_unit_direction_above_deadzone',
         **PositionAccelerationMonitor(min(.2,p['settings'].control.max_joint_acceleration_radps2)).policy(),
@@ -174,7 +180,8 @@ async def execute(p,*,approved,expected_hash,expires,confirm,client_factory=None
     report=dict(complete=False)
     try:
         report=await run_single_position(p['settings'],recorder,factory,inputs.read,config_sha256=p['input_hashes'][str(p['config'])],
-            model=p['model'],read_authorize=inputs.read,write_authorize=inputs.write,clock=clock,sleep=sleep)
+            model=p['model'],read_authorize=inputs.read,write_authorize=inputs.write,clock=clock,sleep=sleep,
+            arrival_policy=p['arrival_policy'])
         return report
     finally:
         if connector['outcome']=='entered':connector['remote_result_unknown']=True
@@ -188,9 +195,10 @@ def main(argv=None):
     for key in ('config','reference-survey','ready-pose','output'):parser.add_argument('--'+key,type=Path,required=True)
     parser.add_argument('--execute-once',action='store_true');parser.add_argument('--approved-preview',type=Path)
     parser.add_argument('--approved-preview-sha256');parser.add_argument('--authorization-expires-utc');parser.add_argument('--confirm')
+    parser.add_argument('--arrival-policy',choices=('strict','coarse_grasp'),default='strict')
     a=parser.parse_args(argv)
     try:
-        p=prepare(a.config,a.reference_survey,a.ready_pose,a.output,expires=a.authorization_expires_utc)
+        p=prepare(a.config,a.reference_survey,a.ready_pose,a.output,expires=a.authorization_expires_utc,arrival_policy=a.arrival_policy)
         if not a.execute_once:print(json.dumps(preview(p),indent=2,allow_nan=False));return 0
         from app.commissioning.qpc_event_loop import new_qpc_loop
         loop=new_qpc_loop();interrupted=False

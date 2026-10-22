@@ -13,6 +13,29 @@ SESSION_NS=10_000_000_000
 STEP_NS=2_000_000_000
 
 
+@dataclass(frozen=True)
+class PositionArrivalPolicy:
+    name: str
+    endpoint_error_m: float
+    orientation_error_rad: float
+    stable_tcp_drift_m: float
+    stable_joint_drift_rad: float
+    stable_span_ns: int
+    completion_ns: int
+
+
+STRICT_ARRIVAL=PositionArrivalPolicy('strict',MAX_ENDPOINT_ERROR_M,math.radians(.1),
+    .00001,.00001,100_000_000,STEP_NS)
+COARSE_GRASP_ARRIVAL=PositionArrivalPolicy('coarse_grasp',.001,math.radians(.2),
+    .0001,math.radians(.02),200_000_000,5_000_000_000)
+
+
+def position_arrival_policy(name):
+    if type(name) is not str or name not in ('strict','coarse_grasp'):
+        raise ValueError('position_invalid_arrival_policy')
+    return STRICT_ARRIVAL if name=='strict' else COARSE_GRASP_ARRIVAL
+
+
 def integer(value):
     if type(value) is not int or not 0<=value<=2**53-1:raise ValueError('position_invalid_integer')
     return value
@@ -114,12 +137,15 @@ class PositionPlan:
     joint_acceleration: float
     created_ns: int
     evidence: PathAudit
+    arrival_policy: PositionArrivalPolicy=STRICT_ARRIVAL
 
     def __post_init__(self):
         integer(self.intent_seq);integer(self.created_ns)
         object.__setattr__(self,'target_p',vector(self.target_p,3))
         object.__setattr__(self,'target_q',vector(self.target_q,4))
         object.__setattr__(self,'goal_joints',vector(self.goal_joints,6))
+        if (self.arrival_policy is not STRICT_ARRIVAL and self.arrival_policy is not COARSE_GRASP_ARRIVAL):
+            raise ValueError('position_invalid_arrival_policy')
         if (self.binding is not self.start.binding
                 or self.joint_speed!=self.evidence.joint_speed
                 or self.joint_acceleration!=self.evidence.joint_acceleration):

@@ -70,6 +70,29 @@ async def test_one_fixed_two_mm_z_natural_arrival_without_stop_or_continuation()
     assert r['actual_acceleration_instant_limit_radps2']==.4
 
 
+async def test_explicit_coarse_profile_uses_the_same_single_motion_contract():
+    r,c,connections=await run(arrival_policy='coarse_grasp')
+    assert r['complete'],r
+    assert r['arrival_policy']['name']=='coarse_grasp'
+    assert r['max_read_entries']==4096
+    assert r['movej_entries']==1 and r['stop_entries']==0 and len(connections)==1
+    assert r['tail_complete'] and r['natural_arrival_confirmed']
+
+
+async def test_coarse_snapshot_children_share_the_extended_fixed_budget():
+    data=fixture();s,c,clock,_,_=data
+    proxy=api()._CoarseSingleClient(c,lambda:None,lambda:None,lambda:None,asyncio.current_task(),clock.now_ns)
+    proxy.read_calls=[dict(method='get_tcp',entered=False,remote_result_unknown=False)]*512
+    from app.commissioning.position_snapshot_groups import FIELDS
+    with proxy.position_snapshot_scope(lambda:None,'budget'):
+        await asyncio.gather(*(getattr(proxy,name)() for name in FIELDS))
+        proxy.verify_position_snapshot_group()
+    assert len(proxy.read_calls)==518 and not c.write_calls
+    proxy.read_calls.extend([dict(method='get_tcp',entered=False)]*(4096-518))
+    with pytest.raises(Exception):await proxy.get_tcp()
+    assert len(proxy.read_calls)==4096 and proxy.read_gate_closed
+
+
 @pytest.mark.parametrize('error_deg',[.076904296875,.1])
 async def test_stationary_ready_offset_within_endpoint_tolerance_can_execute(error_deg):
     data=fixture();s,c,clock,recorder,model=data

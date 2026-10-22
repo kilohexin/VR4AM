@@ -21,3 +21,12 @@ def test_loopback_includes_independent_read_latency_case():
     spec=importlib.util.spec_from_file_location('single_position_latency_loopback',SOURCE)
     m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
     assert 'read_latency' in m.CASES
+
+
+def test_loopback_can_select_only_a_named_arrival_policy():
+    spec=importlib.util.spec_from_file_location('single_position_policy_loopback',SOURCE)
+    m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    args=m.parser().parse_args(['--output','synthetic','--arrival-policy','coarse_grasp'])
+    assert args.arrival_policy=='coarse_grasp'
+    with pytest.raises(SystemExit):
+        m.parser().parse_args(['--output','synthetic','--arrival-policy','unlimited'])

@@ -15,7 +15,8 @@ from app.commissioning.native_jog_mdh import MdhTool,mdh_tcp_jacobian,mdh_tcp_ja
 from app.commissioning.native_jog_site_scope import site_address,permission
 from app.commissioning.paused_stop_cleanup import BoundedStopOnlyClient
 from app.commissioning.position_snapshot_groups import PositionSnapshotGroups
-from app.control.finite_position_types import PositionIntent,INPUT_NS,MAX_STEP_M,JOINT_ENDPOINT_TOLERANCE_RAD
+from app.control.finite_position_types import (PositionIntent,INPUT_NS,MAX_STEP_M,
+    JOINT_ENDPOINT_TOLERANCE_RAD,position_arrival_policy)
 from app.robots.base import StopReason
 from app.robots.finite_position_adapter import _FinitePositionCore
 from app.robots.finite_position_acceleration import PositionAccelerationMonitor
@@ -24,6 +25,11 @@ from app.schemas.messages import BackendState
 
 DISTANCE_M=MAX_STEP_M
 MAX_READS=512
+COARSE_MAX_READS=4096
+
+
+def position_read_limit(policy_name):
+    return COARSE_MAX_READS if position_arrival_policy(policy_name).name=='coarse_grasp' else MAX_READS
 
 
 @lru_cache(maxsize=64)
@@ -69,6 +75,7 @@ class MdhPositionModel:
 
 class _SingleClient(PositionSnapshotGroups,BoundedStopOnlyClient):
     READS=BoundedStopOnlyClient.READS|{'kinematics_inverse','kinematics_forward','get_velocity_factor'}
+    read_entry_limit=MAX_READS
 
     def __init__(self,native,stop,read,write,owner,clock):
         super().__init__(native,stop,read,owner,deadline_clock=clock)
@@ -78,7 +85,9 @@ class _SingleClient(PositionSnapshotGroups,BoundedStopOnlyClient):
         self.math_entries=dict(kinematics_inverse=0,kinematics_forward=0,get_velocity_factor=0)
 
     async def read(self,name,invoke):
-        if len(self.read_calls)>=MAX_READS:raise ValueError('position_site_read_budget')
+        if len(self.read_calls)>=self.read_entry_limit:
+            self.read_gate_closed=True
+            raise ValueError('position_site_read_budget')
         if name in self.math_entries:
             cap=5 if name=='kinematics_forward' else 1
             if self.math_entries[name]>=cap:raise ValueError('position_site_math_consumed')
@@ -111,6 +120,15 @@ class _SingleClient(PositionSnapshotGroups,BoundedStopOnlyClient):
     async def stop_move(self):
         if self.movej_entries!=1:raise ValueError('position_site_stop_not_reserved')
         return await super().stop_move()
+
+
+class _CoarseReadClient(BoundedStopOnlyClient):
+    read_entry_limit=COARSE_MAX_READS
+
+
+class _CoarseSingleClient(_SingleClient):
+    read_entry_limit=COARSE_MAX_READS
+    snapshot_read_client_type=_CoarseReadClient
 
 
 class _SiteAdapter(_FinitePositionCore):
@@ -171,9 +189,10 @@ def _reason(error):
 
 
 async def run_single_position(settings,recorder,client_factory,authorize,*,config_sha256,model,
-        read_authorize=None,write_authorize=None,clock=time.perf_counter_ns,sleep=asyncio.sleep):
+        read_authorize=None,write_authorize=None,clock=time.perf_counter_ns,sleep=asyncio.sleep,arrival_policy='strict'):
     """Exactly one +Z target, no continuation/retry; caller owns live consent."""
     site_address(settings.ip)
+    policy=position_arrival_policy(arrival_policy)
     if (settings.mode!='control' or type(model) is not MdhPositionModel
             or model.model_sha256!=MdhPositionModel.from_settings(settings).model_sha256
             or not 0<settings.control.max_joint_speed_radps<=.05
@@ -186,6 +205,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
     model_binding=copy.deepcopy((model.model_sha256,model.tool))
     reserve=deadline+5_000_000_000;adapter=proxy=None;plan=None;started=False;motion_done=False
     report=dict(complete=False,hardware_verified=False,continuous_control_admitted=False,
+        arrival_policy=asdict(policy),max_read_entries=position_read_limit(policy.name),
         **PositionAccelerationMonitor(min(.2,settings.control.max_joint_acceleration_radps2)).policy(),
         snapshot_read_policy='owned_six_fields_parallel',snapshot_groups=[],
         motion_time_stop_verified=False,natural_arrival_confirmed=False,tail_complete=False,
@@ -235,7 +255,8 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
         permit()
         if report['connect_entries'] or ip!=settings.ip:raise ValueError('position_site_connection_consumed')
         report['connect_entries']+=1;native=await client_factory(ip);permit()
-        proxy=_SingleClient(native,stop,read,native_write,owner,clock);proxy.read_deadline_ns=reserve
+        client_type=_CoarseSingleClient if policy.name=='coarse_grasp' else _SingleClient
+        proxy=client_type(native,stop,read,native_write,owner,clock);proxy.read_deadline_ns=reserve
         return proxy
 
     async def event(row,stamp):await recorder.write_event(row,stamp)
@@ -254,7 +275,7 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
         await asyncio.to_thread(initialize_math);permit()
         report['static_math_initialized_before_connect']=True
         adapter=_SiteAdapter(settings,client_factory=factory,backend_label='LEBAI',position_model=model,
-            clock=clock,sleep=sleep,event_callback=event)
+            clock=clock,sleep=sleep,event_callback=event,arrival_policy=policy.name)
         async with asyncio.timeout(15.):
             await adapter.connect();adapter.bind_position_generation(1)
             sample=await adapter._read_snapshot(read_purpose='single_position_preflight')
@@ -282,8 +303,8 @@ async def run_single_position(settings,recorder,client_factory,authorize,*,confi
                 if not 0<=clock()-current.captured_ns<INPUT_NS:
                     raise ValueError('position_site_tail_feedback_expired')
                 if (evaluate_position_arrival(plan,current,motion_id=result.motion_id) is not None
-                        or math.dist(current.tcp_p,result.final_sample.tcp_p)>1e-5
-                        or max(abs(a-b) for a,b in zip(current.actual_q,result.final_sample.actual_q))>1e-5):
+                        or math.dist(current.tcp_p,result.final_sample.tcp_p)>policy.stable_tcp_drift_m
+                        or max(abs(a-b) for a,b in zip(current.actual_q,result.final_sample.actual_q))>policy.stable_joint_drift_rad):
                     motion_done=False;raise ValueError('position_site_tail_not_stable')
                 await sleep(.1)
             motion_done=True;report.update(tail_complete=True,complete=True)

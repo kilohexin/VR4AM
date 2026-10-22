@@ -80,6 +80,30 @@ async def test_default_preview_is_zero_access(context,monkeypatch,capsys):
     assert row['readonly_authorization_policy']=='full_at_group_boundaries_binding_and_cancellation_per_read'
 
 
+async def test_coarse_profile_is_explicit_in_the_bound_preview(context):
+    e,p,_,c,_=context
+    coarse=e.prepare(p['config'],p['reference_survey'],p['ready_pose'],p['output'],
+        expires=p['authorization_expires_utc'],arrival_policy='coarse_grasp')
+    row=e.preview(coarse)
+    assert row['arrival_policy']['name']=='coarse_grasp'
+    assert row['max_endpoint_error_m']==.001 and row['completion_timeout_s']==5
+    assert row['max_orientation_error_deg']==pytest.approx(.2)
+    assert row['stable_span_ms']==200 and row['stable_tcp_drift_m']==.0001
+    assert row['stable_joint_drift_rad']==pytest.approx(__import__('math').radians(.02))
+    assert row['max_read_entries']==4096
+    assert row['feedback_ttl_ms']==100 and row['movej_rpc_timeout_ms']==200
+    assert row['max_movej_entries']==1 and row['distance_m']==.002
+    assert not coarse['output'].exists() and not c.write_calls
+
+
+async def test_changing_arrival_profile_cannot_reuse_a_strict_approval(context):
+    e,p,kwargs,c,clock=context
+    p['arrival_policy']='coarse_grasp';factory=AsyncMock(return_value=c)
+    with pytest.raises(ValueError):
+        await e.execute(p,**kwargs,client_factory=factory,clock=clock.now_ns,sleep=clock.sleep)
+    factory.assert_not_called();assert not p['output'].exists()
+
+
 @pytest.mark.parametrize('kind',['confirm','expiry','hash','preview','config','ready_pose','reference_survey','runtime','rpc'])
 async def test_invalid_scope_is_zero_native_access(context,monkeypatch,kind):
     e,p,kw,c,clock=context;factory=AsyncMock(return_value=c)

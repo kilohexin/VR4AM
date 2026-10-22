@@ -26,6 +26,7 @@ def parser():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--case',choices=(*CASES,'all'),default='all')
     p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--arrival-policy',choices=('strict','coarse_grasp'),default='strict')
     return p
 
 
@@ -126,7 +127,7 @@ class Recorder(NoopRecorder):
     async def write_critical_event(self,kind,payload,stamp):await self.write_event(dict(payload,kind=kind),stamp)
 
 
-async def run_case(case,output):
+async def run_case(case,output,*,arrival_policy='strict'):
     from websockets.asyncio.server import serve
     sdk,identity=_sdk_identity();sdk.init();peer=Peer(case);client=None;recorder=Recorder()
     async with serve(peer.handler,'127.0.0.1',0) as server:
@@ -139,7 +140,8 @@ async def run_case(case,output):
             p,_=MODEL.forward(Q);settings=replace(loopback_settings(),ip='127.0.0.1',home_q=Q,teleop_ready_q=Q,
                 startup_tcp_min_m=tuple(x-.01 for x in p),startup_tcp_max_m=tuple(x+.01 for x in p),
                 control=replace(loopback_settings().control,max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2))
-            report=await run_single_position(settings,recorder,factory,lambda:None,config_sha256='a'*64,model=MODEL)
+            report=await run_single_position(settings,recorder,factory,lambda:None,config_sha256='a'*64,model=MODEL,
+                arrival_policy=arrival_policy)
             if peer._tasks:await asyncio.wait(tuple(peer._tasks),timeout=.6)
             expected=(report['complete'] and peer.moves==1 and peer.stops==0) if case in ('normal','read_latency') else (not report['complete'] and peer.moves==1 and peer.stops==1)
             if case=='read_latency':
@@ -162,7 +164,7 @@ async def run_case(case,output):
 async def matrix(args):
     results=[]
     for case in CASES if args.case=='all' else (args.case,):
-        r=await run_case(case,args.output);results.append(r)
+        r=await run_case(case,args.output,arrival_policy=args.arrival_policy);results.append(r)
         print(json.dumps(dict(case=case,expected_outcome_observed=r['expected_outcome_observed'],
             complete=r['report']['complete'],move_entries=r['report']['movej_entries'],stop_entries=r['report']['stop_entries'],
             reason=r['report'].get('reason'),latched_fault=r['report']['latched_fault'])),flush=True)

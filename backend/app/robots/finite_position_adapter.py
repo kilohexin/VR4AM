@@ -23,10 +23,12 @@ class _FinitePositionCore(RealLebaiAdapter):
     _stop_blocking_motion_methods=frozenset({'movej','move_pvat','set_claw'})
     _immediate_stop_latch_methods=frozenset({'movej','move_pvat'})
 
-    def __init__(self,settings,*,client_factory=None,backend_label=None,position_model=None,**kwargs):
+    def __init__(self,settings,*,client_factory=None,backend_label=None,position_model=None,arrival_policy='strict',**kwargs):
         if client_factory is None or position_model is None:
             raise ValueError('position_explicit_injection_required')
         self.position_model=position_model;self.position_binding=None
+        self.position_arrival_policy=position_arrival_policy(arrival_policy)
+        self._position_policy_binding=self.position_arrival_policy
         self._position_plan=None;self._position_plan_observer=None
         self.position_busy=False;self.position_aborted=False
         self._position_acceleration=PositionAccelerationMonitor(min(.2,settings.control.max_joint_acceleration_radps2))
@@ -55,7 +57,8 @@ class _FinitePositionCore(RealLebaiAdapter):
         return self.position_binding
 
     def _position_health(self,binding):
-        if (binding is not self.position_binding or binding.connection is not self._client
+        if (self.position_arrival_policy is not self._position_policy_binding
+                or binding is not self.position_binding or binding.connection is not self._client
                 or self._client is None or self._disconnecting or self._latched_fault
                 or self.position_aborted or self._snapshot_calls.closed
                 or self._motion_calls.unknown_methods or self._snapshot_calls.unknown_methods
@@ -151,7 +154,7 @@ class _FinitePositionCore(RealLebaiAdapter):
                 # The renewed timestamp is backed by a new read, never assigned to old feedback.
                 self._position_plan_observer=fresh
                 self._position_plan=PositionPlan(binding,intent.seq,self._position_sample(fresh),p,q,goal,
-                    audit.joint_speed,audit.joint_acceleration,self._clock(),audit)
+                    audit.joint_speed,audit.joint_acceleration,self._clock(),audit,self.position_arrival_policy)
                 return self._position_plan
         except TimeoutError:
             raise ValueError('position_planning_expired') from None
@@ -160,7 +163,8 @@ class _FinitePositionCore(RealLebaiAdapter):
         entered=False;owned=False;entry_ns=None;motion_id=None;final=None;reason=None;stable=None;anchor=None;good=0;last=None
         binding=plan.binding
         try:
-            if plan is not self._position_plan or self.position_busy:raise ValueError('position_plan_obsolete')
+            if (plan is not self._position_plan or self.position_busy
+                    or plan.arrival_policy is not self.position_arrival_policy):raise ValueError('position_plan_obsolete')
             self._position_plan=None;self._position_health(binding);before_entry()
             self.position_busy=True;owned=True
             async with self._sdk_lock:
@@ -176,7 +180,7 @@ class _FinitePositionCore(RealLebaiAdapter):
                     revoked=lambda:self.position_aborted,entered=lambda:entered and self._position_native_entered(),
                     native_result_unknown=self._position_native_unknown)
             if type(motion_id) is not int or motion_id<=0:raise ValueError('position_invalid_motion_id')
-            end=entry_ns+STEP_NS
+            policy=plan.arrival_policy;end=entry_ns+policy.completion_ns
             while self._clock()<end:
                 monitor_authorize();self._position_health(binding)
                 s=await self._read_snapshot(read_purpose='position_progress')
@@ -191,12 +195,12 @@ class _FinitePositionCore(RealLebaiAdapter):
                 check=evaluate_position_arrival(plan,final,motion_id=motion_id)
                 if check is None:
                     if (last is None or final.captured_ns-last>=INPUT_NS or anchor is None
-                            or math.dist(final.tcp_p,anchor.tcp_p)>min(1e-5,math.dist(plan.target_p,plan.start.tcp_p)*.02)
-                            or max(abs(a-b) for a,b in zip(final.actual_q,anchor.actual_q))>1e-5):
+                            or math.dist(final.tcp_p,anchor.tcp_p)>policy.stable_tcp_drift_m
+                            or max(abs(a-b) for a,b in zip(final.actual_q,anchor.actual_q))>policy.stable_joint_drift_rad):
                         stable=final.captured_ns;good=0;anchor=final
                     if stable is None:stable=final.captured_ns;anchor=final
                     good+=1
-                    if good>=3 and final.captured_ns-stable>=100_000_000:
+                    if good>=3 and final.captured_ns-stable>=policy.stable_span_ns:
                         self._motion_accepted=self._motion_write_stop_required=False
                         return PositionResult(True,motion_id,True,False,final,None)
                 else:
@@ -209,7 +213,7 @@ class _FinitePositionCore(RealLebaiAdapter):
                         settling=progress<=length+1e-12  # Trailing the goal, never excess overshoot.
                     # FINISHED describes the controller task, not physical
                     # arrival. Give known trailing/settling feedback the rest
-                    # of the original STEP_NS; all boundaries still run each
+                    # of the fixed policy window; all boundaries still run each
                     # iteration and no additional target is submitted.
                     if final.task_state=='FINISHED' and check!='position_not_finished' and not settling:
                         raise ValueError(check)
