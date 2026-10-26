@@ -2,7 +2,7 @@ import {Quaternion, Vector3} from 'three';
 import type {GripperRequestMessage, GripperResultMessage, RobotStateMessage, VRFrame, Vec3, Quat} from '../protocol/messages';
 import {FINITE_POSITION_DEADZONE} from './finitePositionInput';
 
-type Action = 'joystick' | 'z+' | 'z-' | 'spin+' | 'spin-' | 'open' | 'close';
+type Action = 'joystick' | 'z+' | 'z-' | 'pitch+' | 'pitch-' | 'spin+' | 'spin-' | 'open' | 'close';
 const CLAW_RATE = .15;
 const CLAW_INTERVAL_MS = 100;
 
@@ -36,7 +36,7 @@ export class HoldControlPanel {
     private readonly now: () => number = () => performance.now(),
     private readonly onRelease: () => void = () => {},
     private readonly cancelRequest: (requestId: string) => void = () => {},
-    private readonly positionIntent:(vector:Vec3,event:'held'|'release'|'abort',reason?:string)=>void=()=>{}) {
+    private readonly positionIntent:(vector:Vec3,event:'held'|'release'|'abort',reason?:string,pitch?:number)=>void=()=>{}) {
     root.classList.add('hold-control-panel');
     root.innerHTML = `<h2>手动操纵</h2>
       <div class="joystick-layout">
@@ -49,6 +49,9 @@ export class HoldControlPanel {
         <div class="axis-controls"><span>高度</span>
           <button type="button" data-hold="z+" disabled>上升 +Z</button>
           <button type="button" data-hold="z-" disabled>下降 −Z</button>
+          <span>工具俯仰</span>
+          <button type="button" data-hold="pitch+" disabled>抬头 ＋</button>
+          <button type="button" data-hold="pitch-" disabled>低头 −</button>
           <span>工具自转</span><div class="spin-buttons">
             <button type="button" data-hold="spin-" disabled aria-label="逆向自转">↶</button>
             <button type="button" data-hold="spin+" disabled aria-label="顺向自转">↷</button>
@@ -118,8 +121,11 @@ export class HoldControlPanel {
       else this.cancel(!fresh?'feedback_or_tracking':'frame_gap');
     }
     if(this.positionCandidate&&this.motionHeld()&&fresh){
-      const v:Vec3=this.action==='joystick'?[this.xy.x,this.xy.y,0]:[0,0,this.action==='z+'?1:-1];
-      this.positionIntent(v,'held');
+      if(this.action?.startsWith('pitch'))this.positionIntent([0,0,0],'held',undefined,this.action==='pitch+'?1:-1);
+      else {
+        const v:Vec3=this.action==='joystick'?[this.xy.x,this.xy.y,0]:[0,0,this.action==='z+'?1:-1];
+        this.positionIntent(v,'held');
+      }
     }
     if (!this.positionCandidate&&this.motionHeld() && this.state?.mode === 'ACTIVE') {
       // delta is milliseconds; bounded 20-ms integration, as for VR frames.
@@ -191,8 +197,11 @@ export class HoldControlPanel {
     for (const button of this.root.querySelectorAll<HTMLButtonElement>('[data-joystick],[data-hold]')) {
       button.disabled = !this.fresh() || this.pending !== null || movingWithoutGesture
         || this.action === 'open' || this.action === 'close'
-        || (!!button.dataset.hold?.startsWith('spin') && (this.positionCandidate||!this.state?.target_control?.tool_spin_supported));
+        || (!!button.dataset.hold?.startsWith('spin') && (this.positionCandidate||!this.state?.target_control?.tool_spin_supported))
+        || (!!button.dataset.hold?.startsWith('pitch') && (!this.positionCandidate||!this.state?.finite_position?.pitch_enabled));
       button.classList.toggle('is-held', button === this.capture);
+      if(button.dataset.hold?.startsWith('pitch'))button.title=this.state?.finite_position?.pitch_enabled
+        ?'绕工具自身横轴俯仰；松手完成当前小步并保持姿态':'本次运行范围未包含俯仰控制';
     }
     for (const button of this.root.querySelectorAll<HTMLButtonElement>('[data-claw]')) {
       button.disabled = !this.clawReady() || this.motionHeld() || finiteBusy
@@ -202,7 +211,9 @@ export class HoldControlPanel {
     this.status.textContent = !this.enabled ? '先解锁，再点击进入准备姿态' : this.positionCandidate&&this.state?.finite_position?.phase==='draining'?'松开后正在完成当前小步'
       : this.motionHeld() ? (this.positionCandidate?'长按每步 2 mm；松开后完成当前小步':'摇杆松开回中停止；坐标固定于机械臂基座')
       : this.action === 'open' || this.action === 'close' ? `目标开口 ${((1 - this.clawTarget) * 100).toFixed(0)}% · 松开保持`
-      : this.pending ? '等待上次夹爪请求收尾；不自动重发' : this.positionCandidate?'每步 2 mm；长按摇杆或升降，松开完成当前步':'摇杆控制平面；升降、自转和夹爪长按操作';
+      : this.pending ? '等待上次夹爪请求收尾；不自动重发' : this.positionCandidate?
+        this.state?.finite_position?.pitch_enabled?'平移每步 2 mm · 俯仰每步 0.5°；松开保持':'每步 2 mm；长按摇杆或升降，松开完成当前步'
+        :'摇杆控制平面；升降、自转和夹爪长按操作';
   }
   private moveStick(e: PointerEvent): void {
     const box = this.stick.getBoundingClientRect(), radius = Math.max(1, Math.min(box.width, box.height) / 2);

@@ -18,7 +18,7 @@ from scripts import real_robot_finite_position as single
 CONFIRM='I_APPROVE_ONE_BOUNDED_WEB_FINITE_POSITION_AND_PROGRESSIVE_GRIPPER_SESSION'
 DURATION_NS=300_000_000_000
 CLEANUP_NS=5_000_000_000
-MOVE_LIMIT=21  # one preparation and at most twenty finite translation steps
+MOVE_LIMIT=21  # one preparation and at most twenty finite Cartesian steps
 CLAW_LIMIT=100
 STOP_LIMIT=4
 READ_LIMIT=100000
@@ -111,6 +111,8 @@ def preview(p,web_directory):
         normal_release='finish_current_step_no_next_target',unlock_moves=False,
         prepare_requires_separate_button=True,prepare_preliminary_stop=True,
         vr_enabled=p.get('allow_vr',False),
+        pitch_enabled=p.get('allow_pitch',False),pitch_frame='tool_local_x',pitch_step_deg=.5,pitch_range_deg=20,
+        combined_step_m=.001,combined_pitch_step_deg=.25,
         progressive_gripper=True,home_enabled=False,
         tool_spin_enabled=False,automatic_retry=False,automatic_resume=False,
         stop_limits_ms=[200,300,500],motion_time_stop_verified=False,hardware_verified=False,
@@ -157,11 +159,12 @@ def create_web_app(p,web_directory,window,client_factory):
         return WindowClient(client,window)
     app=create_app(settings=settings,client_factory=factory,backend_label='LEBAI',
         real_finite_position=True,real_position_authorize=window.check,real_position_model=p['model'],
-        real_position_vr=p.get('allow_vr',False))
+        real_position_vr=p.get('allow_vr',False),real_position_pitch=p.get('allow_pitch',False))
     @app.get('/control/identity')
     async def control_identity():
         return dict(runtime='LEBAI',target_strategy='finite_position_web',hardware_verified=False,
             vr_enabled=p.get('allow_vr',False),
+            pitch_enabled=p.get('allow_pitch',False),
             motion_time_stop_verified=False,normal_release='finish_current_step_no_next_target',
             remaining_s=max(0,(DURATION_NS-(window.clock()-window.started))/1e9),
             native_entries=dict(window.native_entries),budget_entries=dict(window.entries),home_enabled=False)
@@ -229,6 +232,7 @@ def parser():
     p.add_argument('--web-directory',type=Path,default=ROOT/'web/dist')
     p.add_argument('--execute',action='store_true')
     p.add_argument('--allow-vr',action='store_true',help='Include VR input in the independently approved session scope')
+    p.add_argument('--allow-pitch',action='store_true',help='Include tool-local pitch in the independently approved session scope')
     p.add_argument('--approved-preview',type=Path);p.add_argument('--expected-preview-sha256')
     p.add_argument('--expires-utc');p.add_argument('--confirm')
     return p
@@ -239,6 +243,7 @@ def main(argv=None):
     p=single.prepare(args.config,args.reference_survey,args.ready_pose,args.output,
         expires=args.expires_utc,arrival_policy='coarse_grasp')
     p['allow_vr']=args.allow_vr
+    p['allow_pitch']=args.allow_pitch
     row=preview(p,args.web_directory)
     if not args.execute:print(json.dumps(row,indent=2));return 0
     if not all((args.approved_preview,args.expected_preview_sha256,args.expires_utc,args.confirm)):

@@ -3,22 +3,29 @@ import math
 import numpy as np
 from scipy.spatial.transform import Rotation
 from app.control.finite_position_types import (MAX_STEP_M,MIN_PROGRESS_M,MAX_ENDPOINT_ERROR_M,
-    JOINT_ENDPOINT_TOLERANCE_RAD,PathAudit)
+    JOINT_ENDPOINT_TOLERANCE_RAD,PathAudit,MAX_PITCH_STEP_RAD,MAX_PITCH_RANGE_RAD)
 
 FRACTIONS=(0.,.25,.5,.75,1.)
 
 
 def build_position_target(sample,intent):
     d=np.asarray(intent.vector)*MAX_STEP_M
-    if np.linalg.norm(d)<1e-7:raise ValueError('position_unresolvable_step')
-    return tuple(float(x) for x in np.asarray(sample.tcp_p)+d),sample.tcp_q
+    if np.linalg.norm(d)<1e-7 and not intent.pitch:raise ValueError('position_unresolvable_step')
+    # Coupled translation/rotation share one smaller geometric step. Summing
+    # two full steps can exceed the unchanged joint/duration limits near a wrist.
+    scale=.5 if intent.pitch and np.linalg.norm(d)>1e-7 else 1.
+    d=d*scale
+    q=sample.tcp_q
+    if intent.pitch:
+        q=tuple(map(float,(Rotation.from_quat(q)*Rotation.from_rotvec([intent.pitch*MAX_PITCH_STEP_RAD*scale,0.,0.])).as_quat()))
+    return tuple(float(x) for x in np.asarray(sample.tcp_p)+d),q
 
 
 def angle(a,b):
     return (Rotation.from_quat(a)*Rotation.from_quat(b).inv()).magnitude()
 
 
-def audit_position_path(start,goal_joints,*,fk_samples,settings,model):
+def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=None,pitch_reference=None):
     if len(fk_samples)!=5:raise ValueError('position_fk_samples_required')
     q0=np.asarray(start.actual_q);dq=np.asarray(goal_joints)-q0
     distance=float(np.max(np.abs(dq)))
@@ -37,8 +44,12 @@ def audit_position_path(start,goal_joints,*,fk_samples,settings,model):
             raise ValueError('position_workspace')
         mp,mr=model.forward(tuple(q))
         if math.dist(mp,p)>1e-5 or angle(mr,r)>1e-4:raise ValueError('position_model_mismatch')
-        if angle(start.tcp_q,r)>math.radians(settings.tcp_rotation_tolerance_deg):
+        relative=Rotation.from_quat(start.tcp_q).inv()*Rotation.from_quat(target_q or start.tcp_q)
+        expected=(Rotation.from_quat(start.tcp_q)*Rotation.from_rotvec(relative.as_rotvec()*f)).as_quat()
+        if angle(expected,r)>math.radians(settings.tcp_rotation_tolerance_deg):
             raise ValueError('position_path_rotation')
+        if pitch_reference is not None and angle(pitch_reference,r)>MAX_PITCH_RANGE_RAD+1e-10:
+            raise ValueError('position_pitch_limit')
     v=min(.05,settings.control.max_joint_speed_radps)
     a=min(.2,settings.control.max_joint_acceleration_radps2)
     for _ in range(11):
@@ -73,10 +84,19 @@ def evaluate_position_arrival(plan,sample,*,motion_id,tail=False):
     if str(sample.robot_state)!='IDLE' or sample.task_state!='FINISHED':return 'position_not_finished'
     delta=np.array(plan.target_p)-plan.start.tcp_p;length=float(np.linalg.norm(delta))
     actual=np.array(sample.tcp_p)-plan.start.tcp_p
-    progress=float(actual@delta/length)
-    cross=float(np.linalg.norm(actual-progress*delta/length))
-    if progress<MIN_PROGRESS_M-1e-12:return 'position_no_actual_progress'
-    if cross>length*.2:return 'position_lateral_deviation'
+    rotation=(Rotation.from_quat(plan.start.tcp_q).inv()*Rotation.from_quat(plan.target_q)).as_rotvec()
+    rotation_length=float(np.linalg.norm(rotation))
+    if length>1e-9:
+        progress=float(actual@delta/length)
+        cross=float(np.linalg.norm(actual-progress*delta/length))
+        minimum=length*.5 if rotation_length>1e-9 else MIN_PROGRESS_M
+        if progress<minimum-1e-12:return 'position_no_actual_progress'
+        if cross>length*.2:return 'position_lateral_deviation'
+    elif np.linalg.norm(actual)>.0001:return 'position_lateral_deviation'
+    if rotation_length>1e-9:
+        observed=(Rotation.from_quat(plan.start.tcp_q).inv()*Rotation.from_quat(sample.tcp_q)).as_rotvec()
+        angular_progress=float(observed@rotation/rotation_length)
+        if angular_progress<rotation_length*.5-1e-12:return 'position_no_actual_progress'
     if angle(sample.tcp_q,plan.target_q)>plan.arrival_policy.orientation_error_rad:return 'position_orientation_error'
     if math.dist(sample.tcp_p,plan.target_p)>plan.arrival_policy.endpoint_error_m+1e-12:return 'position_endpoint_error'
     if max(abs(x-y) for x,y in zip(sample.actual_q,plan.goal_joints))>JOINT_ENDPOINT_TOLERANCE_RAD:return 'position_joint_endpoint'

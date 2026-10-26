@@ -93,7 +93,10 @@ def build_backend(
     real_position_authorize=None,
     real_position_model=None,
     real_position_vr: bool = False,
+    real_position_pitch: bool = False,
 ) -> RobotBackend:
+    if type(real_position_pitch) is not bool or (real_position_pitch and not real_finite_position):
+        raise ValueError('position_pitch_explicit_selection_required')
     if type(real_finite_position) is not bool:raise ValueError('invalid_real_finite_position_selection')
     if real_finite_position:
         if (offline_finite_position or backend_label!='LEBAI' or settings.backend!='lebai'
@@ -105,6 +108,7 @@ def build_backend(
         return RealFinitePositionAdapter(settings.lebai,client_factory=client_factory,
             position_model=real_position_model,authorize=real_position_authorize,
             allow_vr=real_position_vr,
+            allow_pitch=real_position_pitch,
             event_callback=recorder.write_event)
     if type(offline_finite_position) is not bool:raise ValueError('invalid_finite_position_selection')
     if offline_finite_position:
@@ -254,6 +258,7 @@ def create_app(
     real_position_authorize=None,
     real_position_model=None,
     real_position_vr: bool = False,
+    real_position_pitch: bool = False,
 ) -> FastAPI:
     runtime_settings = settings if settings is not None else Settings.load()
     runtime_backend = backend_label or (
@@ -284,6 +289,7 @@ def create_app(
             real_position_authorize=real_position_authorize,
             real_position_model=real_position_model,
             real_position_vr=real_position_vr,
+            real_position_pitch=real_position_pitch,
         )
         latest = LatestVRFrame()
         preparation_enabled = bool(

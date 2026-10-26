@@ -19,6 +19,34 @@ async def test_real_web_default_rejects_xr_finite_intents():
         assert c.write_calls==[]
     finally:await a.disconnect()
 
+
+async def test_real_web_does_not_inherit_offline_pitch_permission():
+    a,c,clock=await make();await a.connect()
+    control=RobotControl(backend=a,latest=LatestVRFrame(),clock=clock,recorder=NoopRecorder())
+    try:
+        control.machine.mode=TeleopMode.ARMED;control._install_position_session()
+        assert control._position_status_message().pitch_enabled is False
+        with pytest.raises(ValueError,match='pitch_not_authorized'):
+            control.accept_position_input(_parse_message(dict(v=1,type='finite_position_input',
+                session_id='web',generation=control.control_generation,seq=1,
+                kind='held',vector=[0,0,0],pitch=1.)),clock.now_ns())
+        assert not c.write_calls
+    finally:await a.disconnect()
+
+
+async def test_explicit_pitch_reaches_real_selector_only_with_injected_client():
+    from app.main import build_backend
+    from app.config import Settings
+    from dataclasses import replace
+    s,c,clock=profile();calls=[]
+    async def factory(ip):calls.append(ip);return c
+    a=build_backend(replace(Settings.load(),backend='lebai',lebai=s,segmented_target=None,transactional_target=None),
+        recorder=NoopRecorder(),client_factory=factory,
+        backend_label='LEBAI',real_finite_position=True,real_position_authorize=lambda:None,
+        real_position_model=c.model,real_position_pitch=True)
+    assert a.position_pitch_enabled is True and a.position_vr_enabled is False
+    assert not calls  # Construction and capability selection never connect.
+
 async def test_explicit_vr_capability_accepts_input_without_sending_a_target():
     from app.robots.finite_position_web import RealFinitePositionAdapter
     s,c,clock=profile()

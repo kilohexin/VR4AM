@@ -12,7 +12,7 @@ function pointer(type:string,x=100,y=100,id=7):Event{const e=new Event(type,{bub
 const cleanup:Array<()=>void>=[];
 afterEach(()=>{cleanup.splice(0).forEach(f=>f());Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});});
 function rig(candidate:boolean|'real'=false){const root=document.createElement('div');document.body.append(root);let now=0;
- const base:RobotStateMessage=candidate?{...state,backend:candidate==='real'?'LEBAI':'LEBAI_FAKE',finite_position:{policy:candidate==='real'?'finite_position_web':'finite_position_offline',phase:'ready',generation:1,entered_steps:0,motion_id:null,reason:null,hardware_verified:false}}:state;
+ const base:RobotStateMessage=candidate?{...state,backend:candidate==='real'?'LEBAI':'LEBAI_FAKE',finite_position:{policy:candidate==='real'?'finite_position_web':'finite_position_offline',phase:'ready',generation:1,entered_steps:0,motion_id:null,reason:null,hardware_verified:false,pitch_enabled:true}}:state;
  const send=vi.fn(),release=vi.fn(),cancel=vi.fn();
  const position=vi.fn();
  const panel=new HoldControlPanel(root,send,()=>now,release,cancel,position);
@@ -25,6 +25,21 @@ function rig(candidate:boolean|'real'=false){const root=document.createElement('
  panel.update(base,true);cleanup.push(()=>{panel.dispose();root.remove();});
  return {root,panel,send,release,cancel,position,find,step,clock:(t:number)=>{now=t;}};
 }
+
+it('holds tool pitch through the finite intent and keeps the TCP translation zero',()=>{
+ const r=rig(true),button=r.find('[data-hold="pitch+"]');expect(button).not.toBeNull();
+ expect(button.disabled).toBe(false);button.dispatchEvent(pointer('pointerdown'));
+ const f=r.panel.applyFrame(frame(0));expect(f.right.grip).toBe(false);
+ expect(r.position.mock.calls.at(-1)).toEqual([[0,0,0],'held',undefined,1]);
+ button.dispatchEvent(pointer('pointerup'));expect(r.position.mock.calls.at(-1)?.[1]).toBe('release');
+ expect(r.release).not.toHaveBeenCalled();
+});
+
+it('does not advertise or send pitch when the backend capability is absent',()=>{
+ const r=rig('real');r.panel.update({...state,backend:'LEBAI',finite_position:{policy:'finite_position_web',
+ phase:'ready',generation:1,entered_steps:0,motion_id:null,reason:null,hardware_verified:false}},true);
+ expect(r.find('[data-hold="pitch+"]').disabled).toBe(true);
+});
 
 it('real web uses finite intents and natural release, never legacy grip translation',()=>{
  const r=rig('real'),stick=r.find('[data-joystick]');

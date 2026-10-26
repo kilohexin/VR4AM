@@ -18,6 +18,24 @@ async def fixture():
     return s,a,c,clock
 
 
+async def test_pitch_boundary_hold_release_retires_held_watchdog_and_can_reverse():
+    s,a,c,clock=await fixture();original=a.plan_step
+    async def limited(*args,**kwargs):raise ValueError('position_pitch_limit')
+    a.plan_step=limited
+    try:
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(0.,0.,0.),1.))
+        await drive(s,clock,until=lambda:s.phase=='hold' and not s.busy)
+        s.offer(PositionIntent('web',1,2,clock.now_ns(),'release',(0.,0.,0.)))
+        await clock.sleep(.2);await s.advance()
+        assert s.phase=='hold' and not s.closed
+        assert s.gate.released and s.gate.latest.kind=='release'
+        a.plan_step=original
+        s.offer(PositionIntent('web',1,3,clock.now_ns(),'held',(-1.,0.,0.)))
+        assert s.phase=='ready' and s.gate.latest.vector==(-1.,0.,0.)
+        assert c.write_calls==[]
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
 async def drive(s,clock,*,hold=False,until=lambda:False):
     for i in range(3000):
         if hold:s.offer(PositionIntent('web',1,s._last_seq+1,clock.now_ns(),'held',(1.,0.,0.)))

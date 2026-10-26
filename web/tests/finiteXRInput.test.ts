@@ -1,6 +1,7 @@
 import {it,expect} from 'vitest';
+import {Quaternion,Vector3} from 'three';
 import {FinitePositionInput} from '../src/ui/finitePositionInput';
-import {FiniteXRInput,finiteXRTransportFrame} from '../src/xr/finiteInput';
+import {FiniteXRInput,finiteXRTransportFrame,relativeToolPitch} from '../src/xr/finiteInput';
 import type {RobotStateMessage,VRFrame} from '../src/protocol/messages';
 
 const state:RobotStateMessage={v:1,type:'robot_state',server_mono_ns:1,mode:'ARMED',robot_state:'IDLE',
@@ -22,6 +23,33 @@ function rig(){
    right:{p,q:[0,0,0,1],grip,trigger}} as VRFrame);}
  return {xr,input,inputs,claws,cancelled,stops,frame,setNow:(t:number)=>{now=t;}};
 }
+it('follows relative hand pitch while keeping pure pitch translation zero and holds on release',()=>{
+ const r=rig();const s={...state,finite_position:{...state.finite_position!,pitch_enabled:true}};
+ function apply(t:number,grip:boolean,q:[number,number,number,number]){
+  r.setNow(t);r.xr.update(s,t);r.xr.apply({v:1,type:'vr_frame',session_id:'quest',seq:t,client_mono_ms:t,
+   tracking_valid:true,visibility:'visible',right:{p:[0,0,0],q,grip,trigger:0}});
+ }
+ apply(0,false,[0,0,0,1]);apply(20,true,[0,0,0,1]);
+ const q=new Quaternion().setFromAxisAngle(new Vector3(1,0,0),Math.PI/90).toArray() as [number,number,number,number];
+ apply(40,true,q);expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[0,0,0],pitch:1});
+ apply(60,false,q);expect(r.inputs.at(-1).kind).toBe('release');expect(r.stops).toEqual([]);
+});
+
+it('extracts pitch in the captured hand frame and is invariant to quaternion signs',()=>{
+ const anchor=new Quaternion().setFromAxisAngle(new Vector3(0,1,0),1.2);
+ const target=anchor.clone().multiply(new Quaternion().setFromAxisAngle(new Vector3(1,0,0),.05));
+ const a=anchor.toArray() as [number,number,number,number],b=target.toArray() as typeof a;
+ expect(relativeToolPitch(a,b)).toBeCloseTo(.05);
+ expect(relativeToolPitch(a,b.map(x=>-x) as typeof a)).toBeCloseTo(.05);
+ expect(relativeToolPitch(a,anchor.clone().multiply(new Quaternion().setFromAxisAngle(new Vector3(0,1,0),.05)).toArray() as typeof a)).toBeCloseTo(0);
+});
+
+it.each([[NaN,0,0,1],[0,0,0,0],[0,0,0,2]])('revokes an invalid hand quaternion %s without replaying the held gesture',(...q)=>{
+ const r=rig();r.frame(0);r.frame(20,true);r.frame(40,true,[.01,0,0]);const count=r.inputs.length;
+ r.xr.apply({v:1,type:'vr_frame',session_id:'quest',seq:60,client_mono_ms:60,tracking_valid:true,
+  visibility:'visible',right:{p:[.1,0,0],q:q as [number,number,number,number],grip:true,trigger:0}});
+ expect(r.stops).toHaveLength(1);r.frame(80,true,[.1,0,0]);expect(r.inputs).toHaveLength(count);
+});
 it('maps a released-then-gripped hand into finite directions and releases without disarming',()=>{
  const r=rig();r.frame(0);r.frame(20,true);r.frame(40,true,[.01,0,0]);
  expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[1,0,0]});

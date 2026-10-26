@@ -10,7 +10,7 @@ import type {
 import type {TeleopConnectionStatus} from '../transport/teleopSocket';
 import type {XRSessionStatus} from '../xr/session';
 
-const DESKTOP_INPUT_HELP='桌面：鼠标左键拖动摇杆控制前后左右 · 长按升降、自转或夹爪开合 · 松开保持 · 右键只转视角';
+const DESKTOP_INPUT_HELP='桌面：鼠标左键拖动摇杆控制前后左右 · 长按升降、俯仰、自转或夹爪开合 · 松开保持 · 右键只转视角';
 const XR_INPUT_HELP='右 Grip 建立末端零位 · Trigger 控制夹爪 · 左摇杆平移平台 · 左 Grip+摇杆调高度 · 按下左摇杆归零';
 
 export interface ControllerHudState {

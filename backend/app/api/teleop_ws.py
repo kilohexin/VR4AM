@@ -396,7 +396,7 @@ async def _receive_operator_messages(
             else:
                 await control.recorder.write_event(dict(kind='finite_position_input',
                     input_seq=message.seq,generation=message.generation,event=message.kind,
-                    vector=list(message.vector),received_ns=received_ns),received_ns)
+                    vector=list(message.vector),pitch=message.pitch,received_ns=received_ns),received_ns)
             continue
 
         if isinstance(message,GripperRequestMessage):

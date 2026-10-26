@@ -53,3 +53,29 @@ async def test_demo_inverse_yields_to_release_while_solving(monkeypatch):
         result=await client.kinematics_inverse(pose_to_lebai(Pose(p=(p[0]+.0005,p[1],p[2]),q=q)),list(s.lebai.teleop_ready_q))
         await task;assert result is not None and order[0]=='release'
     finally:released.set();task.cancel()
+
+
+@pytest.mark.parametrize('direction',[-1.,1.])
+@pytest.mark.parametrize('translation',[False,True])
+async def test_lm3_model_pitch_plans_and_naturally_arrives_without_stop(direction,translation):
+    import math
+    from app.robots.finite_position_adapter import FinitePositionAdapter
+    from app.control.finite_position_types import PositionIntent
+    from app.robots.finite_position_plan import angle
+    from tests.robots.test_lebai_adapter_control import FakeClock
+    m=api();settings=m.demo_settings().lebai;clock=FakeClock()
+    client=m.FinitePositionDemoClient(settings,clock=clock.now_ns,initial_q=settings.teleop_ready_q)
+    async def factory(ip):
+        assert ip=='digital-twin'
+        return client
+    adapter=FinitePositionAdapter(settings,client_factory=factory,backend_label='LEBAI_FAKE',
+        position_model=m.PositionDemoModel(),clock=clock.now_ns,sleep=clock.sleep)
+    await adapter.connect();adapter.bind_position_generation(1)
+    try:
+        plan=await adapter.plan_step(PositionIntent('web',1,1,clock.now_ns(),'held',(0.,0.,1. if translation else 0.),direction),authorize=lambda:None)
+        result=await adapter.execute_step(plan,before_entry=lambda:None,monitor_authorize=lambda:None,on_entered=lambda:None)
+        assert result.complete,result
+        assert math.dist(result.final_sample.tcp_p,plan.target_p)<.0001
+        assert angle(result.final_sample.tcp_q,plan.target_q)<math.radians(.1)
+        assert [x[0] for x in client._write_calls]==['movej']
+    finally:await adapter.disconnect()

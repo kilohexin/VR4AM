@@ -68,6 +68,17 @@ def test_same_direction_updates_do_not_starve_plan_but_reverse_does():
     with pytest.raises(ValueError):g.require_entry(p)
 
 
+def test_pitch_reversal_or_release_revokes_an_unsent_plan():
+    m,g,now=fixture()
+    g.offer(m.PositionIntent('web',1,1,0,'held',(0.,0.,0.),1.));p=g.take_latest()
+    g.offer(m.PositionIntent('web',1,2,0,'held',(0.,0.,0.),-1.))
+    with pytest.raises(ValueError,match='entry_revoked'):g.require_entry(p)
+    g.finish();now[0]=1;g.offer(m.PositionIntent('web',1,3,1,'held',(0.,0.,0.),-1.));p=g.take_latest()
+    assert p is not None
+    g.offer(m.PositionIntent('web',1,4,1,'release',(0.,0.,0.)))
+    with pytest.raises(ValueError,match='entry_revoked'):g.require_entry(p)
+
+
 def test_fresh_real_updates_can_authorize_a_plan_older_than_input_ttl():
     m,g,now=fixture();offer(m,g);p=g.take_latest()
     for seq in range(2,6):

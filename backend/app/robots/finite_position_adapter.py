@@ -20,6 +20,7 @@ def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True).encode(
 class _FinitePositionCore(RealLebaiAdapter):
     """Shared executor. Requires an explicit injected factory; no native loader."""
     position_candidate=False
+    position_pitch_enabled=False
     _stop_blocking_motion_methods=frozenset({'movej','move_pvat','set_claw'})
     _immediate_stop_latch_methods=frozenset({'movej','move_pvat'})
 
@@ -32,6 +33,7 @@ class _FinitePositionCore(RealLebaiAdapter):
         self.position_initial_observations=[]
         self._position_plan=None;self._position_plan_observer=None
         self.position_busy=False;self.position_aborted=False
+        self._position_pitch_reference=None
         self._position_acceleration=PositionAccelerationMonitor(min(.2,settings.control.max_joint_acceleration_radps2))
         self._position_config=digest(asdict(settings))
         self._position_sources={Path(__file__),Path(__file__).with_name('finite_position_plan.py'),
@@ -54,6 +56,7 @@ class _FinitePositionCore(RealLebaiAdapter):
         self.position_binding=PositionBinding(self._client,generation,self._position_config,
             digest(asdict(self.settings.expected_tcp)))
         self.position_aborted=False
+        self._position_pitch_reference=tuple(self._snapshot.actual_tcp.q) if self._snapshot is not None else None
         self._position_acceleration.reset()
         return self.position_binding
 
@@ -139,6 +142,7 @@ class _FinitePositionCore(RealLebaiAdapter):
             await self._sleep(QUIET_OBSERVATION_INTERVAL_S)
 
     async def plan_step(self,intent,*,authorize):
+        if intent.pitch and not self.position_pitch_enabled:raise ValueError('position_pitch_not_authorized')
         binding=self.position_binding;self._position_health(binding);authorize()
         if self.position_busy:raise ValueError('position_busy')
         self._position_plan=None;self._position_plan_observer=None
@@ -155,6 +159,9 @@ class _FinitePositionCore(RealLebaiAdapter):
                 if any(abs(x)>1e-8 for v in (s.actual_qd,s.actual_qdd,s.target_qd,s.target_qdd) for x in v):
                     raise ValueError('position_initial_not_stable')
                 start=self._position_sample(s);p,q=build_position_target(start,intent)
+                if intent.pitch and (self._position_pitch_reference is None
+                        or angle(self._position_pitch_reference,q)>MAX_PITCH_RANGE_RAD+1e-10):
+                    raise ValueError('position_pitch_limit')
                 raw=await self._position_math('kinematics_inverse',lambda:self._client.kinematics_inverse(
                     pose_to_lebai(Pose(p=p,q=q)),list(s.actual_q)),live)
                 if raw is None:raise ValueError('position_ik_unreachable')
@@ -166,10 +173,12 @@ class _FinitePositionCore(RealLebaiAdapter):
                 if math.dist(fk[-1][0],p)>1e-5 or angle(fk[-1][1],q)>1e-4:
                     raise ValueError('position_ik_endpoint_mismatch')
                 audit=await asyncio.to_thread(audit_position_path,start,goal,fk_samples=tuple(fk),
-                    settings=self.settings,model=self.position_model)
+                    settings=self.settings,model=self.position_model,target_q=q,
+                    pitch_reference=self._position_pitch_reference if self.position_pitch_enabled else None)
                 live()
                 await self._emit_event(dict(kind='finite_position_plan',input_seq=intent.seq,
-                    start_tcp=list(start.tcp_p),target_tcp=list(p),goal_joints=list(goal),audit=asdict(audit),
+                    start_tcp=list(start.tcp_p),target_tcp=list(p),target_orientation=list(q),
+                    pitch=intent.pitch,goal_joints=list(goal),audit=asdict(audit),
                     planning_timeout_ms=PLAN_NS/1e6,entry_policy='fresh_identical_start_after_planning'))
                 live()
                 fresh=await self._read_snapshot(read_purpose='position_revalidate');live()
@@ -235,8 +244,10 @@ class _FinitePositionCore(RealLebaiAdapter):
                     if check=='position_endpoint_error':
                         delta=tuple(b-a for a,b in zip(plan.start.tcp_p,plan.target_p))
                         length=math.hypot(*delta)
-                        progress=sum((p-a)*d for p,a,d in zip(final.tcp_p,plan.start.tcp_p,delta))/length
-                        settling=progress<=length+1e-12  # Trailing the goal, never excess overshoot.
+                        if length>1e-9:
+                            progress=sum((p-a)*d for p,a,d in zip(final.tcp_p,plan.start.tcp_p,delta))/length
+                            settling=progress<=length+1e-12  # Trailing the goal, never excess overshoot.
+                        else:settling=False
                     # FINISHED describes the controller task, not physical
                     # arrival. Give known trailing/settling feedback the rest
                     # of the fixed policy window; all boundaries still run each
@@ -290,6 +301,7 @@ class FinitePositionAdapter(_FinitePositionCore):
     """Public demo selector remains Fake-only; no production registration."""
     position_candidate=True
     position_vr_enabled=True
+    position_pitch_enabled=True
 
     def __init__(self,settings,*,client_factory=None,backend_label=None,position_model=None,**kwargs):
         if (settings.ip!='digital-twin' or backend_label!='LEBAI_FAKE'

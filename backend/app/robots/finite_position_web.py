@@ -60,9 +60,11 @@ class RealFinitePositionAdapter(_FinitePositionCore):
     position_candidate=True
     position_policy='finite_position_web'
 
-    def __init__(self,settings,*,client_factory,position_model,authorize,allow_vr=False,**kwargs):
+    def __init__(self,settings,*,client_factory,position_model,authorize,allow_vr=False,allow_pitch=False,**kwargs):
         if type(allow_vr) is not bool:raise ValueError('position_invalid_vr_selection')
+        if type(allow_pitch) is not bool:raise ValueError('position_invalid_pitch_selection')
         self.position_vr_enabled=allow_vr
+        self.position_pitch_enabled=allow_pitch
         if (settings.mode!='control' or settings.ip in ('digital-twin','127.0.0.1','localhost')
                 or not callable(authorize) or position_model is None
                 or not 0<settings.control.max_joint_speed_radps<=.05

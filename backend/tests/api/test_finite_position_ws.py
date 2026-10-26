@@ -14,6 +14,37 @@ def test_new_position_input_parses_without_reinterpreting_stop():
     assert _parse_message(dict(v=1,type='disarm',request_id='stop')).type=='disarm'
 
 
+def test_optional_pitch_keeps_old_input_and_validates_release():
+    assert _parse_message(message()).pitch==0.
+    row=message(pitch=1.);row['vector']=[0.,0.,0.]
+    assert _parse_message(row).pitch==1.
+    for bad in (True,float('nan'),2.,'1'):
+        row['pitch']=bad
+        with pytest.raises((ValueError,ValidationError)):_parse_message(row)
+    row.update(pitch=1.,kind='release')
+    with pytest.raises((ValueError,ValidationError)):_parse_message(row)
+
+
+async def test_pitch_capability_is_explicit_and_not_client_selected():
+    from app.control.robot_control import RobotControl,LatestVRFrame
+    from app.recording.noop import NoopRecorder
+    from app.schemas.messages import TeleopMode
+    from tests.robots.test_finite_position_adapter import prepared
+    a,c,clock,_=await prepared();control=RobotControl(backend=a,latest=LatestVRFrame(),clock=clock,recorder=NoopRecorder())
+    try:
+        control.machine.mode=TeleopMode.ARMED;control._install_position_session()
+        assert control._position_status_message().pitch_enabled is True
+        row=message(pitch=1.);row.update(generation=control.control_generation,vector=[0.,0.,0.])
+        control.accept_position_input(_parse_message(row),clock.now_ns())
+        assert control.finite_position_session.gate.latest.pitch==1.
+        a.position_pitch_enabled=False
+        row['seq']=2
+        with pytest.raises(ValueError,match='pitch_not_authorized'):
+            control.accept_position_input(_parse_message(row),clock.now_ns())
+        assert not c.write_calls
+    finally:await control.stop();await a.disconnect()
+
+
 @pytest.mark.parametrize('field,value',[('vector',[True,0,0]),('generation',True),
     ('seq',2**53),('vector',[float('nan'),0,0]),('vector',[1,2]),('kind','stop')])
 def test_new_input_rejects_unsafe_fields(field,value):

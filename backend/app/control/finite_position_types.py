@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import math
 
 MAX_STEP_M=.002
+MAX_PITCH_STEP_RAD=math.radians(.5)
+MAX_PITCH_RANGE_RAD=math.radians(20.)
 INPUT_DEADZONE=.15
 MIN_PROGRESS_M=.001
 MAX_ENDPOINT_ERROR_M=.0005
@@ -76,6 +78,7 @@ class PositionIntent:
     received_ns: int
     kind: str
     vector: tuple
+    pitch: float=0.
 
     def __post_init__(self):
         if type(self.session_id) is not str or not 1<=len(self.session_id)<=128:
@@ -83,11 +86,15 @@ class PositionIntent:
         for x in (self.generation,self.seq,self.received_ns):integer(x)
         if self.kind not in ('held','release'):raise ValueError('position_invalid_kind')
         v=vector(self.vector,3);length=math.hypot(*v)
-        if self.kind=='release' and length:raise ValueError('position_release_vector')
+        if type(self.pitch) not in (int,float) or not math.isfinite(self.pitch) or abs(self.pitch)>1:
+            raise ValueError('position_invalid_pitch')
+        pitch=0. if abs(self.pitch)<=INPUT_DEADZONE else math.copysign(1.,self.pitch)
+        if self.kind=='release' and (length or self.pitch):raise ValueError('position_release_vector')
         if length<=INPUT_DEADZONE:v=(0.,0.,0.);length=0.
         else:v=tuple(x/length for x in v)
         object.__setattr__(self,'vector',v)
-        if not length:object.__setattr__(self,'kind','release')
+        object.__setattr__(self,'pitch',pitch)
+        if not length and not pitch:object.__setattr__(self,'kind','release')
 
 
 @dataclass(frozen=True)

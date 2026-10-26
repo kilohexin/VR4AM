@@ -25,6 +25,13 @@ def test_vr_opt_in_remains_default_off_in_preview_cli():
     assert m.parser().parse_args(args+['--allow-vr']).allow_vr is True
 
 
+def test_pitch_opt_in_is_default_off_and_does_not_select_execution():
+    m=api();args=['--config','a','--reference-survey','b','--ready-pose','c','--output','d']
+    assert m.parser().parse_args(args).allow_pitch is False
+    parsed=m.parser().parse_args(args+['--allow-pitch'])
+    assert parsed.allow_pitch is True and parsed.execute is False
+
+
 def test_budget_scope_rejects_late_motion_but_reserves_stop_and_readonly_cleanup():
     m=api();now=[0];checked=[]
     guard=m.WebWindow(lambda:checked.append(True),clock=lambda:now[0])
@@ -117,6 +124,13 @@ def test_preview_is_pure_and_binds_assets(tmp_path,monkeypatch,capsys):
     assert row['web_hashes'] and row['motion_authorized'] is False
     assert str(m.COMMON_CONFIG.resolve()) in row['input_hashes']
     assert row['application_settings_binding']['lebai']==row['settings_binding']
+    assert row['pitch_enabled'] is False
+    p['allow_pitch']=True
+    enabled=m.preview(p,web)
+    assert enabled['pitch_enabled'] is True and enabled['pitch_step_deg']==.5
+    assert enabled['combined_step_m']==.001 and enabled['combined_pitch_step_deg']==.25
+    assert enabled['pitch_range_deg']==20 and enabled['motion_authorized'] is False
+    assert row!=enabled
     assert not output.exists()
 
 
@@ -134,5 +148,9 @@ def test_common_config_change_after_preview_cannot_be_approved(tmp_path,monkeypa
     row=m.preview(p,web);approved=tmp_path/'approved.json';approved.write_text(json.dumps(row))
     digest=m.single.sha(approved)
     m.approve(p,row,approved,digest,expiry,m.CONFIRM)
+    p['allow_pitch']=True
+    with pytest.raises(ValueError,match='preview_mismatch'):
+        m.approve(p,m.preview(p,web),approved,digest,expiry,m.CONFIRM)
+    p['allow_pitch']=False
     common.write_text(common.read_text()+'\n# changed after approval\n')
     with pytest.raises(ValueError,match='sources_changed'):m.approve(p,row,approved,digest,expiry,m.CONFIRM)

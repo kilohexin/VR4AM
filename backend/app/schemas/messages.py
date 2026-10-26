@@ -149,6 +149,14 @@ class FinitePositionInputMessage(StrictMessage):
     seq: int = Field(strict=True,ge=0,le=2**53-1)
     kind: Literal['held','release']
     vector: Vec3
+    pitch: float=0.
+
+    @field_validator('pitch',mode='before')
+    @classmethod
+    def strict_pitch(cls,value):
+        if type(value) not in (int,float) or not math.isfinite(value) or abs(value)>1:
+            raise ValueError('position_invalid_pitch')
+        return float(value)
 
     @field_validator('vector',mode='before')
     @classmethod
@@ -158,12 +166,13 @@ class FinitePositionInputMessage(StrictMessage):
 
     @model_validator(mode='after')
     def release_is_zero(self):
-        if self.kind=='release' and any(self.vector):raise ValueError('position_release_vector')
+        if self.kind=='release' and (any(self.vector) or self.pitch):raise ValueError('position_release_vector')
         return self
 
 
 class FinitePositionStatus(StrictMessage):
     vr_enabled: bool = Field(default=False,strict=True)
+    pitch_enabled: bool = Field(default=False,strict=True)
     policy: Literal['finite_position_offline','finite_position_web']='finite_position_offline'
     phase: Literal['inactive','ready','planning','executing','draining','hold','fault']
     generation: int

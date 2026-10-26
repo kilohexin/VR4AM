@@ -1,6 +1,15 @@
 import {it,expect,vi} from 'vitest';
 import {FinitePositionInput} from '../src/ui/finitePositionInput';
 
+it('sends pure or combined pitch and releases both channels without a stop',()=>{
+ const send=vi.fn(),stop=vi.fn(),input=new FinitePositionInput(send,stop);input.reset('web',1);
+ input.offer([0,0,0],1);
+ expect(send.mock.calls.at(-1)?.[0]).toMatchObject({kind:'held',vector:[0,0,0],pitch:1});
+ input.offer([1,0,0],-1);expect(send.mock.calls.at(-1)?.[0]).toMatchObject({vector:[1,0,0],pitch:-1});
+ input.release();expect(send.mock.calls.at(-1)?.[0]).toMatchObject({kind:'release',vector:[0,0,0]});
+ expect(stop).not.toHaveBeenCalled();
+});
+
 it('separates normal release from abort and never replays after reset',()=>{
  const send=vi.fn(),stop=vi.fn(),input=new FinitePositionInput(send,stop);
  input.reset('first',3);input.offer([1,0,0]);input.release();

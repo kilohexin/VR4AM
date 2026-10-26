@@ -31,7 +31,11 @@ class FinitePositionSession:
             return
         if self.phase=='hold' and not self.busy:
             if intent.kind=='release':
-                self._rearm=True;self._last_seq=intent.seq;self._session=intent.session_id;return
+                # Validate a fresh release and retire the held input that hit
+                # the boundary. Keeping it would later trip the input watchdog.
+                # The binding/model reference remains fixed at preparation.
+                gate=PositionGate(self.binding,clock=self.clock);gate.offer(intent)
+                self.gate=gate;self._rearm=True;self._last_seq=intent.seq;self._session=intent.session_id;return
             elif self._rearm:
                 self.gate=PositionGate(self.binding,clock=self.clock);self.phase='ready';self.reason=None;self._rearm=False
         self.gate.offer(intent);self._last_seq=intent.seq;self._session=intent.session_id
@@ -72,8 +76,8 @@ class FinitePositionSession:
         except asyncio.CancelledError:raise
         except Exception as error:
             reason=str(error)
-            if reason in ('position_entry_revoked','position_unresolvable_step','position_snapshot_expired'):
-                self.phase='hold' if reason=='position_unresolvable_step' else 'ready';self.reason=reason
+            if reason in ('position_entry_revoked','position_unresolvable_step','position_snapshot_expired','position_pitch_limit'):
+                self.phase='hold' if reason in ('position_unresolvable_step','position_pitch_limit') else 'ready';self.reason=reason
             else:
                 self.phase='fault';self.reason=reason if reason.startswith('position_') else 'position_session_failed'
                 if self.adapter.position_busy:await self.adapter.stop(StopReason.FAULT)
