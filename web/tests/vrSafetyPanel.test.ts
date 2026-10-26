@@ -232,8 +232,8 @@ describe('VR safety presentation', () => {
     expect(sent[0].type).toBe('disarm');
     expect(panel.safetyState.mode).toBe('ACTIVE');
     const view = describeVrSafety(panel.safetyState, true);
-    expect(view.title).toBe('控制已锁定');
-    expect(view.instruction).toContain('确认现场静止');
+    expect(view.title).toBe('正在确认停止');
+    expect(view.instruction).toContain('等待收尾');
     expect(view.instruction).not.toContain('Home');
     expect(view.title).not.toContain('已停止');
   });
@@ -340,6 +340,20 @@ describe('VR safety presentation', () => {
       shape: 'shield',
     });
   });
+});
+
+it('shows an outstanding stop as waiting, with fault warnings retaining priority',()=>{
+  expect(describeVrSafety({...state('stopped'),stopPending:true},true)).toMatchObject({title:'正在确认停止',tone:'amber'});
+  expect(describeVrSafety({...state('stopped'),stopPending:true,fault:'stop_unverified'},true)).toMatchObject({title:'停止状态未确认',tone:'red'});
+});
+
+it('describes natural finite-step release instead of the legacy streaming stop',()=>{
+  const summary:RobotRuntimeSummary={backend:'LEBAI_FAKE',realRobotMode:'control',actualTcp:null,gripper:0,
+    latencyMs:0,hardwareVerified:false,finitePosition:{policy:'finite_position_offline',phase:'draining',
+      generation:1,entered_steps:1,motion_id:1,reason:null,hardware_verified:false}};
+  const view=describeVrSafety({...state('active'),preparationRequired:true},true,summary);
+  expect(view.title).toBe('正在完成当前小步');expect(view.instruction).toContain('B');
+  expect(view.instruction).not.toContain('松开 Grip 请求停止');
 });
 
 describe('VR safety sprite resources', () => {

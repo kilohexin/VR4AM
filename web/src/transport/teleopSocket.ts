@@ -2,6 +2,8 @@ import {
   isFinitePositionInputMessage,
   type FinitePositionInputMessage,
   isArmFeedbackMessage,
+  isDisarmAckMessage,
+  type DisarmAckMessage,
   isGripperResultMessage,
   type GripperRequestMessage,
   type GripperCancelMessage,
@@ -66,6 +68,7 @@ export class TeleopSocket {
     private readonly onOfflineRehearsalFeedback: (message: OfflineRehearsalFeedbackMessage) => void = () => {},
     private readonly onSimulationScaleResult: (message: SimulationScaleResultMessage) => void = () => {},
     private readonly onGripperResult: (message: GripperResultMessage) => void = () => {},
+    private readonly onDisarmAck: (message: DisarmAckMessage) => void = () => {},
   ) {}
 
   connect(): void {
@@ -163,6 +166,7 @@ export class TeleopSocket {
           this.occupiedReconnectDelayMs = OCCUPIED_INITIAL_RECONNECT_DELAY_MS;
           this.onRobotState(message);
         } else if (isArmFeedbackMessage(message)) this.onArmFeedback(message);
+        else if (isDisarmAckMessage(message)) this.onDisarmAck(message);
         else if (isFaultResetResultMessage(message)) this.onFaultResetResult(message);
         else if (isHomeResultMessage(message)) this.onHomeResult(message);
         else if (isDiagnosticsMessage(message)) this.onDiagnostics(message);

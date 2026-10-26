@@ -11,6 +11,44 @@ async function flushSafetyChange(): Promise<void> {
 }
 
 describe('ArmPanel simulator safety', () => {
+  it('waits for the matching stop acknowledgement and a fresh release before unlocking',()=>{
+    const sent:any[]=[];const panel=new ArmPanel(document.querySelector('#panel')!,m=>sent.push(m));
+    panel.setConnectionStatus({state:'connected'});panel.setMode('READY');panel.observeGrip(false);
+    panel.requestDisarm('xr');const stop=sent.at(-1);
+    panel.setMode('READY');panel.observeGrip(false);
+    expect(panel.armButton.disabled).toBe(true);expect(panel.requestArm()).toBe(false);
+    panel.handleDisarmAck({v:1,type:'disarm_ack',request_id:'different-stop'});
+    expect(panel.requestArm()).toBe(false);
+    panel.handleDisarmAck({v:1,type:'disarm_ack',request_id:stop.request_id});
+    expect(panel.armButton.disabled).toBe(true);
+    panel.observeGrip(false);expect(panel.requestArm()).toBe(false);
+    panel.setMode('READY');panel.observeGrip(false);expect(panel.requestArm()).toBe(true);
+  });
+  it('does not erase an outstanding stop when VR resets its local UI lock',()=>{
+    const sent:any[]=[];const panel=new ArmPanel(document.querySelector('#panel')!,m=>sent.push(m));
+    panel.setConnectionStatus({state:'connected'});panel.setMode('READY');panel.requestDisarm('xr');
+    panel.resetToLocked();panel.setMode('READY');panel.observeGrip(false);
+    expect(panel.requestArm()).toBe(false);
+    panel.setFault('stop_unverified');panel.handleDisarmAck({v:1,type:'disarm_ack',request_id:sent[0].request_id});
+    panel.setMode('FAULT');panel.observeGrip(false);expect(panel.requestArm()).toBe(false);
+    expect(panel.safetyState.fault).toBe('stop_unverified');
+  });
+  it('ignores an older stop acknowledgement when a newer stop is outstanding',()=>{
+    const sent:any[]=[];const panel=new ArmPanel(document.querySelector('#panel')!,m=>sent.push(m));
+    panel.setConnectionStatus({state:'connected'});panel.setMode('READY');
+    panel.requestDisarm();panel.requestDisarm();panel.setMode('READY');
+    panel.handleDisarmAck({v:1,type:'disarm_ack',request_id:sent[0].request_id});panel.observeGrip(false);
+    expect(panel.requestArm()).toBe(false);
+    panel.handleDisarmAck({v:1,type:'disarm_ack',request_id:sent[1].request_id});
+    panel.setMode('READY');panel.observeGrip(false);expect(panel.requestArm()).toBe(true);
+  });
+  it('cannot reinterpret another stop press as Home while stop completion is pending',()=>{
+    const sent:any[]=[];const panel=new ArmPanel(document.querySelector('#panel')!,m=>sent.push(m));
+    panel.setConnectionStatus({state:'connected'});panel.setMode('READY');panel.requestDisarm();
+    panel.setMode('READY');panel.observeGrip(false);
+    expect(panel.stopButton.textContent).not.toContain('Home');
+    panel.requestStopOrReset();expect(sent.map(m=>m.type)).toEqual(['disarm','disarm']);
+  });
   it('keeps VR disabled without capability, including after mode refresh, while permitting exit',()=>{
     const enter=vi.fn(),panel=new ArmPanel(document.querySelector('#panel')!,vi.fn(),enter);
     panel.setVRAllowed(false);panel.setMode('HOLD');panel.setVRStatus({state:'idle'});
@@ -309,13 +347,17 @@ describe('ArmPanel simulator safety', () => {
     panel.setMode('READY');
     panel.observeGrip(false);
     expect(panel.requestArm('xr')).toBe(true);
+    panel.handleArmFeedback({v:1,type:'arm_ack',request_id:send.mock.calls.at(-1)![0].request_id});
     panel.setMode('ACTIVE');
     expect(panel.safetyState).toMatchObject({phase: 'active', armed: true});
 
     panel.requestDisarm('xr');
     panel.observeGrip(false);
+    expect(panel.requestArm('xr')).toBe(false);
+    panel.handleDisarmAck({v:1,type:'disarm_ack',request_id:send.mock.calls.at(-1)![0].request_id});
+    panel.setMode('READY');panel.observeGrip(false);
     expect(panel.requestArm('xr')).toBe(true);
-    expect(panel.safetyState).toMatchObject({phase: 'pending', armed: false, mode: 'ACTIVE'});
+    expect(panel.safetyState).toMatchObject({phase: 'pending', armed: false, mode: 'READY'});
 
     panel.setMode('ACTIVE');
     expect(panel.safetyState).toMatchObject({phase: 'pending', armed: false});
@@ -433,7 +475,7 @@ describe('ArmPanel simulator safety', () => {
   });
 
   it('maps authoritative and local safety phases with stop precedence', () => {
-    const panel = new ArmPanel(document.querySelector('#panel')!, vi.fn());
+    const send=vi.fn();const panel = new ArmPanel(document.querySelector('#panel')!, send);
 
     panel.setMode('READY');
     expect(panel.safetyState.phase).toBe('locked');
@@ -453,6 +495,9 @@ describe('ArmPanel simulator safety', () => {
     expect(panel.safetyState.phase).toBe('stopped');
     panel.setMode('ACTIVE');
     expect(panel.safetyState.phase).toBe('stopped');
+    panel.setMode('READY');
+    expect(panel.safetyState.phase).toBe('stopped');
+    panel.handleDisarmAck({v:1,type:'disarm_ack',request_id:send.mock.calls.at(-1)![0].request_id});
     panel.setMode('READY');
     expect(panel.safetyState.phase).toBe('locked');
     panel.setMode('DISARMED');
@@ -560,6 +605,7 @@ describe('ArmPanel simulator safety', () => {
     }));
 
     panel.setFault('ik_unreachable');
+    panel.handleDisarmAck({v:1,type:'disarm_ack',request_id:send.mock.calls.at(-1)![0].request_id});
     panel.observeGrip(false);
     panel.requestStopOrReset('xr');
     expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -610,6 +656,7 @@ describe('ArmPanel simulator safety', () => {
 
     panel.requestStopOrReset('xr');
     expect(send).toHaveBeenLastCalledWith(expect.objectContaining({type: 'disarm'}));
+    panel.handleDisarmAck({v:1,type:'disarm_ack',request_id:send.mock.calls.at(-1)![0].request_id});
     panel.setMode('DISARMED');
     panel.observeGrip(false);
     panel.requestStopOrReset('xr');
@@ -732,6 +779,7 @@ describe('ArmPanel simulator safety', () => {
 
     expect(panel.safetyState).toMatchObject({homePending: false, eligible: false, armed: false});
     expect(panel.requestArm('desktop')).toBe(false);
+    panel.setMode('READY');
     panel.observeGrip(false);
     expect(panel.requestArm('desktop')).toBe(true);
   });
@@ -806,6 +854,7 @@ describe('ArmPanel simulator safety', () => {
     });
     expect(panel.requestArm('desktop')).toBe(false);
 
+    panel.setMode('READY');
     panel.observeGrip(false);
     expect(panel.requestArm('desktop')).toBe(true);
   });

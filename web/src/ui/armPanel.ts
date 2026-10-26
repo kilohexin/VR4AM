@@ -1,6 +1,7 @@
 import {
   PROTOCOL_VERSION,
   type ArmFeedbackMessage,
+  type DisarmAckMessage,
   type ClientControlMessage,
   type ConstraintKind,
   type FaultResetRejectReason,
@@ -34,6 +35,7 @@ export type ArmSafetySnapshot = Readonly<{
   eligible: boolean;
   armed: boolean;
   pending: boolean;
+  stopPending?: boolean;
   mode: TeleopMode;
   fault: string | null;
   faultRecoverable: boolean;
@@ -100,6 +102,7 @@ export class ArmPanel {
   private gripPressed = true;
   private mode: TeleopMode = 'READY';
   private stopRequested = false;
+  private pendingStopRequestId:string|null=null;
   private safetyPublishQueued = false;
   private automationActive = false;
   private vrStarting = false;
@@ -155,6 +158,8 @@ export class ArmPanel {
     return this.pendingArmRequestId !== null || this.awaitingArmedMode;
   }
 
+  get isStopPending():boolean {return this.pendingStopRequestId!==null;}
+
   get feedbackText(): string {
     return this.resetFeedback ?? this.homeFeedback ?? this.armFeedback ?? '';
   }
@@ -170,6 +175,7 @@ export class ArmPanel {
         : this.eligible,
       armed: (phase === 'armed' || phase === 'active') && this.armed,
       pending: this.isArmPending,
+      stopPending: this.isStopPending,
       mode: this.mode,
       fault: this.fault,
       faultRecoverable: this.isFaultRecoverable,
@@ -195,6 +201,7 @@ export class ArmPanel {
       this.pendingFaultResetId === null &&
       this.pendingHomeRequestId === null &&
       this.recoveryPhase === null
+      && !this.isStopPending && !this.stopRequested && this.mode==='READY'
     ) {
       this.eligible = true;
     }
@@ -206,6 +213,7 @@ export class ArmPanel {
   }
 
   setConnectionStatus(status: TeleopConnectionStatus): void {
+    this.pendingStopRequestId=null;
     this.connectionState = status.state;
     this.connected = status.state === 'connected';
     if (status.state !== 'connected') this.setRuntimeIdentity(null);
@@ -237,7 +245,7 @@ export class ArmPanel {
     if (!this.preparationRequired || !this.preparationUnlocked || !this.connected
         || this.automationActive || this.fault || this.isAuthoritativelyUnavailable()
         || this.armed || this.isArmPending || this.recoveryPhase !== null
-        || this.pendingHomeRequestId !== null || this.gripPressed) return false;
+        || this.pendingHomeRequestId !== null || this.gripPressed || this.isStopPending || this.stopRequested || this.mode!=='READY') return false;
     const message = this.control('prepare_request', source);
     this.pendingArmRequestId = message.request_id;
     this.pendingPreparation = true;
@@ -293,9 +301,10 @@ export class ArmPanel {
 
   setMode(mode: TeleopMode): void {
     this.mode = mode;
-    if (mode === 'READY') this.stopRequested = false;
+    if (mode === 'READY'&&!this.isStopPending) this.stopRequested = false;
     const authoritativeArmed =
-      !this.stopRequested && (mode === 'ARMED' || mode === 'ACTIVE' || mode === 'HOLD');
+      !this.stopRequested && (mode === 'ARMED' || mode === 'ACTIVE' || mode === 'HOLD')
+      &&(this.pendingArmRequestId===null||this.awaitingArmedMode||mode==='ARMED');
     this.armed = authoritativeArmed;
     if (authoritativeArmed) {
       this.pendingArmRequestId = null;
@@ -405,6 +414,7 @@ export class ArmPanel {
       this.isArmPending ||
       this.pendingHomeRequestId !== null ||
       this.recoveryPhase !== null
+      || this.isStopPending || this.stopRequested || this.mode!=='READY'
     ) {
       return false;
     }
@@ -419,8 +429,15 @@ export class ArmPanel {
   }
 
   requestDisarm(source: ControlSource = 'desktop'): void {
-    this.preparationResultId = null;
     if (this.automationActive) return;
+    const message=this.control('disarm',source);
+    this.noteStopRequested(message.request_id);
+    this.sendControl(message);
+  }
+
+  noteStopRequested(requestId:string):void {
+    this.pendingStopRequestId=requestId;
+    this.preparationResultId = null;
     this.armed = false;
     this.eligible = false;
     this.pendingArmRequestId = null;
@@ -430,11 +447,23 @@ export class ArmPanel {
     this.armFeedback = null;
     this.stopRequested = true;
     this.syncButtonState();
-    this.sendControl(this.control('disarm', source));
+  }
+
+  handleDisarmAck(message:DisarmAckMessage):void {
+    if(message.request_id!==this.pendingStopRequestId)return;
+    this.pendingStopRequestId=null;
+    // Completion of a stop transaction grants no new control authority.
+    // A fresh READY state and released input must still arrive.
+    this.eligible=false;
+    this.syncButtonState();
   }
 
   requestStopOrReset(source: ControlSource = 'desktop'): void {
     if (this.automationActive) return;
+    if (this.isStopPending) {
+      if (!this.fault) this.requestDisarm(source);
+      return;
+    }
     if (this.fault) {
       if (!this.isFaultRecoverable) return;
       if (!this.connected || this.gripPressed || this.pendingFaultResetId !== null) return;
@@ -547,11 +576,12 @@ export class ArmPanel {
     this.prepareButton.hidden = !this.preparationRequired;
     this.prepareButton.disabled = !this.preparationUnlocked || !this.connected
       || this.automationActive || Boolean(this.fault) || this.armed || this.isArmPending
-      || this.recoveryPhase !== null || this.gripPressed;
+      || this.recoveryPhase !== null || this.gripPressed || this.isStopPending;
     this.prepareLabel.textContent = this.isArmPending && (this.pendingPreparation || this.awaitingArmedMode)
       ? this.recoveryPhase === 'stabilizing' ? '正在确认到位' : '正在前往准备位'
       : this.armed ? '已到准备位' : '进入准备姿态';
     if (this.preparationRequired && this.armFeedback) this.prepareLabel.textContent = '准备未完成';
+    if (this.isStopPending&&!this.fault)this.prepareLabel.textContent='等待停止确认';
     this.prepareButton.title = this.armFeedback ?? '进入已保存的工作准备姿态；到位前操纵保持锁定';
     if (this.automationActive) {
       this.armButton.disabled = true;
@@ -574,7 +604,7 @@ export class ArmPanel {
       Boolean(this.fault) ||
       this.isArmPending ||
       this.pendingHomeRequestId !== null ||
-      this.recoveryPhase !== null;
+      this.recoveryPhase !== null || this.isStopPending || this.mode!=='READY';
     this.armButton.dataset.state = this.armed
       ? 'armed'
       : this.isArmPending
@@ -590,9 +620,12 @@ export class ArmPanel {
         ? '正在解锁'
         : this.runtimeArmLabel;
     this.armButton.title = this.armFeedback ?? '';
+    if(this.isStopPending&&!this.fault){
+      this.armLabel.textContent='等待停止确认';this.armButton.title='停止事务尚未返回，暂不能解锁或准备';
+    }
     this.armButton.setAttribute(
       'aria-label',
-      this.fault
+      this.isStopPending&&!this.fault ? '等待停止确认' : this.fault
         ? '故障状态，无法解锁仿真'
         : this.armFeedback
           ? this.armFeedback
@@ -625,7 +658,7 @@ export class ArmPanel {
       this.stopButton.disabled = true;
     } else {
       const stopped = this.mode === 'DISARMED' || (!this.armed && this.mode === 'READY');
-      const canRequestHome = !this.preparationRequired && !this.segmentedCandidate && stopped && !this.isArmPending && this.connected && !this.gripPressed;
+      const canRequestHome = !this.isStopPending && !this.preparationRequired && !this.segmentedCandidate && stopped && !this.isArmPending && this.connected && !this.gripPressed;
       this.stopLabel.textContent = canRequestHome ? '回到 Home' : '停止';
       this.stopButton.disabled = false;
     }

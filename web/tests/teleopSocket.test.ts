@@ -61,6 +61,15 @@ function setup(
 }
 
 const validFrame = () => vrFixture as VRFrame;
+it('routes only validated stop acknowledgements to the control UI',()=>{
+ const wire=new FakeSocket();const acks:any[]=[];
+ const client=new TeleopSocket('wss://test',()=>{},()=>wire as unknown as WebSocket,
+  undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,m=>acks.push(m));
+ client.connect();wire.open();
+ const ack={v:1,type:'disarm_ack',request_id:'stop-1'};
+ wire.message(JSON.stringify({...ack,extra:true}));wire.message(JSON.stringify({...ack,request_id:''}));
+ wire.message(JSON.stringify(ack));expect(acks).toEqual([ack]);client.close();
+});
 const control = (type: ClientControlMessage['type']): ClientControlMessage => ({
   v: 1,
   type,

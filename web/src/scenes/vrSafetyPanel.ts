@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type {Pose, RealRobotMode, RuntimeBackend, TargetControlStatus} from '../protocol/messages';
+import type {Pose, RealRobotMode, RuntimeBackend, TargetControlStatus,FinitePositionStatus} from '../protocol/messages';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
 import {isStopFailure, readableConstraint, readableFault, readableTargetControl} from '../ui/hud';
 
@@ -13,6 +13,7 @@ export interface RobotRuntimeSummary {
   latencyMs: number | null;
   hardwareVerified: false;
   targetControl?: TargetControlStatus | null;
+  finitePosition?: FinitePositionStatus | null;
 }
 
 const EMPTY_RUNTIME_SUMMARY: RobotRuntimeSummary = {
@@ -59,6 +60,13 @@ export function describeVrSafety(
   if (state.preparationRequired) {
     core.footer = CONTROL_FOOTER.replace('A解锁 B停止/Home', 'A解锁/再按A准备 B停止');
   }
+  const finite=summary.finitePosition;
+  if(finite&&core.tone==='cyan'&&!state.stopPending){
+    if(['planning','executing','draining'].includes(finite.phase)){
+      core.title=finite.phase==='planning'?'正在规划小步':finite.phase==='draining'?'正在完成当前小步':'小步执行中';
+      core.instruction='松开 Grip 后完成当前小步 · B 请求停止';
+    }else if(state.phase==='armed')core.instruction='Grip 控制平移 · Trigger 控制开合';
+  }
   const statusLine = formatRuntimeSummary(summary)
     + (target ? ' · 分段候选 · 未真机验收' : '');
   return {...core, statusLine};
@@ -104,6 +112,9 @@ function describeSafety(
   }
   if (state.mode === 'STALE') {
     return presentation('数据陈旧', '保持 Grip 松开，停止状态未确认', 'red', 'warning');
+  }
+  if(state.stopPending){
+    return presentation('正在确认停止','保持 Grip 松开，等待收尾；暂不能解锁','amber','stop');
   }
   if (controllerSupported === false) {
     return presentation('手柄不受支持', '当前配置不支持 A/B 安全控制', 'red', 'warning');

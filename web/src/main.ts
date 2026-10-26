@@ -5,6 +5,7 @@ import {
   type DiagnosticsMessage,
   type RobotStateMessage,
   type VRFrame,
+  type ClientControlMessage,
 } from './protocol/messages';
 import {RobotStateBuffer} from './robot/robotState';
 import {SimulationScene} from './scenes/simulationScene';
@@ -104,16 +105,17 @@ const socket = new TeleopSocket(
     refreshSettingsPanel();
   },
   (message)=>{holdPanel?.onGripperResult(message);finiteXR?.onGripperResult(message);},
+  (message)=>armPanel?.handleDisarmAck(message),
 );
 
 const positionInput=new FinitePositionInput(message=>socket.sendPositionInput(message),(reason)=>{
- if(!positionStopSuppressed&&connectionState)socket.sendControl({v:1,type:'disarm',request_id:`finite-abort-${reason??'cancel'}-${Date.now()}`});
+ if(!positionStopSuppressed&&connectionState)sendControl({v:1,type:'disarm',request_id:`finite-abort-${reason??'cancel'}-${Date.now()}`});
 });
 const finiteXR=new FiniteXRInput(positionInput,m=>socket.sendGripper(m),id=>socket.cancelGripper(id));
 
 armPanel = new ArmPanel(
   hud.actionContainer,
-  (message) => {if(message.type==='disarm'){positionStopSuppressed=true;holdPanel?.cancel();positionStopSuppressed=false;}socket.sendControl(message);},
+  sendControl,
   () => void (xrController.isActive ? xrController.exitVR() : xrController.enterVR()),
   (snapshot) => { scene?.setArmSafetyState(snapshot); refreshHoldPanel(); },
 );
@@ -172,12 +174,23 @@ function updateController(controller: {tracking: boolean; grip: boolean; trigger
 
 function sendVRDisarm(): void {
   vrControlSequence += 1;
-  socket.sendControl({
+  sendControl({
     v: PROTOCOL_VERSION,
     type: 'disarm',
     request_id: `vr-disarm-${vrControlSequence}`,
     client_mono_ms: performance.now(),
   });
+}
+
+function sendControl(message:ClientControlMessage):void {
+  if(message.type!=='disarm'){socket.sendControl(message);return;}
+  positionStopSuppressed=true;
+  try {
+    armPanel?.noteStopRequested(message.request_id);
+    socket.sendControl(message);
+    holdPanel?.cancel();
+    finiteXR?.reset('operator_stop');
+  } finally {positionStopSuppressed=false;}
 }
 
 function updateXRStatus(status: XRSessionStatus): void {
@@ -342,6 +355,7 @@ function applyDiagnosticsRuntime(
     latencyMs: latencyView.currentMs,
     hardwareVerified: false,
     targetControl: state.target_control ?? null,
+    finitePosition: state.finite_position ?? null,
   });
 }
 

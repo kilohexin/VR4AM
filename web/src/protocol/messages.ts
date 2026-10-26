@@ -206,6 +206,14 @@ export interface ArmRejectedMessage {
 }
 
 export type ArmFeedbackMessage = ArmAckMessage | ArmRejectedMessage;
+export interface DisarmAckMessage {
+  v:typeof PROTOCOL_VERSION;type:'disarm_ack';request_id:string;
+}
+export function isDisarmAckMessage(value:unknown):value is DisarmAckMessage {
+  return isRecord(value)&&hasExactKeys(value,['v','type','request_id'])&&value.v===PROTOCOL_VERSION
+    &&value.type==='disarm_ack'&&typeof value.request_id==='string'
+    &&codePointLength(value.request_id)>0&&codePointLength(value.request_id)<=64;
+}
 
 export interface ConnectionRejectedMessage {
   v: typeof PROTOCOL_VERSION;
