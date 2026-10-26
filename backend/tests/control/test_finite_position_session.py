@@ -18,6 +18,112 @@ async def fixture():
     return s,a,c,clock
 
 
+async def test_unsent_workspace_boundary_holds_then_reverses_without_repreparation():
+    from dataclasses import replace
+    from app.robots.finite_position_adapter import FinitePositionAdapter
+    from tests.robots.finite_position_fixture import fixture as adapter_fixture
+    settings,c,clock=adapter_fixture()
+    settings=replace(settings,startup_tcp_max_m=(.301,.3,.6))
+    async def factory(ip):return c
+    a=FinitePositionAdapter(settings,client_factory=factory,backend_label='LEBAI_FAKE',
+        position_model=c.model,clock=clock.now_ns,sleep=clock.sleep)
+    await a.connect();binding=a.bind_position_generation(1)
+    s=api().FinitePositionSession(a,binding,clock=clock.now_ns,recorder=Recorder(),authorize=lambda:None)
+    try:
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
+        await drive(s,clock,until=lambda:s.worker is not None and s.worker.done())
+        await s.advance()
+        assert s.phase=='hold' and s.reason=='position_workspace'
+        assert c.write_calls==[] and not a._latched_fault
+        s.offer(PositionIntent('web',1,2,clock.now_ns(),'release',(0.,0.,0.)))
+        await clock.sleep(.2);await s.advance()
+        assert not s.closed and s.phase=='hold'
+        s.offer(PositionIntent('web',1,3,clock.now_ns(),'held',(-1.,0.,0.)))
+        await drive(s,clock,until=lambda:bool(c.write_calls))
+        s.offer(PositionIntent('web',1,4,clock.now_ns(),'release',(0.,0.,0.)))
+        await drive(s,clock,until=lambda:s.phase=='ready' and not s.busy)
+        assert a.position_binding is binding
+        assert [x[0] for x in c.write_calls]==['movej']
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
+@pytest.mark.parametrize('damage',['accepted','stop_owed','motion_unknown','read_unknown','latched',
+    'new_motion_record','changed_motion_record','changed_binding','pending_write','execution_stage','model_mismatch'])
+async def test_boundary_text_never_downgrades_unproved_or_execution_failures(damage):
+    s,a,c,clock=await fixture();original=a.plan_step;pending=None
+    if damage=='changed_motion_record':a._motion_calls.last['movej']={'outcome':'returned'}
+    async def reject(*args,**kwargs):
+        nonlocal pending
+        if damage=='accepted':a._motion_accepted=True
+        if damage=='stop_owed':a._motion_write_stop_required=True
+        if damage=='motion_unknown':a._motion_calls.unknown_methods.add('movej')
+        if damage=='read_unknown':a._snapshot_calls.unknown_methods.add('get_kin_data')
+        if damage=='latched':a._latched_fault='stop_unverified'
+        if damage=='new_motion_record':a._motion_calls.last['movej']={'outcome':'returned'}
+        if damage=='changed_motion_record':a._motion_calls.last['movej']['outcome']='timeout'
+        if damage=='changed_binding':a.bind_position_generation(2)
+        if damage=='pending_write':
+            pending=asyncio.create_task(asyncio.Event().wait());a._motion_calls.tasks.add(pending)
+        raise ValueError('position_model_mismatch' if damage=='model_mismatch' else 'position_workspace')
+    if damage=='execution_stage':
+        a.plan_step=original;a.execute_step=reject
+    else:a.plan_step=reject
+    try:
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
+        await s.advance();await s.worker
+        assert s.phase=='fault' and c.write_calls==[]
+        if damage=='motion_unknown':assert 'movej' in a._motion_calls.unknown_methods
+        if damage=='latched':assert a._latched_fault=='stop_unverified'
+    finally:
+        if pending is not None:
+            pending.cancel();await asyncio.gather(pending,return_exceptions=True);a._motion_calls.tasks.discard(pending)
+        await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
+async def test_boundary_hold_recording_failure_is_fault_not_a_silent_retry():
+    s,a,c,clock=await fixture()
+    async def reject(*args,**kwargs):raise ValueError('position_workspace')
+    async def fail_record(*args,**kwargs):raise OSError('synthetic recorder failure')
+    a.plan_step=reject;s.recorder.write_event=fail_record
+    try:
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
+        await s.advance();await s.worker
+        assert s.phase=='fault' and s.reason=='position_recording_unavailable' and c.write_calls==[]
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
+async def test_hold_release_during_rejection_recording_is_kept_until_worker_retires():
+    s,a,c,clock=await fixture();recording=asyncio.Event();finish=asyncio.Event()
+    async def reject(*args,**kwargs):raise ValueError('position_workspace')
+    async def record(*args,**kwargs):recording.set();await finish.wait()
+    a.plan_step=reject;s.recorder.write_event=record
+    try:
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
+        await s.advance();await asyncio.wait_for(recording.wait(),1.)
+        assert s.phase=='hold' and s.busy and not a.position_busy
+        s.offer(PositionIntent('web',1,2,clock.now_ns(),'release',(0.,0.,0.)))
+        assert s._rearm is True
+        finish.set();await s.worker;await s.advance()
+        await clock.sleep(.2);await s.advance()
+        s.offer(PositionIntent('web',1,3,clock.now_ns(),'held',(-1.,0.,0.)))
+        assert s.phase=='ready' and s.gate.latest.vector==(-1.,0.,0.) and c.write_calls==[]
+    finally:finish.set();await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
+async def test_each_rejected_gesture_keeps_its_identity_even_if_hold_states_coalesce():
+    s,a,c,clock=await fixture()
+    async def reject(*args,**kwargs):raise ValueError('position_workspace')
+    a.plan_step=reject
+    try:
+        for seq,direction in ((1,1.),(3,-1.)):
+            s.offer(PositionIntent('web',1,seq,clock.now_ns(),'held',(direction,0.,0.)))
+            await s.advance();await s.worker;await s.advance()
+            assert s.view().phase=='hold' and s.view().blocked_input_seq==seq
+            s.offer(PositionIntent('web',1,seq+1,clock.now_ns(),'release',(0.,0.,0.)))
+        assert c.write_calls==[]
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+
 async def test_pitch_boundary_hold_release_retires_held_watchdog_and_can_reverse():
     s,a,c,clock=await fixture();original=a.plan_step
     async def limited(*args,**kwargs):raise ValueError('position_pitch_limit')

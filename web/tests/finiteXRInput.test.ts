@@ -68,6 +68,20 @@ it('requires release after tracking loss and never resumes an old held gesture',
  expect(r.stops).toHaveLength(1);r.frame(100);r.frame(120,true);r.frame(140,true,[0,.01,0]);
  expect(r.inputs.at(-1).vector).toEqual([0,1,0]);
 });
+
+it('retires a boundary-held gesture and requires physical release before recapturing',()=>{
+ const r=rig();r.frame(0);r.frame(20,true);r.frame(40,true,[.01,0,0]);
+ const heldState:RobotStateMessage={...state,finite_position:{...state.finite_position!,phase:'hold',reason:'position_workspace'}};
+ r.xr.update(heldState,40);
+ expect(r.inputs.at(-1).kind).toBe('release');
+ function apply(t:number,grip:boolean,p:[number,number,number]=[0,0,0]){
+  r.setNow(t);r.xr.update(heldState,t);r.xr.apply({v:1,type:'vr_frame',session_id:'quest',seq:t,client_mono_ms:t,
+   tracking_valid:true,visibility:'visible',right:{p,q:[0,0,0,1],grip,trigger:0}});
+ }
+ const count=r.inputs.length;apply(60,true,[.1,0,0]);expect(r.inputs).toHaveLength(count);
+ expect(r.stops).toEqual([]);apply(80,false);apply(100,true);apply(120,true,[-.01,0,0]);
+ expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[-1,0,0]});
+});
 it('keeps one claw target in flight and does not cancel it when Trigger is released',()=>{
  const r=rig();r.frame(0);r.frame(20,false,[0,0,0],.7);expect(r.claws).toHaveLength(1);
  r.frame(40);expect(r.claws).toHaveLength(1);expect(r.cancelled).toEqual([]);

@@ -13,4 +13,7 @@ it('validates optional bounded pitch without accepting a pitched release or extr
  expect(isFinitePositionStatus(status)).toBe(true);
  expect(isFinitePositionStatus({...status,pitch_enabled:true})).toBe(true);
  expect(isFinitePositionStatus({...status,pitch_enabled:1})).toBe(false);
+ expect(isFinitePositionStatus({...status,blocked_input_seq:2})).toBe(true);
+ expect(isFinitePositionStatus({...status,blocked_input_seq:null})).toBe(true);
+ for(const blocked_input_seq of [true,-1,1.5,'2'])expect(isFinitePositionStatus({...status,blocked_input_seq})).toBe(false);
 });

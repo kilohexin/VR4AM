@@ -35,6 +35,32 @@ it('holds tool pitch through the finite intent and keeps the TCP translation zer
  expect(r.release).not.toHaveBeenCalled();
 });
 
+it('releases a boundary-blocked gesture without aborting or replaying it after fresh feedback',()=>{
+ const r=rig(true),stick=r.find('[data-joystick]');stick.dispatchEvent(pointer('pointerdown',180,100));
+ r.panel.applyFrame(frame(0));r.position.mockClear();
+ const blocked:RobotStateMessage={...state,finite_position:{policy:'finite_position_offline',phase:'hold',
+  generation:1,entered_steps:0,motion_id:null,reason:'position_workspace',hardware_verified:false}};
+ r.panel.update(blocked,true,0);
+ expect(r.position.mock.calls.map(c=>c[1])).toEqual(['release']);
+ expect(r.root.textContent).toContain('工作区边界');
+ r.panel.applyFrame(frame(20));r.clock(40);r.panel.update(blocked,true,40);r.panel.applyFrame(frame(40));
+ expect(r.position).toHaveBeenCalledTimes(1);
+ const down=r.find('[data-hold="z-"]');down.dispatchEvent(pointer('pointerdown'));
+ r.clock(60);r.panel.update(blocked,true,60);r.panel.applyFrame(frame(60));
+ expect(r.position.mock.calls.at(-1)?.slice(0,2)).toEqual([[0,0,-1],'held']);
+ expect(r.release).not.toHaveBeenCalled();
+});
+
+it('releases a second rejected gesture when the intervening planning state was not published',()=>{
+ const r=rig(true),stick=r.find('[data-joystick]');
+ const held:RobotStateMessage={...state,finite_position:{policy:'finite_position_offline',phase:'hold',generation:1,
+ entered_steps:0,motion_id:null,reason:'position_workspace',hardware_verified:false,blocked_input_seq:1}};
+ r.panel.update(held,true,0);stick.dispatchEvent(pointer('pointerdown',180,100));r.panel.applyFrame(frame(0));
+ r.position.mockClear();
+ r.panel.update({...held,finite_position:{...held.finite_position!,blocked_input_seq:3}},true,20);
+ expect(r.position.mock.calls.map(c=>c[1])).toEqual(['release']);
+});
+
 it('does not advertise or send pitch when the backend capability is absent',()=>{
  const r=rig('real');r.panel.update({...state,backend:'LEBAI',finite_position:{policy:'finite_position_web',
  phase:'ready',generation:1,entered_steps:0,motion_id:null,reason:null,hardware_verified:false}},true);

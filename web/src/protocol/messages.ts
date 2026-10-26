@@ -13,6 +13,7 @@ export interface FinitePositionStatus {
  generation:number;entered_steps:number;motion_id:number|null;reason:string|null;hardware_verified:false;
  vr_enabled?:boolean;
  pitch_enabled?:boolean;
+ blocked_input_seq?:number|null;
 }
 export function isFinitePositionInputMessage(value:unknown):value is FinitePositionInputMessage {
  if(!isRecord(value)||!hasExactKeys(value,['v','type','session_id','generation','seq','kind','vector'],['pitch']))return false;
@@ -24,14 +25,16 @@ export function isFinitePositionInputMessage(value:unknown):value is FinitePosit
   &&(value.kind!=='release'||(value.vector.every(x=>x===0)&&(!value.pitch||value.pitch===0)));
 }
 export function isFinitePositionStatus(value:unknown):value is FinitePositionStatus {
- if(!isRecord(value)||!hasExactKeys(value,['policy','phase','generation','entered_steps','motion_id','reason','hardware_verified'],['vr_enabled','pitch_enabled']))return false;
+ if(!isRecord(value)||!hasExactKeys(value,['policy','phase','generation','entered_steps','motion_id','reason','hardware_verified'],['vr_enabled','pitch_enabled','blocked_input_seq']))return false;
  return (value.policy==='finite_position_offline'||value.policy==='finite_position_web')&&['inactive','ready','planning','executing','draining','hold','fault'].includes(String(value.phase))
   &&Number.isSafeInteger(value.generation)&&Number(value.generation)>=0&&Number.isSafeInteger(value.entered_steps)
   &&Number(value.entered_steps)>=0&&Number(value.entered_steps)<=10&&value.hardware_verified===false
   &&(value.motion_id===null||(Number.isSafeInteger(value.motion_id)&&Number(value.motion_id)>0))
   &&(value.reason===null||typeof value.reason==='string')
   &&(!Object.hasOwn(value,'vr_enabled')||typeof value.vr_enabled==='boolean')
-  &&(!Object.hasOwn(value,'pitch_enabled')||typeof value.pitch_enabled==='boolean');
+  &&(!Object.hasOwn(value,'pitch_enabled')||typeof value.pitch_enabled==='boolean')
+  &&(!Object.hasOwn(value,'blocked_input_seq')||value.blocked_input_seq===null
+    ||(Number.isSafeInteger(value.blocked_input_seq)&&Number(value.blocked_input_seq)>=0));
 }
 
 export interface Pose {

@@ -109,6 +109,7 @@ def preview(p,web_directory):
         held_limit_s=10,held_step_limit=10,completion_s=5,prepare_timeout_s=60,
         prepare_tolerance_deg=.1,prepare_speed_radps=.05,prepare_acceleration_radps2=.2,
         normal_release='finish_current_step_no_next_target',unlock_moves=False,
+        planning_boundary_rejection='zero_write_hold_requires_release',
         prepare_requires_separate_button=True,prepare_preliminary_stop=True,
         vr_enabled=p.get('allow_vr',False),
         pitch_enabled=p.get('allow_pitch',False),pitch_frame='tool_local_x',pitch_step_deg=.5,pitch_range_deg=20,

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type {Pose, RealRobotMode, RuntimeBackend, TargetControlStatus,FinitePositionStatus} from '../protocol/messages';
 import type {ArmSafetySnapshot} from '../ui/armPanel';
+import {finiteHoldTitle} from '../ui/finitePositionFeedback';
 import {isStopFailure, readableConstraint, readableFault, readableTargetControl} from '../ui/hud';
 
 const CONTROL_FOOTER = 'A解锁 B停止/Home · 右Grip末端 Trigger夹爪 · 左摇杆平台/按下归零 · 左Grip+摇杆升降' as const;
@@ -62,7 +63,10 @@ export function describeVrSafety(
   }
   const finite=summary.finitePosition;
   if(finite&&core.tone==='cyan'&&!state.stopPending){
-    if(['planning','executing','draining'].includes(finite.phase)){
+    const boundary=finiteHoldTitle(finite);
+    if(boundary){
+      core.title=boundary;core.instruction='松开 Grip 后重新握持，反向或更换方向调整';core.tone='amber';core.shape='warning';
+    }else if(['planning','executing','draining'].includes(finite.phase)){
       core.title=finite.phase==='planning'?'正在规划小步':finite.phase==='draining'?'正在完成当前小步':'小步执行中';
       core.instruction='松开 Grip 后完成当前小步 · B 请求停止';
     }else if(state.phase==='armed')core.instruction=finite.pitch_enabled?'Grip 控制平移和手腕俯仰 · Trigger 控制开合':'Grip 控制平移 · Trigger 控制开合';

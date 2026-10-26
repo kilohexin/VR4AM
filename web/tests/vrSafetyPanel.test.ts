@@ -356,6 +356,15 @@ it('describes natural finite-step release instead of the legacy streaming stop',
   expect(view.instruction).not.toContain('松开 Grip 请求停止');
 });
 
+it('explains a finite workspace hold without replacing a fault warning',()=>{
+ const summary:RobotRuntimeSummary={backend:'LEBAI_FAKE',realRobotMode:'control',actualTcp:null,gripper:0,
+ latencyMs:0,hardwareVerified:false,finitePosition:{policy:'finite_position_offline',phase:'hold',
+ generation:1,entered_steps:0,motion_id:null,reason:'position_workspace',hardware_verified:false}};
+ expect(describeVrSafety(state('armed'),true,summary)).toMatchObject({title:'工作区边界',tone:'amber'});
+ expect(describeVrSafety(state('armed'),true,summary).instruction).toContain('松开 Grip');
+ expect(describeVrSafety({...state('armed'),fault:'stop_unverified'},true,summary).tone).toBe('red');
+});
+
 describe('VR safety sprite resources', () => {
   let context: CanvasRenderingContext2D;
 

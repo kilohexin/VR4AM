@@ -1,7 +1,7 @@
 """One offline finite goal at a time; normal release drains, faults stop."""
 import asyncio
 from app.control.finite_position_gate import PositionGate
-from app.control.finite_position_types import PositionView,INPUT_NS
+from app.control.finite_position_types import PositionView,INPUT_NS,POSITION_PLANNING_BOUNDARIES
 from app.robots.base import StopReason
 
 
@@ -11,6 +11,7 @@ class FinitePositionSession:
         self.gate=PositionGate(binding,clock=clock);self.worker=None
         self.phase='ready';self.reason=None;self.motion_id=None;self.closed=False
         self._last_seq=-1;self._session=None;self._rearm=False
+        self._blocked_seq=None
 
     @property
     def busy(self):return self.worker is not None
@@ -29,14 +30,14 @@ class FinitePositionSession:
             gate.offer(intent)
             self.gate=gate;self._last_seq=intent.seq;self._session=intent.session_id
             return
-        if self.phase=='hold' and not self.busy:
-            if intent.kind=='release':
+        if self.phase=='hold':
+            if intent.kind=='release' and not self.adapter.position_busy:
                 # Validate a fresh release and retire the held input that hit
                 # the boundary. Keeping it would later trip the input watchdog.
                 # The binding/model reference remains fixed at preparation.
                 gate=PositionGate(self.binding,clock=self.clock);gate.offer(intent)
                 self.gate=gate;self._rearm=True;self._last_seq=intent.seq;self._session=intent.session_id;return
-            elif self._rearm:
+            elif self._rearm and not self.busy:
                 self.gate=PositionGate(self.binding,clock=self.clock);self.phase='ready';self.reason=None;self._rearm=False
         self.gate.offer(intent);self._last_seq=intent.seq;self._session=intent.session_id
         if intent.kind=='release' and self.adapter.position_busy:self.phase='draining'
@@ -56,10 +57,13 @@ class FinitePositionSession:
             raise ValueError('position_recording_unavailable')
 
     async def _run_step(self,intent):
+        planning=True;marker=None
         try:
+            marker=self.adapter.position_planning_marker()
             def entry_authorize():
                 self._monitor();self.gate.require_entry(intent)
             plan=await self.adapter.plan_step(intent,authorize=entry_authorize)
+            planning=False
             def entered():
                 entry_authorize();self.gate.mark_entered(intent);self.phase='executing'
             result=await self.adapter.execute_step(plan,before_entry=entry_authorize,
@@ -76,8 +80,24 @@ class FinitePositionSession:
         except asyncio.CancelledError:raise
         except Exception as error:
             reason=str(error)
-            if reason in ('position_entry_revoked','position_unresolvable_step','position_snapshot_expired','position_pitch_limit'):
-                self.phase='hold' if reason in ('position_unresolvable_step','position_pitch_limit') else 'ready';self.reason=reason
+            if self.closed:return
+            hold=False
+            if planning and reason in POSITION_PLANNING_BOUNDARIES:
+                try:
+                    self._monitor();hold=self.adapter.position_boundary_hold_safe(marker)
+                except Exception:pass
+            if hold:
+                self.phase='hold';self.reason=reason;self._blocked_seq=intent.seq
+                try:
+                    await self.recorder.write_event(dict(kind='finite_position_boundary_rejected',
+                        reason=reason,input_seq=intent.seq,entered=False,
+                        zero_motion_write_verified=True,requires_release=True),self.clock())
+                    self._monitor()
+                except Exception:
+                    if not self.closed:
+                        self.phase='fault';self.reason=self.adapter._latched_fault or 'position_recording_unavailable'
+            elif reason in ('position_entry_revoked','position_snapshot_expired'):
+                self.phase='ready';self.reason=reason
             else:
                 self.phase='fault';self.reason=reason if reason.startswith('position_') else 'position_session_failed'
                 if self.adapter.position_busy:await self.adapter.stop(StopReason.FAULT)
@@ -99,7 +119,7 @@ class FinitePositionSession:
         if self.gate.entered_steps>=10:self.phase='hold';return
         intent=self.gate.take_latest()
         if intent is not None:
-            self.phase='planning';self.reason=None
+            self.phase='planning';self.reason=None;self._blocked_seq=None
             self.worker=asyncio.create_task(self._run_step(intent),name='finite-position-step')
 
     async def abort(self,reason):
@@ -115,4 +135,5 @@ class FinitePositionSession:
         if self.adapter._latched_fault:self.reason=self.adapter._latched_fault
 
     def view(self):
-        return PositionView(self.phase,self.binding.generation,self.gate.entered_steps,self.motion_id,self.reason)
+        return PositionView(self.phase,self.binding.generation,self.gate.entered_steps,self.motion_id,self.reason,
+            blocked_input_seq=self._blocked_seq if self.phase=='hold' else None)

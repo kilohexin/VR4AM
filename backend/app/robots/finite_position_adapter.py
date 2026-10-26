@@ -1,5 +1,6 @@
 """Explicit Fake-injected finite movej candidate. No native connection factory."""
 import asyncio
+import copy
 import hashlib
 import json
 import math
@@ -73,6 +74,24 @@ class _FinitePositionCore(RealLebaiAdapter):
         if self._snapshot is not None:
             fault=self._motion_boundary_fault(self._snapshot)
             if fault:raise ValueError('position_'+fault)
+
+    def position_planning_marker(self):
+        """Local obligation evidence, never a claim of physical stopping."""
+        try:self._position_health(self.position_binding)
+        except Exception:return None
+        if (self.position_busy or self._motion_accepted or self._motion_write_stop_required
+                or self._gripper_active or self._stop_lock.locked() or self._pump.fault
+                or (self._stop_transaction is not None and self._stop_transaction.unresolved)
+                or any(not task.done() for task in self._motion_calls.tasks)):
+            return None
+        return (self.position_binding,self._client,self._pump.generation,
+            self._motion_calls,self._snapshot_calls,copy.deepcopy(self._motion_calls.last))
+
+    def position_boundary_hold_safe(self,marker):
+        current=self.position_planning_marker()
+        return bool(marker is not None and current is not None
+            and all(marker[i] is current[i] for i in (0,1,3,4))
+            and marker[2]==current[2] and marker[5]==current[5])
 
     def _position_feedback_limits(self,s):
         fault=self._motion_boundary_fault(s)
@@ -159,6 +178,8 @@ class _FinitePositionCore(RealLebaiAdapter):
                 if any(abs(x)>1e-8 for v in (s.actual_qd,s.actual_qdd,s.target_qd,s.target_qdd) for x in v):
                     raise ValueError('position_initial_not_stable')
                 start=self._position_sample(s);p,q=build_position_target(start,intent)
+                if any(not lo<=x<=hi for lo,x,hi in zip(self.settings.startup_tcp_min_m,p,self.settings.startup_tcp_max_m)):
+                    raise ValueError('position_workspace')
                 if intent.pitch and (self._position_pitch_reference is None
                         or angle(self._position_pitch_reference,q)>MAX_PITCH_RANGE_RAD+1e-10):
                     raise ValueError('position_pitch_limit')

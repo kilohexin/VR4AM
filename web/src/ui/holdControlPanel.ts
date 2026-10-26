@@ -1,6 +1,7 @@
 import {Quaternion, Vector3} from 'three';
 import type {GripperRequestMessage, GripperResultMessage, RobotStateMessage, VRFrame, Vec3, Quat} from '../protocol/messages';
 import {FINITE_POSITION_DEADZONE} from './finitePositionInput';
+import {finiteHoldTitle,enteredFiniteHold} from './finitePositionFeedback';
 
 type Action = 'joystick' | 'z+' | 'z-' | 'pitch+' | 'pitch-' | 'spin+' | 'spin-' | 'open' | 'close';
 const CLAW_RATE = .15;
@@ -82,6 +83,7 @@ export class HoldControlPanel {
   }
 
   update(state: RobotStateMessage | null, available: boolean, receivedAt = this.now()): void {
+    const enteredHold=enteredFiniteHold(this.state?.finite_position,state?.finite_position);
     this.positionCandidate=(state?.backend==='LEBAI_FAKE'&&state.finite_position?.policy==='finite_position_offline')
       ||(state?.backend==='LEBAI'&&state.finite_position?.policy==='finite_position_web');
     this.stick.setAttribute('aria-label',this.positionCandidate?'平面摇杆：拖动控制左右前后，松开后完成当前小步':'平面摇杆：拖动控制左右前后，松开停止');
@@ -93,6 +95,8 @@ export class HoldControlPanel {
     if (!this.enabled) {
       this.cancel('unavailable'); this.pending = null;
       this.position = this.rotation = null; this.previousTime = null;
+    } else if(this.positionCandidate&&enteredHold&&this.action!==null&&this.action!=='open'&&this.action!=='close') {
+      this.finishGesture('release');
     }
     if (state) {
       const percent = Math.max(0, Math.min(100, (1 - state.gripper) * 100));
@@ -192,6 +196,7 @@ export class HoldControlPanel {
     && (this.action !== 'joystick' || Math.hypot(this.xy.x, this.xy.y) > 0);}
   private clawReady(): boolean {return this.fresh() && this.state?.robot_state === 'IDLE' && this.state.mode !== 'ACTIVE';}
   private refresh(): void {
+    const boundary=this.positionCandidate?finiteHoldTitle(this.state?.finite_position):null;
     const finiteBusy=this.positionCandidate&&['planning','executing','draining'].includes(this.state?.finite_position?.phase??'');
     const movingWithoutGesture = !this.positionCandidate&&this.state?.mode === 'ACTIVE' && !this.motionHeld();
     for (const button of this.root.querySelectorAll<HTMLButtonElement>('[data-joystick],[data-hold]')) {
@@ -208,7 +213,9 @@ export class HoldControlPanel {
         || (this.pending !== null && button !== this.capture);
       button.classList.toggle('is-held', button === this.capture);
     }
-    this.status.textContent = !this.enabled ? '先解锁，再点击进入准备姿态' : this.positionCandidate&&this.state?.finite_position?.phase==='draining'?'松开后正在完成当前小步'
+    this.status.textContent = !this.enabled ? '先解锁，再点击进入准备姿态'
+      : boundary?`${boundary} · 松开后重新按住，反向或更换方向调整`
+      : this.positionCandidate&&this.state?.finite_position?.phase==='draining'?'松开后正在完成当前小步'
       : this.motionHeld() ? (this.positionCandidate?'长按每步 2 mm；松开后完成当前小步':'摇杆松开回中停止；坐标固定于机械臂基座')
       : this.action === 'open' || this.action === 'close' ? `目标开口 ${((1 - this.clawTarget) * 100).toFixed(0)}% · 松开保持`
       : this.pending ? '等待上次夹爪请求收尾；不自动重发' : this.positionCandidate?

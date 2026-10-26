@@ -6,6 +6,7 @@
   "properties": {
     "vr_enabled": {"type":"boolean","default":false},
     "pitch_enabled": {"type":"boolean","default":false},
+    "blocked_input_seq": {"anyOf":[{"type":"integer","minimum":0,"maximum":9007199254740991},{"type":"null"}],"default":null},
     "policy": {
       "enum": ["finite_position_offline", "finite_position_web"],
       "default": "finite_position_offline",

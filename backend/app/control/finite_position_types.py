@@ -5,6 +5,9 @@ import math
 MAX_STEP_M=.002
 MAX_PITCH_STEP_RAD=math.radians(.5)
 MAX_PITCH_RANGE_RAD=math.radians(20.)
+POSITION_PLANNING_BOUNDARIES=frozenset({'position_workspace','position_joint_limit',
+    'position_joint_jump','position_ik_unreachable','position_estimated_duration',
+    'position_path_rotation','position_pitch_limit','position_unresolvable_step'})
 INPUT_DEADZONE=.15
 MIN_PROGRESS_M=.001
 MAX_ENDPOINT_ERROR_M=.0005
@@ -183,3 +186,4 @@ class PositionView:
     motion_id: int|None=None
     reason: str|None=None
     hardware_verified: bool=False
+    blocked_input_seq: int|None=None

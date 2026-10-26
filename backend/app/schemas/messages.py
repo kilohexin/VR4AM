@@ -173,6 +173,7 @@ class FinitePositionInputMessage(StrictMessage):
 class FinitePositionStatus(StrictMessage):
     vr_enabled: bool = Field(default=False,strict=True)
     pitch_enabled: bool = Field(default=False,strict=True)
+    blocked_input_seq: int|None = Field(default=None,strict=True,ge=0,le=2**53-1)
     policy: Literal['finite_position_offline','finite_position_web']='finite_position_offline'
     phase: Literal['inactive','ready','planning','executing','draining','hold','fault']
     generation: int

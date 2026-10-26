@@ -1,6 +1,7 @@
 import {Quaternion} from 'three';
 import type {GripperRequestMessage,GripperResultMessage,RobotStateMessage,Vec3,Quat,VRFrame} from '../protocol/messages';
 import {FinitePositionInput} from '../ui/finitePositionInput';
+import {enteredFiniteHold} from '../ui/finitePositionFeedback';
 
 export function finiteXRTransportFrame(frame:VRFrame):VRFrame {
  return {...frame,right:{...frame.right,grip:false,trigger:0}};
@@ -22,8 +23,10 @@ export class FiniteXRInput {
  constructor(private position:FinitePositionInput,private sendClaw:(m:GripperRequestMessage)=>void,
   private cancelClaw:(id:string)=>void,private now:()=>number=()=>performance.now()){}
  update(state:RobotStateMessage|null,receivedAt:number):void {
+  const enteredHold=enteredFiniteHold(this.state?.finite_position,state?.finite_position);
   if(this.state?.finite_position?.generation!==state?.finite_position?.generation)this.reset('xr_generation_changed');
   this.state=state;this.receivedAt=receivedAt;
+  if(enteredHold){this.position.release();this.anchor=null;this.mustRelease=true;}
  }
  reset(reason='xr_reset'):void {
   this.position.abort(reason);

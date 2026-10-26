@@ -57,6 +57,14 @@ def test_pitch_schema_accepts_optional_bounded_scalar_and_explicit_capability():
     status=dict(policy='finite_position_offline',phase='ready',generation=1,entered_steps=0,pitch_enabled=True)
     status_validator=Draft202012Validator({'$ref':'#/$defs/FinitePositionStatus','$defs':schema['$defs']})
     assert not list(status_validator.iter_errors(status))
+    for value in (None,2):
+        row={**status,'blocked_input_seq':value}
+        assert not list(status_validator.iter_errors(row))
+        assert messages.FinitePositionStatus.model_validate(row).blocked_input_seq==value
+    for value in (True,-1,1.5,'2',2**53):
+        row={**status,'blocked_input_seq':value}
+        assert list(status_validator.iter_errors(row))
+        with pytest.raises(ValidationError):messages.FinitePositionStatus.model_validate(row)
 
 
 def local_refs(value: Any) -> list[str]:
