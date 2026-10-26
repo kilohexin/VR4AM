@@ -8,6 +8,8 @@ import type {RobotStateMessage} from '../src/protocol/messages';
 import {TeleopSocket} from '../src/transport/teleopSocket';
 import {ArmPanel} from '../src/ui/armPanel';
 import {XRSessionController, type XRRenderHost} from '../src/xr/session';
+import {FinitePositionInput} from '../src/ui/finitePositionInput';
+import {FiniteXRInput,finiteXRTransportFrame} from '../src/xr/finiteInput';
 
 class MemorySocket {
   readyState = 0;
@@ -32,10 +34,11 @@ function inputSource(input: {grip?: boolean; trigger?: number; a?: boolean; b?: 
     gamepad: {buttons}} as unknown as XRInputSource;
 }
 
-function setup() {
+function setup(finiteMode=false) {
   document.body.innerHTML = '<div id="panel"></div>';
   const wire = new MemorySocket();
   let panel: ArmPanel;
+  let finite:FiniteXRInput;let position:FinitePositionInput;let generation=-1;
   const socket = new TeleopSocket('ws://synthetic.invalid', (state) => {
     panel.setRuntimeIdentity(state.backend ?? null);
     panel.setFault(state.fault ?? null);
@@ -43,6 +46,12 @@ function setup() {
     panel.setRecoveryPhase(state.recovery_phase ?? null);
     panel.setPreparationState(state.preparation_required ?? false, state.preparation_unlocked ?? false);
     panel.setMode(state.mode);
+    if(finiteMode){
+      if(state.finite_position&&state.finite_position.generation!==generation){
+        generation=state.finite_position.generation;position.reset('xr-finite-replay',generation);
+      }
+      finite.update(state,now);
+    }
   }, () => wire as unknown as WebSocket,
   (status) => panel.setConnectionStatus(status), (ack) => panel.handleArmFeedback(ack));
   panel = new ArmPanel(document.querySelector('#panel')!, (message) => socket.sendControl(message));
@@ -57,11 +66,13 @@ function setup() {
     stopXR: async () => { loop = null; }, updateXRPresentation: () => {}, renderXR: () => {},
   };
   let now = 0;
+  position=new FinitePositionInput(m=>socket.sendPositionInput(m),()=>socket.sendControl({v:1,type:'disarm',request_id:'xr-abort'}));
+  finite=new FiniteXRInput(position,m=>socket.sendGripper(m),id=>socket.cancelGripper(id),()=>now);
   let disarm = 0;
   const controller = new XRSessionController({
     xr: {isSessionSupported: async () => true, requestSession: async () => session} as unknown as XRSystem,
     host, createSessionId: () => scenario.session_id, now: () => now,
-    onFrame: (frame) => forwardTeleopFrame(frame, 'xr', false, (message) => socket.sendFrame(message)),
+    onFrame: (frame) => {if(finiteMode){finite.apply(frame);frame=finiteXRTransportFrame(frame);}forwardTeleopFrame(frame, 'xr', false, (message) => socket.sendFrame(message));},
     onController: (state) => { if (state.tracking) panel.observeGrip(state.grip); },
     onArmRequest: () => { panel.requestXRPrimaryAction(); },
     onStopOrResetRequest: () => { panel.requestStopOrReset('xr'); },
@@ -69,11 +80,11 @@ function setup() {
       request_id: `vr-disarm-${++disarm}`, client_mono_ms: now}),
     onLockReset: () => panel.resetToLocked(), onStatus: (status) => panel.setVRStatus(status),
   });
-  function emit(at: number, input: Parameters<typeof inputSource>[0], tracking = true) {
+  function emit(at: number, input: Parameters<typeof inputSource>[0], tracking = true, p=[.4,.5,.6]) {
     now = at;
     session.inputSources = [inputSource(input)];
     loop?.(at, {getPose: () => tracking ? {transform: {
-      position: {x: 0.4, y: 0.5, z: 0.6}, orientation: {x: 0, y: 0, z: 0, w: 1},
+      position: {x:p[0],y:p[1],z:p[2]}, orientation: {x: 0, y: 0, z: 0, w: 1},
     }} : null, getViewerPose: () => null} as unknown as XRFrame);
   }
   function feedback(mode: RobotStateMessage['mode'], fault: string | null = null,
@@ -85,6 +96,23 @@ function setup() {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+it('routes real XR Grip motion through finite intents, preserving normal release and B stop',async()=>{
+ const r=setup(true);const sent=()=>r.wire.sent.map(v=>JSON.parse(v));
+ try{
+  r.socket.connect();r.wire.open();await r.controller.enterVR();
+  r.feedback('ARMED',null,{manual_input_ready:true,translation_scale:1,finite_position:{policy:'finite_position_offline',
+   phase:'ready',generation:1,entered_steps:0,motion_id:null,reason:null,hardware_verified:false,vr_enabled:true}});
+  r.emit(20,{});r.emit(40,{grip:true});r.emit(60,{grip:true},true,[.41,.5,.6]);
+  expect(sent().filter(m=>m.type==='vr_frame').every(m=>!m.right.grip&&m.right.trigger===0)).toBe(true);
+  expect(sent().find(m=>m.type==='finite_position_input')).toMatchObject({session_id:'xr-finite-replay',kind:'held',vector:[1,0,0]});
+  const stops=sent().filter(m=>m.type==='disarm').length;
+  r.emit(80,{});expect(sent().filter(m=>m.type==='finite_position_input').at(-1).kind).toBe('release');
+  expect(sent().filter(m=>m.type==='disarm')).toHaveLength(stops);
+  r.emit(90,{b:true});expect(sent().filter(m=>m.type==='disarm')).toHaveLength(stops+1);
+  expect(sent().some(m=>m.type==='home_request')).toBe(false);
+ }finally{await r.controller.dispose();r.socket.close();}
+});
 
 it('requires a second released A gesture for preparation and B revokes pending completion', async()=>{
   const r=setup();

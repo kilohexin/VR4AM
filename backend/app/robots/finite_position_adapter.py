@@ -289,6 +289,7 @@ class _FinitePositionCore(RealLebaiAdapter):
 class FinitePositionAdapter(_FinitePositionCore):
     """Public demo selector remains Fake-only; no production registration."""
     position_candidate=True
+    position_vr_enabled=True
 
     def __init__(self,settings,*,client_factory=None,backend_label=None,position_model=None,**kwargs):
         if (settings.ip!='digital-twin' or backend_label!='LEBAI_FAKE'

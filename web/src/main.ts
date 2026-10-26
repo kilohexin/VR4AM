@@ -15,6 +15,7 @@ import {ArmPanel} from './ui/armPanel';
 import {Hud} from './ui/hud';
 import {HoldControlPanel} from './ui/holdControlPanel';
 import {FinitePositionInput} from './ui/finitePositionInput';
+import {FiniteXRInput,finiteXRTransportFrame} from './xr/finiteInput';
 import {SimulationSettingsPanel} from './ui/simulationSettingsPanel';
 import {LatencyTracker} from './ui/latency';
 import {DiagnosticsPanel, DiagnosticsUpdateCoordinator} from './ui/diagnosticsPanel';
@@ -68,6 +69,7 @@ const socket = new TeleopSocket(
     armPanel?.setConnectionStatus(status);
     xrController?.setConstraint(null);
     if (status.state !== 'connected') {
+      finiteXR?.reset('xr_disconnected');
       positionGeneration=null;
       latestGrip = false;
       pendingScaleRequestId = null;
@@ -101,12 +103,13 @@ const socket = new TeleopSocket(
     settingsPanel?.handleResult(message);
     refreshSettingsPanel();
   },
-  (message)=>holdPanel?.onGripperResult(message),
+  (message)=>{holdPanel?.onGripperResult(message);finiteXR?.onGripperResult(message);},
 );
 
 const positionInput=new FinitePositionInput(message=>socket.sendPositionInput(message),(reason)=>{
  if(!positionStopSuppressed&&connectionState)socket.sendControl({v:1,type:'disarm',request_id:`finite-abort-${reason??'cancel'}-${Date.now()}`});
 });
+const finiteXR=new FiniteXRInput(positionInput,m=>socket.sendGripper(m),id=>socket.cancelGripper(id));
 
 armPanel = new ArmPanel(
   hud.actionContainer,
@@ -121,6 +124,7 @@ holdPanel=new HoldControlPanel(hud.desktopControlContainer,(message)=>socket.sen
    sendFrame({...lastManualFrame,client_mono_ms:performance.now(),
     visibility:document.visibilityState==='visible'?'visible':'hidden'},'manual');
  },requestId=>socket.cancelGripper(requestId),(vector,event,reason)=>{
+  if(xrState!=='idle')return; // A disabled desktop panel cannot revoke the XR owner's gesture.
   if(event==='held')positionInput.offer(vector);
   else if(event==='release')positionInput.release();
   else positionInput.abort(reason);
@@ -177,6 +181,10 @@ function sendVRDisarm(): void {
 }
 
 function updateXRStatus(status: XRSessionStatus): void {
+  if(status.state!==xrState){
+    finiteXR.reset('xr_source_changed');
+    positionInput.reset(`${status.state==='active'?'xr':'web'}-finite-${crypto.randomUUID()}`,positionGeneration??0);
+  }
   xrState = status.state;
   hud.setXRInputState(status.state);
   refreshHoldPanel();
@@ -196,6 +204,10 @@ function updateXRStatus(status: XRSessionStatus): void {
 
 function sendFrame(frame: VRFrame, source: TeleopFrameSource): void {
   if(source==='offline_rehearsal')return;
+  if(source==='xr'&&latestRobotState?.finite_position){
+    finiteXR.apply(frame);
+    frame=finiteXRTransportFrame(frame);
+  }
   if(source==='manual'&&holdPanel){
    lastManualFrame=frame;
    frame=holdPanel.applyFrame(frame);
@@ -214,11 +226,13 @@ function sendFrameToSocket(frame: VRFrame): void {
 function onRobotState(state: RobotStateMessage): void {
   if(state.finite_position&&state.finite_position.generation!==positionGeneration){
     positionGeneration=state.finite_position.generation;
-    positionInput.reset(`web-finite-${crypto.randomUUID()}`,positionGeneration);
+    positionInput.reset(`${xrState==='active'?'xr':'web'}-finite-${crypto.randomUUID()}`,positionGeneration);
   }
   lastRobotStateReceivedMs=performance.now();
   if(state.finite_position)positionInput.observe(state.finite_position.phase);
   latestRobotState = structuredClone(state);
+  finiteXR.update(state,lastRobotStateReceivedMs);
+  armPanel.setVRAllowed(!state.finite_position || state.finite_position.vr_enabled===true);
   const constraint = state.constraint ?? null;
   const recoveryPhase = state.recovery_phase ?? null;
   scene.applyRobotState(state);

@@ -19,6 +19,11 @@ def test_no_arguments_cannot_start_real_server():
     assert m.parser().parse_args(['--config','a','--reference-survey','b',
         '--ready-pose','c','--output','d']).execute is False
 
+def test_vr_opt_in_remains_default_off_in_preview_cli():
+    m=api();args=['--config','a','--reference-survey','b','--ready-pose','c','--output','d']
+    assert m.parser().parse_args(args).allow_vr is False
+    assert m.parser().parse_args(args+['--allow-vr']).allow_vr is True
+
 
 def test_budget_scope_rejects_late_motion_but_reserves_stop_and_readonly_cleanup():
     m=api();now=[0];checked=[]

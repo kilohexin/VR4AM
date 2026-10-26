@@ -95,9 +95,26 @@ describe('joystick and progressive claw',()=>{
   expect(action==='open'?first.value<.5:first.value>.5).toBe(true);
   r.panel.onGripperResult({v:1,type:'gripper_result',request_id:first.request_id,accepted:true,message:'returned'});
   r.step(140,'HOLD');expect(r.send).toHaveBeenCalledTimes(2);
-  b.dispatchEvent(pointer('pointerup'));expect(r.cancel).toHaveBeenCalledTimes(1);
+  b.dispatchEvent(pointer('pointerup'));expect(r.cancel).not.toHaveBeenCalled();
   const count=r.send.mock.calls.length;r.step(160,'HOLD');r.step(180,'HOLD');expect(r.send).toHaveBeenCalledTimes(count);
   expect(r.panel.applyFrame(frame(200)).right.grip).toBe(false);
+ });
+ it('real finite claw release lets the selected target finish without cancelling its RPC',()=>{
+  const r=rig('real'),b=r.find('[data-claw="close"]');
+  b.dispatchEvent(pointer('pointerdown'));r.panel.applyFrame(frame(0));r.step(40,'HOLD');
+  const request=r.send.mock.calls[0][0];
+  b.dispatchEvent(pointer('pointerup'));
+  expect(r.cancel).not.toHaveBeenCalled();
+  r.step(80,'HOLD');r.step(120,'HOLD');expect(r.send).toHaveBeenCalledTimes(1);
+  r.panel.onGripperResult({v:1,type:'gripper_result',request_id:request.request_id,accepted:true,message:'returned'});
+  r.step(160,'HOLD');expect(r.send).toHaveBeenCalledTimes(1);
+ });
+ it('does not cancel a released claw RPC just because its SDK lock delays ordinary feedback',()=>{
+  const r=rig('real'),b=r.find('[data-claw="close"]');
+  b.dispatchEvent(pointer('pointerdown'));r.panel.applyFrame(frame(0));r.step(40,'HOLD');
+  b.dispatchEvent(pointer('pointerup'));r.clock(141);r.panel.applyFrame(frame(120));
+  expect(r.cancel).not.toHaveBeenCalled();expect(r.send).toHaveBeenCalledTimes(1);
+  window.dispatchEvent(new Event('blur'));expect(r.cancel).toHaveBeenCalledTimes(1);
  });
  it('never queues increments while waiting for one claw reply',()=>{
   const r=rig(),b=r.find('[data-claw="close"]');b.dispatchEvent(pointer('pointerdown'));r.panel.applyFrame(frame(0));

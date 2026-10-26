@@ -108,7 +108,15 @@ export class HoldControlPanel {
     const delta = this.previousTime === null ? 0 : time - this.previousTime;
     this.previousTime = time;
     const fresh = this.fresh() && frame.tracking_valid && frame.visibility === 'visible';
-    if (!fresh || delta < 0 || delta > 100) this.cancel(!fresh?'feedback_or_tracking':'frame_gap');
+    if (!fresh || delta < 0 || delta > 100) {
+      const awaitingSelectedClaw=!fresh&&this.enabled&&this.pending!==null&&!this.motionHeld()
+        &&frame.tracking_valid&&frame.visibility==='visible'&&delta>=0&&delta<=100
+        &&this.now()-this.receivedAt>100;
+      // A selected claw RPC can hold the SDK lock past the telemetry period.
+      // Stop generating targets, but do not cancel its already-owned reply.
+      if(awaitingSelectedClaw)this.finishGesture('release');
+      else this.cancel(!fresh?'feedback_or_tracking':'frame_gap');
+    }
     if(this.positionCandidate&&this.motionHeld()&&fresh){
       const v:Vec3=this.action==='joystick'?[this.xy.x,this.xy.y,0]:[0,0,this.action==='z+'?1:-1];
       this.positionIntent(v,'held');
@@ -155,7 +163,9 @@ export class HoldControlPanel {
     const button = this.capture, id = this.pointer;
     this.action = null; this.pointer = null; this.capture = null; this.xy = {x: 0, y: 0};
     this.knob.style.transform = 'translate(-50%, -50%)';
-    if (this.pending && !this.pendingCancelled) {this.pendingCancelled = true; this.cancelRequest(this.pending);}
+    // A normal release keeps the already selected target. Cancelling its
+    // in-flight RPC cannot undo a native claw command and makes it unknown.
+    if (event==='abort' && this.pending && !this.pendingCancelled) {this.pendingCancelled = true; this.cancelRequest(this.pending);}
     if (button && id !== null) {try {if (button.hasPointerCapture(id)) button.releasePointerCapture(id);} catch {}}
     this.refresh();
     if (held || (event==='abort'&&this.positionCandidate)) {

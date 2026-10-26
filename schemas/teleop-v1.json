@@ -4,6 +4,7 @@
     "FinitePositionStatus": {
   "additionalProperties": false,
   "properties": {
+    "vr_enabled": {"type":"boolean","default":false},
     "policy": {
       "enum": ["finite_position_offline", "finite_position_web"],
       "default": "finite_position_offline",

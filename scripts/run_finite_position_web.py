@@ -110,6 +110,7 @@ def preview(p,web_directory):
         prepare_tolerance_deg=.1,prepare_speed_radps=.05,prepare_acceleration_radps2=.2,
         normal_release='finish_current_step_no_next_target',unlock_moves=False,
         prepare_requires_separate_button=True,prepare_preliminary_stop=True,
+        vr_enabled=p.get('allow_vr',False),
         progressive_gripper=True,home_enabled=False,
         tool_spin_enabled=False,automatic_retry=False,automatic_resume=False,
         stop_limits_ms=[200,300,500],motion_time_stop_verified=False,hardware_verified=False,
@@ -155,10 +156,12 @@ def create_web_app(p,web_directory,window,client_factory):
         window.check()
         return WindowClient(client,window)
     app=create_app(settings=settings,client_factory=factory,backend_label='LEBAI',
-        real_finite_position=True,real_position_authorize=window.check,real_position_model=p['model'])
+        real_finite_position=True,real_position_authorize=window.check,real_position_model=p['model'],
+        real_position_vr=p.get('allow_vr',False))
     @app.get('/control/identity')
     async def control_identity():
         return dict(runtime='LEBAI',target_strategy='finite_position_web',hardware_verified=False,
+            vr_enabled=p.get('allow_vr',False),
             motion_time_stop_verified=False,normal_release='finish_current_step_no_next_target',
             remaining_s=max(0,(DURATION_NS-(window.clock()-window.started))/1e9),
             native_entries=dict(window.native_entries),budget_entries=dict(window.entries),home_enabled=False)
@@ -225,6 +228,7 @@ def parser():
     for name in ('config','reference-survey','ready-pose','output'):p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--web-directory',type=Path,default=ROOT/'web/dist')
     p.add_argument('--execute',action='store_true')
+    p.add_argument('--allow-vr',action='store_true',help='Include VR input in the independently approved session scope')
     p.add_argument('--approved-preview',type=Path);p.add_argument('--expected-preview-sha256')
     p.add_argument('--expires-utc');p.add_argument('--confirm')
     return p
@@ -234,6 +238,7 @@ def main(argv=None):
     args=parser().parse_args(argv)
     p=single.prepare(args.config,args.reference_survey,args.ready_pose,args.output,
         expires=args.expires_utc,arrival_policy='coarse_grasp')
+    p['allow_vr']=args.allow_vr
     row=preview(p,args.web_directory)
     if not args.execute:print(json.dumps(row,indent=2));return 0
     if not all((args.approved_preview,args.expected_preview_sha256,args.expires_utc,args.confirm)):

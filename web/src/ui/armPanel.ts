@@ -103,6 +103,8 @@ export class ArmPanel {
   private safetyPublishQueued = false;
   private automationActive = false;
   private vrStarting = false;
+  private vrAllowed = true;
+  private vrActive = false;
   private readonly armLabel: HTMLElement;
   private readonly stopLabel: HTMLElement;
   private runtimeArmLabel = '解锁仿真';
@@ -141,7 +143,7 @@ export class ArmPanel {
     this.armButton.addEventListener('click', () => this.requestArm('desktop'));
     this.stopButton.addEventListener('click', () => this.requestStopOrReset('desktop'));
     this.vrButton.addEventListener('click', () => {
-      if (!this.automationActive) onEnterVR();
+      if (!this.automationActive && (this.vrAllowed || this.vrActive)) onEnterVR();
     });
   }
 
@@ -369,7 +371,8 @@ export class ArmPanel {
   setVRStatus(status: XRSessionStatus): void {
     const label = requireElement(this.vrButton, 'span');
     this.vrStarting = status.state === 'starting';
-    this.vrButton.disabled = this.automationActive || this.vrStarting;
+    this.vrActive = status.state === 'active';
+    this.vrButton.disabled = this.automationActive || this.vrStarting || (!this.vrAllowed&&!this.vrActive);
     this.vrButton.dataset.state = status.state;
     this.vrButton.title = status.state === 'error' ? status.message : '';
     label.textContent = status.state === 'starting'
@@ -377,6 +380,11 @@ export class ArmPanel {
       : status.state === 'active'
         ? '退出 VR'
         : '进入 VR';
+  }
+
+  setVRAllowed(allowed:boolean):void {
+    this.vrAllowed=allowed;
+    this.syncButtonState();
   }
 
   requestXRPrimaryAction(): boolean {
@@ -622,7 +630,7 @@ export class ArmPanel {
       this.stopButton.disabled = false;
     }
     this.stopButton.title = this.resetFeedback ?? this.homeFeedback ?? '';
-    this.vrButton.disabled = this.vrStarting;
+    this.vrButton.disabled = this.vrStarting || (!this.vrAllowed&&!this.vrActive);
     this.publishSafetyChange();
   }
 

@@ -1576,6 +1576,8 @@ class RobotControl:
 
     def accept_position_input(self,message,received_ns):
         from app.control.finite_position_types import PositionIntent
+        if message.session_id.startswith('xr-finite-') and not getattr(self.backend,'position_vr_enabled',False):
+            raise ValueError('position_vr_not_authorized')
         session=self.finite_position_session
         if not self._finite_position_enabled or session is None:
             raise ValueError('position_not_prepared')
@@ -1624,7 +1626,8 @@ class RobotControl:
         from app.control.finite_position_types import PositionView
         from app.schemas.messages import FinitePositionStatus
         view=self.finite_position_session.view() if self.finite_position_session is not None else PositionView(generation=self._control_generation)
-        return FinitePositionStatus(**asdict(view),policy=getattr(self.backend,'position_policy','finite_position_offline'))
+        return FinitePositionStatus(**asdict(view),policy=getattr(self.backend,'position_policy','finite_position_offline'),
+            vr_enabled=getattr(self.backend,'position_vr_enabled',False))
 
     async def _record_state_message(self, message: RobotStateMessage) -> None:
         """Record the composed message and retain the existing failure response."""

@@ -379,6 +379,11 @@ async def _receive_operator_messages(
             return
 
         if isinstance(message, VRFrame):
+            if (message.session_id.startswith('quest-')
+                    and getattr(control.backend,'position_candidate',False)
+                    and not getattr(control.backend,'position_vr_enabled',False)):
+                await _protocol_error(websocket,send_lock)
+                return
             app.state.latest.publish(message, control.clock.now_ns())
             start_sender.set()
             continue

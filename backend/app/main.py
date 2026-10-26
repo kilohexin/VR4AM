@@ -92,6 +92,7 @@ def build_backend(
     real_finite_position: bool = False,
     real_position_authorize=None,
     real_position_model=None,
+    real_position_vr: bool = False,
 ) -> RobotBackend:
     if type(real_finite_position) is not bool:raise ValueError('invalid_real_finite_position_selection')
     if real_finite_position:
@@ -103,6 +104,7 @@ def build_backend(
         from app.robots.finite_position_web import RealFinitePositionAdapter
         return RealFinitePositionAdapter(settings.lebai,client_factory=client_factory,
             position_model=real_position_model,authorize=real_position_authorize,
+            allow_vr=real_position_vr,
             event_callback=recorder.write_event)
     if type(offline_finite_position) is not bool:raise ValueError('invalid_finite_position_selection')
     if offline_finite_position:
@@ -251,6 +253,7 @@ def create_app(
     real_finite_position: bool = False,
     real_position_authorize=None,
     real_position_model=None,
+    real_position_vr: bool = False,
 ) -> FastAPI:
     runtime_settings = settings if settings is not None else Settings.load()
     runtime_backend = backend_label or (
@@ -280,6 +283,7 @@ def create_app(
             real_finite_position=real_finite_position,
             real_position_authorize=real_position_authorize,
             real_position_model=real_position_model,
+            real_position_vr=real_position_vr,
         )
         latest = LatestVRFrame()
         preparation_enabled = bool(
