@@ -106,3 +106,23 @@ async def connect_real_client(ip: str) -> LebaiClientProtocol:
     except Exception:
         raise BackendCommandError("lebai_sdk_connect_failed") from None
     return client
+
+
+async def connect_docker_simulator_client() -> LebaiClientProtocol:
+    """Explicit local simulator connection (3030); never a real-port fallback.
+
+    Not selected by the ordinary backend. The dedicated simulator caller must
+    verify its local container before using this factory.
+    """
+    try:
+        module = importlib.import_module("lebai_sdk")
+    except ModuleNotFoundError:
+        raise BackendCommandError("lebai_sdk_unavailable") from None
+    try:
+        module.init()
+    except Exception:
+        raise BackendCommandError("lebai_simulator_init_failed") from None
+    try:
+        return await module.connect("127.0.0.1", True)
+    except Exception:
+        raise BackendCommandError("lebai_simulator_connect_failed") from None

@@ -22,6 +22,7 @@ class _FinitePositionCore(RealLebaiAdapter):
     """Shared executor. Requires an explicit injected factory; no native loader."""
     position_candidate=False
     position_pitch_enabled=False
+    position_local_math_parallel=False
     _stop_blocking_motion_methods=frozenset({'movej','move_pvat','set_claw'})
     _immediate_stop_latch_methods=frozenset({'movej','move_pvat'})
 
@@ -33,6 +34,7 @@ class _FinitePositionCore(RealLebaiAdapter):
         self._position_policy_binding=self.position_arrival_policy
         self.position_initial_observations=[]
         self._position_plan=None;self._position_plan_observer=None
+        self._position_local_math_lock=asyncio.Lock()
         self.position_busy=False;self.position_aborted=False
         self._position_pitch_reference=None
         self._position_acceleration=PositionAccelerationMonitor(min(.2,settings.control.max_joint_acceleration_radps2))
@@ -131,9 +133,29 @@ class _FinitePositionCore(RealLebaiAdapter):
             task_state if task_state is not None else s.motion_state,s.estop)
 
     async def _position_math(self,name,operation,authorize):
-        async with self._sdk_lock:
-            authorize();self._position_health(self.position_binding)
-            return await self._snapshot_calls.call(name,operation,.2,revoked=lambda:self.position_aborted)
+        client,binding=self._client,self.position_binding
+        local_math=(self.position_local_math_parallel is True
+            and getattr(client,'_position_pure_local_kinematics',False) is True
+            and name in ('kinematics_inverse','kinematics_forward'))
+        lock=self._position_local_math_lock if local_math else self._sdk_lock
+        async with lock:
+            authorize();self._position_health(binding)
+            if client is not self._client:raise BackendCommandError('snapshot_read_client_changed')
+            owner,generation=self._snapshot_calls,self._pump.generation
+            entered,unknown=self._snapshot_native_evidence(client,name)
+            def revoked():
+                return (self.position_aborted or owner.closed or owner is not self._snapshot_calls
+                    or client is not self._client or generation!=self._pump.generation)
+            try:
+                result=await owner.call(name,operation,.2,revoked=revoked,
+                    entered=entered,native_result_unknown=unknown)
+                if revoked():raise BackendCommandError('snapshot_read_client_changed')
+                return result
+            finally:
+                if owner.unknown_methods and owner is self._snapshot_calls:self._preflight_ready=False
+                if owner.closed or owner.last.get(name,{}).get('outcome') not in (None,'returned'):
+                    self._schedule_sdk_diagnostic(dict(kind='snapshot_rpc_ownership',
+                        source='finite_position_math',**owner.snapshot()))
 
     async def _position_quiet_snapshot(self,purpose,authorize):
         """Observe valid completed reads; never rewrite a reported rate to zero."""
@@ -324,6 +346,7 @@ class FinitePositionAdapter(_FinitePositionCore):
     position_vr_enabled=True
     position_pitch_enabled=True
     position_offline_prepare_scheduler=True
+    position_local_math_parallel=True
 
     def __init__(self,settings,*,client_factory=None,backend_label=None,position_model=None,**kwargs):
         if (settings.ip!='digital-twin' or backend_label!='LEBAI_FAKE'

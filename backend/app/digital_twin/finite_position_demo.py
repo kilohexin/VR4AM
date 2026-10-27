@@ -36,6 +36,10 @@ class PositionDemoModel:
 
 
 class FinitePositionDemoClient(SegmentedDemoClient):
+    # These methods only calculate from explicit joint/pose inputs and the
+    # fixed local model. They never call a native SDK or mutate arm state.
+    _position_pure_local_kinematics=True
+
     async def kinematics_inverse(self,pose,joints):
         await self._delay();self._require_connected()
         if self._faults.ik_failure:return None

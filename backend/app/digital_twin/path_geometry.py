@@ -1,7 +1,33 @@
 """Batched geometry for the synthetic demo, not hardware path certification."""
+import math
 import numpy as np
+from scipy.spatial.transform import Rotation
 
-from app.sim.kinematics import chain_points
+from app.sim.kinematics import _translation,_rotation
+
+
+def chain_points_batch(samples,model):
+    """Same FK order as scalar chain_points; retain every sample, batch rotations."""
+    values=np.asarray(samples,dtype=float)
+    if values.ndim!=2 or values.shape[1]!=6 or not len(values) or not np.isfinite(values).all():
+        raise ValueError('invalid_ready_path_samples')
+    count=len(values);transform=np.repeat(np.eye(4)[None,:,:],count,axis=0)
+    points={'base':np.zeros((count,3))}
+    for index,axis,offset in zip(range(6),model.joint_axes,model.joint_offsets_m,strict=True):
+        transform=transform@_translation(offset)
+        points[f'joint{index+1}']=transform[:,:3,3].copy()
+        axis_local=np.eye(3)['xyz'.index(axis)]
+        rotations=np.repeat(np.eye(4)[None,:,:],count,axis=0)
+        rotations[:,:3,:3]=Rotation.from_rotvec(values[:,index,None]*axis_local).as_matrix()
+        transform=transform@rotations
+    transform=transform@_translation(model.tool_root_offset_m)
+    transform=transform@_rotation(Rotation.from_quat(model.tool_rotation_xyzw).as_matrix())
+    transform=transform@_translation(model.tcp_offset_m)
+    if (not np.isfinite(transform).all()
+            or not all(math.isclose(float(d),1.,abs_tol=1e-8) for d in np.linalg.det(transform[:,:3,:3]))):
+        raise ValueError('invalid LM3 transform')
+    points['tcp']=transform[:,:3,3].copy()
+    return points
 
 
 def segment_distances(a0,a1,b0,b1):
@@ -42,8 +68,7 @@ def validate_ready_samples(start,goal,settings,model):
             or np.any(samples>np.array(settings.soft_joint_max_rad)-settings.joint_limit_margin_rad)
             or np.any(abs(samples-np.array(model.home_q))>model.joint_window_rad)):
         raise ValueError('demo_ready_path_invalid')
-    frames=[chain_points(q,model) for q in samples]
-    points={name:np.stack([frame[name] for frame in frames]) for name in frames[0]}
+    points=chain_points_batch(samples,model)
     positions=points['tcp']
     if (np.any(positions<np.array(settings.startup_tcp_min_m))
             or np.any(positions>np.array(settings.startup_tcp_max_m))):

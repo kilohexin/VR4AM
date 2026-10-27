@@ -24,6 +24,28 @@ def test_segment_batch_rejects_nonfinite_geometry():
         segment_distances(points,points,bad,points)
 
 
+@pytest.mark.parametrize('count',[1,65])
+def test_batch_fk_matches_scalar_joint_origins_and_tcp_for_every_sample(count):
+    from app.digital_twin.path_geometry import chain_points_batch
+    from app.sim.kinematics import chain_points
+    from app.sim.lm3_model import LM3Model
+    model=LM3Model();rng=np.random.default_rng(27)
+    samples=np.array(model.home_q)+rng.uniform(-1.,1.,(count,6))
+    actual=chain_points_batch(samples,model)
+    expected=[chain_points(row,model) for row in samples]
+    assert tuple(actual)==tuple(expected[0])
+    for name in actual:
+        np.testing.assert_allclose(actual[name],np.stack([row[name] for row in expected]),atol=1e-13,rtol=1e-13)
+
+
+@pytest.mark.parametrize('samples',[np.zeros((0,6)),np.zeros((2,5)),np.zeros(6),np.full((1,6),np.nan)])
+def test_batch_fk_rejects_empty_wrong_shape_and_nonfinite_samples(samples):
+    from app.digital_twin.path_geometry import chain_points_batch
+    from app.sim.lm3_model import LM3Model
+    with pytest.raises(ValueError,match='invalid_ready_path_samples'):
+        chain_points_batch(samples,LM3Model())
+
+
 def test_ready_path_agrees_with_original_scalar_decisions():
     from dataclasses import replace
     from app.digital_twin.path_geometry import validate_ready_samples
@@ -64,9 +86,9 @@ def test_ready_validation_checks_all_65_samples_and_collision_pairs(monkeypatch)
     from app.sim.lm3_model import LM3Model
     settings=demo.demo_settings().lebai;model=LM3Model()
     demo._validate_ready_path.cache_clear()
-    original=geometry.chain_points;seen=[]
-    def capture(q,m):seen.append(tuple(q));return original(q,m)
-    monkeypatch.setattr(geometry,'chain_points',capture)
+    original=geometry.chain_points_batch;seen=[]
+    def capture(q,m):seen.extend(map(tuple,q));return original(q,m)
+    monkeypatch.setattr(geometry,'chain_points_batch',capture)
     demo._validate_ready_path(settings.home_q,settings.teleop_ready_q,settings,model)
     assert len(seen)==65
     assert seen[0]==settings.home_q and seen[-1]==settings.teleop_ready_q
