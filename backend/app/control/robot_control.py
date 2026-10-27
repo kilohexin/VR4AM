@@ -876,13 +876,15 @@ class RobotControl:
                     self._deadline_rebase_requested = False
                     self._deadline_compensation_ns = 0
                 lateness_ns = now_ns - next_deadline_ns
-                if (self._finite_position_enabled and self.finite_position_session is not None
-                        and not self._recovery_lock.locked() and lateness_ns>OVERRUN_NS):
+                offline_preparing=self._offline_position_preparation_no_stream()
+                if (((self._finite_position_enabled and self.finite_position_session is not None
+                        and not self._recovery_lock.locked()) or offline_preparing) and lateness_ns>OVERRUN_NS):
                     # This offline position candidate has no PVAT stream to
                     # catch up. Its independent input/entry/completion deadlines
                     # remain active in Session/Adapter; never replay missed ticks.
                     self.backend._schedule_sdk_diagnostic(dict(kind='finite_position_scheduler_late',
-                        lateness_ns=lateness_ns,stream_catchup=False,input_deadline_ms=100))
+                        lateness_ns=lateness_ns,stream_catchup=False,input_deadline_ms=100,
+                        phase='offline_preparation' if offline_preparing else 'finite_position'))
                     next_deadline_ns=now_ns;self._consecutive_overruns=0;lateness_ns=0
                 latest = self.latest.snapshot()
                 no_client_frame = self._position_idle_deadline_rebase() or (
@@ -1550,6 +1552,16 @@ class RobotControl:
         if state.fault is not None and self._fault is None:
             self._latch_backend_fault(state.fault)
         return state
+
+    def _offline_position_preparation_no_stream(self):
+        # Explicitly Fake-only. The owned preparation command has no stream
+        # backlog to replay; tick still enforces its original 100-ms input lease.
+        episode=self._preparation_episode
+        return bool(self._finite_position_enabled
+            and getattr(self.backend,'position_offline_prepare_scheduler',False) is True
+            and self._recovery_lock.locked() and episode is not None
+            and not self._fault and not self._stop_unverified and not self._pending_stop_completion
+            and self._preparation_is_current(episode))
 
     def _position_idle_deadline_rebase(self):
         return bool(self._finite_position_enabled and self.machine.mode in {TeleopMode.READY,TeleopMode.DISARMED}

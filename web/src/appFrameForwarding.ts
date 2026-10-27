@@ -1,4 +1,10 @@
 import type {VRFrame} from './protocol/messages';
+import type {XRSessionStatus} from './xr/session';
+
+/** Failed XR entry/teardown leaves no live input owner; authority is separate. */
+export function desktopOwnsInput(state:XRSessionStatus['state']):boolean {
+  return state==='idle'||state==='error';
+}
 
 export type TeleopFrameSource = 'manual' | 'xr' | 'offline_rehearsal';
 

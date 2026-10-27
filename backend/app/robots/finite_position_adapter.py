@@ -323,6 +323,7 @@ class FinitePositionAdapter(_FinitePositionCore):
     position_candidate=True
     position_vr_enabled=True
     position_pitch_enabled=True
+    position_offline_prepare_scheduler=True
 
     def __init__(self,settings,*,client_factory=None,backend_label=None,position_model=None,**kwargs):
         if (settings.ip!='digital-twin' or backend_label!='LEBAI_FAKE'

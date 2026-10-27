@@ -1,5 +1,5 @@
 import './styles.css';
-import {type TeleopFrameSource} from './appFrameForwarding';
+import {desktopOwnsInput,type TeleopFrameSource} from './appFrameForwarding';
 import {
   PROTOCOL_VERSION,
   type DiagnosticsMessage,
@@ -126,7 +126,7 @@ holdPanel=new HoldControlPanel(hud.desktopControlContainer,(message)=>socket.sen
    sendFrame({...lastManualFrame,client_mono_ms:performance.now(),
     visibility:document.visibilityState==='visible'?'visible':'hidden'},'manual');
  },requestId=>socket.cancelGripper(requestId),(vector,event,reason,pitch)=>{
-  if(xrState!=='idle')return; // A disabled desktop panel cannot revoke the XR owner's gesture.
+  if(!desktopOwnsInput(xrState))return; // A disabled desktop panel cannot revoke the XR owner's gesture.
   if(event==='held')positionInput.offer(vector,pitch);
   else if(event==='release')positionInput.release();
   else positionInput.abort(reason);
@@ -325,7 +325,7 @@ function disposeForPageExit(): void {
 }
 
 function refreshHoldPanel():void{
- holdPanel?.update(latestRobotState,connectionState&&xrState==='idle'&&Boolean(armPanel?.isArmed),lastRobotStateReceivedMs);
+ holdPanel?.update(latestRobotState,connectionState&&desktopOwnsInput(xrState)&&Boolean(armPanel?.isArmed),lastRobotStateReceivedMs);
 }
 
 function recordAcknowledgement(sequence: number | null): void {
