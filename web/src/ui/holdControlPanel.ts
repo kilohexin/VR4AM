@@ -26,6 +26,7 @@ export class HoldControlPanel {
   private clawLastSendMs = Number.NEGATIVE_INFINITY;
   private disposed = false;
   private positionCandidate=false;
+  private feedbackPaused=false;
   private readonly status: HTMLElement;
   private readonly feedback: HTMLElement;
   private readonly opening: HTMLElement;
@@ -85,7 +86,8 @@ export class HoldControlPanel {
   update(state: RobotStateMessage | null, available: boolean, receivedAt = this.now()): void {
     const enteredHold=enteredFiniteHold(this.state?.finite_position,state?.finite_position);
     this.positionCandidate=(state?.backend==='LEBAI_FAKE'&&state.finite_position?.policy==='finite_position_offline')
-      ||(state?.backend==='LEBAI'&&state.finite_position?.policy==='finite_position_web');
+      ||(state?.backend==='LEBAI'&&state.finite_position?.policy==='finite_position_web')
+      ||(state?.backend==='LEBAI_DOCKER'&&state.finite_position?.policy==='finite_position_docker');
     this.stick.setAttribute('aria-label',this.positionCandidate?'平面摇杆：拖动控制左右前后，松开后完成当前小步':'平面摇杆：拖动控制左右前后，松开停止');
     this.state = state;
     this.receivedAt = receivedAt;
@@ -119,9 +121,13 @@ export class HoldControlPanel {
       const awaitingSelectedClaw=!fresh&&this.enabled&&this.pending!==null&&!this.motionHeld()
         &&frame.tracking_valid&&frame.visibility==='visible'&&delta>=0&&delta<=100
         &&this.now()-this.receivedAt>100;
+      const finiteFeedbackGap=this.positionCandidate&&!fresh&&this.enabled
+        &&frame.tracking_valid&&frame.visibility==='visible'&&delta>=0&&delta<=100
+        &&this.now()-this.receivedAt>100;
       // A selected claw RPC can hold the SDK lock past the telemetry period.
       // Stop generating targets, but do not cancel its already-owned reply.
-      if(awaitingSelectedClaw)this.finishGesture('release');
+      if(finiteFeedbackGap){this.feedbackPaused=true;this.finishGesture('release');}
+      else if(awaitingSelectedClaw)this.finishGesture('release');
       else this.cancel(!fresh?'feedback_or_tracking':'frame_gap');
     }
     if(this.positionCandidate&&this.motionHeld()&&fresh){
@@ -191,10 +197,13 @@ export class HoldControlPanel {
     this.root.removeEventListener('lostpointercapture', this.onUp); window.removeEventListener('blur', this.cancel);
     document.removeEventListener('visibilitychange', this.onVisibility); document.removeEventListener('focusin', this.onFocus);
   }
-  private fresh(): boolean {const time = this.now(); return !this.disposed && this.enabled && time >= this.receivedAt && time - this.receivedAt <= 100;}
+  private fresh(maxAge=this.positionCandidate&&this.state?.backend==='LEBAI_DOCKER'
+    &&this.action!=='open'&&this.action!=='close'?500:100): boolean {
+    const time=this.now();return !this.disposed&&this.enabled&&time>=this.receivedAt&&time-this.receivedAt<=maxAge;
+  }
   private motionHeld(): boolean {return this.action !== null && this.action !== 'open' && this.action !== 'close'
     && (this.action !== 'joystick' || Math.hypot(this.xy.x, this.xy.y) > 0);}
-  private clawReady(): boolean {return this.fresh() && this.state?.robot_state === 'IDLE' && this.state.mode !== 'ACTIVE';}
+  private clawReady(): boolean {return this.fresh(100) && this.state?.robot_state === 'IDLE' && this.state.mode !== 'ACTIVE';}
   private refresh(): void {
     const boundary=this.positionCandidate?finiteHoldTitle(this.state?.finite_position):null;
     const finiteBusy=this.positionCandidate&&['planning','executing','draining'].includes(this.state?.finite_position?.phase??'');
@@ -214,6 +223,7 @@ export class HoldControlPanel {
       button.classList.toggle('is-held', button === this.capture);
     }
     this.status.textContent = !this.enabled ? '先解锁，再点击进入准备姿态'
+      : this.feedbackPaused?'反馈暂缓，已释放当前手势；更新后重新按住即可'
       : boundary?`${boundary} · 松开后重新按住，反向或更换方向调整`
       : this.positionCandidate&&this.state?.finite_position?.phase==='draining'?'松开后正在完成当前小步'
       : this.motionHeld() ? (this.positionCandidate?'长按每步 2 mm；松开后完成当前小步':'摇杆松开回中停止；坐标固定于机械臂基座')
@@ -236,7 +246,9 @@ export class HoldControlPanel {
     if (!(e.target instanceof Element)) return;
     const button = e.target.closest<HTMLButtonElement>('[data-joystick],[data-hold],[data-claw]');
     if (!button || button.disabled || !this.fresh() || e.button !== 0 || this.pointer !== null || !this.state) return;
+    if(button.dataset.claw&&!this.fresh(100))return;
     e.preventDefault(); button.focus({preventScroll: true});
+    this.feedbackPaused=false;
     this.pointer = e.pointerId; this.capture = button;
     this.action = button.hasAttribute('data-joystick') ? 'joystick' : (button.dataset.hold ?? button.dataset.claw) as Action;
     this.previousTime = null;

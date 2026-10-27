@@ -55,6 +55,17 @@ it('maps a released-then-gripped hand into finite directions and releases withou
  expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[1,0,0]});
  r.frame(60,false,[.01,0,0]);expect(r.inputs.at(-1).kind).toBe('release');expect(r.stops).toEqual([]);
 });
+
+it('releases on delayed display feedback and requires regrip without disarming',()=>{
+ const r=rig();r.frame(0);r.frame(20,true);r.frame(40,true,[.01,0,0]);
+ r.xr.update(state,20);r.setNow(130);
+ r.xr.apply({v:1,type:'vr_frame',session_id:'quest-test',seq:130,client_mono_ms:130,
+  tracking_valid:true,visibility:'visible',right:{p:[.01,0,0],q:[0,0,0,1],grip:true,trigger:0}});
+ expect(r.inputs.at(-1).kind).toBe('release');expect(r.stops).toEqual([]);
+ const count=r.inputs.length;r.frame(140,true,[.1,0,0]);expect(r.inputs).toHaveLength(count);
+ r.frame(160,false);r.frame(180,true);r.frame(200,true,[-.01,0,0]);
+ expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[-1,0,0]});
+});
 it('uses reported TCP to stop following a reached target instead of accumulating goals',()=>{
  const r=rig();r.frame(0);r.frame(20,true);r.frame(40,true,[.002,0,0]);
  r.xr.update({...state,actual_tcp:{p:[.302,0,.4],q:[0,0,0,1]}},40);
@@ -112,4 +123,13 @@ it('waits for a selected claw result across feedback latency and blocks a compet
  r.setNow(121);r.xr.apply({v:1,type:'vr_frame',session_id:'quest-test',seq:121,client_mono_ms:100,
   tracking_valid:true,visibility:'visible',right:{p:[.01,0,0],q:[0,0,0,1],grip:true,trigger:0}});
  expect(r.cancelled).toEqual([]);expect(r.inputs).toEqual([]);expect(r.claws).toHaveLength(1);
+});
+
+it('does not replay Trigger release after a pending claw crosses a display gap',()=>{
+ const r=rig();r.frame(0);r.frame(20,false,[0,0,0],.7);
+ r.setNow(130);r.xr.apply({v:1,type:'vr_frame',session_id:'quest-test',seq:130,client_mono_ms:100,
+  tracking_valid:true,visibility:'visible',right:{p:[0,0,0],q:[0,0,0,1],grip:false,trigger:0}});
+ r.xr.onGripperResult({v:1,type:'gripper_result',request_id:r.claws[0].request_id,accepted:true,message:'returned'});
+ r.frame(140,false,[0,0,0],0);r.frame(160,false,[0,0,0],0);
+ expect(r.claws).toHaveLength(1);expect(r.cancelled).toEqual([]);
 });

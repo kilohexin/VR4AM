@@ -580,15 +580,16 @@ async def _receive_operator_messages(
             )
 
 
-async def _drain_idle_web_close(control,tasks,sender,close_requested,read_pending):
+async def _drain_idle_web_close(control,tasks,sender,close_requested,read_pending,*,revoke_generation=True):
     """Let only existing zero-actuation reads/static stops reach original bounds.
 
     This does not extend an RPC deadline or start a new read cycle. The
     single server's outer cleanup bound remains in force if a task won't exit.
     """
-    control._advance_control_generation()  # revoke UI authority before any wait
+    if revoke_generation:control._advance_control_generation()
     close_requested.set()
-    loop=asyncio.get_running_loop();deadline=loop.time()+1.
+    loop=asyncio.get_running_loop()
+    deadline=loop.time()+getattr(control.backend,'_stop_cleanup_grace_s',1.)
     remaining=set(tasks)
     while remaining:
         remaining={task for task in remaining if not task.done()}
@@ -662,6 +663,7 @@ async def _run_coupled_session(
         "SIMULATOR",
         "LEBAI",
         "LEBAI_FAKE",
+        "LEBAI_DOCKER",
     }:
         diagnostics_task = asyncio.create_task(
             _delayed_diagnostics_sender(
@@ -700,8 +702,27 @@ async def _run_coupled_session(
             drain_idle=(idle_web and wait_error is None and close_guard()
                 and control.mode in {TeleopMode.READY,TeleopMode.DISARMED}
                 and getattr(control,'_fault',None) is None)
+            quiet_guard=getattr(control.backend,'docker_quiet_close_safe',None)
+            position_session=control.finite_position_session
+            drain_docker=(idle_web and wait_error is None and callable(quiet_guard) and quiet_guard()
+                and control.mode in {TeleopMode.READY,TeleopMode.DISARMED,TeleopMode.ARMED,TeleopMode.HOLD}
+                and not control._fault and not control._pending_stop_completion
+                and not control._recovery_lock.locked() and not control._recovery_phase
+                and control._preparation_unlock is None
+                and (position_session is None or (position_session.worker is None
+                    and position_session.phase in ('ready','hold') and position_session.gate.released)))
             try:
-                if drain_idle:
+                if drain_docker:
+                    # Quiescent completed actions: block all control ticks and
+                    # receive/new sends while an existing read reaches its own
+                    # deadline. on_disconnect still owns the original stop.
+                    control._disconnecting+=1
+                    try:
+                        with anyio.CancelScope(shield=True):
+                            await _drain_idle_web_close(control,tasks,sender,close_requested,read_pending,
+                                revoke_generation=False)
+                    finally:control._disconnecting-=1
+                elif drain_idle:
                     with anyio.CancelScope(shield=True):
                         await _drain_idle_web_close(control,tasks,sender,close_requested,read_pending)
             except BaseException as error:
@@ -736,6 +757,14 @@ async def teleop_websocket(websocket: WebSocket) -> None:
     await websocket.accept()
     app = websocket.app
     control: RobotControl = app.state.control
+    backend=control.backend
+    if (getattr(backend,'position_policy',None)=='finite_position_docker'
+            and (control._fault or backend._latched_fault
+                or backend._snapshot_calls.unknown_methods or backend._motion_calls.unknown_methods)):
+        message='后端故障已锁存，已停止自动重连；请查看诊断，恢复后刷新页面。'
+        await websocket.send_json(dict(v=1,type='connection_rejected',reason='backend_fault',message=message))
+        await websocket.close(code=4410,reason='backend_fault')
+        return
     owner_token = object()
     async with app.state.teleop_owner_lock:
         owns_connection = app.state.teleop_owner is None

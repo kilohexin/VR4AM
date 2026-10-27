@@ -19,6 +19,7 @@ import type {ArmSafetySnapshot} from '../ui/armPanel';
 import type {XRPresentationSample} from '../xr/session';
 import {ControllerHints} from './controllerHints';
 import {DesktopOrbitCamera} from './desktopOrbitCamera';
+import {DesktopInputScheduler} from './desktopInputScheduler';
 import type {GraspBlock} from './kinematicGraspController';
 import {WorkspacePlacementController} from './workspacePlacementController';
 import {type RobotRuntimeSummary, VrSafetyPanel} from './vrSafetyPanel';
@@ -151,6 +152,9 @@ export class SimulationScene {
     hardwareVerified: false,
   };
   private started = false;
+  private readonly desktopInput = new DesktopInputScheduler(nowMs => {
+    if (this.started) this.sendDesktopFrame(nowMs);
+  });
   private automationActive = false;
 
   constructor(
@@ -188,6 +192,7 @@ export class SimulationScene {
     this.addListeners();
     this.resize();
     void this.loadModel();
+    this.desktopInput.start();
     this.animationHandle = requestAnimationFrame(this.animate);
   }
 
@@ -267,6 +272,7 @@ export class SimulationScene {
 
   async startXR(session: XRSession, loop: XRFrameRequestCallback): Promise<void> {
     if (!this.started) throw new Error('Simulation scene is not running');
+    this.desktopInput.setXROwned(true);
     if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
     this.animationHandle = null;
     this.vrSafetyPanel.setVisible(false);
@@ -292,6 +298,7 @@ export class SimulationScene {
       this.sessionId = createSessionId();
       this.sequence = 0;
       this.lastFrameMs = Number.NEGATIVE_INFINITY;
+      this.desktopInput.setXROwned(false);
       if (this.started && this.animationHandle === null) {
         this.animationHandle = requestAnimationFrame(this.animate);
       }
@@ -329,6 +336,7 @@ export class SimulationScene {
   dispose(): void {
     if (!this.started) return;
     this.started = false;
+    this.desktopInput.stop();
     if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
     this.animationHandle = null;
     this.renderer.setAnimationLoop(null);
@@ -347,7 +355,6 @@ export class SimulationScene {
     this.animationHandle = requestAnimationFrame(this.animate);
 
     this.updateScene(nowMs);
-    this.sendDesktopFrame(nowMs);
     this.renderer.render(this.scene, this.camera);
   };
 

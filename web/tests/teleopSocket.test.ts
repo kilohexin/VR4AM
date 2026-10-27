@@ -61,6 +61,14 @@ function setup(
 }
 
 const validFrame = () => vrFixture as VRFrame;
+it('stops reconnecting after an explicit backend fault rejection',()=>{
+ const statuses:TeleopConnectionStatus[]=[];const {client,sockets}=setup(()=>{},s=>statuses.push(s));
+ client.connect();sockets[0].open();
+ sockets[0].message(JSON.stringify({v:1,type:'connection_rejected',reason:'backend_fault',message:'fault latched'}));
+ sockets[0].closeFromServer();vi.advanceTimersByTime(60_000);
+ expect(sockets).toHaveLength(1);expect(statuses.at(-1)).toEqual({state:'faulted',message:'fault latched'});
+ client.close();
+});
 it('routes only validated stop acknowledgements to the control UI',()=>{
  const wire=new FakeSocket();const acks:any[]=[];
  const client=new TeleopSocket('wss://test',()=>{},()=>wire as unknown as WebSocket,

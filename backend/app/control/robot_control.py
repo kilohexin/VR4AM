@@ -854,7 +854,7 @@ class RobotControl:
                     # The loop is already stopping the robot. Give that bounded
                     # operation a chance to finish instead of manufacturing a
                     # cancelled-stop fault during ordinary application shutdown.
-                    await asyncio.wait({task}, timeout=1.0)
+                    await asyncio.wait({task},timeout=getattr(self.backend,'_stop_cleanup_grace_s',1.))
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
@@ -1149,6 +1149,19 @@ class RobotControl:
             or received.frame.visibility != "visible"
         ):
             return
+        if (age_ms>=VR_FRAME_STALE_MS or not received.frame.tracking_valid or received.frame.visibility!='visible'):
+            idle_proof=getattr(self.backend,'docker_idle_input_safe',None)
+            if (self.machine.mode in {TeleopMode.READY,TeleopMode.DISARMED}
+                    and self._preparation_unlock is None and self._position_idle_deadline_rebase()
+                    and callable(idle_proof) and idle_proof()):
+                # No preparation/actuator authority or writes existed. A page
+                # loading gap locks local input; it is not a stop transaction.
+                if self.machine.mode==TeleopMode.READY:
+                    self.machine.disarm();self._last_frame_id=None
+                    self._advance_control_generation()
+                    if not await self._record_critical('docker_idle_input_expired',{'actuator_writes':0}):
+                        self._latch_recording_fault()
+                return
         if age_ms >= 250:
             await self._safe_stop(StopReason.STALE)
             if not self._hard_stop_completion:
@@ -1554,7 +1567,7 @@ class RobotControl:
         return state
 
     def _offline_position_preparation_no_stream(self):
-        # Explicitly Fake-only. The owned preparation command has no stream
+        # Explicitly simulation-only. The owned preparation command has no stream
         # backlog to replay; tick still enforces its original 100-ms input lease.
         episode=self._preparation_episode
         return bool(self._finite_position_enabled

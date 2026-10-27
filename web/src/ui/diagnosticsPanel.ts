@@ -229,6 +229,7 @@ function appendText(parent: HTMLElement, tag: 'h2' | 'span' | 'strong' | 'li', v
 }
 
 function runtimeIdentity(runtime: RuntimeBackend | null): string {
+  if (runtime === 'LEBAI_DOCKER') return 'L MASTER DOCKER';
   if (runtime === 'LEBAI_FAKE') return 'SIMULATION';
   if (runtime === 'LEBAI') return 'REAL ROBOT';
   if (runtime === 'SIMULATOR') return 'SIMULATOR';

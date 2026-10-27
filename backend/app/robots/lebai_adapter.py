@@ -160,6 +160,8 @@ class RealLebaiAdapter:
     supports_prepare_on_arm = True
     # Internal commissioning subclass hook, never configurable by VR/API input.
     _motion_stop_rpc_method = "stop_move"
+    _stop_rpc_timeout_s = .2
+    _stop_verification_ns = 500_000_000
     _stop_blocking_motion_methods = frozenset({'move_pvat', 'set_claw'})
     _immediate_stop_latch_methods = frozenset({'move_pvat'})
 
@@ -631,6 +633,7 @@ class RealLebaiAdapter:
             self._stop_transaction = StopTransaction(
                 self._stop_episode_id, self._clock, self._schedule_sdk_diagnostic,
                 on_request_started=self._start_stop_diagnostic_sampling,
+                rpc_timeout_s=self._stop_rpc_timeout_s,
             )
 
     def _start_stop_diagnostic_sampling(self, method: str) -> None:
@@ -698,7 +701,7 @@ class RealLebaiAdapter:
         diagnostics: dict[str, Any],
     ) -> object:
         call: dict[str, Any] = {
-            "method": method, "started_ns": self._clock(), "timeout_ms": 200,
+            "method": method, "started_ns": self._clock(), "timeout_ms": int(self._stop_rpc_timeout_s*1000),
         }
         diagnostics["rpc_calls"].append(call)
         try:
@@ -784,7 +787,7 @@ class RealLebaiAdapter:
         started_ns = transaction.verification_started_ns
         stable_since_ns = transaction.stable_since_ns
         diagnostics["verification_started_ns"] = started_ns
-        diagnostics["verification_deadline_ns"] = started_ns + 500_000_000
+        diagnostics["verification_deadline_ns"] = started_ns + self._stop_verification_ns
         diagnostics["stable_since_ns"] = stable_since_ns
         stable_anchor: LebaiSnapshot | None = transaction.stable_anchor
         try:
@@ -844,7 +847,7 @@ class RealLebaiAdapter:
                         transaction.stable_anchor = stable_anchor
                         diagnostics["stable_since_ns"] = stable_since_ns
                     elif (now_ns - stable_since_ns >= 300_000_000
-                          and (transaction.confirmed or now_ns - started_ns < 500_000_000)):
+                          and (transaction.confirmed or now_ns - started_ns < self._stop_verification_ns)):
                         if self._motion_calls.unknown_methods & self._stop_blocking_motion_methods:
                             await self._fail_unverified_stop(diagnostics=diagnostics)
                             raise BackendCommandError("stop_unverified")
@@ -859,7 +862,7 @@ class RealLebaiAdapter:
                     transaction.stable_anchor = None
                     diagnostics["stable_since_ns"] = None
                     transaction.confirmed = False
-                if now_ns - started_ns >= 500_000_000:
+                if now_ns - started_ns >= self._stop_verification_ns:
                     self._latched_fault = "stop_incomplete"
                     await self._fail_unverified_stop(
                         diagnostics=diagnostics,
@@ -2245,13 +2248,8 @@ class RealLebaiAdapter:
                 settled_state in _STOP_SETTLED_STATES
                 and running_motion is not None
             ):
-                raw_motion_state = await self._timed(
-                    "get_motion_state",
-                    lambda: client.get_motion_state(running_motion),
-                    latencies,
-                    deadline_ns=deadline_ns,
-                    timeout_error="sdk_timeout:get_motion_state",
-                )
+                raw_motion_state = await self._read_retained_task_state(
+                    client,running_motion,latencies,deadline_ns,read_purpose)
                 if isinstance(raw_motion_state, str):
                     motion_state = raw_motion_state.strip().upper()
                 if motion_state == "FINISHED":
@@ -2334,6 +2332,10 @@ class RealLebaiAdapter:
 
     def _before_snapshot_install(self, snapshot, read):
         pass
+
+    async def _read_retained_task_state(self,client,motion_id,latencies,deadline_ns,read_purpose):
+        return await self._timed('get_motion_state',lambda:client.get_motion_state(motion_id),latencies,
+            deadline_ns=deadline_ns,timeout_error='sdk_timeout:get_motion_state')
 
     async def _read_snapshot_fields(self, client, latencies, deadline_ns, *,
                                     read_purpose, include_raw_kinematics):

@@ -8,7 +8,7 @@
     "pitch_enabled": {"type":"boolean","default":false},
     "blocked_input_seq": {"anyOf":[{"type":"integer","minimum":0,"maximum":9007199254740991},{"type":"null"}],"default":null},
     "policy": {
-      "enum": ["finite_position_offline", "finite_position_web"],
+      "enum": ["finite_position_offline", "finite_position_web", "finite_position_docker"],
       "default": "finite_position_offline",
       "title": "Policy",
       "type": "string"
@@ -747,7 +747,8 @@
               "enum": [
                 "SIMULATOR",
                 "LEBAI",
-                "LEBAI_FAKE"
+                "LEBAI_FAKE",
+                "LEBAI_DOCKER"
               ],
               "type": "string"
             },

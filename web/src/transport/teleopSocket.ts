@@ -36,6 +36,7 @@ export type SocketFactory = (url: string) => WebSocket;
 export type TeleopConnectionStatus =
   | {state: 'connected'}
   | {state: 'occupied'; message: string}
+  | {state: 'faulted'; message: string}
   | {state: 'unreachable'}
   | {state: 'disconnected'}
   | {state: 'reconnecting'};
@@ -145,7 +146,6 @@ export class TeleopSocket {
     socket.onopen = () => {
       if (!this.isCurrent(socket, generation)) return;
       this.occupied = false;
-      this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
       this.onConnectionChange({state: 'connected'});
       this.sendControl({
         v: PROTOCOL_VERSION,
@@ -159,10 +159,15 @@ export class TeleopSocket {
       try {
         const message: unknown = JSON.parse(event.data);
         if (isConnectionRejectedMessage(message)) {
+          if(message.reason==='backend_fault'){
+            this.explicitClose=true;this.socket=null;
+            this.onConnectionChange({state:'faulted',message:message.message});socket.close();return;
+          }
           this.occupied = true;
           this.reconnectDelayMs = this.occupiedReconnectDelayMs;
           this.onConnectionChange({state: 'occupied', message: message.message});
         } else if (isRobotStateMessage(message)) {
+          this.reconnectDelayMs=INITIAL_RECONNECT_DELAY_MS;
           this.occupiedReconnectDelayMs = OCCUPIED_INITIAL_RECONNECT_DELAY_MS;
           this.onRobotState(message);
         } else if (isArmFeedbackMessage(message)) this.onArmFeedback(message);

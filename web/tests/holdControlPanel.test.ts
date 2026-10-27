@@ -35,6 +35,18 @@ it('holds tool pitch through the finite intent and keeps the TCP translation zer
  expect(r.release).not.toHaveBeenCalled();
 });
 
+it.each([true,'real'] as const)('finite %s releases on delayed display feedback without disarming or replaying',candidate=>{
+ const r=rig(candidate),button=r.find('[data-hold="z+"]');
+ button.dispatchEvent(pointer('pointerdown'));r.panel.applyFrame(frame(0));
+ r.clock(20);r.panel.applyFrame(frame(20));r.position.mockClear();
+ r.clock(110);r.panel.applyFrame(frame(110));
+ expect(r.position.mock.calls.map(c=>c[1])).toEqual(['release']);
+ expect(r.root.textContent).toContain('反馈暂缓');
+ r.step(130,'ARMED');expect(r.position).toHaveBeenCalledTimes(1);
+ button.dispatchEvent(pointer('pointerdown'));r.step(150,'ARMED');
+ expect(r.position.mock.calls.at(-1)?.[1]).toBe('held');
+});
+
 it('releases a boundary-blocked gesture without aborting or replaying it after fresh feedback',()=>{
  const r=rig(true),stick=r.find('[data-joystick]');stick.dispatchEvent(pointer('pointerdown',180,100));
  r.panel.applyFrame(frame(0));r.position.mockClear();

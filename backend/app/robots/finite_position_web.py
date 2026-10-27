@@ -70,6 +70,10 @@ class RealFinitePositionAdapter(_FinitePositionCore):
                 or not 0<settings.control.max_joint_speed_radps<=.05
                 or not 0<settings.control.max_joint_acceleration_radps2<=.2):
             raise ValueError('position_web_explicit_profile_required')
+        self._initialize_web_core(settings,client_factory=client_factory,position_model=position_model,
+            authorize=authorize,**kwargs)
+
+    def _initialize_web_core(self,settings,*,client_factory,position_model,authorize,backend_label='LEBAI',**kwargs):
         self._web_authorize=authorize
         self._web_prepare_authorize=None
         self._web_entry_plan=None;self._web_before_entry=None;self._web_on_entered=None;self._web_move_floor=0
@@ -78,7 +82,7 @@ class RealFinitePositionAdapter(_FinitePositionCore):
             native=await client_factory(ip)
             return _WebClient(native,authorize,self._web_native_entry_check,self._web_claw_entry_check)
         super().__init__(settings,client_factory=factory,position_model=position_model,
-            backend_label='LEBAI',arrival_policy='coarse_grasp',**kwargs)
+            backend_label=backend_label,arrival_policy='coarse_grasp',**kwargs)
         self._position_sources.add(Path(__file__))
         self._position_identity=self._source_identity();self._position_metadata=self._source_metadata()
         self._finite_snapshot_wrappers=set()
@@ -156,6 +160,9 @@ class RealFinitePositionAdapter(_FinitePositionCore):
     async def _read_snapshot_fields(self,client,latencies,deadline_ns,**kwargs):
         if kwargs['read_purpose']=='stop_verification':
             return await super()._read_snapshot_fields(client,latencies,deadline_ns,**kwargs)
+        return await self._web_parallel_snapshot_fields(client,latencies,deadline_ns,**kwargs)
+
+    async def _web_parallel_snapshot_fields(self,client,latencies,deadline_ns,**kwargs):
         owner=self._snapshot_calls;generation=self._pump.generation
         def check():
             if (client is not self._client or owner is not self._snapshot_calls or owner.closed

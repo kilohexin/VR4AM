@@ -162,11 +162,13 @@ export class Hud {
     const labels: Record<TeleopConnectionStatus['state'], string> = {
       connected: '已连接',
       occupied: '控制端已被占用，请关闭电脑端网页后重试',
+      faulted: '后端故障已锁存，自动重连已停止',
       unreachable: '后端不可达',
       disconnected: '连接已中断',
       reconnecting: '正在重连',
     };
     this.connectionValue.textContent = labels[status.state];
+    if(status.state==='faulted')this.showSceneError(status.message);
     this.connectionValue.dataset.tone = status.state === 'connected' ? 'healthy' : 'muted';
     if (status.state !== 'connected') {
       this.setRuntimeIdentity(null, null);
@@ -194,7 +196,7 @@ export class Hud {
   ): void {
     this.runtimeIdentityValue.textContent = runtimeIdentityLabel(backend, realMode);
     this.runtimeIdentityValue.dataset.backend = backend ?? 'UNKNOWN';
-    this.brandHeading.textContent = backend === 'LEBAI_FAKE' || backend === 'SIMULATOR'
+    this.brandHeading.textContent = backend === 'LEBAI_FAKE' || backend === 'SIMULATOR' || backend === 'LEBAI_DOCKER'
       ? 'LM3 遥操作仿真'
       : 'LM3 遥操作';
     this.rehearsalBanner.textContent = backend === 'LEBAI'
@@ -205,7 +207,7 @@ export class Hud {
           : '真机运行模式未确认，禁止控制'
       : backend === null
         ? '运行环境未确认，禁止控制'
-        : '仿真模式，不是真机';
+        : backend === 'LEBAI_DOCKER' ? '原厂 Docker 机械臂仿真＋本地虚拟夹爪 · 无接触物理' : '仿真模式，不是真机';
   }
 
   setController(state: ControllerHudState): void {
@@ -344,6 +346,7 @@ export function isStopFailure(fault: string | null): boolean {
 
 function runtimeIdentityLabel(backend: RuntimeBackend | null, realMode: RealRobotMode | null): string {
   if (backend === null) return '运行环境未确认';
+  if (backend === 'LEBAI_DOCKER') return '原厂 Docker 仿真 · LEBAI_DOCKER';
   if (backend === 'LEBAI_FAKE') return '仿真 · LEBAI_FAKE';
   if (backend === 'LEBAI') {
     if (realMode === 'control') return '真机控制 · LEBAI';

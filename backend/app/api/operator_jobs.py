@@ -58,7 +58,10 @@ class OperatorJobs:
                 if current():
                     try:
                         await self.control.command_gripper(message.value,is_current=current)
-                        accepted, reason = True, 'sdk_returned_not_physical_completion'
+                        accepted=True
+                        reason=('virtual_target_accepted_not_physical_grasp'
+                            if getattr(self.control.backend,'gripper_provider',None)=='local_virtual'
+                            else 'sdk_returned_not_physical_completion')
                     except BackendCommandError as error:
                         await self.control._enter_fault(str(error))
                         reason = 'backend_fault'

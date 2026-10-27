@@ -203,6 +203,7 @@ function formatRuntimeSummary(summary: RobotRuntimeSummary): string {
       : `${Math.round(summary.gripper * 100)}%`;
     return `真机已连接 · ${mode} · TCP ${tcp} · 夹爪闭合度${gripper} · ${latency}`;
   }
+  if (summary.backend === 'LEBAI_DOCKER') return `原厂Docker仿真 · TCP ${tcp} · ${latency}`;
   if (summary.backend === 'LEBAI_FAKE') return `仿真已连接 · TCP ${tcp} · ${latency}`;
   return `SIMULATOR · TCP ${tcp} · ${latency}`;
 }

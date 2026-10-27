@@ -581,6 +581,7 @@ describe('XR render-loop handoff', () => {
     const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
     const scene = {
       started: true,
+      desktopInput: {setXROwned: vi.fn(), stop: vi.fn()},
       animationHandle: 42,
       renderer: {xr: {setSession}, setAnimationLoop},
       vrSafetyPanel: {setVisible},
@@ -614,6 +615,7 @@ describe('XR render-loop handoff', () => {
     const beginSession = vi.fn();
     const scene = {
       started: true,
+      desktopInput: {setXROwned: vi.fn(), stop: vi.fn()},
       animationHandle: null,
       renderer: {
         xr: {setSession: vi.fn().mockRejectedValue(new DOMException('install failed'))},
@@ -649,6 +651,7 @@ describe('XR render-loop handoff', () => {
     robotVisualRoot.position.y = 0.92;
     const scene = {
       started: true,
+      desktopInput: {setXROwned: vi.fn(), stop: vi.fn()},
       animationHandle: null,
       sessionId: 'desktop-before-xr',
       sequence: 41,
@@ -700,6 +703,7 @@ describe('XR render-loop handoff', () => {
     robotVisualRoot.position.y = 1.04;
     const scene = {
       started: true,
+      desktopInput: {setXROwned: vi.fn(), stop: vi.fn()},
       animationHandle: null,
       sessionId: 'desktop-before-rejected-stop',
       sequence: 52,
@@ -833,6 +837,7 @@ describe('XR render-loop handoff', () => {
     const removeCanvas = vi.fn();
     const scene = {
       started: true,
+      desktopInput: {setXROwned: vi.fn(), stop: vi.fn()},
       animationHandle: null,
       renderer: {
         setAnimationLoop: vi.fn(),

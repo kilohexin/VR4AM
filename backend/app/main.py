@@ -94,7 +94,18 @@ def build_backend(
     real_position_model=None,
     real_position_vr: bool = False,
     real_position_pitch: bool = False,
+    docker_simulation: bool = False,
 ) -> RobotBackend:
+    if type(docker_simulation) is not bool:raise ValueError('invalid_docker_simulator_selection')
+    if docker_simulation:
+        if (real_finite_position or offline_finite_position or backend_label!='LEBAI_DOCKER'
+                or settings.backend!='lebai' or settings.lebai is None
+                or settings.segmented_target is not None or settings.transactional_target is not None
+                or stop_diagnostic_sampling):raise ValueError('docker_simulator_explicit_selection_required')
+        from app.robots.finite_position_docker import DockerFinitePositionAdapter
+        return DockerFinitePositionAdapter(settings.lebai,
+            **({'client_factory':client_factory} if client_factory is not connect_real_client else {}),
+            event_callback=recorder.write_event)
     if type(real_position_pitch) is not bool or (real_position_pitch and not real_finite_position):
         raise ValueError('position_pitch_explicit_selection_required')
     if type(real_finite_position) is not bool:raise ValueError('invalid_real_finite_position_selection')
@@ -259,6 +270,7 @@ def create_app(
     real_position_model=None,
     real_position_vr: bool = False,
     real_position_pitch: bool = False,
+    docker_simulation: bool = False,
 ) -> FastAPI:
     runtime_settings = settings if settings is not None else Settings.load()
     runtime_backend = backend_label or (
@@ -290,8 +302,13 @@ def create_app(
             real_position_model=real_position_model,
             real_position_vr=real_position_vr,
             real_position_pitch=real_position_pitch,
+            docker_simulation=docker_simulation,
         )
         latest = LatestVRFrame()
+        if docker_simulation:
+            from app.digital_twin.docker_runtime import DockerClock
+            control_clock=DockerClock()
+        else:control_clock=offline_position_clock if offline_finite_position and offline_position_clock is not None else MonotonicClock()
         preparation_enabled = bool(
             getattr(backend, 'supports_prepare_on_arm', False)
             and runtime_settings.lebai is not None
@@ -301,7 +318,7 @@ def create_app(
         control = RobotControl(
             backend=backend,
             latest=latest,
-            clock=offline_position_clock if offline_finite_position and offline_position_clock is not None else MonotonicClock(),
+            clock=control_clock,
             recorder=recorder,
             mapper=_build_mapper(runtime_settings),
             limiter=_build_limiter(runtime_settings, runtime_backend),
@@ -309,7 +326,7 @@ def create_app(
             segmented_settings=runtime_settings.segmented_target,
             prepare_on_arm=preparation_enabled,
             explicit_preparation=preparation_enabled,
-            prepare_options=HomeOptions(.05,60.,math.radians(.1),.02,.3) if real_finite_position else None,
+            prepare_options=HomeOptions(.05,60.,math.radians(.1),.02,.3) if real_finite_position or docker_simulation else None,
             constraint_clear_ms=runtime_settings.constraint_clear_ms,
             home_options=HomeOptions(
                 max_speed_radps=runtime_settings.home_joint_speed_radps,

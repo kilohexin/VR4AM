@@ -9,7 +9,7 @@ export interface FinitePositionInputMessage {
  kind:'held'|'release';vector:Vec3;pitch?:number;
 }
 export interface FinitePositionStatus {
- policy:'finite_position_offline'|'finite_position_web';phase:'inactive'|'ready'|'planning'|'executing'|'draining'|'hold'|'fault';
+ policy:'finite_position_offline'|'finite_position_web'|'finite_position_docker';phase:'inactive'|'ready'|'planning'|'executing'|'draining'|'hold'|'fault';
  generation:number;entered_steps:number;motion_id:number|null;reason:string|null;hardware_verified:false;
  vr_enabled?:boolean;
  pitch_enabled?:boolean;
@@ -26,7 +26,7 @@ export function isFinitePositionInputMessage(value:unknown):value is FinitePosit
 }
 export function isFinitePositionStatus(value:unknown):value is FinitePositionStatus {
  if(!isRecord(value)||!hasExactKeys(value,['policy','phase','generation','entered_steps','motion_id','reason','hardware_verified'],['vr_enabled','pitch_enabled','blocked_input_seq']))return false;
- return (value.policy==='finite_position_offline'||value.policy==='finite_position_web')&&['inactive','ready','planning','executing','draining','hold','fault'].includes(String(value.phase))
+ return ['finite_position_offline','finite_position_web','finite_position_docker'].includes(String(value.policy))&&['inactive','ready','planning','executing','draining','hold','fault'].includes(String(value.phase))
   &&Number.isSafeInteger(value.generation)&&Number(value.generation)>=0&&Number.isSafeInteger(value.entered_steps)
   &&Number(value.entered_steps)>=0&&Number(value.entered_steps)<=10&&value.hardware_verified===false
   &&(value.motion_id===null||(Number.isSafeInteger(value.motion_id)&&Number(value.motion_id)>0))
@@ -80,7 +80,7 @@ export type TeleopMode =
   | 'DISARMED';
 
 export type BackendState = 'DISCONNECTED' | 'IDLE' | 'MOVING' | 'HOLD' | 'FAULT';
-export type RuntimeBackend = 'SIMULATOR' | 'LEBAI' | 'LEBAI_FAKE';
+export type RuntimeBackend = 'SIMULATOR' | 'LEBAI' | 'LEBAI_FAKE' | 'LEBAI_DOCKER';
 export type RealRobotMode = 'readonly' | 'control';
 
 export interface TargetControlStatus {
@@ -224,7 +224,7 @@ export function isDisarmAckMessage(value:unknown):value is DisarmAckMessage {
 export interface ConnectionRejectedMessage {
   v: typeof PROTOCOL_VERSION;
   type: 'connection_rejected';
-  reason: 'controller_occupied';
+  reason: 'controller_occupied' | 'backend_fault';
   message: string;
 }
 
@@ -752,7 +752,7 @@ export function isRobotStateMessage(value: unknown): value is RobotStateMessage 
   if (
     Object.hasOwn(value, 'backend') &&
     value.backend !== null &&
-    !isEnumValue(['SIMULATOR', 'LEBAI', 'LEBAI_FAKE'], value.backend)
+    !isEnumValue(['SIMULATOR', 'LEBAI', 'LEBAI_FAKE','LEBAI_DOCKER'], value.backend)
   ) {
     return false;
   }
@@ -802,7 +802,7 @@ export function isDiagnosticsMessage(value: unknown): value is DiagnosticsMessag
     value.v !== PROTOCOL_VERSION ||
     value.type !== 'diagnostics' ||
     !isNonNegativeInteger(value.server_mono_ns) ||
-    !isEnumValue(['SIMULATOR', 'LEBAI', 'LEBAI_FAKE'], value.runtime) ||
+    !isEnumValue(['SIMULATOR', 'LEBAI', 'LEBAI_FAKE','LEBAI_DOCKER'], value.runtime) ||
     value.hardware_verified !== false ||
     !isNonNegativeInteger(value.control_generation) ||
     !isNullableJointVector(value.actual_qd) ||
@@ -864,7 +864,7 @@ export function isConnectionRejectedMessage(value: unknown): value is Connection
     hasExactKeys(value, ['v', 'type', 'reason', 'message']) &&
     value.v === PROTOCOL_VERSION &&
     value.type === 'connection_rejected' &&
-    value.reason === 'controller_occupied' &&
+    (value.reason === 'controller_occupied' || value.reason === 'backend_fault') &&
     typeof value.message === 'string'
   );
 }

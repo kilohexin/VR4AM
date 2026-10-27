@@ -11,15 +11,15 @@ from app.recording.clock_anchor import sample_performance_anchor, sample_perform
 class StopRpc:
     def __init__(self, episode_id: int, request_id: int, method: str,
                  send: Callable[[], Awaitable[object]], clock: Callable[[], int],
-                 emit: Callable[[dict[str, object]], None]) -> None:
+                 emit: Callable[[dict[str, object]], None], *, timeout_s: float = .2) -> None:
         self.episode_id = episode_id
         self.request_id = request_id
         self.method = method
         self.clock = clock
         self.emit = emit
         self.started_ns = clock()
-        self.deadline_ns = self.started_ns + 200_000_000
-        self.deadline = asyncio.get_running_loop().time() + .2
+        self.deadline_ns = self.started_ns + int(timeout_s*1_000_000_000)
+        self.deadline = asyncio.get_running_loop().time() + timeout_s
         self.wait_failed = False
         self.outcome = 'pending'
         self.result: object = None
@@ -94,11 +94,13 @@ class StopRpc:
 class StopTransaction:
     def __init__(self, episode_id: int, clock: Callable[[], int],
                  emit: Callable[[dict[str, object]], None],
-                 on_request_started: Callable[[str], None] | None = None) -> None:
+                 on_request_started: Callable[[str], None] | None = None,
+                 *, rpc_timeout_s: float = .2) -> None:
         self.episode_id = episode_id
         self.clock = clock
         self.emit = emit
         self.on_request_started = on_request_started
+        self.rpc_timeout_s=rpc_timeout_s
         self.requests: dict[str, StopRpc] = {}
         self.verification_started_ns: int | None = None
         self.stable_since_ns: int | None = None
@@ -118,7 +120,7 @@ class StopTransaction:
         reused = method in self.requests
         if not reused:
             self.requests[method] = StopRpc(self.episode_id, len(self.requests) + 1,
-                                            method, send, self.clock, self.emit)
+                                            method, send, self.clock, self.emit,timeout_s=self.rpc_timeout_s)
             if self.on_request_started is not None:
                 # StopRpc's task is queued first. This observer cannot change
                 # the request deadline or turn a stop into a diagnostic error.

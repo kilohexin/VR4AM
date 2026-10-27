@@ -11,7 +11,7 @@ PROTOCOL_VERSION = 1
 Vec3 = tuple[float, float, float]
 Quat = tuple[float, float, float, float]
 JointVector = tuple[float, float, float, float, float, float]
-RuntimeBackend = Literal["SIMULATOR", "LEBAI", "LEBAI_FAKE"]
+RuntimeBackend = Literal["SIMULATOR", "LEBAI", "LEBAI_FAKE", "LEBAI_DOCKER"]
 FaultResetRejectReason = Literal[
     "no_fault",
     "stop_incomplete",
@@ -174,7 +174,7 @@ class FinitePositionStatus(StrictMessage):
     vr_enabled: bool = Field(default=False,strict=True)
     pitch_enabled: bool = Field(default=False,strict=True)
     blocked_input_seq: int|None = Field(default=None,strict=True,ge=0,le=2**53-1)
-    policy: Literal['finite_position_offline','finite_position_web']='finite_position_offline'
+    policy: Literal['finite_position_offline','finite_position_web','finite_position_docker']='finite_position_offline'
     phase: Literal['inactive','ready','planning','executing','draining','hold','fault']
     generation: int
     entered_steps: int
@@ -201,7 +201,7 @@ class RobotStateMessage(StrictMessage):
     fault: str | None = None
     constraint: ConstraintKind | None = None
     recovery_phase: RecoveryPhase | None = None
-    backend: Literal["SIMULATOR", "LEBAI", "LEBAI_FAKE"] | None = None
+    backend: RuntimeBackend | None = None
     real_robot_mode: Literal["readonly", "control"] | None = None
     preflight_ready: bool | None = None
     preflight_reason: str | None = None

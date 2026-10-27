@@ -260,10 +260,10 @@ class _FinitePositionCore(RealLebaiAdapter):
             if type(motion_id) is not int or motion_id<=0:raise ValueError('position_invalid_motion_id')
             policy=plan.arrival_policy;end=entry_ns+policy.completion_ns
             while self._clock()<end:
+                progress_started_ns=self._clock()
                 monitor_authorize();self._position_health(binding)
-                s=await self._read_snapshot(read_purpose='position_progress')
+                s,state=await self._position_progress(motion_id,monitor_authorize)
                 monitor_authorize();self._position_health(binding)
-                state=await self._position_math('get_motion_state',lambda:self._client.get_motion_state(motion_id),monitor_authorize)
                 if self._clock()>=end:raise ValueError('position_completion_timeout')
                 final=self._position_sample(s,str(state).upper())
                 if not 0<=self._clock()-final.captured_ns<INPUT_NS:raise ValueError('position_feedback_expired')
@@ -298,7 +298,7 @@ class _FinitePositionCore(RealLebaiAdapter):
                     if final.task_state=='FINISHED' and check!='position_not_finished' and not settling:
                         raise ValueError(check)
                 last=final.captured_ns
-                await self._sleep(.02)
+                await self._position_progress_pause(progress_started_ns)
             raise ValueError(reason or 'position_completion_timeout')
         except BaseException as error:
             if entered and not self._position_native_entered():
@@ -318,6 +318,15 @@ class _FinitePositionCore(RealLebaiAdapter):
                 self._schedule_sdk_diagnostic(dict(kind='finite_position_step',input_seq=plan.intent_seq,
                     entered=entered,entry_ns=entry_ns,motion_id=motion_id if type(motion_id) is int else None,
                     reason=reason,unknown=bool(self._motion_calls.unknown_methods)))
+
+    async def _position_progress(self,motion_id,authorize):
+        s=await self._read_snapshot(read_purpose='position_progress')
+        authorize();self._position_health(self.position_binding)
+        state=await self._position_math('get_motion_state',lambda:self._client.get_motion_state(motion_id),authorize)
+        return s,state
+
+    async def _position_progress_pause(self,started_ns):
+        await self._sleep(.02)
 
     async def prepare(self,*args,**kwargs):
         if self.position_busy:raise BackendCommandError('position_busy')

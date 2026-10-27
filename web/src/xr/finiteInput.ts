@@ -47,9 +47,14 @@ export class FiniteXRInput {
   this.lastTime=frame.client_mono_ms;
   const feedbackFresh=t>=this.receivedAt&&t-this.receivedAt<100;
   if(this.pending&&(!feedbackFresh||frame.right.grip)){
+   if(!feedbackFresh)this.trigger=null;
    this.position.release();this.anchor=null;this.mustRelease=true;return;
   }
-  if(!feedbackFresh){this.reset('xr_feedback_expired');return;}
+  if(!feedbackFresh){
+   // Display latency cannot authorize another target. Release the finite
+   // gesture; its owned step still runs the backend's fresh-feedback checks.
+   this.position.release();this.anchor=null;this.mustRelease=true;this.trigger=null;return;
+  }
   if(!frame.right.grip){this.position.release();this.anchor=null;this.mustRelease=false;}
   else if(!this.mustRelease){
    if(!this.anchor){
