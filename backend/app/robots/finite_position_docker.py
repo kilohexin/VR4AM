@@ -9,6 +9,7 @@ from app.commissioning.finite_position_site import MdhPositionModel
 
 class DockerFinitePositionAdapter(RealFinitePositionAdapter):
     position_policy='finite_position_docker'
+    _position_joint_speed_cap=.3
     _position_estimated_duration_s=4.8  # 5-s coarse arrival window less 200-ms margin
     gripper_provider='local_virtual'
     _stop_rpc_timeout_s=1.
@@ -19,7 +20,7 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
 
     def __init__(self,settings,*,client_factory=None,**kwargs):
         if (settings.ip!='127.0.0.1' or settings.mode!='control'
-                or not 0<settings.control.max_joint_speed_radps<=.05
+                or not 0<settings.control.max_joint_speed_radps<=.3
                 or not 0<settings.control.max_joint_acceleration_radps2<=.2):
             raise ValueError('docker_simulator_profile_required')
         self.position_vr_enabled=True;self.position_pitch_enabled=True

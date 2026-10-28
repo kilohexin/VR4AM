@@ -326,7 +326,8 @@ def create_app(
             segmented_settings=runtime_settings.segmented_target,
             prepare_on_arm=preparation_enabled,
             explicit_preparation=preparation_enabled,
-            prepare_options=HomeOptions(.05,60.,math.radians(.1),.02,.3) if real_finite_position or docker_simulation else None,
+            prepare_options=HomeOptions(runtime_settings.lebai.control.max_joint_speed_radps if docker_simulation else .05,
+                60.,math.radians(.1),.02,.3) if real_finite_position or docker_simulation else None,
             constraint_clear_ms=runtime_settings.constraint_clear_ms,
             home_options=HomeOptions(
                 max_speed_radps=runtime_settings.home_joint_speed_radps,

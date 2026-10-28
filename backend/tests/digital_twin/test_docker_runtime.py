@@ -67,3 +67,15 @@ def test_launcher_preview_never_loads_or_connects_sdk(monkeypatch,capsys):
     report=json.loads(capsys.readouterr().out)
     assert report['execute'] is False and report['sdk_target']=='127.0.0.1:3030'
     assert ('lebai_sdk' in sys.modules)==before
+
+
+async def test_docker_served_build_cannot_connect_to_an_embedded_foreign_ws_url(tmp_path):
+    import httpx
+    from app.digital_twin.docker_runtime import create_docker_app
+    (tmp_path/'index.html').write_text('<html>Docker</html>',encoding='utf-8')
+    # ASGI transport intentionally does not start lifespan or load an SDK.
+    app=create_docker_app(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://localhost:8773') as c:
+        r=await c.get('/')
+    assert r.status_code==200
+    assert r.headers['content-security-policy']=="connect-src 'self' ws://localhost:8773 wss://localhost:8773"

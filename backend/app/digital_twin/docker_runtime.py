@@ -3,6 +3,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import subprocess
 import time
 from dataclasses import replace
@@ -18,9 +19,9 @@ class DockerClock:
 
 def docker_settings():
     s=load_digital_twin_settings();ready=(0.,-math.pi/4,math.pi/2,-math.pi/4,math.pi/2,0.)
-    control=replace(s.lebai.control,max_joint_speed_radps=.05,max_joint_acceleration_radps2=.2,
-        max_tcp_speed_mps=.005,max_tcp_acceleration_mps2=.02,
-        max_tcp_rotation_radps=.1,max_tcp_angular_acceleration_radps2=.2,translation_scale=1.)
+    control=replace(s.lebai.control,max_joint_speed_radps=.3,max_joint_acceleration_radps2=.2,
+        max_tcp_speed_mps=.03,max_tcp_acceleration_mps2=.02,
+        max_tcp_rotation_radps=.5,max_tcp_angular_acceleration_radps2=.2,translation_scale=1.)
     return replace(s,lebai=replace(s.lebai,ip='127.0.0.1',expected_tcp=TcpExpectation(0.,0.,0.,0.,0.,0.),
         home_q=ready,teleop_ready_q=ready,control=control),segmented_target=None,transactional_target=None)
 
@@ -83,6 +84,16 @@ def create_docker_app(web_directory):
     directory=Path(web_directory).resolve()
     if not (directory/'index.html').is_file():raise ValueError('docker_simulator_web_build_missing')
     app=create_app(settings=docker_settings(),backend_label='LEBAI_DOCKER',docker_simulation=True)
+    @app.middleware('http')
+    async def same_origin_control(request,call_next):
+        response=await call_next(request)
+        # Also constrain a dist built with an old VITE_TELEOP_WS_URL override.
+        # Explicit WS schemes support browsers that do not match them to 'self'.
+        host=request.url.netloc
+        if isinstance(host,bytes):host=host.decode('ascii')
+        sources=f" ws://{host} wss://{host}" if re.fullmatch(r'[A-Za-z0-9.\[\]:-]+',host) else ''
+        response.headers['Content-Security-Policy']="connect-src 'self'"+sources
+        return response
     run_id=str(uuid.uuid4())
     @app.get('/simulation/status')
     async def status():
@@ -92,6 +103,8 @@ def create_docker_app(web_directory):
             gripper_provider='local_virtual',gripper_physics=False,
             kinematics_provider='controller_ik_verified_local_fk',native_fk_admission_queries=3,
             timing_profile='virtual_controller',stop_rpc_timeout_ms=1000,stop_verification_timeout_ms=2000,
+            motion_profile='docker_functional',joint_speed_cap_radps=backend.settings.control.max_joint_speed_radps,
+            tcp_speed_cap_mps=backend.settings.control.max_tcp_speed_mps,
             moves=getattr(client,'move_entries',0),claws=getattr(client,'claw_entries',0),
             control_fault=app.state.control._fault,
             control_mode=app.state.control.mode.value,session_owned=app.state.teleop_owner is not None,

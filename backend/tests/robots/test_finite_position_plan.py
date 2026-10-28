@@ -68,3 +68,22 @@ def test_explicit_virtual_duration_budget_accepts_same_slow_bounded_path():
 def test_virtual_duration_budget_must_leave_the_arrival_margin(budget):
     with pytest.raises(ValueError,match='duration_budget'):
         api().audit_position_path(sample(),(),fk_samples=(),settings=None,model=None,duration_limit_s=budget)
+
+
+def test_explicit_simulation_speed_cap_does_not_change_default_planner():
+    s=sample();settings,_,_=fixture();model=LinearModel()
+    settings=replace(settings,control=replace(settings.control,
+        max_joint_speed_radps=.3,max_tcp_speed_mps=1.,max_tcp_acceleration_mps2=1.))
+    goal=tuple(x+(.002 if i==0 else 0) for i,x in enumerate(s.actual_q))
+    fk=tuple(model.forward(tuple(a+(b-a)*f for a,b in zip(s.actual_q,goal))) for f in api().FRACTIONS)
+    args=dict(fk_samples=fk,settings=settings,model=model)
+    assert api().audit_position_path(s,goal,**args).joint_speed==.05
+    assert api().audit_position_path(s,goal,**args,joint_speed_cap=.3).joint_speed==.3
+    restricted=replace(settings,control=replace(settings.control,max_joint_speed_radps=.02))
+    assert api().audit_position_path(s,goal,**{**args,'settings':restricted},joint_speed_cap=.3).joint_speed==.02
+
+
+@pytest.mark.parametrize('cap',[0,-1,True,float('nan'),float('inf'),.31])
+def test_simulation_speed_cap_rejects_invalid_values(cap):
+    with pytest.raises(ValueError,match='speed_cap'):
+        api().audit_position_path(sample(),(),fk_samples=(),settings=None,model=None,joint_speed_cap=cap)

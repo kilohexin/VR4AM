@@ -11,3 +11,9 @@ config/real-robot.local.yaml
 logs/commissioning/
 artifacts/
 .tmp/
+# Local TLS material and environment overrides are never delivery artifacts.
+*.pem
+*.key
+*.pfx
+.env
+.env.*.local

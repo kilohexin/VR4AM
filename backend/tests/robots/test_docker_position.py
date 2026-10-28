@@ -9,7 +9,8 @@ def test_docker_settings_use_separate_loopback_zero_tool_and_mdh_ready():
     s=docker_settings()
     assert s.lebai.ip=='127.0.0.1' and s.lebai.mode=='control'
     assert s.lebai.expected_tcp.z==0 and s.lebai.teleop_ready_q[5]==0
-    assert s.lebai.control.max_joint_speed_radps==.05
+    assert s.lebai.control.max_joint_speed_radps==.3
+    assert s.lebai.control.max_tcp_speed_mps==.03
     assert s.lebai.gripper.max_force_percent==30
 
 
@@ -19,6 +20,24 @@ def test_docker_selector_is_explicit_and_exposes_its_own_identity():
     a=build_backend(docker_settings(),NoopRecorder(),backend_label='LEBAI_DOCKER',docker_simulation=True)
     assert a._backend_label=='LEBAI_DOCKER' and a.position_policy=='finite_position_docker'
     assert a.position_vr_enabled and a.position_pitch_enabled
+    assert a._position_joint_speed_cap==.3
+
+
+@pytest.mark.parametrize('speed',[0,float('nan'),float('inf'),.301])
+def test_docker_profile_still_rejects_invalid_or_unbounded_joint_speed(speed):
+    from app.digital_twin.docker_runtime import docker_settings
+    from app.robots.finite_position_docker import DockerFinitePositionAdapter
+    s=docker_settings().lebai
+    with pytest.raises(ValueError,match='profile_required'):
+        DockerFinitePositionAdapter(replace(s,control=replace(s.control,max_joint_speed_radps=speed)))
+
+
+def test_real_web_constructor_does_not_accept_the_docker_speed_profile():
+    from app.digital_twin.docker_runtime import docker_settings
+    from app.robots.finite_position_web import RealFinitePositionAdapter
+    s=replace(docker_settings().lebai,ip='192.0.2.1')
+    with pytest.raises(ValueError,match='explicit_profile_required'):
+        RealFinitePositionAdapter(s,client_factory=lambda _:None,position_model=object(),authorize=lambda:None)
 
 
 def test_virtual_timing_is_distinct_from_physical_stop_contract():

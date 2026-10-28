@@ -25,7 +25,9 @@ def angle(a,b):
     return (Rotation.from_quat(a)*Rotation.from_quat(b).inv()).magnitude()
 
 
-def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=None,pitch_reference=None,duration_limit_s=1.8):
+def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=None,pitch_reference=None,duration_limit_s=1.8,joint_speed_cap=.05):
+    if (type(joint_speed_cap) not in (int,float) or not math.isfinite(joint_speed_cap)
+            or not 0<joint_speed_cap<=.3):raise ValueError('position_invalid_speed_cap')
     if (type(duration_limit_s) not in (int,float) or not math.isfinite(duration_limit_s)
             or not 0<duration_limit_s<=4.8):raise ValueError('position_invalid_duration_budget')
     if len(fk_samples)!=5:raise ValueError('position_fk_samples_required')
@@ -52,7 +54,7 @@ def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=N
             raise ValueError('position_path_rotation')
         if pitch_reference is not None and angle(pitch_reference,r)>MAX_PITCH_RANGE_RAD+1e-10:
             raise ValueError('position_pitch_limit')
-    v=min(.05,settings.control.max_joint_speed_radps)
+    v=min(joint_speed_cap,settings.control.max_joint_speed_radps)
     a=min(.2,settings.control.max_joint_acceleration_radps2)
     for _ in range(11):
         speeds=[];accels=[];angular=[];angular_acc=[]
