@@ -82,7 +82,7 @@ function createRobotModel(
         const joint = jointNodes[index];
         joint.rotation.copy(originalRotations[index]);
         joint.rotation[axis] += q[index]
-          + (backend === 'LEBAI' ? REAL_VISUAL_JOINT_OFFSETS[index] : 0);
+          + (backend === 'LEBAI' || backend === 'LEBAI_DOCKER' ? REAL_VISUAL_JOINT_OFFSETS[index] : 0);
       });
     },
     setGripper(value: number): void {

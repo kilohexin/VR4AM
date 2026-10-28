@@ -60,7 +60,7 @@ describe('RobotModel', () => {
     });
   });
 
-  it('renders the captured real LM3 pose with its upper arm rising above the shoulder', () => {
+  it.each(['LEBAI','LEBAI_DOCKER'] as const)('renders %s controller joints with the encoder-zero presentation offset', (backend) => {
     const root = new THREE.Group();
     const joint1 = new THREE.Group();
     joint1.name = 'Joint1';
@@ -93,7 +93,7 @@ describe('RobotModel', () => {
       -1.5768363761471962,
       0.3939454410888813,
       -0.004026699568199808,
-    ], 'LEBAI');
+    ], backend);
     root.updateMatrixWorld(true);
 
     const shoulderY = joint2.getWorldPosition(new THREE.Vector3()).y;

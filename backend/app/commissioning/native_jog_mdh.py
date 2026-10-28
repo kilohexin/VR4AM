@@ -47,6 +47,13 @@ class MdhTool:
         object.__setattr__(self, 'rotation_xyzw', q)
 
 
+def _cross3(a, b):
+    # Every axis/offset here is a fixed 3-vector; avoid NumPy broadcasting and
+    # axis normalization in the repeated analytic Jacobian/Jdot calculation.
+    return np.array((a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2],
+        a[0]*b[1]-a[1]*b[0]))
+
+
 def _mdh_geometry(q, tool: MdhTool):
     """Return fresh base-frame TCP transform and geometric J (linear, angular).
 
@@ -75,7 +82,7 @@ def _mdh_geometry(q, tool: MdhTool):
     tcp[:3, :3] = Rotation.from_quat(tool.rotation_xyzw).as_matrix()
     transform = transform @ tcp
     jacobian = np.array([
-        np.r_[np.cross(axis, transform[:3, 3]-origin), axis]
+        np.concatenate((_cross3(axis, transform[:3, 3]-origin), axis))
         for origin, axis in zip(origins, axes, strict=True)
     ]).T
     if not np.isfinite(transform).all() or not np.isfinite(jacobian).all():
@@ -103,10 +110,10 @@ def mdh_tcp_jacobian_rate(q, qd, tool: MdhTool):
     for i, (origin, axis) in enumerate(zip(origins, axes, strict=True)):
         zdot, odot = np.zeros(3), np.zeros(3)
         for k in range(i):
-            zdot += np.cross(axes[k], axis)*qd[k]
-            odot += np.cross(axes[k], origin-origins[k])*qd[k]
-        columns.append(np.r_[np.cross(zdot, transform[:3, 3]-origin)
-            + np.cross(axis, pdot-odot), zdot])
+            zdot += _cross3(axes[k], axis)*qd[k]
+            odot += _cross3(axes[k], origin-origins[k])*qd[k]
+        columns.append(np.concatenate((_cross3(zdot, transform[:3, 3]-origin)
+            + _cross3(axis, pdot-odot), zdot)))
     derivative = np.array(columns).T
     if not np.isfinite(derivative).all():
         raise ValueError('nonfinite theoretical MDH rate')

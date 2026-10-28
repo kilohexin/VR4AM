@@ -25,7 +25,9 @@ def angle(a,b):
     return (Rotation.from_quat(a)*Rotation.from_quat(b).inv()).magnitude()
 
 
-def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=None,pitch_reference=None):
+def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=None,pitch_reference=None,duration_limit_s=1.8):
+    if (type(duration_limit_s) not in (int,float) or not math.isfinite(duration_limit_s)
+            or not 0<duration_limit_s<=4.8):raise ValueError('position_invalid_duration_budget')
     if len(fk_samples)!=5:raise ValueError('position_fk_samples_required')
     q0=np.asarray(start.actual_q);dq=np.asarray(goal_joints)-q0
     distance=float(np.max(np.abs(dq)))
@@ -70,7 +72,7 @@ def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=N
                 and max(accels)<=settings.control.max_tcp_acceleration_mps2
                 and max(angular)<=settings.control.max_tcp_rotation_radps
                 and max(angular_acc)<=settings.control.max_tcp_angular_acceleration_radps2):
-            if duration>1.8:raise ValueError('position_estimated_duration')
+            if duration>duration_limit_s:raise ValueError('position_estimated_duration')
             return PathAudit(model.model_sha256,FRACTIONS,True,True,True,
                 model.factory_calibrated,v,a,max(speeds),max(accels))
         v/=2;a/=4

@@ -51,3 +51,22 @@ it('keeps live Docker direction input through a short display delay, then releas
   expect(intents.some(x=>x[1]==='abort')).toBe(false);
  }finally{panel.dispose();root.remove();}
 });
+
+it('pauses a held virtual claw across delayed display feedback without queuing or losing the live gesture',()=>{
+ let now=0;const root=document.createElement('div');document.body.append(root);const requests:any[]=[];
+ const panel=new HoldControlPanel(root,m=>requests.push(m),()=>now);
+ const frame=(t:number):VRFrame=>({v:1,type:'vr_frame',session_id:'desktop',seq:t,client_mono_ms:t,
+  tracking_valid:true,visibility:'visible',right:{p:[0,0,0],q:[0,0,0,1],grip:false,trigger:0}});
+ try{
+  panel.update(state as RobotStateMessage,true,0);const b=root.querySelector<HTMLButtonElement>('[data-claw="open"]')!;
+  b.setPointerCapture=()=>{};b.hasPointerCapture=()=>false;
+  const event=(type:string)=>{const e=new Event(type,{bubbles:true});Object.assign(e,{pointerId:7,button:0});b.dispatchEvent(e);};
+  event('pointerdown');panel.applyFrame(frame(0));now=40;panel.applyFrame(frame(now));expect(requests).toHaveLength(1);
+  now=120;panel.applyFrame(frame(now));
+  panel.onGripperResult({v:1,type:'gripper_result',request_id:requests[0].request_id,accepted:true,message:'virtual'});
+  now=160;panel.applyFrame(frame(now));expect(requests).toHaveLength(1);expect(b.disabled).toBe(false);
+  now=200;panel.update(state as RobotStateMessage,true,now);panel.applyFrame(frame(now));expect(requests).toHaveLength(2);
+  event('pointerup');now=220;panel.update(state as RobotStateMessage,true,now);panel.applyFrame(frame(now));
+  expect(requests).toHaveLength(2);
+ }finally{panel.dispose();root.remove();}
+});

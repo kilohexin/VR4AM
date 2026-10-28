@@ -45,9 +45,11 @@ export class FiniteXRInput {
    this.reset('xr_frame_gap');return;
   }
   this.lastTime=frame.client_mono_ms;
-  const feedbackFresh=t>=this.receivedAt&&t-this.receivedAt<100;
-  if(this.pending&&(!feedbackFresh||frame.right.grip)){
-   if(!feedbackFresh)this.trigger=null;
+  const displayWindow=s.backend==='LEBAI_DOCKER'&&s.finite_position?.policy==='finite_position_docker'?500:100;
+  const feedbackFresh=t>=this.receivedAt&&t-this.receivedAt<displayWindow;
+  const clawFeedbackFresh=t>=this.receivedAt&&t-this.receivedAt<100;
+  if(this.pending&&(!clawFeedbackFresh||frame.right.grip)){
+   if(!clawFeedbackFresh)this.trigger=null;
    this.position.release();this.anchor=null;this.mustRelease=true;return;
   }
   if(!feedbackFresh){
@@ -72,6 +74,7 @@ export class FiniteXRInput {
   }
   // No default opening on preparation. Once Trigger changes, its analogue
   // value controls closure; a pending target finishes even on normal release.
+  if(!clawFeedbackFresh){this.trigger=null;return;}
   if(this.trigger===null){this.trigger=frame.right.trigger;return;}
   const value=Math.max(0,Math.min(1,frame.right.trigger));
   if(!frame.right.grip&&s.robot_state==='IDLE'&&!['planning','executing','draining'].includes(s.finite_position!.phase)

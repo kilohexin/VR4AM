@@ -66,6 +66,31 @@ it('releases on delayed display feedback and requires regrip without disarming',
  r.frame(160,false);r.frame(180,true);r.frame(200,true,[-.01,0,0]);
  expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[-1,0,0]});
 });
+
+it('uses the Docker display window only while live XR samples remain fresh',()=>{
+ const r=rig();const docker:RobotStateMessage={...state,backend:'LEBAI_DOCKER',
+  finite_position:{...state.finite_position!,policy:'finite_position_docker'}};
+ function apply(t:number,grip:boolean,p:[number,number,number]){
+  r.setNow(t);r.xr.apply({v:1,type:'vr_frame',session_id:'quest-docker',seq:t,client_mono_ms:t,
+   tracking_valid:true,visibility:'visible',right:{p,q:[0,0,0,1],grip,trigger:0}});
+ }
+ r.xr.update(docker,0);apply(0,false,[0,0,0]);apply(20,true,[0,0,0]);
+ for(let t=40;t<=520;t+=20){apply(t,true,[.0025,0,0]);if(t===200)expect(r.inputs.at(-1).kind).toBe('held');}
+ expect(r.inputs.at(-1).kind).toBe('release');expect(r.stops).toEqual([]);
+ const n=r.inputs.length;r.xr.update(docker,540);apply(540,true,[.01,0,0]);expect(r.inputs).toHaveLength(n);
+});
+
+it('does not dispatch or replay a new Docker claw target across a 100ms display gap',()=>{
+ const r=rig();const docker:RobotStateMessage={...state,backend:'LEBAI_DOCKER',
+  finite_position:{...state.finite_position!,policy:'finite_position_docker'}};
+ function apply(t:number,trigger:number){
+  r.setNow(t);r.xr.apply({v:1,type:'vr_frame',session_id:'quest-docker',seq:t,client_mono_ms:t,
+   tracking_valid:true,visibility:'visible',right:{p:[0,0,0],q:[0,0,0,1],grip:false,trigger}});
+ }
+ r.xr.update(docker,0);apply(0,0);apply(80,0);apply(120,.7);expect(r.claws).toHaveLength(0);
+ r.xr.update(docker,140);apply(140,.7);expect(r.claws).toHaveLength(0);
+ apply(160,.8);expect(r.claws).toHaveLength(1);
+});
 it('uses reported TCP to stop following a reached target instead of accumulating goals',()=>{
  const r=rig();r.frame(0);r.frame(20,true);r.frame(40,true,[.002,0,0]);
  r.xr.update({...state,actual_tcp:{p:[.302,0,.4],q:[0,0,0,1]}},40);

@@ -51,3 +51,20 @@ def test_path_audit_rejects_workspace_and_bad_model():
     bad=replace(settings,startup_tcp_max_m=(.3,.3,.6))
     with pytest.raises(ValueError):m.audit_position_path(s,tuple(goal),fk_samples=fk,settings=bad,model=LinearModel())
 
+
+
+def test_explicit_virtual_duration_budget_accepts_same_slow_bounded_path():
+    m=api();s=sample();settings,_,_=fixture()
+    settings=replace(settings,control=replace(settings.control,max_tcp_speed_mps=.005))
+    goal=tuple(x+(.002 if i==0 else 0) for i,x in enumerate(s.actual_q))
+    fk=tuple(LinearModel().forward(tuple(a+(b-a)*f for a,b in zip(s.actual_q,goal))) for f in m.FRACTIONS)
+    with pytest.raises(ValueError,match='estimated_duration'):
+        m.audit_position_path(s,goal,fk_samples=fk,settings=settings,model=LinearModel())
+    audit=m.audit_position_path(s,goal,fk_samples=fk,settings=settings,model=LinearModel(),duration_limit_s=4.8)
+    assert audit.model_rates_ok and audit.joint_speed<=.05 and audit.joint_acceleration<=.2
+
+
+@pytest.mark.parametrize('budget',[0,-1,True,float('nan'),float('inf'),5.])
+def test_virtual_duration_budget_must_leave_the_arrival_margin(budget):
+    with pytest.raises(ValueError,match='duration_budget'):
+        api().audit_position_path(sample(),(),fk_samples=(),settings=None,model=None,duration_limit_s=budget)

@@ -56,12 +56,18 @@ def verify_local_docker(container=None):
         raise ValueError('docker_simulator_not_admitted') from None
 
 
-async def ensure_docker_idle(client):
+async def ensure_docker_idle(client,*,check=lambda:None):
+    check()
     state=await client.get_robot_state()
+    check()
     if state=='STOP':
+        check()
         await client.start_sys()
+        check()
         for _ in range(100):
+            check()
             state=await client.get_robot_state()
+            check()
             if state=='IDLE':return
             if state not in ('STARTING','BOOTING','ROBOT_ON','STOP'):break
             await asyncio.sleep(.1)
@@ -84,9 +90,11 @@ def create_docker_app(web_directory):
         return dict(runtime='LEBAI_DOCKER',provider='official_lmaster',sdk_target='127.0.0.1:3030',
             simulator=True,hardware_verified=False,run_id=run_id,pid=os.getpid(),
             gripper_provider='local_virtual',gripper_physics=False,
+            kinematics_provider='controller_ik_verified_local_fk',native_fk_admission_queries=3,
             timing_profile='virtual_controller',stop_rpc_timeout_ms=1000,stop_verification_timeout_ms=2000,
             moves=getattr(client,'move_entries',0),claws=getattr(client,'claw_entries',0),
             control_fault=app.state.control._fault,
+            control_mode=app.state.control.mode.value,session_owned=app.state.teleop_owner is not None,
             unknown_reads=sorted(backend._snapshot_calls.unknown_methods),
             unknown_writes=sorted(backend._motion_calls.unknown_methods),
             admission=backend._docker_admission,model_sha256=backend.position_model.model_sha256)

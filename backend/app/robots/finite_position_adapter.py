@@ -217,7 +217,8 @@ class _FinitePositionCore(RealLebaiAdapter):
                     raise ValueError('position_ik_endpoint_mismatch')
                 audit=await asyncio.to_thread(audit_position_path,start,goal,fk_samples=tuple(fk),
                     settings=self.settings,model=self.position_model,target_q=q,
-                    pitch_reference=self._position_pitch_reference if self.position_pitch_enabled else None)
+                    pitch_reference=self._position_pitch_reference if self.position_pitch_enabled else None,
+                    duration_limit_s=getattr(self,'_position_estimated_duration_s',1.8))
                 live()
                 await self._emit_event(dict(kind='finite_position_plan',input_seq=intent.seq,
                     start_tcp=list(start.tcp_p),target_tcp=list(p),target_orientation=list(q),

@@ -197,8 +197,7 @@ export class HoldControlPanel {
     this.root.removeEventListener('lostpointercapture', this.onUp); window.removeEventListener('blur', this.cancel);
     document.removeEventListener('visibilitychange', this.onVisibility); document.removeEventListener('focusin', this.onFocus);
   }
-  private fresh(maxAge=this.positionCandidate&&this.state?.backend==='LEBAI_DOCKER'
-    &&this.action!=='open'&&this.action!=='close'?500:100): boolean {
+  private fresh(maxAge=this.positionCandidate&&this.state?.backend==='LEBAI_DOCKER'?500:100): boolean {
     const time=this.now();return !this.disposed&&this.enabled&&time>=this.receivedAt&&time-this.receivedAt<=maxAge;
   }
   private motionHeld(): boolean {return this.action !== null && this.action !== 'open' && this.action !== 'close'
@@ -218,7 +217,8 @@ export class HoldControlPanel {
         ?'绕工具自身横轴俯仰；松手完成当前小步并保持姿态':'本次运行范围未包含俯仰控制';
     }
     for (const button of this.root.querySelectorAll<HTMLButtonElement>('[data-claw]')) {
-      button.disabled = !this.clawReady() || this.motionHeld() || finiteBusy
+      const liveVirtualHold=this.enabled&&this.positionCandidate&&this.state?.backend==='LEBAI_DOCKER'&&button===this.capture;
+      button.disabled = (!this.clawReady()&&!liveVirtualHold) || this.motionHeld() || finiteBusy
         || (this.pending !== null && button !== this.capture);
       button.classList.toggle('is-held', button === this.capture);
     }

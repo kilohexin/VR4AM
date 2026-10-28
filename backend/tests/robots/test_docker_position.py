@@ -114,7 +114,12 @@ async def test_parallel_connect_is_reserved_before_container_inspection(monkeypa
     entered=threading.Event();release=threading.Event();connections=[]
     def inspect():entered.set();release.wait(2);return {}
     async def state():return 'IDLE'
-    async def factory():connections.append(1);return SimpleNamespace(get_robot_state=state)
+    async def fk(q):
+        from app.schemas.messages import Pose
+        from app.robots.lebai_codec import pose_to_lebai
+        p,r=a.position_model.forward(q);return pose_to_lebai(Pose(p=p,q=r))
+    async def factory():
+        connections.append(1);return SimpleNamespace(get_robot_state=state,kinematics_forward=fk)
     async def connected(self):return 'connected'
     monkeypatch.setattr(d,'connect_docker_simulator_client',factory)
     monkeypatch.setattr(runtime,'verify_local_docker',inspect)
@@ -126,3 +131,79 @@ async def test_parallel_connect_is_reserved_before_container_inspection(monkeypa
         with pytest.raises(ValueError,match='pending'):await a.connect()
     finally:release.set();await first
     assert connections==[1]
+
+
+@pytest.mark.parametrize('where',['connect','fk'])
+async def test_late_bootstrap_result_cannot_dispatch_another_native_call(monkeypatch,where):
+    import asyncio
+    from types import SimpleNamespace
+    from app.robots import finite_position_docker as d
+    from app.digital_twin import docker_runtime as runtime
+    from app.schemas.messages import Pose
+    from app.robots.lebai_codec import pose_to_lebai
+    entered=asyncio.Event();release=asyncio.Event();calls=[];started=False
+    async def delayed():
+        entered.set()
+        try:await release.wait()
+        except asyncio.CancelledError:await release.wait()
+    async def state():calls.append('state');return 'IDLE' if where=='fk' or started else 'STOP'
+    async def start():
+        nonlocal started
+        started=True;calls.append('start_sys')
+    async def fk(q):
+        calls.append('fk')
+        if where=='fk':await delayed()
+        p,r=a.position_model.forward(q);return pose_to_lebai(Pose(p=p,q=r))
+    native=SimpleNamespace(get_robot_state=state,start_sys=start,kinematics_forward=fk)
+    async def factory():
+        if where=='connect':await delayed()
+        return native
+    monkeypatch.setattr(d,'connect_docker_simulator_client',factory)
+    monkeypatch.setattr(runtime,'verify_local_docker',lambda:{})
+    a=d.DockerFinitePositionAdapter(runtime.docker_settings().lebai)
+    task=asyncio.create_task(a.connect());await entered.wait();task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):await task
+        release.set();await asyncio.gather(*tuple(a._docker_bootstrap_calls.tasks),return_exceptions=True)
+        assert calls==([] if where=='connect' else ['state','fk'])
+        assert a._docker_bootstrap_calls.unknown_methods and a._docker_ready_client is None
+    finally:release.set();await asyncio.gather(task,return_exceptions=True)
+
+
+@pytest.mark.parametrize('failure',[False,True])
+async def test_page_poll_waits_for_planning_entry_window_without_reusing_feedback(monkeypatch,failure):
+    import asyncio
+    from app.robots.finite_position_docker import DockerFinitePositionAdapter
+    from app.robots.finite_position_web import RealFinitePositionAdapter
+    from app.digital_twin.docker_runtime import docker_settings
+    a=DockerFinitePositionAdapter(docker_settings().lebai)
+    planning=asyncio.Event();finish=asyncio.Event();reads=[]
+    async def plan(self,*args,**kwargs):
+        planning.set();await finish.wait()
+        if failure:raise ValueError('position_planning_expired')
+        return 'owned-plan'
+    async def execute(self,plan,**kwargs):
+        assert plan=='owned-plan'
+        kwargs['on_entered']()
+        return 'completed'
+    async def state(self):reads.append('new-controller-read');return 'new-state'
+    monkeypatch.setattr(RealFinitePositionAdapter,'plan_step',plan)
+    monkeypatch.setattr(RealFinitePositionAdapter,'execute_step',execute)
+    monkeypatch.setattr(RealFinitePositionAdapter,'get_state',state)
+    worker=asyncio.create_task(a.plan_step(None,authorize=lambda:None));await planning.wait()
+    poll=asyncio.create_task(a.get_state());await asyncio.sleep(0);await asyncio.sleep(0)
+    try:
+        assert not poll.done() and reads==[], 'page polling must not queue ahead of fresh-entry send'
+        finish.set()
+        if failure:
+            with pytest.raises(ValueError,match='planning_expired'):await worker
+        else:
+            result=await worker
+            await asyncio.sleep(0)
+            assert not poll.done() and reads==[]
+            assert await a.execute_step(result,on_entered=lambda:None)=='completed'
+        assert await asyncio.wait_for(poll,.2)=='new-state'
+        assert reads==['new-controller-read']
+    finally:
+        finish.set();worker.cancel();poll.cancel()
+        await asyncio.gather(worker,poll,return_exceptions=True)
