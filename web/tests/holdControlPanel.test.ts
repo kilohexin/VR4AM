@@ -197,3 +197,19 @@ describe('joystick and progressive claw',()=>{
   r.step(120,'HOLD');expect(r.panel.applyFrame(frame(140)).right.grip).toBe(false);
  });
 });
+
+
+it('shows the real startup workspace rejection instead of a generic unlock instruction',()=>{
+ const r=rig('real');
+ const blocked:RobotStateMessage={...state,backend:'LEBAI',mode:'READY',manual_input_ready:false,
+  preflight_ready:false,preflight_reason:'tcp_outside_startup_envelope',
+  finite_position:{policy:'finite_position_web',phase:'inactive',generation:1,entered_steps:0,
+   motion_id:null,reason:null,hardware_verified:false}};
+ r.panel.update(blocked,true,0);
+ expect(r.root.textContent).toContain('当前 TCP 超出操作区');
+ expect(r.root.textContent).toContain('不会自动回位');
+ expect(r.find('[data-hold="z+"]').disabled).toBe(true);
+ expect(r.position.mock.calls).toEqual([[[0,0,0],'abort','unavailable']]);
+ r.panel.update({...blocked,preflight_ready:true,preflight_reason:null},true,20);
+ expect(r.root.textContent).not.toContain('当前 TCP 超出操作区');
+});

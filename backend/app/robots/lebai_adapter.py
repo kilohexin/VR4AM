@@ -1178,6 +1178,9 @@ class RealLebaiAdapter:
         snapshot = await self._read_snapshot(
             read_purpose="state", observer_timing=observer_timing,
         )
+        return self._state_message_from_snapshot(snapshot)
+
+    def _state_message_from_snapshot(self, snapshot):
         robot_state = (
             BackendState.FAULT
             if self._latched_fault is not None
@@ -2225,15 +2228,7 @@ class RealLebaiAdapter:
             captured_ns = self._clock()
             sdk_lock_wait_ms = (captured_ns - read_requested_ns) / 1_000_000
             deadline_ns = captured_ns + _SNAPSHOT_READ_TIMEOUT_NS
-            connected = await self._timed(
-                "is_connected",
-                client.is_connected,
-                latencies,
-                deadline_ns=deadline_ns,
-            )
-            if not connected:
-                raise BackendCommandError("robot_disconnected")
-            fields = await self._read_snapshot_fields(client, latencies, deadline_ns,
+            fields = await self._read_snapshot_input_fields(client, latencies, deadline_ns,
                 read_purpose=read_purpose, include_raw_kinematics=include_raw_kinematics)
             raw_state, raw_estop, raw_kin, raw_tcp, raw_claw, raw_running = fields['values']
             raw_kinematics = fields['raw_kinematics']
@@ -2336,6 +2331,12 @@ class RealLebaiAdapter:
     async def _read_retained_task_state(self,client,motion_id,latencies,deadline_ns,read_purpose):
         return await self._timed('get_motion_state',lambda:client.get_motion_state(motion_id),latencies,
             deadline_ns=deadline_ns,timeout_error='sdk_timeout:get_motion_state')
+
+    async def _read_snapshot_input_fields(self, client, latencies, deadline_ns, **kwargs):
+        connected = await self._timed('is_connected', client.is_connected, latencies, deadline_ns=deadline_ns)
+        if not connected:
+            raise BackendCommandError('robot_disconnected')
+        return await self._read_snapshot_fields(client, latencies, deadline_ns, **kwargs)
 
     async def _read_snapshot_fields(self, client, latencies, deadline_ns, *,
                                     read_purpose, include_raw_kinematics):

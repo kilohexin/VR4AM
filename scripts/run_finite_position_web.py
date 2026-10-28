@@ -110,6 +110,8 @@ def preview(p,web_directory):
         prepare_tolerance_deg=.1,prepare_speed_radps=.05,prepare_acceleration_radps2=.2,
         normal_release='finish_current_step_no_next_target',unlock_moves=False,
         planning_boundary_rejection='zero_write_hold_requires_release',
+        snapshot_read_policy='owned_connection_and_six_fields_parallel',
+        stop_snapshot_read_policy='connection_then_serial_fields',snapshot_total_timeout_ms=300,
         prepare_requires_separate_button=True,prepare_preliminary_stop=True,
         vr_enabled=p.get('allow_vr',False),
         pitch_enabled=p.get('allow_pitch',False),pitch_frame='tool_local_x',pitch_step_deg=.5,pitch_range_deg=20,

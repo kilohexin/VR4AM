@@ -222,7 +222,10 @@ export class HoldControlPanel {
         || (this.pending !== null && button !== this.capture);
       button.classList.toggle('is-held', button === this.capture);
     }
-    this.status.textContent = !this.enabled ? '先解锁，再点击进入准备姿态'
+    const startupBlocked=this.state?.backend==='LEBAI'&&this.state.preflight_ready===false
+      &&this.state.preflight_reason==='tcp_outside_startup_envelope';
+    this.status.textContent = !this.enabled ? startupBlocked
+      ?'当前 TCP 超出操作区，请先核对保存的准备位；不会自动回位':'先解锁，再点击进入准备姿态'
       : this.feedbackPaused?'反馈暂缓，已释放当前手势；更新后重新按住即可'
       : boundary?`${boundary} · 松开后重新按住，反向或更换方向调整`
       : this.positionCandidate&&this.state?.finite_position?.phase==='draining'?'松开后正在完成当前小步'

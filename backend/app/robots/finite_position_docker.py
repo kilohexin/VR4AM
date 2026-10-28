@@ -111,7 +111,8 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             and all(x==0 for v in (s.actual_qd,s.target_qd,s.actual_qdd,s.target_qdd) for x in v))
 
     async def _read_snapshot_fields(self,client,latencies,deadline_ns,**kwargs):
-        # Connection is read before this group and retained task state after it.
+        # Connection overlaps normal reads; stop verification still checks it first.
+        # Retained task state remains after this group.
         # Keep all fields and original stop predicates; only scheduling differs.
         return await self._web_parallel_snapshot_fields(client,latencies,deadline_ns,**kwargs)
 

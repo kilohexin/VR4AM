@@ -157,6 +157,49 @@ class RealFinitePositionAdapter(_FinitePositionCore):
         try:return await super().prepare(options,on_phase,authorize=authorize)
         finally:self._web_prepare_authorize=None
 
+    def _state_message_from_snapshot(self,snapshot):
+        state=super()._state_message_from_snapshot(snapshot)
+        preflight=self._preflight_from_snapshot(snapshot)
+        # Display evidence only: this does not set _preflight_ready or grant
+        # entry authority, and it uses the exact sample behind this message.
+        return state.model_copy(update=dict(preflight_ready=preflight.ready,preflight_reason=preflight.reason))
+
+    async def _read_snapshot_input_fields(self,client,latencies,deadline_ns,**kwargs):
+        if kwargs['read_purpose']=='stop_verification':
+            return await super()._read_snapshot_input_fields(client,latencies,deadline_ns,**kwargs)
+        owner=self._snapshot_calls;generation=self._pump.generation
+        def check():
+            if (client is not self._client or owner is not self._snapshot_calls or owner.closed
+                    or owner.unknown_methods
+                    or (kwargs['read_purpose']!='state' and generation!=self._pump.generation)):
+                raise BackendCommandError('position_snapshot_binding_changed')
+        async def connected():
+            check()
+            value=await self._timed('is_connected',client.is_connected,latencies,deadline_ns=deadline_ns)
+            check()
+            if not value:raise BackendCommandError('robot_disconnected')
+        check()
+        # These are read-only requests on an already-created client. One shared
+        # original deadline; no additional query, retry or timestamp renewal.
+        tasks=(asyncio.create_task(connected(),name='finite-snapshot-connected'),
+            asyncio.create_task(self._read_snapshot_fields(client,latencies,deadline_ns,**kwargs),
+                name='finite-snapshot-fields'))
+        self._finite_snapshot_wrappers.update(tasks)
+        def completed(done):
+            self._finite_snapshot_wrappers.discard(done)
+            if not done.cancelled():done.exception()
+        for task in tasks:task.add_done_callback(completed)
+        try:
+            await asyncio.wait(tasks,return_when=asyncio.FIRST_EXCEPTION)
+            for task in tasks:
+                if task.done() and (task.cancelled() or task.exception() is not None):task.result()
+            check()
+            return tasks[1].result()
+        except BaseException:
+            for task in tasks:
+                if not task.done() and not task.cancelling():task.cancel()
+            raise
+
     async def _read_snapshot_fields(self,client,latencies,deadline_ns,**kwargs):
         if kwargs['read_purpose']=='stop_verification':
             return await super()._read_snapshot_fields(client,latencies,deadline_ns,**kwargs)

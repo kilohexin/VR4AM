@@ -119,6 +119,9 @@ def test_preview_is_pure_and_binds_assets(tmp_path,monkeypatch,capsys):
     import json
     row=json.loads(capsys.readouterr().out)
     assert row['scope']=='bounded_web_finite_position_and_gripper'
+    assert row['snapshot_read_policy']=='owned_connection_and_six_fields_parallel'
+    assert row['stop_snapshot_read_policy']=='connection_then_serial_fields'
+    assert row['snapshot_total_timeout_ms']==300
     assert row['max_movej_entries']==m.MOVE_LIMIT and row['normal_release']=='finish_current_step_no_next_target'
     assert row['arrival_policy']['name']=='coarse_grasp' and row['home_enabled'] is False
     assert row['web_hashes'] and row['motion_authorized'] is False
