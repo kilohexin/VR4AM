@@ -758,7 +758,7 @@ async def teleop_websocket(websocket: WebSocket) -> None:
     app = websocket.app
     control: RobotControl = app.state.control
     backend=control.backend
-    if (getattr(backend,'position_policy',None)=='finite_position_docker'
+    if (getattr(backend,'position_policy',None) in ('finite_position_docker','finite_position_web')
             and (control._fault or backend._latched_fault
                 or backend._snapshot_calls.unknown_methods or backend._motion_calls.unknown_methods)):
         message='后端故障已锁存，已停止自动重连；请查看诊断，恢复后刷新页面。'
