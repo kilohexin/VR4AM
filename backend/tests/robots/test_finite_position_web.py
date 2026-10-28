@@ -180,7 +180,8 @@ async def test_wrapped_recording_drop_prevents_next_step(tmp_path):
     finally:await a.disconnect()
 
 
-async def test_app_unlock_prepare_translation_release_and_progressive_claw(monkeypatch):
+@pytest.mark.parametrize('planning_delay_s',[0.,.12])
+async def test_app_unlock_prepare_translation_release_and_progressive_claw(monkeypatch,planning_delay_s):
     """Production app/controller and real selector, with no native SDK loaded."""
     import asyncio,time
     from unittest.mock import AsyncMock
@@ -203,13 +204,25 @@ async def test_app_unlock_prepare_translation_release_and_progressive_claw(monke
     app=create_app(settings=settings,client_factory=factory,real_finite_position=True,
         real_position_authorize=lambda:None,real_position_model=c.model)
     async with app.router.lifespan_context(app):
-        control=app.state.control;seq=0
+        control=app.state.control;seq=0;intent_seq=0;held=False
+        def position(event):
+            nonlocal intent_seq
+            intent_seq+=1
+            control.accept_position_input(_parse_message(dict(v=1,type='finite_position_input',
+                session_id='web',generation=gen,seq=intent_seq,kind=event,
+                vector=[1,0,0] if event=='held' else [0,0,0])),control.clock.now_ns())
+        original_plan=app.state.backend.plan_step
+        async def delayed_plan(*args,**kwargs):
+            await asyncio.sleep(planning_delay_s)
+            return await original_plan(*args,**kwargs)
+        app.state.backend.plan_step=delayed_plan
         def heartbeat():
             nonlocal seq
             seq+=1
             frame=VRFrame(v=1,type='vr_frame',session_id='desktop',seq=seq,client_mono_ms=seq,
                 tracking_valid=True,visibility='visible',right=dict(p=[0,0,0],q=[0,0,0,1],grip=False,trigger=0))
             control.latest.publish(frame,control.clock.now_ns())
+            if held:position('held')  # finite intent has its own lease, separate from neutral VR health frames
         async def keep_fresh():
             while True:heartbeat();await asyncio.sleep(.02)
         heartbeat();refresh=asyncio.create_task(keep_fresh())
@@ -222,17 +235,16 @@ async def test_app_unlock_prepare_translation_release_and_progressive_claw(monke
             status=await control.state_message()
             assert status.manual_input_ready and status.finite_position.policy=='finite_position_web'
             gen=control.control_generation
-            control.accept_position_input(_parse_message(dict(v=1,type='finite_position_input',
-                session_id='web',generation=gen,seq=1,kind='held',vector=[1,0,0])),control.clock.now_ns())
+            held=True;position('held')
             released=False
             for _ in range(200):
-                if len(c.write_calls)==3 and not released:
-                    control.accept_position_input(_parse_message(dict(v=1,type='finite_position_input',
-                        session_id='web',generation=gen,seq=2,kind='release',vector=[0,0,0])),control.clock.now_ns())
-                    released=True
+                assert control._fault is None,control._fault
+                if sum(r[0]=='movej' for r in c.write_calls)==2 and not released:
+                    held=False;position('release');released=True
                 await control.tick();await asyncio.sleep(.03)
                 if released and not control.finite_position_session.busy:break
             assert released and not control._fault
+            if planning_delay_s:assert intent_seq>2, 'the slow plan must receive new held samples before release'
             assert not control.finite_position_session.busy,str((control.finite_position_session.view(),
                 [(f.f_code.co_name,f.f_lineno) for f in control.finite_position_session.worker.get_stack()],
                 c.robot_state,c.motion_state,c.kin_data['actual_joint_pose'],
@@ -242,4 +254,4 @@ async def test_app_unlock_prepare_translation_release_and_progressive_claw(monke
             assert [r[0] for r in c.write_calls][-2:]==['set_claw','set_claw']
             assert c.write_calls[-2][2]!=c.write_calls[-1][2]
         finally:
-            refresh.cancel();await asyncio.gather(refresh,return_exceptions=True)
+            held=False;refresh.cancel();await asyncio.gather(refresh,return_exceptions=True)
