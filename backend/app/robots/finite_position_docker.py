@@ -88,6 +88,28 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
         self._docker_bootstrap_calls.close()
         return await super().disconnect()
 
+    def _ensure_stop_transaction(self):
+        # L Master can move the virtual controller between project sessions.
+        # A completed stop's anchor/deadline must not describe that new task.
+        # Never replace a pending/failed stop or an owned actuator obligation.
+        import math
+        from app.robots.lebai_adapter import _STOP_JOINT_DRIFT_RAD,_STOP_TCP_DRIFT_M
+        old=self._stop_transaction;s=self._snapshot
+        anchor=old.stable_anchor if old is not None else None
+        if (old is not None and old.confirmed and not old.unresolved and anchor is not None
+                and s is not None and 0<=self._clock()-s.captured_ns<100_000_000
+                and not self._latched_fault and not self._motion_calls.unknown_methods
+                and not self._snapshot_calls.unknown_methods and not self._motion_calls.tasks
+                and not self.position_busy and not self._motion_accepted
+                and not self._motion_write_stop_required and not self._gripper_active
+                and (s.raw_running_motion!=anchor.raw_running_motion
+                    or max(abs(a-b) for a,b in zip(s.actual_q,anchor.actual_q))>_STOP_JOINT_DRIFT_RAD
+                    or math.dist(s.actual_tcp.p,anchor.actual_tcp.p)>_STOP_TCP_DRIFT_M)):
+            self._stop_transaction=None
+            self._schedule_sdk_diagnostic(dict(kind='docker_external_motion_epoch',
+                previous_stop_episode=old.episode_id,reason='observed_after_confirmed_stop'))
+        super()._ensure_stop_transaction()
+
     def docker_idle_input_safe(self):
         """No owned actuator operation exists; this is not a stopping result."""
         if self.position_idle_input_guard is not True or not self.web_idle_close_safe():return False

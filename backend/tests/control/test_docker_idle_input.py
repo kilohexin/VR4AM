@@ -20,6 +20,53 @@ async def rig():
     return control,adapter,client,clock,latest
 
 
+async def test_external_docker_motion_gets_a_new_stop_episode_after_confirmed_stop():
+    from dataclasses import replace
+    from app.robots.base import StopReason
+    _control,a,c,clock,_latest=await rig()
+    try:
+        await a.stop(StopReason.DISCONNECT)
+        old=a._stop_transaction
+        assert old.confirmed
+        # A fresh observed external pose, with no owned motion still pending.
+        sample=await a._read_snapshot()
+        a._snapshot=replace(sample,actual_q=(sample.actual_q[0]+.1,*sample.actual_q[1:]))
+        await a.stop(StopReason.DISCONNECT)
+        assert a._stop_transaction is not old and a._stop_transaction.confirmed
+        assert [x[0] for x in c.write_calls]==['stop_move','stop_move']
+    finally:await a.disconnect()
+
+
+async def test_unchanged_docker_feedback_reuses_confirmed_stop():
+    from app.robots.base import StopReason
+    _control,a,c,_clock,_latest=await rig()
+    try:
+        await a.stop(StopReason.DISCONNECT);old=a._stop_transaction
+        await a.stop(StopReason.DISCONNECT)
+        assert a._stop_transaction is old
+        assert [x[0] for x in c.write_calls]==['stop_move']
+    finally:await a.disconnect()
+
+
+@pytest.mark.parametrize('damage',['unconfirmed','fault','unknown_read','stale','owned_motion'])
+async def test_external_motion_never_replaces_unresolved_or_owned_stop(damage):
+    from dataclasses import replace
+    from app.robots.base import StopReason
+    _control,a,c,clock,_latest=await rig()
+    try:
+        await a.stop(StopReason.DISCONNECT);old=a._stop_transaction
+        sample=await a._read_snapshot()
+        a._snapshot=replace(sample,actual_q=(sample.actual_q[0]+.1,*sample.actual_q[1:]))
+        if damage=='unconfirmed':old.confirmed=False
+        if damage=='fault':a._latched_fault='stop_unverified'
+        if damage=='unknown_read':a._snapshot_calls.unknown_methods.add('get_tcp')
+        if damage=='stale':await clock.sleep(.2)
+        if damage=='owned_motion':a._motion_write_stop_required=True
+        a._ensure_stop_transaction()
+        assert a._stop_transaction is old
+    finally:await a.disconnect()
+
+
 async def test_initial_page_gap_without_authority_or_writes_does_not_send_stop():
     control,adapter,client,clock,latest=await rig()
     try:
