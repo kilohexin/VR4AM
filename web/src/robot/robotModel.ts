@@ -12,9 +12,11 @@ const JOINTS = visualKinematics.joints.map(({name, axis}) => {
   return {name, axis: axis as Axis};
 });
 
-// The visual GLB's upright shoulder zero differs from the real LM3 encoder zero.
-// This is presentation-only: simulator FK/IK and commands retain their own joint conventions.
-const REAL_VISUAL_JOINT_OFFSETS = [0, Math.PI / 2, 0, 0, 0, 0] as const;
+// GLB rest frames differ from the controller MDH frames at shoulder and wrist.
+// Its J6 local +Z points opposite the controller's flange rotation axis.
+// Presentation only: raw encoder feedback, FK/IK and outgoing targets stay unchanged.
+const REAL_VISUAL_JOINT_OFFSETS = [0, Math.PI / 2, 0, Math.PI / 2, Math.PI, 0] as const;
+const REAL_VISUAL_JOINT_SIGNS = [1, 1, 1, 1, 1, -1] as const;
 
 export const LM3_HOME_Q = visualKinematics.home_q as readonly number[];
 export const LM3_TCP_OFFSET: readonly [number, number, number] = [
@@ -81,8 +83,10 @@ function createRobotModel(
       JOINTS.forEach(({axis}, index) => {
         const joint = jointNodes[index];
         joint.rotation.copy(originalRotations[index]);
-        joint.rotation[axis] += q[index]
-          + (backend === 'LEBAI' || backend === 'LEBAI_DOCKER' ? REAL_VISUAL_JOINT_OFFSETS[index] : 0);
+        const controllerFrame = backend === 'LEBAI' || backend === 'LEBAI_DOCKER';
+        joint.rotation[axis] += controllerFrame
+          ? q[index] * REAL_VISUAL_JOINT_SIGNS[index] + REAL_VISUAL_JOINT_OFFSETS[index]
+          : q[index];
       });
     },
     setGripper(value: number): void {
