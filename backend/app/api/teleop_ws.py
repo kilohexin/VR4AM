@@ -711,11 +711,15 @@ async def _run_coupled_session(
                 and control._preparation_unlock is None
                 and (position_session is None or (position_session.worker is None
                     and position_session.phase in ('ready','hold') and position_session.gate.released)))
+            drain_docker_stop=(idle_web and wait_error is None
+                and getattr(control.backend,'position_policy',None)=='finite_position_docker'
+                and any(task in control._backend_stop_owners and not task.done() for task in tasks))
             try:
-                if drain_docker:
-                    # Quiescent completed actions: block all control ticks and
-                    # receive/new sends while an existing read reaches its own
-                    # deadline. on_disconnect still owns the original stop.
+                if drain_docker or drain_docker_stop:
+                    # Completed actions or an already-owned Docker stop:
+                    # block new input/ticks and let existing reads/stop
+                    # verification reach their original bounded deadlines.
+                    # on_disconnect still reuses the original stop episode.
                     control._disconnecting+=1
                     try:
                         with anyio.CancelScope(shield=True):

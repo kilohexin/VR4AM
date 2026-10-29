@@ -33,3 +33,46 @@ async def test_completed_docker_actions_drain_started_read_before_disconnect_sto
         release.set()
         if not task.done():task.cancel()
         await asyncio.gather(task,return_exceptions=True);await a.disconnect()
+
+
+@pytest.mark.parametrize('verification_fails',[False,True])
+async def test_page_send_failure_does_not_cancel_an_owned_docker_stop_verification(verification_fails):
+    from fastapi import WebSocketDisconnect
+    from app.robots.base import BackendCommandError
+    control,a,c,_clock,_latest=await rig()
+    control.machine.mode=TeleopMode.ARMED;a._client.move_entries=1
+    state=SimpleNamespace(control=control,latest=control.latest,teleop_sender_tasks=set(),
+        teleop_owner=None,teleop_owner_lock=asyncio.Lock())
+    wire=MemoryWire(state);entered=asyncio.Event();release=asyncio.Event();cancelled=[]
+    original=c.get_estop_reason;send=wire.send_json
+    async def blocked():
+        if control._backend_stop_owners:
+            entered.set()
+            try:await release.wait()
+            except asyncio.CancelledError:cancelled.append(True);raise
+            if verification_fails:raise RuntimeError('injected_verification_failure')
+        return await original()
+    async def fail_during_stop(value):
+        if entered.is_set():raise WebSocketDisconnect(1001)
+        await send(value)
+    c.get_estop_reason=blocked;wire.send_json=fail_during_stop
+    task=asyncio.create_task(teleop_websocket(wire))
+    wire.send(dict(v=1,type='hello',request_id='hello'))
+    wire.send(dict(v=1,type='disarm',request_id='stop'))
+    try:
+        await asyncio.wait_for(entered.wait(),1)
+        await asyncio.sleep(.05)
+        assert not cancelled and not task.done()
+        release.set()
+        if verification_fails:
+            with pytest.raises(BackendCommandError):await asyncio.wait_for(task,2)
+            assert control._stop_unverified
+        else:
+            await asyncio.wait_for(task,2)
+            assert not control._stop_unverified and not a._snapshot_calls.unknown_methods
+        assert state.teleop_owner is None
+        assert [r[0] for r in c.write_calls]==['stop_move']
+    finally:
+        release.set()
+        if not task.done():task.cancel()
+        await asyncio.gather(task,return_exceptions=True);await a.disconnect()
