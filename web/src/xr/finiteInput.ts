@@ -8,10 +8,16 @@ export function finiteXRTransportFrame(frame:VRFrame):VRFrame {
 }
 
 export function relativeToolPitch(from:Quat,to:Quat):number {
+ return relativeToolTwist(from,to,'x');
+}
+export function relativeToolSpin(from:Quat,to:Quat):number {
+ return relativeToolTwist(from,to,'z');
+}
+function relativeToolTwist(from:Quat,to:Quat,axis:'x'|'z'):number {
  const q=new Quaternion(...from).invert().multiply(new Quaternion(...to));
  // q and -q describe the same pose; use the shortest signed local-X twist.
  const sign=q.w<0?-1:1;
- return Math.hypot(q.x,q.w)<1e-10?0:2*Math.atan2(q.x*sign,q.w*sign);
+ return Math.hypot(q[axis],q.w)<1e-10?0:2*Math.atan2(q[axis]*sign,q.w*sign);
 }
 
 /** XR samples feed the same finite goals as the desktop, without a goal queue. */
@@ -68,9 +74,15 @@ export class FiniteXRInput {
    const distance=Math.hypot(...error);
    const handPitch=Math.max(-Math.PI/9,Math.min(Math.PI/9,relativeToolPitch(this.anchor.handQ,frame.right.q)));
    const pitchError=s.finite_position!.pitch_enabled?handPitch-relativeToolPitch(this.anchor.tcpQ,s.actual_tcp.q):0;
-   const pitch=Math.abs(pitchError)>Math.PI/600?Math.sign(pitchError):0;
-   if(distance<=.001&&!pitch)this.position.release();
-   else this.position.offer(distance>.001?error.map(v=>v/distance) as Vec3:[0,0,0],pitch);
+   const docker=s.backend==='LEBAI_DOCKER'&&s.finite_position?.policy==='finite_position_docker';
+   const translationDeadband=docker ? .004 : .001;
+   const angleDeadband=docker?Math.PI/240:Math.PI/600;
+   const handSpin=Math.max(-Math.PI/2,Math.min(Math.PI/2,relativeToolSpin(this.anchor.handQ,frame.right.q)));
+   const spinError=s.finite_position!.spin_enabled?handSpin-relativeToolSpin(this.anchor.tcpQ,s.actual_tcp.q):0;
+   const pitch=Math.abs(pitchError)>angleDeadband?Math.sign(pitchError):0;
+   const spin=Math.abs(spinError)>angleDeadband?Math.sign(spinError):0;
+   if(distance<=translationDeadband&&!pitch&&!spin)this.position.release();
+   else this.position.offer(distance>translationDeadband?error.map(v=>v/distance) as Vec3:[0,0,0],pitch,spin);
   }
   // No default opening on preparation. Once Trigger changes, its analogue
   // value controls closure; a pending target finishes even on normal release.

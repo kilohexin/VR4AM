@@ -26,6 +26,27 @@ function rig(candidate:boolean|'real'=false){const root=document.createElement('
  return {root,panel,send,release,cancel,position,find,step,clock:(t:number)=>{now=t;}};
 }
 
+it('sends finite Docker spin only when advertised and releases without a translation target',()=>{
+ const r=rig(true);
+ r.panel.update({...state,backend:'LEBAI_DOCKER',finite_position:{policy:'finite_position_docker',phase:'ready',generation:1,
+  entered_steps:0,motion_id:null,reason:null,hardware_verified:false,pitch_enabled:true,spin_enabled:true}},true,0);
+ const button=r.find('[data-hold="spin+"]');expect(button.disabled).toBe(false);
+ button.dispatchEvent(pointer('pointerdown'));r.panel.applyFrame(frame(0));
+ expect(r.position.mock.calls.at(-1)).toEqual([[0,0,0],'held',undefined,0,1]);
+ button.dispatchEvent(pointer('pointerup'));expect(r.position.mock.calls.at(-1)?.[1]).toBe('release');
+ expect(r.root.textContent).toContain('8 mm');
+});
+
+it('uses a visible progressive Docker opening rate and holds the selected opening on release',()=>{
+ const r=rig(true);const s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{policy:'finite_position_docker',phase:'ready',generation:1,
+  entered_steps:0,motion_id:null,reason:null,hardware_verified:false}};
+ r.panel.update(s,true,0);const button=r.find('[data-claw="open"]');button.dispatchEvent(pointer('pointerdown'));
+ r.panel.applyFrame(frame(0));r.clock(20);r.panel.update(s,true,20);r.panel.applyFrame(frame(20));
+ expect(r.send.mock.calls.at(-1)?.[0].value).toBeCloseTo(.488);
+ button.dispatchEvent(pointer('pointerup'));r.clock(40);r.panel.update(s,true,40);r.panel.applyFrame(frame(40));
+ expect(r.send).toHaveBeenCalledTimes(1);expect(r.cancel).not.toHaveBeenCalled();
+});
+
 it.each([
  [{manual_input_ready:false,preparation_required:true,preparation_unlocked:true},'已解锁，请点击'],
  [{manual_input_ready:false,recovery_phase:'homing'},'正在前往准备位'],

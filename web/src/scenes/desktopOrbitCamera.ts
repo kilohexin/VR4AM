@@ -28,6 +28,7 @@ export class DesktopOrbitCamera {
     this.canvas.addEventListener('pointerup', this.onPointerUp);
     this.canvas.addEventListener('pointercancel', this.onPointerUp);
     this.canvas.addEventListener('lostpointercapture', this.onPointerUp);
+    this.canvas.addEventListener('wheel', this.onWheel, {passive:false});
     this.ownerWindow.addEventListener('blur', this.onBlur);
   }
 
@@ -40,6 +41,7 @@ export class DesktopOrbitCamera {
     this.canvas.removeEventListener('pointerup', this.onPointerUp);
     this.canvas.removeEventListener('pointercancel', this.onPointerUp);
     this.canvas.removeEventListener('lostpointercapture', this.onPointerUp);
+    this.canvas.removeEventListener('wheel', this.onWheel);
     this.ownerWindow.removeEventListener('blur', this.onBlur);
   }
 
@@ -79,6 +81,14 @@ export class DesktopOrbitCamera {
   };
 
   private readonly onBlur = (): void => this.release();
+
+  private readonly onWheel = (event:WheelEvent):void => {
+    if(!Number.isFinite(event.deltaY))return;
+    event.preventDefault();
+    const delta=event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?500:1);
+    this.radius=THREE.MathUtils.clamp(this.radius*Math.exp(THREE.MathUtils.clamp(delta*.0015,-1,1)),.55,5);
+    this.updateCamera();
+  };
 
   private release(): void {
     const pointer = this.activePointer;

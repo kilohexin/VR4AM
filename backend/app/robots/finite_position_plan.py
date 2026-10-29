@@ -8,16 +8,20 @@ from app.control.finite_position_types import (MAX_STEP_M,MIN_PROGRESS_M,MAX_END
 FRACTIONS=(0.,.25,.5,.75,1.)
 
 
-def build_position_target(sample,intent):
-    d=np.asarray(intent.vector)*MAX_STEP_M
-    if np.linalg.norm(d)<1e-7 and not intent.pitch:raise ValueError('position_unresolvable_step')
+def build_position_target(sample,intent,*,step_m=MAX_STEP_M,angle_step_rad=MAX_PITCH_STEP_RAD):
+    if not 0<step_m<=.008 or not 0<angle_step_rad<=math.radians(1.5):
+        raise ValueError('position_invalid_step_profile')
+    d=np.asarray(intent.vector)*step_m
+    if np.linalg.norm(d)<1e-7 and not (intent.pitch or intent.spin):raise ValueError('position_unresolvable_step')
     # Coupled translation/rotation share one smaller geometric step. Summing
     # two full steps can exceed the unchanged joint/duration limits near a wrist.
-    scale=.5 if intent.pitch and np.linalg.norm(d)>1e-7 else 1.
+    scale=.5 if (intent.pitch or intent.spin) and np.linalg.norm(d)>1e-7 else 1.
     d=d*scale
     q=sample.tcp_q
-    if intent.pitch:
-        q=tuple(map(float,(Rotation.from_quat(q)*Rotation.from_rotvec([intent.pitch*MAX_PITCH_STEP_RAD*scale,0.,0.])).as_quat()))
+    if intent.pitch or intent.spin:
+        magnitude=max(1.,math.hypot(intent.pitch,intent.spin))
+        rotation=np.array([intent.pitch,0.,intent.spin])*angle_step_rad*scale/magnitude
+        q=tuple(map(float,(Rotation.from_quat(q)*Rotation.from_rotvec(rotation)).as_quat()))
     return tuple(float(x) for x in np.asarray(sample.tcp_p)+d),q
 
 
@@ -25,9 +29,9 @@ def angle(a,b):
     return (Rotation.from_quat(a)*Rotation.from_quat(b).inv()).magnitude()
 
 
-def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=None,pitch_reference=None,duration_limit_s=1.8,joint_speed_cap=.05):
+def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=None,pitch_reference=None,duration_limit_s=1.8,joint_speed_cap=.05,rotation_range_rad=MAX_PITCH_RANGE_RAD):
     if (type(joint_speed_cap) not in (int,float) or not math.isfinite(joint_speed_cap)
-            or not 0<joint_speed_cap<=.3):raise ValueError('position_invalid_speed_cap')
+            or not 0<joint_speed_cap<=.6):raise ValueError('position_invalid_speed_cap')
     if (type(duration_limit_s) not in (int,float) or not math.isfinite(duration_limit_s)
             or not 0<duration_limit_s<=4.8):raise ValueError('position_invalid_duration_budget')
     if len(fk_samples)!=5:raise ValueError('position_fk_samples_required')
@@ -52,7 +56,7 @@ def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=N
         expected=(Rotation.from_quat(start.tcp_q)*Rotation.from_rotvec(relative.as_rotvec()*f)).as_quat()
         if angle(expected,r)>math.radians(settings.tcp_rotation_tolerance_deg):
             raise ValueError('position_path_rotation')
-        if pitch_reference is not None and angle(pitch_reference,r)>MAX_PITCH_RANGE_RAD+1e-10:
+        if pitch_reference is not None and angle(pitch_reference,r)>rotation_range_rad+1e-10:
             raise ValueError('position_pitch_limit')
     v=min(joint_speed_cap,settings.control.max_joint_speed_radps)
     a=min(.2,settings.control.max_joint_acceleration_radps2)

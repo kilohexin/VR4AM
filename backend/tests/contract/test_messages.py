@@ -46,15 +46,17 @@ def load_protocol_schema() -> dict:
     return json.loads((ROOT / "schemas" / "teleop-v1.json").read_text(encoding="utf-8-sig"))
 
 
-def test_pitch_schema_accepts_optional_bounded_scalar_and_explicit_capability():
+@pytest.mark.parametrize('field',['pitch','spin'])
+def test_rotation_schema_accepts_optional_bounded_scalar_and_explicit_capability(field):
     schema=load_protocol_schema()
     row=dict(v=1,type='finite_position_input',session_id='web',generation=1,seq=1,
-        kind='held',vector=[0.,0.,0.],pitch=1.)
+        kind='held',vector=[0.,0.,0.],**{field:1.})
     validator=Draft202012Validator({'$ref':'#/$defs/FinitePositionInputMessage','$defs':schema['$defs']})
     assert not list(validator.iter_errors(row))
     for value in (True,2.,'1'):
-        assert list(validator.iter_errors({**row,'pitch':value}))
-    status=dict(policy='finite_position_offline',phase='ready',generation=1,entered_steps=0,pitch_enabled=True)
+        assert list(validator.iter_errors({**row,field:value}))
+    status=messages.FinitePositionStatus(policy='finite_position_offline',phase='ready',generation=1,entered_steps=0,
+        **{field+'_enabled':True}).model_dump(mode='json')
     status_validator=Draft202012Validator({'$ref':'#/$defs/FinitePositionStatus','$defs':schema['$defs']})
     assert not list(status_validator.iter_errors(status))
     for value in (None,2):

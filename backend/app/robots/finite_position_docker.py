@@ -1,6 +1,7 @@
 """Official Docker adapter; it cannot select a non-loopback native endpoint."""
 import asyncio
 import time
+import math
 from pathlib import Path
 from app.robots.finite_position_web import RealFinitePositionAdapter
 from app.robots.lebai_sdk_bridge import connect_docker_simulator_client
@@ -9,7 +10,12 @@ from app.commissioning.finite_position_site import MdhPositionModel
 
 class DockerFinitePositionAdapter(RealFinitePositionAdapter):
     position_policy='finite_position_docker'
-    _position_joint_speed_cap=.3
+    _position_joint_speed_cap=.6
+    _position_rate_epsilon=1e-9  # Simulator differentiation can return 0.2000000000035 for 0.2.
+    position_step_m=.008
+    position_angle_step_rad=math.radians(1.5)
+    position_rotation_range_rad=math.radians(90.)
+    position_spin_enabled=True
     _position_estimated_duration_s=4.8  # 5-s coarse arrival window less 200-ms margin
     gripper_provider='local_virtual'
     _stop_rpc_timeout_s=1.
@@ -20,7 +26,7 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
 
     def __init__(self,settings,*,client_factory=None,**kwargs):
         if (settings.ip!='127.0.0.1' or settings.mode!='control'
-                or not 0<settings.control.max_joint_speed_radps<=.3
+                or not 0<settings.control.max_joint_speed_radps<=.6
                 or not 0<settings.control.max_joint_acceleration_radps2<=.2):
             raise ValueError('docker_simulator_profile_required')
         self.position_vr_enabled=True;self.position_pitch_enabled=True
@@ -62,7 +68,7 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
                 raise ValueError('docker_bootstrap_pending')
             if self._docker_ready_client is not None:
                 return await super().connect()
-            from app.digital_twin.docker_runtime import verify_local_docker,ensure_docker_idle
+            from app.digital_twin.docker_runtime import verify_local_docker,ensure_docker_idle,ensure_docker_speed
             self._docker_admission=await asyncio.to_thread(verify_local_docker)
             owner=self._docker_bootstrap_calls
             def check():
@@ -73,6 +79,7 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
                 client=await connect_docker_simulator_client()
                 check()
                 await ensure_docker_idle(client,check=check)
+                self._docker_velocity_factor=await ensure_docker_speed(client,check=check)
                 from app.digital_twin.docker_kinematics import admit_local_fk
                 client=await admit_local_fk(client,self.position_model,check=check)
                 check()

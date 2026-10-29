@@ -10,7 +10,7 @@ import type {
 import type {TeleopConnectionStatus} from '../transport/teleopSocket';
 import type {XRSessionStatus} from '../xr/session';
 
-const DESKTOP_INPUT_HELP='桌面：鼠标左键拖动摇杆控制前后左右 · 长按升降、俯仰、自转或夹爪开合 · 松开保持 · 右键只转视角';
+const DESKTOP_INPUT_HELP='桌面：鼠标左键拖动摇杆控制前后左右 · 长按升降、俯仰、自转或夹爪开合 · 松开保持 · 右键转视角 · 滚轮缩放';
 const XR_INPUT_HELP='右 Grip 建立末端零位 · Trigger 控制夹爪 · 左摇杆平移平台 · 左 Grip+摇杆调高度 · 按下左摇杆归零';
 
 export interface ControllerHudState {
@@ -305,6 +305,13 @@ function modeTone(mode: TeleopMode): string {
 export function readableFault(fault: string | null): string {
   if (!fault) return '无';
   const labels: Record<string, string> = {
+    position_completion_timeout: '目标到位超时，请检查仿真速度倍率',
+    position_not_finished: '目标尚未完成，请检查仿真速度倍率',
+    position_reported_rate_limit: '反馈速度或加速度超过当前运行档位',
+    position_recording_unavailable: '运行记录暂不可用',
+    position_initial_not_stable: '起始姿态尚未稳定',
+    position_endpoint_error: '目标到位误差超出当前容差',
+    position_session_expired: '本次持按时限已到，请松开后重新操作',
     protocol_error: '协议消息无效',
     tracking_lost: '追踪已丢失',
     input_stale: '控制输入已超时',
@@ -335,7 +342,7 @@ export function readableFault(fault: string | null): string {
     stale_frame: '控制帧超时',
     backend_error: '仿真后端错误',
   };
-  return labels[fault] ?? '未知仿真故障';
+  return labels[fault] ?? (/^[a-z][a-z0-9_]{0,79}$/.test(fault)?`控制故障（${fault}）`:'控制故障，请查看诊断');
 }
 
 export function readableTargetControl(status: TargetControlStatus): string {

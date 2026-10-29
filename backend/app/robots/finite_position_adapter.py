@@ -22,6 +22,11 @@ class _FinitePositionCore(RealLebaiAdapter):
     """Shared executor. Requires an explicit injected factory; no native loader."""
     position_candidate=False
     position_pitch_enabled=False
+    position_spin_enabled=False
+    _position_rate_epsilon=0.
+    position_step_m=MAX_STEP_M
+    position_angle_step_rad=MAX_PITCH_STEP_RAD
+    position_rotation_range_rad=MAX_PITCH_RANGE_RAD
     position_local_math_parallel=False
     _stop_blocking_motion_methods=frozenset({'movej','move_pvat','set_claw'})
     _immediate_stop_latch_methods=frozenset({'movej','move_pvat'})
@@ -37,7 +42,7 @@ class _FinitePositionCore(RealLebaiAdapter):
         self._position_local_math_lock=asyncio.Lock()
         self.position_busy=False;self.position_aborted=False
         self._position_pitch_reference=None
-        self._position_acceleration=PositionAccelerationMonitor(min(.2,settings.control.max_joint_acceleration_radps2))
+        self._position_acceleration=PositionAccelerationMonitor(min(.2,settings.control.max_joint_acceleration_radps2),numeric_epsilon=self._position_rate_epsilon)
         self._position_config=digest(asdict(settings))
         self._position_sources={Path(__file__),Path(__file__).with_name('finite_position_plan.py'),
             Path(__file__).with_name('finite_position_acceleration.py'),
@@ -100,8 +105,8 @@ class _FinitePositionCore(RealLebaiAdapter):
         if fault:raise ValueError('position_'+fault)
         if not self._joints_inside_limits(s.target_q):raise ValueError('position_joint_outside_soft_limits')
         limits=self.settings.control
-        if (any(abs(x)>limits.max_joint_speed_radps for v in (s.actual_qd,s.target_qd) for x in v)
-                or any(abs(x)>self._position_acceleration.limit for x in s.target_qdd)):
+        if (any(abs(x)>limits.max_joint_speed_radps+self._position_rate_epsilon for v in (s.actual_qd,s.target_qd) for x in v)
+                or any(abs(x)>self._position_acceleration.limit+self._position_rate_epsilon for x in s.target_qdd)):
             raise ValueError('position_reported_rate_limit')
         self._position_acceleration.observe(s.actual_qdd,captured_ns=s.captured_ns,now_ns=self._clock())
 
@@ -184,6 +189,7 @@ class _FinitePositionCore(RealLebaiAdapter):
 
     async def plan_step(self,intent,*,authorize):
         if intent.pitch and not self.position_pitch_enabled:raise ValueError('position_pitch_not_authorized')
+        if intent.spin and not self.position_spin_enabled:raise ValueError('position_spin_not_authorized')
         binding=self.position_binding;self._position_health(binding);authorize()
         if self.position_busy:raise ValueError('position_busy')
         self._position_plan=None;self._position_plan_observer=None
@@ -199,11 +205,11 @@ class _FinitePositionCore(RealLebaiAdapter):
                 if not 0<=self._clock()-s.captured_ns<INPUT_NS:raise ValueError('position_snapshot_expired')
                 if any(abs(x)>1e-8 for v in (s.actual_qd,s.actual_qdd,s.target_qd,s.target_qdd) for x in v):
                     raise ValueError('position_initial_not_stable')
-                start=self._position_sample(s);p,q=build_position_target(start,intent)
+                start=self._position_sample(s);p,q=build_position_target(start,intent,step_m=self.position_step_m,angle_step_rad=self.position_angle_step_rad)
                 if any(not lo<=x<=hi for lo,x,hi in zip(self.settings.startup_tcp_min_m,p,self.settings.startup_tcp_max_m)):
                     raise ValueError('position_workspace')
-                if intent.pitch and (self._position_pitch_reference is None
-                        or angle(self._position_pitch_reference,q)>MAX_PITCH_RANGE_RAD+1e-10):
+                if (intent.pitch or intent.spin) and (self._position_pitch_reference is None
+                        or angle(self._position_pitch_reference,q)>self.position_rotation_range_rad+1e-10):
                     raise ValueError('position_pitch_limit')
                 raw=await self._position_math('kinematics_inverse',lambda:self._client.kinematics_inverse(
                     pose_to_lebai(Pose(p=p,q=q)),list(s.actual_q)),live)
@@ -219,11 +225,11 @@ class _FinitePositionCore(RealLebaiAdapter):
                     settings=self.settings,model=self.position_model,target_q=q,
                     pitch_reference=self._position_pitch_reference if self.position_pitch_enabled else None,
                     duration_limit_s=getattr(self,'_position_estimated_duration_s',1.8),
-                    joint_speed_cap=getattr(self,'_position_joint_speed_cap',.05))
+                    joint_speed_cap=getattr(self,'_position_joint_speed_cap',.05),rotation_range_rad=self.position_rotation_range_rad)
                 live()
                 await self._emit_event(dict(kind='finite_position_plan',input_seq=intent.seq,
                     start_tcp=list(start.tcp_p),target_tcp=list(p),target_orientation=list(q),
-                    pitch=intent.pitch,goal_joints=list(goal),audit=asdict(audit),
+                    pitch=intent.pitch,spin=intent.spin,goal_joints=list(goal),audit=asdict(audit),
                     planning_timeout_ms=PLAN_NS/1e6,entry_policy='fresh_identical_start_after_planning'))
                 live()
                 fresh=await self._read_snapshot(read_purpose='position_revalidate');live()

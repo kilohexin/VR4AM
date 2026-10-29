@@ -4,6 +4,17 @@ import {describe, expect, it, vi} from 'vitest';
 import {DesktopOrbitCamera} from '../src/scenes/desktopOrbitCamera';
 
 describe('DesktopOrbitCamera', () => {
+  it('zooms the view with the wheel and removes its handler on disposal',()=>{
+    const canvas=document.createElement('canvas'),camera=new THREE.PerspectiveCamera();
+    const orbit=new DesktopOrbitCamera(canvas,camera);orbit.attach();
+    const initial=camera.position.clone(),target=new THREE.Vector3(.03,.42,0);
+    const wheel=new WheelEvent('wheel',{deltaY:-500,cancelable:true});canvas.dispatchEvent(wheel);
+    expect(wheel.defaultPrevented).toBe(true);
+    expect(camera.position.distanceTo(target)).toBeLessThan(initial.distanceTo(target));
+    orbit.reset();expect(camera.position.toArray()).toEqual(initial.toArray());orbit.dispose();
+    canvas.dispatchEvent(new WheelEvent('wheel',{deltaY:-500}));
+    expect(camera.position.toArray()).toEqual(initial.toArray());
+  });
   it('orbits only with the right pointer and resets to the exact default view', () => {
     const canvas = document.createElement('canvas');
     canvas.setPointerCapture = vi.fn();

@@ -19,9 +19,9 @@ class DockerClock:
 
 def docker_settings():
     s=load_digital_twin_settings();ready=(0.,-math.pi/4,math.pi/2,-math.pi/4,math.pi/2,0.)
-    control=replace(s.lebai.control,max_joint_speed_radps=.3,max_joint_acceleration_radps2=.2,
-        max_tcp_speed_mps=.03,max_tcp_acceleration_mps2=.02,
-        max_tcp_rotation_radps=.5,max_tcp_angular_acceleration_radps2=.2,translation_scale=1.)
+    control=replace(s.lebai.control,max_joint_speed_radps=.6,max_joint_acceleration_radps2=.2,
+        max_tcp_speed_mps=.15,max_tcp_acceleration_mps2=.15,
+        max_tcp_rotation_radps=1.,max_tcp_angular_acceleration_radps2=1.,translation_scale=1.)
     return replace(s,lebai=replace(s.lebai,ip='127.0.0.1',expected_tcp=TcpExpectation(0.,0.,0.,0.,0.,0.),
         home_q=ready,teleop_ready_q=ready,control=control),segmented_target=None,transactional_target=None)
 
@@ -75,6 +75,18 @@ async def ensure_docker_idle(client,*,check=lambda:None):
     if state!='IDLE':raise ValueError('docker_simulator_requires_idle')
 
 
+async def ensure_docker_speed(client,*,check=lambda:None):
+    """Startup-only on the already verified local simulator, before any target."""
+    check();factor=await client.get_velocity_factor();check()
+    if type(factor) is not int or not 0<=factor<=100:
+        raise ValueError('docker_speed_factor_invalid')
+    if factor!=100:
+        check();await client.set_velocity_factor(100);check()
+        factor=await client.get_velocity_factor();check()
+    if factor!=100:raise ValueError('docker_speed_factor_unconfirmed')
+    return factor
+
+
 def create_docker_app(web_directory):
     import os
     import uuid
@@ -103,7 +115,9 @@ def create_docker_app(web_directory):
             gripper_provider='local_virtual',gripper_physics=False,
             kinematics_provider='controller_ik_verified_local_fk',native_fk_admission_queries=3,
             timing_profile='virtual_controller',stop_rpc_timeout_ms=1000,stop_verification_timeout_ms=2000,
-            motion_profile='docker_functional',joint_speed_cap_radps=backend.settings.control.max_joint_speed_radps,
+            motion_profile='docker_functional',startup_velocity_factor_percent=getattr(backend,'_docker_velocity_factor',None),
+            translation_step_mm=backend.position_step_m*1000,angle_step_deg=math.degrees(backend.position_angle_step_rad),
+            joint_speed_cap_radps=backend.settings.control.max_joint_speed_radps,
             tcp_speed_cap_mps=backend.settings.control.max_tcp_speed_mps,
             moves=getattr(client,'move_entries',0),claws=getattr(client,'claw_entries',0),
             control_fault=app.state.control._fault,

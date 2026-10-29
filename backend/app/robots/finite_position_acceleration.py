@@ -6,9 +6,12 @@ from app.control.finite_position_types import INPUT_NS
 class PositionAccelerationMonitor:
     consecutive_samples=3
 
-    def __init__(self,limit):
+    def __init__(self,limit,*,numeric_epsilon=0.):
         if type(limit) not in (int,float) or not math.isfinite(limit) or not 0<limit<=.2:
             raise ValueError('position_acceleration_limit_invalid')
+        if type(numeric_epsilon) not in (int,float) or not 0<=numeric_epsilon<=1e-9:
+            raise ValueError('position_acceleration_epsilon_invalid')
+        self.numeric_epsilon=numeric_epsilon
         self.limit=float(limit);self.instant_limit=2*self.limit if self.limit==.2 else self.limit
         self.reset()
 
@@ -27,9 +30,9 @@ class PositionAccelerationMonitor:
                 or type(captured_ns) is not int or captured_ns<0 or type(now_ns) is not int):
             raise ValueError('position_acceleration_feedback_invalid')
         values=tuple(values)
-        if any(abs(v)>self.instant_limit for v in values):
+        if any(abs(v)>self.instant_limit+self.numeric_epsilon for v in values):
             raise ValueError('position_reported_rate_limit')
-        moderate=any(abs(v)>self.limit for v in values)
+        moderate=any(abs(v)>self.limit+self.numeric_epsilon for v in values)
         if moderate and not 0<=now_ns-captured_ns<INPUT_NS:
             raise ValueError('position_feedback_expired')
         if self._stamp is not None:
@@ -39,7 +42,7 @@ class PositionAccelerationMonitor:
             # Missing/interrupted observation cannot earn the transient exception.
             if moderate and captured_ns-self._stamp>=INPUT_NS:
                 raise ValueError('position_reported_rate_limit')
-        self._counts=[n+1 if abs(v)>self.limit else 0 for n,v in zip(self._counts,values)]
+        self._counts=[n+1 if abs(v)>self.limit+self.numeric_epsilon else 0 for n,v in zip(self._counts,values)]
         self._stamp,self._values=captured_ns,values
         if max(self._counts)>=self.consecutive_samples:
             raise ValueError('position_reported_rate_limit')

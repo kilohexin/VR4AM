@@ -308,6 +308,7 @@ describe('Chinese simulator HUD', () => {
     ['tracking_lost', '追踪已丢失'],
     ['input_stale', '控制输入已超时'],
     ['control_overrun', '控制周期连续超时'],
+    ['position_completion_timeout', '目标到位超时，请检查仿真速度倍率'],
     ['invalid_numeric', '控制数据包含无效数值'],
     ['workspace_violation', '目标超出工作空间'],
     ['joint_limit', '目标超出关节限制'],

@@ -82,6 +82,7 @@ class PositionIntent:
     kind: str
     vector: tuple
     pitch: float=0.
+    spin: float=0.
 
     def __post_init__(self):
         if type(self.session_id) is not str or not 1<=len(self.session_id)<=128:
@@ -92,12 +93,16 @@ class PositionIntent:
         if type(self.pitch) not in (int,float) or not math.isfinite(self.pitch) or abs(self.pitch)>1:
             raise ValueError('position_invalid_pitch')
         pitch=0. if abs(self.pitch)<=INPUT_DEADZONE else math.copysign(1.,self.pitch)
-        if self.kind=='release' and (length or self.pitch):raise ValueError('position_release_vector')
+        if type(self.spin) not in (int,float) or not math.isfinite(self.spin) or abs(self.spin)>1:
+            raise ValueError('position_invalid_spin')
+        spin=0. if abs(self.spin)<=INPUT_DEADZONE else math.copysign(1.,self.spin)
+        if self.kind=='release' and (length or self.pitch or self.spin):raise ValueError('position_release_vector')
         if length<=INPUT_DEADZONE:v=(0.,0.,0.);length=0.
         else:v=tuple(x/length for x in v)
         object.__setattr__(self,'vector',v)
         object.__setattr__(self,'pitch',pitch)
-        if not length and not pitch:object.__setattr__(self,'kind','release')
+        object.__setattr__(self,'spin',spin)
+        if not length and not pitch and not spin:object.__setattr__(self,'kind','release')
 
 
 @dataclass(frozen=True)

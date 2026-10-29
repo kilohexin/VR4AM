@@ -9,8 +9,8 @@ def test_docker_settings_use_separate_loopback_zero_tool_and_mdh_ready():
     s=docker_settings()
     assert s.lebai.ip=='127.0.0.1' and s.lebai.mode=='control'
     assert s.lebai.expected_tcp.z==0 and s.lebai.teleop_ready_q[5]==0
-    assert s.lebai.control.max_joint_speed_radps==.3
-    assert s.lebai.control.max_tcp_speed_mps==.03
+    assert s.lebai.control.max_joint_speed_radps==.6
+    assert s.lebai.control.max_tcp_speed_mps==.15
     assert s.lebai.gripper.max_force_percent==30
 
 
@@ -20,10 +20,10 @@ def test_docker_selector_is_explicit_and_exposes_its_own_identity():
     a=build_backend(docker_settings(),NoopRecorder(),backend_label='LEBAI_DOCKER',docker_simulation=True)
     assert a._backend_label=='LEBAI_DOCKER' and a.position_policy=='finite_position_docker'
     assert a.position_vr_enabled and a.position_pitch_enabled
-    assert a._position_joint_speed_cap==.3
+    assert a._position_joint_speed_cap==.6
 
 
-@pytest.mark.parametrize('speed',[0,float('nan'),float('inf'),.301])
+@pytest.mark.parametrize('speed',[0,float('nan'),float('inf'),.601])
 def test_docker_profile_still_rejects_invalid_or_unbounded_joint_speed(speed):
     from app.digital_twin.docker_runtime import docker_settings
     from app.robots.finite_position_docker import DockerFinitePositionAdapter
@@ -137,8 +137,9 @@ async def test_parallel_connect_is_reserved_before_container_inspection(monkeypa
         from app.schemas.messages import Pose
         from app.robots.lebai_codec import pose_to_lebai
         p,r=a.position_model.forward(q);return pose_to_lebai(Pose(p=p,q=r))
+    async def factor():return 100
     async def factory():
-        connections.append(1);return SimpleNamespace(get_robot_state=state,kinematics_forward=fk)
+        connections.append(1);return SimpleNamespace(get_robot_state=state,kinematics_forward=fk,get_velocity_factor=factor)
     async def connected(self):return 'connected'
     monkeypatch.setattr(d,'connect_docker_simulator_client',factory)
     monkeypatch.setattr(runtime,'verify_local_docker',inspect)
@@ -173,7 +174,8 @@ async def test_late_bootstrap_result_cannot_dispatch_another_native_call(monkeyp
         calls.append('fk')
         if where=='fk':await delayed()
         p,r=a.position_model.forward(q);return pose_to_lebai(Pose(p=p,q=r))
-    native=SimpleNamespace(get_robot_state=state,start_sys=start,kinematics_forward=fk)
+    async def factor():return 100
+    native=SimpleNamespace(get_robot_state=state,start_sys=start,kinematics_forward=fk,get_velocity_factor=factor)
     async def factory():
         if where=='connect':await delayed()
         return native

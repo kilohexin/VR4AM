@@ -26,7 +26,7 @@ def main(argv=None):
     print(json.dumps(dict(execute=args.run,runtime='LEBAI_DOCKER',sdk_target='127.0.0.1:3030',
         simulator=True,web_host=args.host,web_port=args.port,admission=admission,
         startup='STOP/ROBOT_ON -> start_sys -> IDLE; otherwise require IDLE',
-        controls='unlock,prepare,2mm translation,0.5deg pitch,progressive claw',
+        controls='unlock,prepare,8mm translation,1.5deg pitch/spin,progressive claw',startup_velocity_factor_percent=100,
         gripper_provider='local_virtual',gripper_physics=False,hardware_verified=False)),flush=True)
     if not args.run:return 0
     import uvicorn

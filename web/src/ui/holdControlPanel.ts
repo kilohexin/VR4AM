@@ -38,7 +38,7 @@ export class HoldControlPanel {
     private readonly now: () => number = () => performance.now(),
     private readonly onRelease: () => void = () => {},
     private readonly cancelRequest: (requestId: string) => void = () => {},
-    private readonly positionIntent:(vector:Vec3,event:'held'|'release'|'abort',reason?:string,pitch?:number)=>void=()=>{}) {
+    private readonly positionIntent:(vector:Vec3,event:'held'|'release'|'abort',reason?:string,pitch?:number,spin?:number)=>void=()=>{}) {
     root.classList.add('hold-control-panel');
     root.innerHTML = `<h2>手动操纵</h2>
       <div class="joystick-layout">
@@ -132,6 +132,7 @@ export class HoldControlPanel {
     }
     if(this.positionCandidate&&this.motionHeld()&&fresh){
       if(this.action?.startsWith('pitch'))this.positionIntent([0,0,0],'held',undefined,this.action==='pitch+'?1:-1);
+      else if(this.action?.startsWith('spin'))this.positionIntent([0,0,0],'held',undefined,0,this.action==='spin+'?1:-1);
       else {
         const v:Vec3=this.action==='joystick'?[this.xy.x,this.xy.y,0]:[0,0,this.action==='z+'?1:-1];
         this.positionIntent(v,'held');
@@ -150,7 +151,8 @@ export class HoldControlPanel {
     }
     if (fresh && (this.action === 'open' || this.action === 'close') && !this.pending && this.clawReady()) {
       const seconds = Math.min(50, Math.max(0, delta)) / 1000;
-      this.clawTarget = Math.max(0, Math.min(1, this.clawTarget + (this.action === 'close' ? 1 : -1) * seconds * CLAW_RATE));
+      const rate=this.state?.backend==='LEBAI_DOCKER' ? .6 : CLAW_RATE;
+      this.clawTarget = Math.max(0, Math.min(1, this.clawTarget + (this.action === 'close' ? 1 : -1) * seconds * rate));
       if (Math.abs(this.clawTarget - this.clawLastSent) >= .005 && this.now() - this.clawLastSendMs >= CLAW_INTERVAL_MS) {
         this.pending = `web-claw-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         this.pendingCancelled = false;
@@ -210,7 +212,7 @@ export class HoldControlPanel {
     for (const button of this.root.querySelectorAll<HTMLButtonElement>('[data-joystick],[data-hold]')) {
       button.disabled = !this.fresh() || this.pending !== null || movingWithoutGesture
         || this.action === 'open' || this.action === 'close'
-        || (!!button.dataset.hold?.startsWith('spin') && (this.positionCandidate||!this.state?.target_control?.tool_spin_supported))
+        || (!!button.dataset.hold?.startsWith('spin') && (this.positionCandidate?!this.state?.finite_position?.spin_enabled:!this.state?.target_control?.tool_spin_supported))
         || (!!button.dataset.hold?.startsWith('pitch') && (!this.positionCandidate||!this.state?.finite_position?.pitch_enabled));
       button.classList.toggle('is-held', button === this.capture);
       if(button.dataset.hold?.startsWith('pitch'))button.title=this.state?.finite_position?.pitch_enabled
@@ -224,6 +226,8 @@ export class HoldControlPanel {
     }
     const startupBlocked=this.state?.backend==='LEBAI'&&this.state.preflight_ready===false
       &&this.state.preflight_reason==='tcp_outside_startup_envelope';
+    const step=this.state?.backend==='LEBAI_DOCKER'?'8 mm':'2 mm';
+    const angle=this.state?.backend==='LEBAI_DOCKER'?'1.5°':'0.5°';
     this.status.textContent = !this.state||this.state.mode==='DISCONNECTED'?'等待后端连接与实际反馈'
       : this.state.fault?'控制故障，操纵已锁定；请查看故障详情'
       : this.state.recovery_phase==='stopping'?'正在确认停止，暂不可操纵'
@@ -238,10 +242,10 @@ export class HoldControlPanel {
       : this.positionCandidate&&this.state?.finite_position?.phase==='draining'?'松开后正在完成当前小步'
       : this.positionCandidate&&this.state?.finite_position?.phase==='planning'?'正在规划下一小步；保持按住继续，松开取消未发送目标'
       : this.positionCandidate&&this.state?.finite_position?.phase==='executing'?'正在执行当前小步；松开后完成本步'
-      : this.motionHeld() ? (this.positionCandidate?'长按每步 2 mm；松开后完成当前小步':'摇杆松开回中停止；坐标固定于机械臂基座')
+      : this.motionHeld() ? (this.positionCandidate?`长按每步 ${step}；松开后完成当前小步`:'摇杆松开回中停止；坐标固定于机械臂基座')
       : this.action === 'open' || this.action === 'close' ? `目标开口 ${((1 - this.clawTarget) * 100).toFixed(0)}% · 松开保持`
       : this.pending ? '等待上次夹爪请求收尾；不自动重发' : this.positionCandidate?
-        this.state?.finite_position?.pitch_enabled?'平移每步 2 mm · 俯仰每步 0.5°；松开保持':'每步 2 mm；长按摇杆或升降，松开完成当前步'
+        this.state?.finite_position?.pitch_enabled?`平移每步 ${step} · 俯仰${this.state.finite_position.spin_enabled?'/自转':''}每步 ${angle}；松开保持`:`每步 ${step}；长按摇杆或升降，松开完成当前步`
         :'摇杆控制平面；升降、自转和夹爪长按操作';
   }
   private moveStick(e: PointerEvent): void {

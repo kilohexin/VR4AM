@@ -14,14 +14,15 @@ def test_new_position_input_parses_without_reinterpreting_stop():
     assert _parse_message(dict(v=1,type='disarm',request_id='stop')).type=='disarm'
 
 
-def test_optional_pitch_keeps_old_input_and_validates_release():
-    assert _parse_message(message()).pitch==0.
-    row=message(pitch=1.);row['vector']=[0.,0.,0.]
-    assert _parse_message(row).pitch==1.
+@pytest.mark.parametrize('field',['pitch','spin'])
+def test_optional_rotation_keeps_old_input_and_validates_release(field):
+    assert getattr(_parse_message(message()),field)==0.
+    row=message(**{field:1.});row['vector']=[0.,0.,0.]
+    assert getattr(_parse_message(row),field)==1.
     for bad in (True,float('nan'),2.,'1'):
-        row['pitch']=bad
+        row[field]=bad
         with pytest.raises((ValueError,ValidationError)):_parse_message(row)
-    row.update(pitch=1.,kind='release')
+    row.update({field:1.,'kind':'release'})
     with pytest.raises((ValueError,ValidationError)):_parse_message(row)
 
 
@@ -41,6 +42,24 @@ async def test_pitch_capability_is_explicit_and_not_client_selected():
         row['seq']=2
         with pytest.raises(ValueError,match='pitch_not_authorized'):
             control.accept_position_input(_parse_message(row),clock.now_ns())
+        assert not c.write_calls
+    finally:await control.stop();await a.disconnect()
+
+async def test_spin_requires_backend_capability_even_with_valid_wire_input():
+    from app.control.robot_control import RobotControl,LatestVRFrame
+    from app.recording.noop import NoopRecorder
+    from app.schemas.messages import TeleopMode
+    from tests.robots.test_finite_position_adapter import prepared
+    a,c,clock,_=await prepared();control=RobotControl(backend=a,latest=LatestVRFrame(),clock=clock,recorder=NoopRecorder())
+    try:
+        control.machine.mode=TeleopMode.ARMED;control._install_position_session()
+        row=message(spin=1.);row.update(generation=control.control_generation,vector=[0.,0.,0.])
+        assert control._position_status_message().spin_enabled is False
+        with pytest.raises(ValueError,match='spin_not_authorized'):
+            control.accept_position_input(_parse_message(row),clock.now_ns())
+        a.position_spin_enabled=True
+        control.accept_position_input(_parse_message(row),clock.now_ns())
+        assert control.finite_position_session.gate.latest.spin==1.
         assert not c.write_calls
     finally:await control.stop();await a.disconnect()
 

@@ -23,6 +23,21 @@ function rig(){
    right:{p,q:[0,0,0,1],grip,trigger}} as VRFrame);}
  return {xr,input,inputs,claws,cancelled,stops,frame,setNow:(t:number)=>{now=t;}};
 }
+
+it('Docker uses half-step deadbands and tool spin without chasing an overshot 8mm goal',()=>{
+ const r=rig();let s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{...state.finite_position!,policy:'finite_position_docker',pitch_enabled:true,spin_enabled:true}};
+ const apply=(t:number,grip:boolean,p:[number,number,number],q:[number,number,number,number]=[0,0,0,1])=>{
+  r.setNow(t);r.xr.update(s,t);r.xr.apply({v:1,type:'vr_frame',session_id:'test',seq:t,client_mono_ms:t,
+   tracking_valid:true,visibility:'visible',right:{p,q,grip,trigger:0}});
+ };
+ apply(0,false,[0,0,0]);apply(20,true,[0,0,0]);apply(40,true,[.005,0,0]);
+ expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[1,0,0]});
+ s={...s,actual_tcp:{...s.actual_tcp,p:[.308,0,.4]}};apply(60,true,[.005,0,0]);
+ expect(r.inputs.at(-1).kind).toBe('release');
+ apply(80,false,[0,0,0]);apply(100,true,[0,0,0]);
+ apply(120,true,[0,0,0],[0,0,Math.sin(.02),Math.cos(.02)]);
+ expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[0,0,0],spin:1});
+});
 it('follows relative hand pitch while keeping pure pitch translation zero and holds on release',()=>{
  const r=rig();const s={...state,finite_position:{...state.finite_position!,pitch_enabled:true}};
  function apply(t:number,grip:boolean,q:[number,number,number,number]){
@@ -75,7 +90,7 @@ it('uses the Docker display window only while live XR samples remain fresh',()=>
    tracking_valid:true,visibility:'visible',right:{p,q:[0,0,0,1],grip,trigger:0}});
  }
  r.xr.update(docker,0);apply(0,false,[0,0,0]);apply(20,true,[0,0,0]);
- for(let t=40;t<=520;t+=20){apply(t,true,[.0025,0,0]);if(t===200)expect(r.inputs.at(-1).kind).toBe('held');}
+ for(let t=40;t<=520;t+=20){apply(t,true,[.005,0,0]);if(t===200)expect(r.inputs.at(-1).kind).toBe('held');}
  expect(r.inputs.at(-1).kind).toBe('release');expect(r.stops).toEqual([]);
  const n=r.inputs.length;r.xr.update(docker,540);apply(540,true,[.01,0,0]);expect(r.inputs).toHaveLength(n);
 });

@@ -83,7 +83,7 @@ def test_explicit_simulation_speed_cap_does_not_change_default_planner():
     assert api().audit_position_path(s,goal,**{**args,'settings':restricted},joint_speed_cap=.3).joint_speed==.02
 
 
-@pytest.mark.parametrize('cap',[0,-1,True,float('nan'),float('inf'),.31])
+@pytest.mark.parametrize('cap',[0,-1,True,float('nan'),float('inf'),.61])
 def test_simulation_speed_cap_rejects_invalid_values(cap):
     with pytest.raises(ValueError,match='speed_cap'):
         api().audit_position_path(sample(),(),fk_samples=(),settings=None,model=None,joint_speed_cap=cap)

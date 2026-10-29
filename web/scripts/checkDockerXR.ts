@@ -1,12 +1,12 @@
 // Explicit Docker-only acceptance client. Close other control pages before running.
 import {FinitePositionInput} from '../src/ui/finitePositionInput';
-import {FiniteXRInput,finiteXRTransportFrame,relativeToolPitch} from '../src/xr/finiteInput';
+import {FiniteXRInput,finiteXRTransportFrame,relativeToolPitch,relativeToolSpin} from '../src/xr/finiteInput';
 
 const port=process.argv[2]??'8773';
 if(!/^\d{4,5}$/.test(port)||Number(port)<1024||Number(port)>65535)throw Error('invalid_local_port');
 const origin=`http://127.0.0.1:${port}`;
 const admitted=await(await fetch(origin+'/simulation/status')).json() as any;
-if(admitted.runtime!=='LEBAI_DOCKER'||admitted.sdk_target!=='127.0.0.1:3030'||admitted.joint_speed_cap_radps!==.3)throw Error('wrong_simulator');
+if(admitted.runtime!=='LEBAI_DOCKER'||admitted.sdk_target!=='127.0.0.1:3030'||admitted.joint_speed_cap_radps!==.6)throw Error('wrong_simulator');
 const ws=new WebSocket(`ws://127.0.0.1:${port}/ws/v1/teleop`);
 let state:any=null,generation=-1,seq=0,timer:any=null,closed=false;
 const replies=new Map<string,any>();
@@ -40,7 +40,7 @@ async function command(type:string,id:string){
  if(replies.get(id).type.endsWith('rejected'))throw Error(JSON.stringify(replies.get(id)));
 }
 async function prepare(id:string){
- await wait(()=>state?.mode==='READY','ready');
+ await wait(()=>state?.mode==='READY'&&state.ack_seq>0,'ready_with_released_frame');
  await command('arm_request','arm-'+id);await command('prepare_request','prepare-'+id);
  await wait(()=>state?.manual_input_ready===true,'prepared');
  await sleep(100); // Real released XR frames establish the new generation's release barrier.
@@ -58,25 +58,30 @@ try{
  },20);
  await prepare('initial');
  const preparedGeneration=generation;
- for(const sign of [1,-1]){
+ for(const axis of [0,1])for(const sign of [1,-1]){
   hand.p=[0,0,0];hand.q=[0,0,0,1];hand.grip=false;await sleep(100);
-  const x=state.actual_tcp.p[0];hand.grip=true;await sleep(80);hand.p[0]=sign*.0045;
-  await wait(()=>sign*(state.actual_tcp.p[0]-x)>.003,'XR_planar_continuation',12000);
+  const x=state.actual_tcp.p[axis];hand.grip=true;await sleep(80);hand.p[axis]=sign*.018;
+  await wait(()=>sign*(state.actual_tcp.p[axis]-x)>.012,'XR_planar_continuation',12000);
   hand.grip=false;
   await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_planar_release');
   if(generation!==preparedGeneration)throw Error('unexpected_reprepare');
-  console.log('PASS XR planar continuation/reversal',sign,state.actual_tcp.p[0]-x);
+  console.log('PASS XR planar continuation/reversal',axis,sign,state.actual_tcp.p[axis]-x);
  }
  hand.p=[0,0,0];await sleep(100);
- const z=state.actual_tcp.p[2];hand.grip=true;await sleep(80);hand.p[2]=.0025;
- await wait(()=>state.actual_tcp.p[2]>z+.001,'XR_translation');hand.grip=false;
+ const z=state.actual_tcp.p[2];hand.grip=true;await sleep(80);hand.p[2]=.01;
+ await wait(()=>state.actual_tcp.p[2]>z+.004,'XR_translation');hand.grip=false;
  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_translation_arrival');
  console.log('PASS XR translation/release',state.actual_tcp.p[2]-z);
  const q=[...state.actual_tcp.q];hand.p=[0,0,0];hand.q=[0,0,0,1];await sleep(80);
- hand.grip=true;await sleep(80);hand.q=[Math.sin(.012/2),0,0,Math.cos(.012/2)];
- await wait(()=>Math.abs(relativeToolPitch(q as any,state.actual_tcp.q))>.004,'XR_pitch');hand.grip=false;
+ hand.grip=true;await sleep(80);hand.q=[Math.sin(.032/2),0,0,Math.cos(.032/2)];
+ await wait(()=>Math.abs(relativeToolPitch(q as any,state.actual_tcp.q))>.013,'XR_pitch');hand.grip=false;
  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_pitch_arrival');
  console.log('PASS XR pitch/release',relativeToolPitch(q as any,state.actual_tcp.q));
+ const spinQ=[...state.actual_tcp.q];hand.p=[0,0,0];hand.q=[0,0,0,1];await sleep(100);
+ hand.grip=true;await sleep(80);hand.q=[0,0,Math.sin(.032/2),Math.cos(.032/2)];
+ await wait(()=>Math.abs(relativeToolSpin(spinQ as any,state.actual_tcp.q))>.013,'XR_spin');hand.grip=false;
+ await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_spin_arrival');
+ console.log('PASS XR spin/release',relativeToolSpin(spinQ as any,state.actual_tcp.q));
  // Reposition a released hand far away, then regrip without moving it.
  // Reacquisition must anchor to the current TCP, not replay the old hand target.
  hand.p=[.3,.2,.1];hand.q=[0,Math.sin(.2),0,Math.cos(.2)];await sleep(120);
@@ -89,7 +94,7 @@ try{
  hand.trigger=.35;await wait(()=>state.gripper<.5,'XR_claw_open');
  hand.trigger=.6;await wait(()=>state.gripper>.55,'XR_claw_close');
  console.log('PASS XR analogue claw',state.gripper);
- hand.p=[0,0,0];await sleep(80);hand.grip=true;await sleep(80);hand.p[2]=.0025;
+ hand.p=[0,0,0];await sleep(80);hand.grip=true;await sleep(80);hand.p[2]=.01;
  await wait(()=>state.finite_position.phase==='executing','XR_loss_entry');hand.tracked=false;
  await wait(()=>['DISARMED','READY'].includes(state.mode)&&state.robot_state==='IDLE','XR_tracking_stop',6000);
  hand.grip=false;hand.tracked=true;hand.p=[0,0,0];hand.q=[0,0,0,1];await sleep(100);
