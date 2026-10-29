@@ -82,3 +82,24 @@ it('keeps local stop dominant over an in-flight old ARMED state',()=>{
  p.requestDisarm();p.setMode('ARMED');expect(p.isArmed).toBe(false);
  expect(p.safetyState.phase).toBe('stopped');
 });
+
+it('labels acknowledged unlock and preparation consistently for assistive controls',()=>{
+ const {p,send}=rig();p.armButton.click();
+ p.handleArmFeedback({v:1,type:'arm_ack',request_id:send.mock.calls[0][0].request_id});
+ expect(p.armButton.getAttribute('aria-label')).toContain('已解锁');
+ expect(p.armButton.disabled).toBe(true);p.prepareButton.click();
+ expect(p.armButton.getAttribute('aria-label')).toContain('准备');
+ expect(p.armButton.getAttribute('aria-label')).not.toContain('等待后端确认解锁');
+ expect(p.prepareButton.disabled).toBe(true);
+});
+
+it('shows acknowledged unlock in the primary HUD while preserving fault precedence',()=>{
+ const hud=new Hud(document.querySelector('#panel')!);
+ const state={mode:'READY' as const,backendState:'IDLE' as const,sampleAgeMs:1,
+   fault:null,constraint:null,recoveryPhase:null,preparationRequired:true,preparationUnlocked:true};
+ hud.setRobotState(state);
+ expect(document.querySelector('[data-field="mode"]')?.textContent).toContain('已解锁，等待准备');
+ hud.setRobotState({...state,fault:'stop_unverified'});
+ expect(document.querySelector('[data-field="mode"]')?.textContent).toContain('FAULT');
+ expect(document.querySelector('[data-field="mode"]')?.textContent).not.toContain('等待准备');
+});

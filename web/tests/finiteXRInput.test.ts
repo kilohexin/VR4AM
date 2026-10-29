@@ -98,6 +98,24 @@ it('uses reported TCP to stop following a reached target instead of accumulating
   visibility:'visible',right:{p:[.002,0,0],q:[0,0,0,1],grip:true,trigger:0}});
  expect(r.inputs.at(-1).kind).toBe('release');
 });
+
+it('recaptures the latest TCP and orientation after moving the released hand without a jump',()=>{
+ const r=rig();r.frame(0);r.frame(20,true);r.frame(40,true,[.01,0,0]);r.frame(60,false,[.01,0,0]);
+ const current:RobotStateMessage={...state,actual_tcp:{p:[.308,.002,.4],q:[Math.sin(.02),0,0,Math.cos(.02)]},
+  finite_position:{...state.finite_position!,pitch_enabled:true}};
+ const handQ:[number,number,number,number]=[0,Math.sin(.4),0,Math.cos(.4)];
+ function apply(t:number,grip:boolean,p:[number,number,number]){
+  r.setNow(t);r.xr.update(current,t);r.xr.apply({v:1,type:'vr_frame',session_id:'quest',seq:t,client_mono_ms:t,
+   tracking_valid:true,visibility:'visible',right:{p,q:handQ,grip,trigger:0}});
+ }
+ apply(80,false,[.4,.2,.3]);const held=r.inputs.filter(m=>m.kind==='held').length;
+ apply(100,true,[.4,.2,.3]);apply(120,true,[.4,.2,.3]);
+ expect(r.inputs.filter(m=>m.kind==='held')).toHaveLength(held);
+ apply(140,true,[.4,.19,.3]);
+ expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[0,-1,0]});
+ expect(r.inputs.at(-1).pitch??0).toBe(0);
+ expect(r.stops).toEqual([]);
+});
 it('requires release after tracking loss and never resumes an old held gesture',()=>{
  const r=rig();r.frame(0);r.frame(20,true);r.frame(40,true,[.01,0,0]);r.frame(60,true,[.01,0,0],0,false);
  const count=r.inputs.length;r.frame(80,true,[.1,0,0]);expect(r.inputs).toHaveLength(count);

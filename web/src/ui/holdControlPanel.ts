@@ -224,11 +224,20 @@ export class HoldControlPanel {
     }
     const startupBlocked=this.state?.backend==='LEBAI'&&this.state.preflight_ready===false
       &&this.state.preflight_reason==='tcp_outside_startup_envelope';
-    this.status.textContent = !this.enabled ? startupBlocked
-      ?'当前 TCP 超出操作区，请先核对保存的准备位；不会自动回位':'先解锁，再点击进入准备姿态'
+    this.status.textContent = !this.state||this.state.mode==='DISCONNECTED'?'等待后端连接与实际反馈'
+      : this.state.fault?'控制故障，操纵已锁定；请查看故障详情'
+      : this.state.recovery_phase==='stopping'?'正在确认停止，暂不可操纵'
+      : this.state.recovery_phase==='homing'?'正在前往准备位，暂不可操纵'
+      : this.state.recovery_phase==='stabilizing'?'正在确认到位，完成后即可操纵'
+      : !this.enabled ? startupBlocked
+      ?'当前 TCP 超出操作区，请先核对保存的准备位；不会自动回位'
+      : this.state.preparation_required&&this.state.preparation_unlocked?'已解锁，请点击“进入准备姿态”'
+      :'先解锁，再点击进入准备姿态'
       : this.feedbackPaused?'反馈暂缓，已释放当前手势；更新后重新按住即可'
       : boundary?`${boundary} · 松开后重新按住，反向或更换方向调整`
       : this.positionCandidate&&this.state?.finite_position?.phase==='draining'?'松开后正在完成当前小步'
+      : this.positionCandidate&&this.state?.finite_position?.phase==='planning'?'正在规划下一小步；保持按住继续，松开取消未发送目标'
+      : this.positionCandidate&&this.state?.finite_position?.phase==='executing'?'正在执行当前小步；松开后完成本步'
       : this.motionHeld() ? (this.positionCandidate?'长按每步 2 mm；松开后完成当前小步':'摇杆松开回中停止；坐标固定于机械臂基座')
       : this.action === 'open' || this.action === 'close' ? `目标开口 ${((1 - this.clawTarget) * 100).toFixed(0)}% · 松开保持`
       : this.pending ? '等待上次夹爪请求收尾；不自动重发' : this.positionCandidate?

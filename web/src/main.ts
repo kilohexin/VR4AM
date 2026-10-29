@@ -264,6 +264,8 @@ function onRobotState(state: RobotStateMessage): void {
     constraint,
     recoveryPhase,
     targetControl: state.target_control ?? null,
+    preparationRequired: state.preparation_required ?? false,
+    preparationUnlocked: state.preparation_unlocked ?? false,
   });
   diagnosticsUpdates.onRobotState(state, recordAcknowledgement);
   refreshSettingsPanel();

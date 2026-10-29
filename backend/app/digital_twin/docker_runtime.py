@@ -61,7 +61,7 @@ async def ensure_docker_idle(client,*,check=lambda:None):
     check()
     state=await client.get_robot_state()
     check()
-    if state=='STOP':
+    if state in ('STOP','ROBOT_ON'):
         check()
         await client.start_sys()
         check()

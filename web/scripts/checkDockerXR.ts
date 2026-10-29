@@ -77,6 +77,15 @@ try{
  await wait(()=>Math.abs(relativeToolPitch(q as any,state.actual_tcp.q))>.004,'XR_pitch');hand.grip=false;
  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_pitch_arrival');
  console.log('PASS XR pitch/release',relativeToolPitch(q as any,state.actual_tcp.q));
+ // Reposition a released hand far away, then regrip without moving it.
+ // Reacquisition must anchor to the current TCP, not replay the old hand target.
+ hand.p=[.3,.2,.1];hand.q=[0,Math.sin(.2),0,Math.cos(.2)];await sleep(120);
+ const beforeRegrip=await status();const regripTcp=[...state.actual_tcp.p];
+ hand.grip=true;await sleep(350);hand.grip=false;
+ const afterRegrip=await status();
+ if(afterRegrip.moves!==beforeRegrip.moves||Math.hypot(...state.actual_tcp.p.map((v:number,i:number)=>v-regripTcp[i]))>.0001)
+  throw Error('stationary_regrip_moved');
+ console.log('PASS stationary regrip no jump');
  hand.trigger=.35;await wait(()=>state.gripper<.5,'XR_claw_open');
  hand.trigger=.6;await wait(()=>state.gripper>.55,'XR_claw_close');
  console.log('PASS XR analogue claw',state.gripper);

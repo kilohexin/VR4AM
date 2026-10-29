@@ -25,7 +25,7 @@ def main(argv=None):
     admission=runtime.verify_local_docker()
     print(json.dumps(dict(execute=args.run,runtime='LEBAI_DOCKER',sdk_target='127.0.0.1:3030',
         simulator=True,web_host=args.host,web_port=args.port,admission=admission,
-        startup='STOP -> start_sys -> IDLE; otherwise require IDLE',
+        startup='STOP/ROBOT_ON -> start_sys -> IDLE; otherwise require IDLE',
         controls='unlock,prepare,2mm translation,0.5deg pitch,progressive claw',
         gripper_provider='local_virtual',gripper_physics=False,hardware_verified=False)),flush=True)
     if not args.run:return 0

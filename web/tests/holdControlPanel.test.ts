@@ -26,6 +26,32 @@ function rig(candidate:boolean|'real'=false){const root=document.createElement('
  return {root,panel,send,release,cancel,position,find,step,clock:(t:number)=>{now=t;}};
 }
 
+it.each([
+ [{manual_input_ready:false,preparation_required:true,preparation_unlocked:true},'已解锁，请点击'],
+ [{manual_input_ready:false,recovery_phase:'homing'},'正在前往准备位'],
+ [{manual_input_ready:false,recovery_phase:'stabilizing'},'正在确认到位'],
+ [{fault:'stop_unverified'},'控制故障，操纵已锁定'],
+] as const)('distinguishes preparation and fault instead of asking to unlock again: %j',(patch,text)=>{
+ const r=rig(true);r.panel.update({...state,...patch},true,0);
+ expect(r.root.querySelector('[data-field="hold-status"]')!.textContent).toContain(text);
+ expect(r.find('[data-hold="z+"]').disabled).toBe(true);
+ expect(r.send).not.toHaveBeenCalled();
+});
+
+it.each([['planning','正在规划下一小步'],['executing','正在执行当前小步'],['draining','松开后正在完成当前小步']] as const)(
+ 'shows the authoritative finite %s phase without needing a held mouse gesture',(phase,text)=>{
+ const r=rig(true);r.panel.update({...state,finite_position:{policy:'finite_position_offline',phase,generation:1,
+  entered_steps:1,motion_id:1,reason:null,hardware_verified:false}},true,0);
+ expect(r.root.querySelector('[data-field="hold-status"]')!.textContent).toContain(text);
+ expect(r.send).not.toHaveBeenCalled();
+});
+
+it('shows missing feedback instead of an instruction to unlock',()=>{
+ const r=rig(true);r.panel.update(null,false);
+ expect(r.root.querySelector('[data-field="hold-status"]')!.textContent).toContain('等待后端连接');
+ expect(r.find('[data-hold="z+"]').disabled).toBe(true);
+});
+
 it('holds tool pitch through the finite intent and keeps the TCP translation zero',()=>{
  const r=rig(true),button=r.find('[data-hold="pitch+"]');expect(button).not.toBeNull();
  expect(button.disabled).toBe(false);button.dispatchEvent(pointer('pointerdown'));

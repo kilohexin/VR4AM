@@ -44,17 +44,17 @@ def test_admission_requires_the_inspected_daemon_and_port_to_be_local(monkeypatc
     with pytest.raises(ValueError,match='not_admitted'):d.verify_local_docker('local-sim')
 
 
-@pytest.mark.parametrize('initial',['STOP','IDLE','MOVING','PAUSED','ERROR'])
-async def test_virtual_start_only_occurs_from_stop_and_never_resumes_or_resets(initial):
+@pytest.mark.parametrize('initial',['STOP','ROBOT_ON','IDLE','MOVING','PAUSED','ERROR','BOOTING','STARTING'])
+async def test_virtual_start_only_occurs_from_unstarted_states_and_never_resumes_or_resets(initial):
     from app.digital_twin.docker_runtime import ensure_docker_idle
     states=iter([initial,'STARTING','IDLE']);writes=[]
     async def get_state():return next(states)
     async def start():writes.append('start_sys')
     client=SimpleNamespace(get_robot_state=get_state,start_sys=start)
-    if initial in ('STOP','IDLE'):await ensure_docker_idle(client)
+    if initial in ('STOP','ROBOT_ON','IDLE'):await ensure_docker_idle(client)
     else:
         with pytest.raises(ValueError,match='requires_idle'):await ensure_docker_idle(client)
-    assert writes==(['start_sys'] if initial=='STOP' else [])
+    assert writes==(['start_sys'] if initial in ('STOP','ROBOT_ON') else [])
 
 
 def test_launcher_preview_never_loads_or_connects_sdk(monkeypatch,capsys):

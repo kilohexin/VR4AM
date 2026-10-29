@@ -629,6 +629,10 @@ export class ArmPanel {
         ? '故障状态，无法解锁仿真'
         : this.armFeedback
           ? this.armFeedback
+          : this.preparationRequired && (this.pendingPreparation || this.awaitingArmedMode)
+            ? '已解锁，正在准备'
+          : this.preparationUnlocked
+            ? '已解锁'
           : this.isArmPending
             ? '正在等待后端确认解锁'
             : this.armed
