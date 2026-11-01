@@ -14,14 +14,19 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'backend'))
 
 
-async def probe(client,reverse=False,blend=False,bounded=False,geometric=False):
+async def probe(client,reverse=False,blend=False,bounded=False,geometric=False,rotation=None):
     from app.robots.lebai_motion_calls import OwnedMotionCalls
     owner=OwnedMotionCalls();stop_owner=OwnedMotionCalls()
+    if rotation not in (None,'pitch','spin'):raise ValueError('invalid_rotation_axis')
+    geometric=geometric or rotation is not None
     bounded=bounded or geometric
     blend=blend or bounded
     case=('geometric_blend_reverse' if reverse else 'geometric_blend') if geometric else (
         'bounded_blend' if bounded else 'blend' if blend else 'reverse' if reverse else 'steady')
     report=dict(case=case,commands=[],samples=[],unknown=[],stop_sent=False)
+    if rotation:
+        report.update(rotation_axis=rotation,angular_step_deg=.5,angular_lead_deg=1.,
+                      requested_movel_acceleration=.1,requested_movel_speed=.08)
     origin=time.perf_counter();entered=False
     async def sample():
         captured_ns=time.perf_counter_ns()
@@ -35,14 +40,29 @@ async def probe(client,reverse=False,blend=False,bounded=False,geometric=False):
         initial=await sample()
         if initial['state']!='IDLE' or max(map(abs,initial['qd']))>.002:raise ValueError('requires_idle')
         start=initial['pose'];frame=dict.fromkeys(('x','y','z','rx','ry','rz'),0.)
+        if rotation:
+            from scipy.spatial.transform import Rotation
+            from app.robots.lebai_codec import pose_from_lebai,pose_to_lebai
+            from app.schemas.messages import Pose
+            start_pose=pose_from_lebai(start);start_rotation=Rotation.from_quat(start_pose.q)
+            radians_per_m=math.radians(.5)/.004
+        def position(row):
+            if rotation:
+                current=pose_from_lebai(row['pose'])
+                if math.dist(current.p,start_pose.p)>.001:raise ValueError('rotation_tcp_drift')
+                relative=(start_rotation.inv()*Rotation.from_quat(current.q)).as_rotvec()
+                if math.hypot(*relative)>math.radians(4):raise ValueError('rotation_range')
+                return tuple(float(x/radians_per_m) for x in relative)
+            return tuple(row['pose'][k] for k in ('x','y','z'))
         gate=None;binding=object();seq=0
         if geometric:
             from app.control.blended_position_gate import BlendedPositionGate
-            p=tuple(start[k] for k in ('x','y','z'))
+            p=position(initial)
             gate=BlendedPositionGate(binding,tuple(x-.03 for x in p),tuple(x+.03 for x in p),clock=time.perf_counter_ns)
         pending=[]
         for i in range(6 if bounded else 4 if blend else 8):
-            direction=(0,0,-1 if reverse and i>=3 else 1)
+            sign=-1 if reverse and i>=3 else 1
+            direction=(sign,0,0) if rotation=='pitch' else (0,0,sign)
             if gate and reverse and i==3:
                 # Reversal never appends behind the previous direction. Retain
                 # ownership until every old ID and a continuous quiet span agree.
@@ -57,7 +77,7 @@ async def probe(client,reverse=False,blend=False,bounded=False,geometric=False):
                         elif state not in ('WAIT','RUNNING'):raise ValueError('reverse_task_unknown')
                     pending=[ident for ident in pending if ident not in finished]
                     row=await sample()
-                    gate.observe(binding,tuple(row['pose'][k] for k in ('x','y','z')),row['captured_ns'],
+                    gate.observe(binding,position(row),row['captured_ns'],
                         finished=finished,idle=row['state']=='IDLE',stationary=max(map(abs,row['qd']))<=.002)
                     if time.perf_counter()>deadline:raise ValueError('reverse_drain_timeout')
                     if gate.draining:await asyncio.sleep(.02)
@@ -70,7 +90,7 @@ async def probe(client,reverse=False,blend=False,bounded=False,geometric=False):
                         done=pending.pop(0)
                         if gate:
                             row=await sample()
-                            gate.observe(binding,tuple(row['pose'][k] for k in ('x','y','z')),row['captured_ns'],finished=(done,))
+                            gate.observe(binding,position(row),row['captured_ns'],finished=(done,))
                         break
                     if state not in ('WAIT','RUNNING') or time.perf_counter()>deadline:raise ValueError('queue_did_not_advance')
                     await sample();await asyncio.sleep(.02)
@@ -80,7 +100,7 @@ async def probe(client,reverse=False,blend=False,bounded=False,geometric=False):
                 deadline=time.perf_counter()+2.
                 while reserved is None:
                     seq+=1;gate.offer(binding,seq,time.perf_counter_ns(),direction)
-                    actual=tuple(row['pose'][k] for k in ('x','y','z'))
+                    actual=position(row)
                     reserved=gate.reserve(binding,actual,row['captured_ns'])
                     if reserved is not None:break
                     if time.perf_counter()>deadline:raise ValueError('geometry_did_not_advance')
@@ -94,14 +114,18 @@ async def probe(client,reverse=False,blend=False,bounded=False,geometric=False):
             if blend:
                 target={**start,'z':start['z']+.004*(i+1)}
                 if reserved:target={**start,**dict(zip(('x','y','z'),reserved.position))}
-                operation=lambda:client.movel(target,.1,.02,0.,.001 if bounded or i<3 else 0.)
+                if rotation:
+                    q=(start_rotation*Rotation.from_rotvec([x*radians_per_m for x in reserved.position])).as_quat()
+                    target=pose_to_lebai(Pose(p=start_pose.p,q=tuple(q)))
+                operation=lambda:client.movel(target,.1,.08 if rotation else .02,0.,.001 if bounded or i<3 else 0.)
             else:operation=lambda:client.speedl(.1,velocity,.2,frame)
             ident=await owner.call('movel' if blend else 'speedl',operation,.5,revoked=lambda:False)
             if type(ident) is not int or ident<=0:raise ValueError('invalid_motion_id')
             if gate:gate.acknowledge(binding,reserved,ident)
             pending.append(ident)
             report['commands'].append(dict(t=stamp-origin,reply_t=time.perf_counter()-origin,id=ident,
-                **(dict(target=target,r=.001 if bounded or i<3 else 0.,lead_m=lead) if blend else dict(z=velocity['z']))))
+                **(dict(target=target,r=.001 if bounded or i<3 else 0.,
+                    **({'lead_deg':math.degrees(lead*radians_per_m)} if rotation else {'lead_m':lead})) if blend else dict(z=velocity['z']))))
             await asyncio.sleep(max(0,.08-(time.perf_counter()-stamp)))
         report['release_t']=time.perf_counter()-origin
         if gate:gate.offer(binding,seq+1,time.perf_counter_ns(),(0,0,0))
@@ -119,7 +143,7 @@ async def probe(client,reverse=False,blend=False,bounded=False,geometric=False):
             row=await sample()
             quiet=row['state']=='IDLE' and max(map(abs,row['qd']))<=.002
             if gate:
-                gate.observe(binding,tuple(row['pose'][k] for k in ('x','y','z')),row['captured_ns'],
+                gate.observe(binding,position(row),row['captured_ns'],
                     finished=finished,idle=row['state']=='IDLE',stationary=max(map(abs,row['qd']))<=.002)
                 quiet=quiet and not pending and gate.tail is None
             stable=stable+1 if quiet else 0
@@ -150,20 +174,25 @@ def main():
     parser.add_argument('--blend',action='store_true')
     parser.add_argument('--bounded-blend',action='store_true')
     parser.add_argument('--geometric-blend',action='store_true')
+    parser.add_argument('--rotation',choices=('pitch','spin'),help='Docker-only 0.5-degree orientation experiment')
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
+    if args.rotation:args.geometric_blend=True
     if args.geometric_blend:args.bounded_blend=True
     from app.digital_twin.docker_runtime import verify_local_docker
     admission=verify_local_docker()
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admission,speedl_max=0 if args.blend or args.bounded_blend else 8,
-            movel_max=6 if args.bounded_blend else 4 if args.blend else 0,duration_s=.2,period_s=.08,speed_mps=.02 if args.blend or args.bounded_blend else .01)))
+            movel_max=6 if args.bounded_blend else 4 if args.blend else 0,rotation_axis=args.rotation,
+            angular_step_deg=.5 if args.rotation else None,angular_lead_deg=1. if args.rotation else None,
+            duration_s=.2,period_s=.08,speed_mps=None if args.rotation else .02 if args.blend or args.bounded_blend else .01,
+            rotation_speed_argument=.08 if args.rotation else None)))
         return 0
     from app.robots.lebai_sdk_bridge import connect_docker_simulator_client
     from app.commissioning.qpc_event_loop import new_qpc_loop
     async def run():
         client=await connect_docker_simulator_client()
-        result=await probe(client,args.reverse,args.blend,args.bounded_blend,args.geometric_blend);result['admission']=admission
+        result=await probe(client,args.reverse,args.blend,args.bounded_blend,args.geometric_blend,args.rotation);result['admission']=admission
         args.output.parent.mkdir(parents=True,exist_ok=True)
         args.output.write_text(json.dumps(result,indent=2),encoding='utf-8')
         print(json.dumps({k:v for k,v in result.items() if k not in ('samples','admission')}))
