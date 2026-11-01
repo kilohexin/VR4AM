@@ -11,20 +11,30 @@ const ws=new WebSocket(`ws://127.0.0.1:${port}/ws/v1/teleop`);
 let state:any=null,generation=-1,seq=0,timer:any=null,closed=false;
 let continuous=false;
 let directInput=false;
+const timing={maxFrameGapMs:0,maxStateGapMs:0,inputRejections:0};
+let lastFrameAt:number|null=null,lastStateAt:number|null=null;
 const replies=new Map<string,any>();
+const pendingClaws=new Set<string>();
 const hand={p:[0,0,0],q:[0,0,0,1],grip:false,trigger:0,tracked:true};
-const send=(m:any)=>{if(ws.readyState===1)ws.send(JSON.stringify(m));};
+const send=(m:any)=>{if(ws.readyState===1){
+ if(m.type==='gripper_request')pendingClaws.add(m.request_id);
+ ws.send(JSON.stringify(m));
+}};
 const input=new FinitePositionInput(send,reason=>send({v:1,type:'disarm',request_id:`xr-abort-${reason}-${Date.now()}`}));
 const xr=new FiniteXRInput(input,send,id=>send({v:1,type:'gripper_cancel',request_id:id}));
 ws.onmessage=e=>{
  const m=JSON.parse(String(e.data));
  if(m.type==='robot_state'){
+  const received=performance.now();
+  if(lastStateAt!==null)timing.maxStateGapMs=Math.max(timing.maxStateGapMs,received-lastStateAt);
+  lastStateAt=received;
   if(m.backend!=='LEBAI_DOCKER')throw Error('not_Docker');
   if(m.finite_position.generation!==generation){generation=m.finite_position.generation;input.reset('xr-finite-synthetic',generation);}
   state=m;input.observe(m.finite_position.phase);xr.update(m,performance.now());
  }else{
   if(m.request_id)replies.set(m.request_id,m);
-  if(m.type==='gripper_result')xr.onGripperResult(m);
+  if(m.type==='position_input_rejected')timing.inputRejections++;
+  if(m.type==='gripper_result'){pendingClaws.delete(m.request_id);xr.onGripperResult(m);}
   if(m.type==='connection_rejected')throw Error('connection_rejected:'+m.reason);
  }
 };
@@ -53,7 +63,10 @@ try{
  await new Promise<void>((resolve,reject)=>{ws.onopen=()=>resolve();ws.onerror=()=>reject(Error('socket_error'));});
  send({v:1,type:'hello',request_id:'hello'});
  timer=setInterval(()=>{
-  const now=performance.now();const frame:any={v:1,type:'vr_frame',session_id:'quest-synthetic',seq:++seq,
+  const now=performance.now();
+  if(lastFrameAt!==null)timing.maxFrameGapMs=Math.max(timing.maxFrameGapMs,now-lastFrameAt);
+  lastFrameAt=now;
+  const frame:any={v:1,type:'vr_frame',session_id:'quest-synthetic',seq:++seq,
    client_mono_ms:now,tracking_valid:hand.tracked,visibility:'visible',
    right:{p:[...hand.p],q:[...hand.q],grip:hand.grip,trigger:hand.trigger}};
   if(continuous)input.offer([0,0,0],0,Math.floor(state.finite_position.entered_steps/2)%2===0?1:-1);
@@ -110,6 +123,10 @@ try{
  for(let i=1;i<=30;i++){hand.trigger=.35+.3*i/30;await sleep(20);}
  await wait(()=>state.gripper>.55,'XR_claw_close');
  console.log('PASS XR analogue claw',state.gripper);
+ await wait(()=>pendingClaws.size===0&&state.robot_state==='IDLE','XR_claw_returned');
+ // A visible opening can precede the command reply. Keep sending released
+ // frames until the claw owns no request before starting a fresh Grip.
+ hand.grip=false;await sleep(120);
  hand.p=[0,0,0];await sleep(80);hand.grip=true;await sleep(80);hand.p[2]=.01;
  await wait(()=>state.finite_position.phase==='executing','XR_loss_entry');hand.tracked=false;
  await wait(()=>['DISARMED','READY'].includes(state.mode)&&state.robot_state==='IDLE','XR_tracking_stop',6000);
@@ -120,4 +137,7 @@ try{
  while(s.session_owned&&performance.now()<end){await sleep(50);s=await status();}
  if(s.session_owned||s.control_fault||s.unknown_reads.length||s.unknown_writes.length)throw Error('disconnect:'+JSON.stringify(s));
  console.log('PASS disconnect',JSON.stringify(s));
-}finally{if(timer)clearInterval(timer);if(!closed)ws.close();}
+}finally{
+ console.log('XR cadence',JSON.stringify(timing));
+ if(timer)clearInterval(timer);if(!closed)ws.close();
+}

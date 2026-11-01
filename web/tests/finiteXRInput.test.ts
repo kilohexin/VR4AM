@@ -183,6 +183,17 @@ it('waits for a selected claw result across feedback latency and blocks a compet
  expect(r.cancelled).toEqual([]);expect(r.inputs).toEqual([]);expect(r.claws).toHaveLength(1);
 });
 
+it('requires release and a fresh Grip after grasp was blocked by an in-flight claw',()=>{
+ const r=rig();r.frame(0);r.frame(20,false,[0,0,0],.7);
+ r.frame(40,true,[.01,0,0],.7);
+ r.xr.onGripperResult({v:1,type:'gripper_result',request_id:r.claws[0].request_id,accepted:true,message:'returned'});
+ r.frame(60,true,[.02,0,0],.7);expect(r.inputs).toEqual([]);
+ r.frame(80,false,[0,0,0],.7);r.frame(100,true,[0,0,0],.7);
+ r.frame(120,true,[.01,0,0],.7);
+ expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[1,0,0]});
+ expect(r.cancelled).toEqual([]);expect(r.stops).toEqual([]);
+});
+
 it('does not replay Trigger release after a pending claw crosses a display gap',()=>{
  const r=rig();r.frame(0);r.frame(20,false,[0,0,0],.7);
  r.setNow(130);r.xr.apply({v:1,type:'vr_frame',session_id:'quest-test',seq:130,client_mono_ms:100,
