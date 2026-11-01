@@ -108,3 +108,15 @@ def test_wrong_binding_and_session_deadline_rejected():
     with pytest.raises(ValueError):g.offer(m.PositionIntent('web',2,1,0,'held',(1.,0.,0.)))
     offer(m,g);now[0]=10_000_000_000
     with pytest.raises(ValueError):g.take_latest()
+
+def test_continuous_virtual_gesture_keeps_freshness_release_and_single_goal():
+    m,_,now=fixture();binding=m.PositionBinding(object(),1,'a'*64,'b'*64)
+    g=m.PositionGate(binding,clock=lambda:now[0],diagnostic_limits=False)
+    for seq in range(1,13):
+        now[0]=seq*1_000_000_000;offer(m,g,seq,stamp=now[0])
+        p=g.take_latest();assert p is not None
+        g.mark_entered(p);assert g.take_latest() is None;g.finish()
+    assert g.deadline_ns is None and not g.exhausted
+    now[0]+=100_000_000
+    with pytest.raises(ValueError,match='input_expired'):g.take_latest()
+    offer(m,g,13,'release',(0.,0.,0.),stamp=now[0]);assert g.take_latest() is None

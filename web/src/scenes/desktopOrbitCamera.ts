@@ -54,7 +54,7 @@ export class DesktopOrbitCamera {
   }
 
   private readonly onPointerDown = (event: PointerEvent): void => {
-    if (event.button !== 2 || this.activePointer !== null) return;
+    if (event.button !== 0 || this.activePointer !== null) return;
     event.preventDefault();
     this.activePointer = event.pointerId;
     try {

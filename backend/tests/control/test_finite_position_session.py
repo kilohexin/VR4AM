@@ -17,6 +17,39 @@ async def fixture():
     s=api().FinitePositionSession(a,a.position_binding,clock=clock.now_ns,recorder=Recorder(),authorize=lambda:None)
     return s,a,c,clock
 
+async def test_only_docker_continuous_capability_removes_diagnostic_gesture_caps():
+    s,a,c,clock=await fixture()
+    try:
+        a.position_continuous_gestures=True
+        assert s._new_gate().diagnostic_limits is True
+        a.position_policy='finite_position_docker'
+        s.gate=s._new_gate()
+        s.offer(PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.)))
+        await clock.sleep(11)
+        s.offer(PositionIntent('web',1,2,clock.now_ns(),'held',(1.,0.,0.)))
+        s._monitor();assert s.gate.deadline_ns is None
+        s.offer(PositionIntent('web',1,3,clock.now_ns(),'release',(0.,0.,0.)))
+        s.offer(PositionIntent('web',1,4,clock.now_ns(),'held',(1.,0.,0.)))
+        assert s.gate.diagnostic_limits is False  # Regrip retains Docker policy.
+        await clock.sleep(.1)
+        with pytest.raises(ValueError,match='input_expired'):s._monitor()
+        assert not c.write_calls
+    finally:await s.abort(StopReason.SHUTDOWN);await a.disconnect()
+
+async def test_late_step_result_does_not_overwrite_original_abort_cause():
+    from types import SimpleNamespace
+    s,a,c,clock=await fixture()
+    async def plan(*args,**kwargs):return object()
+    async def execute(*args,**kwargs):
+        s.closed=True;s.phase='fault';s.reason='position_input_expired'
+        return SimpleNamespace(complete=False,entered=True,remote_unknown=False,motion_id=1,reason='position_session_revoked')
+    a.plan_step=plan;a.execute_step=execute
+    try:
+        intent=PositionIntent('web',1,1,clock.now_ns(),'held',(1.,0.,0.))
+        s.offer(intent);s.gate.take_latest();await s._run_step(intent)
+        assert s.reason=='position_input_expired'
+    finally:await a.disconnect()
+
 
 async def test_unsent_workspace_boundary_holds_then_reverses_without_repreparation():
     from dataclasses import replace

@@ -19,8 +19,9 @@ describe('Chinese simulator HUD', () => {
     new Hud(document.querySelector('#app')!);
     const hint=document.querySelector('[data-field="input-help"]')!;
     expect(hint.textContent).toContain('鼠标左键');
-    expect(hint.textContent).toContain('夹爪开合');
-    expect(hint.textContent).toContain('自转');
+    expect(hint.textContent).toContain('旋转视角');
+    expect(hint.textContent).toContain('滚轮缩放');
+    expect(hint.textContent).not.toContain('拖动摇杆');
     expect(hint.textContent).not.toContain('左摇杆');
   });
 

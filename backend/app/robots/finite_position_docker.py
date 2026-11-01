@@ -16,6 +16,7 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
     position_angle_step_rad=math.radians(1.5)
     position_rotation_range_rad=math.radians(90.)
     position_spin_enabled=True
+    position_continuous_gestures=True
     _position_estimated_duration_s=4.8  # 5-s coarse arrival window less 200-ms margin
     gripper_provider='local_virtual'
     _stop_rpc_timeout_s=1.

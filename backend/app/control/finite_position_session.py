@@ -8,10 +8,15 @@ from app.robots.base import StopReason
 class FinitePositionSession:
     def __init__(self,adapter,binding,*,clock,recorder,authorize):
         self.adapter,self.binding,self.clock,self.recorder,self.authorize=adapter,binding,clock,recorder,authorize
-        self.gate=PositionGate(binding,clock=clock);self.worker=None
+        self.gate=self._new_gate();self.worker=None
         self.phase='ready';self.reason=None;self.motion_id=None;self.closed=False
         self._last_seq=-1;self._session=None;self._rearm=False
         self._blocked_seq=None
+
+    def _new_gate(self):
+        continuous=(getattr(self.adapter,'position_policy',None)=='finite_position_docker'
+            and getattr(self.adapter,'position_continuous_gestures',False) is True)
+        return PositionGate(self.binding,clock=self.clock,diagnostic_limits=not continuous)
 
     @property
     def busy(self):return self.worker is not None
@@ -26,7 +31,7 @@ class FinitePositionSession:
             # A fresh gesture after release AND known completion starts its
             # own fixed window. Never renew while planning/executing/draining.
             if intent.received_ns<self.gate._last_stamp:raise ValueError('position_input_rejected')
-            gate=PositionGate(self.binding,clock=self.clock)
+            gate=self._new_gate()
             gate.offer(intent)
             self.gate=gate;self._last_seq=intent.seq;self._session=intent.session_id
             return
@@ -35,10 +40,10 @@ class FinitePositionSession:
                 # Validate a fresh release and retire the held input that hit
                 # the boundary. Keeping it would later trip the input watchdog.
                 # The binding/model reference remains fixed at preparation.
-                gate=PositionGate(self.binding,clock=self.clock);gate.offer(intent)
+                gate=self._new_gate();gate.offer(intent)
                 self.gate=gate;self._rearm=True;self._last_seq=intent.seq;self._session=intent.session_id;return
             elif self._rearm and not self.busy:
-                self.gate=PositionGate(self.binding,clock=self.clock);self.phase='ready';self.reason=None;self._rearm=False
+                self.gate=self._new_gate();self.phase='ready';self.reason=None;self._rearm=False
         self.gate.offer(intent);self._last_seq=intent.seq;self._session=intent.session_id
         if intent.kind=='release' and self.adapter.position_busy:self.phase='draining'
 
@@ -68,6 +73,7 @@ class FinitePositionSession:
                 entry_authorize();self.gate.mark_entered(intent);self.phase='executing'
             result=await self.adapter.execute_step(plan,before_entry=entry_authorize,
                 monitor_authorize=self._monitor,on_entered=entered)
+            if self.closed:return  # Keep the original revocation cause during asynchronous cleanup.
             self.motion_id=result.motion_id
             if not result.complete:
                 if not result.entered and result.reason in ('position_entry_revoked','position_snapshot_expired'):
@@ -116,7 +122,7 @@ class FinitePositionSession:
             await self.abort(StopReason.STALE);return
         if self.worker is not None:return
         if self.phase=='hold':return
-        if self.gate.entered_steps>=10:self.phase='hold';return
+        if self.gate.exhausted:self.phase='hold';return
         intent=self.gate.take_latest()
         if intent is not None:
             self.phase='planning';self.reason=None;self._blocked_seq=None

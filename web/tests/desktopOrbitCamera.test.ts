@@ -15,7 +15,7 @@ describe('DesktopOrbitCamera', () => {
     canvas.dispatchEvent(new WheelEvent('wheel',{deltaY:-500}));
     expect(camera.position.toArray()).toEqual(initial.toArray());
   });
-  it('orbits only with the right pointer and resets to the exact default view', () => {
+  it('orbits only with the left pointer and resets to the exact default view', () => {
     const canvas = document.createElement('canvas');
     canvas.setPointerCapture = vi.fn();
     canvas.hasPointerCapture = vi.fn(() => false);
@@ -24,12 +24,12 @@ describe('DesktopOrbitCamera', () => {
     orbit.attach();
     const initial = camera.position.clone();
 
-    canvas.dispatchEvent(pointerEvent('pointerdown', 1, 0));
-    canvas.dispatchEvent(pointerEvent('pointermove', 1, 0, 40, 20));
+    canvas.dispatchEvent(pointerEvent('pointerdown', 1, 2));
+    canvas.dispatchEvent(pointerEvent('pointermove', 1, 2, 40, 20));
     expect(camera.position.toArray()).toEqual(initial.toArray());
 
-    canvas.dispatchEvent(pointerEvent('pointerdown', 2, 2));
-    canvas.dispatchEvent(pointerEvent('pointermove', 2, 2, 40, 20));
+    canvas.dispatchEvent(pointerEvent('pointerdown', 2, 0));
+    canvas.dispatchEvent(pointerEvent('pointermove', 2, 0, 40, 20));
     expect(camera.position.distanceTo(initial)).toBeGreaterThan(0.05);
 
     orbit.reset();

@@ -30,7 +30,7 @@ export function isFinitePositionStatus(value:unknown):value is FinitePositionSta
  if(!isRecord(value)||!hasExactKeys(value,['policy','phase','generation','entered_steps','motion_id','reason','hardware_verified'],['vr_enabled','pitch_enabled','spin_enabled','blocked_input_seq']))return false;
  return ['finite_position_offline','finite_position_web','finite_position_docker'].includes(String(value.policy))&&['inactive','ready','planning','executing','draining','hold','fault'].includes(String(value.phase))
   &&Number.isSafeInteger(value.generation)&&Number(value.generation)>=0&&Number.isSafeInteger(value.entered_steps)
-  &&Number(value.entered_steps)>=0&&Number(value.entered_steps)<=10&&value.hardware_verified===false
+  &&Number(value.entered_steps)>=0&&(value.policy==='finite_position_docker'||Number(value.entered_steps)<=10)&&value.hardware_verified===false
   &&(value.motion_id===null||(Number.isSafeInteger(value.motion_id)&&Number(value.motion_id)>0))
   &&(value.reason===null||typeof value.reason==='string')
   &&(!Object.hasOwn(value,'vr_enabled')||typeof value.vr_enabled==='boolean')

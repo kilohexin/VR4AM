@@ -9,6 +9,8 @@ const admitted=await(await fetch(origin+'/simulation/status')).json() as any;
 if(admitted.runtime!=='LEBAI_DOCKER'||admitted.sdk_target!=='127.0.0.1:3030'||admitted.joint_speed_cap_radps!==.6)throw Error('wrong_simulator');
 const ws=new WebSocket(`ws://127.0.0.1:${port}/ws/v1/teleop`);
 let state:any=null,generation=-1,seq=0,timer:any=null,closed=false;
+let continuous=false;
+let directInput=false;
 const replies=new Map<string,any>();
 const hand={p:[0,0,0],q:[0,0,0,1],grip:false,trigger:0,tracked:true};
 const send=(m:any)=>{if(ws.readyState===1)ws.send(JSON.stringify(m));};
@@ -54,10 +56,20 @@ try{
   const now=performance.now();const frame:any={v:1,type:'vr_frame',session_id:'quest-synthetic',seq:++seq,
    client_mono_ms:now,tracking_valid:hand.tracked,visibility:'visible',
    right:{p:[...hand.p],q:[...hand.q],grip:hand.grip,trigger:hand.trigger}};
-  xr.apply(frame);send(finiteXRTransportFrame(frame));
+  if(continuous)input.offer([0,0,0],0,Math.floor(state.finite_position.entered_steps/2)%2===0?1:-1);
+  else if(!directInput)xr.apply(frame);
+  send(finiteXRTransportFrame(frame));
  },20);
  await prepare('initial');
  const preparedGeneration=generation;
+ if(process.argv.includes('--continuous')){
+  const started=performance.now();directInput=true;continuous=true;
+  await wait(()=>state.finite_position.entered_steps>=12&&performance.now()-started>11000,'continuous_gesture',45000);
+  continuous=false;input.release();
+  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','continuous_release');
+  console.log('PASS continuous gesture beyond 10s/10 steps',state.finite_position.entered_steps,performance.now()-started);
+  xr.reset();directInput=false;await sleep(100);
+ }
  for(const axis of [0,1])for(const sign of [1,-1]){
   hand.p=[0,0,0];hand.q=[0,0,0,1];hand.grip=false;await sleep(100);
   const x=state.actual_tcp.p[axis];hand.grip=true;await sleep(80);hand.p[axis]=sign*.018;
