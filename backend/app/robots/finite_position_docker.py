@@ -9,6 +9,8 @@ from app.commissioning.finite_position_site import MdhPositionModel
 
 
 class DockerFinitePositionAdapter(RealFinitePositionAdapter):
+    _stop_blocking_motion_methods=RealFinitePositionAdapter._stop_blocking_motion_methods | {'movel'}
+    _immediate_stop_latch_methods=RealFinitePositionAdapter._immediate_stop_latch_methods | {'movel'}
     position_policy='finite_position_docker'
     _position_joint_speed_cap=.6
     _position_rate_epsilon=1e-9  # Simulator differentiation can return 0.2000000000035 for 0.2.
@@ -49,6 +51,8 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             position_model=MdhPositionModel.from_settings(settings),authorize=lambda:None,
             backend_label='LEBAI_DOCKER',**kwargs)
         self._position_sources.add(Path(__file__))
+        self._position_sources.update((Path(__file__).with_name('blended_position_docker.py'),
+            Path(__file__).with_name('blended_position_path.py')))
         self._position_sources.update((Path(__file__).parents[1]/'digital_twin/docker_kinematics.py',
             Path(__file__).parents[1]/'commissioning/native_jog_mdh.py',
             Path(__file__).parents[1]/'commissioning/finite_position_site.py'))

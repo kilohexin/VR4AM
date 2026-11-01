@@ -31,6 +31,9 @@ class BlendedPositionGate:
         if binding is not self.binding or self.revoked:raise ValueError('blend_revoked')
         return integer(self.clock())
 
+    @property
+    def released(self):return self.latest is None
+
     def offer(self,binding,seq,stamp,direction):
         now=self._live(binding);integer(seq);integer(stamp);d=vector(direction,3)
         if seq<=self.seq or stamp<self.stamp or not 0<=now-stamp<INPUT_NS:raise ValueError('blend_input_expired')

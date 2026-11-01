@@ -15,6 +15,7 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run',action='store_true',help='Start the virtual controller and web app')
     parser.add_argument('--port',type=int,default=8773)
+    parser.add_argument('--blended-translation',action='store_true',help='Opt-in experimental bounded Cartesian translation')
     parser.add_argument('--host',choices=('127.0.0.1','0.0.0.0'),default='127.0.0.1')
     parser.add_argument('--cert');parser.add_argument('--key')
     args=parser.parse_args(argv)
@@ -26,14 +27,15 @@ def main(argv=None):
     print(json.dumps(dict(execute=args.run,runtime='LEBAI_DOCKER',sdk_target='127.0.0.1:3030',
         simulator=True,web_host=args.host,web_port=args.port,admission=admission,
         startup='STOP/ROBOT_ON -> start_sys -> IDLE; otherwise require IDLE',
-        controls='unlock,prepare,8mm translation,1.5deg pitch/spin,progressive claw',startup_velocity_factor_percent=100,
+        controls='unlock,prepare,translation,1.5deg pitch/spin,progressive claw',startup_velocity_factor_percent=100,
+        blended_translation=args.blended_translation,translation_step_mm=4 if args.blended_translation else 8,
         gripper_provider='local_virtual',gripper_physics=False,hardware_verified=False)),flush=True)
     if not args.run:return 0
     import uvicorn
     from app.commissioning.qpc_event_loop import new_qpc_loop
     listener=socket.socket();listener.bind((args.host,args.port));listener.listen(128)
     async def serve():
-        app=runtime.create_docker_app(ROOT/'web/dist')
+        app=runtime.create_docker_app(ROOT/'web/dist',blended_translation=args.blended_translation)
         server=uvicorn.Server(uvicorn.Config(app,host=args.host,port=args.port,log_level='info',
             ssl_certfile=args.cert,ssl_keyfile=args.key))
         await server.serve(sockets=[listener])

@@ -87,7 +87,7 @@ async def ensure_docker_speed(client,*,check=lambda:None):
     return factor
 
 
-def create_docker_app(web_directory):
+def create_docker_app(web_directory,*,blended_translation=False):
     import os
     import uuid
     from pathlib import Path
@@ -96,6 +96,14 @@ def create_docker_app(web_directory):
     directory=Path(web_directory).resolve()
     if not (directory/'index.html').is_file():raise ValueError('docker_simulator_web_build_missing')
     app=create_app(settings=docker_settings(),backend_label='LEBAI_DOCKER',docker_simulation=True)
+    from contextlib import asynccontextmanager
+    original_lifespan=app.router.lifespan_context
+    @asynccontextmanager
+    async def lifespan(application):
+        async with original_lifespan(application) as state:
+            application.state.backend.position_blended_translation=blended_translation is True
+            yield state
+    app.router.lifespan_context=lifespan
     @app.middleware('http')
     async def same_origin_control(request,call_next):
         response=await call_next(request)
@@ -115,8 +123,9 @@ def create_docker_app(web_directory):
             gripper_provider='local_virtual',gripper_physics=False,
             kinematics_provider='controller_ik_verified_local_fk',native_fk_admission_queries=3,
             timing_profile='virtual_controller',stop_rpc_timeout_ms=1000,stop_verification_timeout_ms=2000,
-            motion_profile='docker_functional',startup_velocity_factor_percent=getattr(backend,'_docker_velocity_factor',None),
-            translation_step_mm=backend.position_step_m*1000,angle_step_deg=math.degrees(backend.position_angle_step_rad),
+            motion_profile='docker_blended_candidate' if backend.position_blended_translation else 'docker_functional',startup_velocity_factor_percent=getattr(backend,'_docker_velocity_factor',None),
+            translation_step_mm=4. if backend.position_blended_translation else backend.position_step_m*1000,angle_step_deg=math.degrees(backend.position_angle_step_rad),
+            blended_translation=backend.position_blended_translation,
             joint_speed_cap_radps=backend.settings.control.max_joint_speed_radps,
             tcp_speed_cap_mps=backend.settings.control.max_tcp_speed_mps,
             moves=getattr(client,'move_entries',0),claws=getattr(client,'claw_entries',0),

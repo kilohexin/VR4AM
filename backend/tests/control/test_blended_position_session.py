@@ -152,3 +152,16 @@ async def test_port_cannot_enter_twice():
     offer(s, p, 1);await tick(s, p)
     assert s.closed and s.reason == 'blend_duplicate_entry'
     assert s.entered_steps == 1 and p.stops == 1
+
+
+async def test_held_queue_wait_remains_executing_until_release():
+    s,p=rig()
+    async def moving(pending):
+        p.now+=1_000_000
+        return BlendFeedback((0.,0.,0.),p.now,(),False,False)
+    p.read=moving
+    for seq in range(1,4):
+        offer(s,p,seq);await tick(s,p)
+    assert len(p.writes)==2 and s.phase=='executing'
+    offer(s,p,4,(0.,0.,0.));await tick(s,p)
+    assert s.phase=='draining' and len(p.writes)==2

@@ -71,6 +71,10 @@ class BlendedPositionSession:
         self.gate.observe(self.binding, sample.position, sample.captured_ns,
                           finished=sample.finished, idle=sample.idle, stationary=sample.stationary)
         if self.gate.tail is None and not self.gate.pending:
+            if self._obligation:
+                settled = getattr(self.port, 'settled', None)
+                if settled is not None:
+                    settled()
             self._obligation = False
         return sample
 
@@ -81,7 +85,8 @@ class BlendedPositionSession:
             sample = await self._read()
             target = self.gate.reserve(self.binding, sample.position, sample.captured_ns)
             if target is None:
-                self.phase = 'draining' if self.gate.tail is not None else 'ready'
+                self.phase = ('ready' if self.gate.tail is None else
+                              'draining' if self.gate.draining or self.gate.released else 'executing')
                 return
             self.phase = 'planning'
             plan = await self.port.audit(target)
@@ -137,7 +142,7 @@ class BlendedPositionSession:
         except Exception as error:
             await self.abort(str(error))
             return
-        if self.worker is None and (self.intent is not None or self.gate.tail is not None):
+        if self.worker is None and ((self.intent is not None and self.intent.kind != 'release') or self.gate.tail is not None):
             self.worker = asyncio.create_task(self._tick(), name='docker-blended-tick')
 
     async def abort(self, reason):

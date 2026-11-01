@@ -4,6 +4,12 @@
 
 ## 11月1日：原厂续接语义专项实验
 
+新增Docker原厂执行端与网页/VR可选接线：`run_lmaster_docker.py --blended-translation`，默认关闭。平移使用固定朝向的5点Cartesian IK/FK及逆Jacobian/Jdot速率检查，再用新反馈检查路径偏离、输入/代次/连接和100ms期限；原厂movel回执纳入未知结果与停止义务。俯仰/自转继续原有限位置执行器，两种执行器之间必须自然收尾再切换。状态接口明确标记 `docker_blended_candidate` 与4mm步长。没有提高真机速度参数，也没有恒速或实体制动保证。
+
+`scripts/check_docker_blended.py` 默认只预览；本机原厂测试 `.tmp/blended-port/native-01.json` 完整通过：一次准备movej、6次movel、最终ready、未知读写/故障/关闭故障均为空。77项定向回归通过。启动接线曾在准备锁内提前检查操纵授权，已修复并增加回归。长按队列等待的阶段标记也已从draining修为executing；松手才进入draining。
+
+候选完整合成XR链还未通过。`20261101T145112Z-c71ee4a6` 扩展自转长按触发position_input_expired；后两轮普通XR链通过XY双向约12～16mm、升降约8mm、俯仰/自转约1.5°、重新握持不跳动和渐进虚拟夹爪，但跟踪丢失测试等待运动阶段超时。最新记录 `logs/commissioning/20261101T145450Z-bd64a03d/session.jsonl`，没有完成该用例的跟踪丢失/重新准备验收；退出后session_owned=false、fault为空、未知读写为空。阶段标记修复未消除此超时，不能视为根因已解决。停止测试后恢复8773默认有限位置模式，候选未默认开放。
+
 GitHub留档：用户明确授权后，将当前分支 `codex/offline-evidence-audit` 推送至 `1753b4ca4323aceaa9668f1d0324645f0aa6acd6`，远端引用已核对。
 
 随后新增未注册的 `BlendedPositionSession` 候选，直接接收现有网页和XR的 `PositionIntent`，绑定输入会话/准备代次；将读取、路径审计、实际发送、停止作为明确的注入接口。规划期间松手不写入，发送后松手仍接管回执并排空，反向等待原方向完成，输入过期/断连终止续发，停止未确认保留故障；原厂执行端必须在真实写入边界再次调用进入检查。20项定向测试通过，覆盖双方输入格式、12段续接、松手/反向、断连竞态、重复进入和未知发送不重试。这是可复用会话层，尚无生产原厂端口实现，也未替换网页/VR默认模式；旋转仍明确拒绝进入此平移候选，需要独立审计。未连接真机。

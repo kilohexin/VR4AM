@@ -1596,7 +1596,12 @@ class RobotControl:
             received=self.latest.snapshot()
             if received is not None and (not received.frame.tracking_valid or received.frame.visibility!='visible'):
                 raise ValueError('position_input_unavailable')
-        self.finite_position_session=FinitePositionSession(self.backend,binding,clock=self.clock.now_ns,
+        session_type=FinitePositionSession
+        if (getattr(self.backend,'position_policy',None)=='finite_position_docker'
+                and getattr(self.backend,'position_blended_translation',False) is True):
+            from app.control.docker_motion_session import DockerMotionSession
+            session_type=DockerMotionSession
+        self.finite_position_session=session_type(self.backend,binding,clock=self.clock.now_ns,
             recorder=self.recorder,authorize=authorized)
 
     def accept_position_input(self,message,received_ns):
