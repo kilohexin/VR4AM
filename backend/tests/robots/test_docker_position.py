@@ -228,3 +228,28 @@ async def test_page_poll_waits_for_planning_entry_window_without_reusing_feedbac
     finally:
         finish.set();worker.cancel();poll.cancel()
         await asyncio.gather(worker,poll,return_exceptions=True)
+
+@pytest.mark.parametrize('damage',[None,'expired','generation','connection','binding','aborted','fault','idle'])
+async def test_motion_display_reuses_only_fresh_owned_sample(monkeypatch,damage):
+    from types import SimpleNamespace
+    from app.robots.finite_position_docker import DockerFinitePositionAdapter
+    from app.robots.finite_position_web import RealFinitePositionAdapter
+    from app.digital_twin.docker_runtime import docker_settings
+    a=DockerFinitePositionAdapter(docker_settings().lebai,clock=lambda:200_000_000)
+    a._client=object();a.position_binding=object();a.position_busy=True
+    sample=SimpleNamespace(captured_ns=150_000_000)
+    a._docker_display_sample=(a._client,a.position_binding,a._pump.generation,sample)
+    reads=[]
+    async def read(self):reads.append(1);return 'fresh-read'
+    monkeypatch.setattr(RealFinitePositionAdapter,'get_state',read)
+    a._state_message_from_snapshot=lambda s:('display',s.captured_ns)
+    if damage=='expired':sample.captured_ns=100_000_000
+    if damage=='generation':a._docker_display_sample=(a._client,a.position_binding,-1,sample)
+    if damage=='connection':a._client=object()
+    if damage=='binding':a.position_binding=object()
+    if damage=='aborted':a.position_aborted=True
+    if damage=='fault':a._latched_fault='stop_unverified'
+    if damage=='idle':a.position_busy=False
+    result=await a.get_state()
+    assert result==('fresh-read' if damage else ('display',150_000_000))
+    assert reads==([1] if damage else [])

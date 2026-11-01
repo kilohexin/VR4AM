@@ -103,8 +103,12 @@ try{
  if(afterRegrip.moves!==beforeRegrip.moves||Math.hypot(...state.actual_tcp.p.map((v:number,i:number)=>v-regripTcp[i]))>.0001)
   throw Error('stationary_regrip_moved');
  console.log('PASS stationary regrip no jump');
- hand.trigger=.35;await wait(()=>state.gripper<.5,'XR_claw_open');
- hand.trigger=.6;await wait(()=>state.gripper>.55,'XR_claw_close');
+ // Model an operator squeezing over fresh frames. A single change during a
+ // display gap is intentionally discarded by the product's no-replay rule.
+ for(let i=1;i<=30;i++){hand.trigger=.35*i/30;await sleep(20);}
+ await wait(()=>state.gripper<.5,'XR_claw_open');
+ for(let i=1;i<=30;i++){hand.trigger=.35+.3*i/30;await sleep(20);}
+ await wait(()=>state.gripper>.55,'XR_claw_close');
  console.log('PASS XR analogue claw',state.gripper);
  hand.p=[0,0,0];await sleep(80);hand.grip=true;await sleep(80);hand.p[2]=.01;
  await wait(()=>state.finite_position.phase==='executing','XR_loss_entry');hand.tracked=false;

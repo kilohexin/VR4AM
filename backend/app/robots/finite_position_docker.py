@@ -38,6 +38,7 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
         self._docker_bootstrap_closed=False
         self._docker_connecting=False
         self._docker_finished_task=None
+        self._docker_display_sample=None
         self._docker_entry_owner=None
         self._docker_page_reads=asyncio.Event();self._docker_page_reads.set()
         async def factory(ip):
@@ -159,6 +160,8 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             if str(state).upper()=='FINISHED':self._docker_finished_task=key
         authorize();self._position_health(self.position_binding)
         sample=await self._read_snapshot(read_purpose='position_progress')
+        # Presentation may reuse this owned observation, never renew its timestamp.
+        self._docker_display_sample=(self._client,self.position_binding,self._pump.generation,sample)
         return sample,state
 
     async def _position_math(self,name,operation,authorize):
@@ -208,6 +211,14 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             raise
 
     async def get_state(self):
+        cached=self._docker_display_sample
+        if (cached is not None and self.position_busy and not self.position_aborted
+                and not self._disconnecting and not self._latched_fault and not self._pump.fault
+                and not self._snapshot_calls.unknown_methods and not self._motion_calls.unknown_methods
+                and cached[0] is self._client and cached[1] is self.position_binding
+                and cached[2]==self._pump.generation
+                and 0<=self._clock()-cached[3].captured_ns<100_000_000):
+            return self._state_message_from_snapshot(cached[3])
         # Only UI polling yields. Planning/revalidation/progress/stop reads keep
         # their own native ownership and deadlines. Do not substitute a cache.
         if self._docker_entry_owner is not None:
@@ -217,13 +228,14 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
 
     async def execute_step(self,*args,**kwargs):
         self._docker_finished_task=None
+        self._docker_display_sample=None
         owner=self._docker_entry_owner;entered=kwargs['on_entered']
         def native_entered():
             entered();self._release_page_reads(owner)
         kwargs['on_entered']=native_entered
         try:return await super().execute_step(*args,**kwargs)
         finally:
-            self._docker_finished_task=None;self._release_page_reads(owner)
+            self._docker_finished_task=None;self._docker_display_sample=None;self._release_page_reads(owner)
 
     async def _position_progress_pause(self,started_ns):
         # Reads already consume the sample period. Do not add 20 ms on top.
