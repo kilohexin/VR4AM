@@ -165,3 +165,17 @@ async def test_held_queue_wait_remains_executing_until_release():
     assert len(p.writes)==2 and s.phase=='executing'
     offer(s,p,4,(0.,0.,0.));await tick(s,p)
     assert s.phase=='draining' and len(p.writes)==2
+
+
+@pytest.mark.parametrize('fail',[False,True])
+async def test_page_read_pause_is_released_on_success_and_failure(fail):
+    s,p=rig();events=[]
+    p.begin_cycle=lambda:events.append('begin')
+    p.end_cycle=lambda:events.append('end')
+    async def audit():
+        assert events==['begin']
+        if fail:raise ValueError('path_invalid')
+    p.on_audit=audit
+    offer(s,p,1);await tick(s,p)
+    assert events==['begin','end']
+    assert len(p.writes)==(0 if fail else 1)

@@ -87,7 +87,8 @@ async def ensure_docker_speed(client,*,check=lambda:None):
     return factor
 
 
-def create_docker_app(web_directory,*,blended_translation=False):
+def create_docker_app(web_directory,*,blended_translation=False,blended_rotation=False):
+    if blended_rotation is True:blended_translation=True
     import os
     import uuid
     from pathlib import Path
@@ -102,6 +103,7 @@ def create_docker_app(web_directory,*,blended_translation=False):
     async def lifespan(application):
         async with original_lifespan(application) as state:
             application.state.backend.position_blended_translation=blended_translation is True
+            application.state.backend.position_blended_rotation=blended_rotation is True
             yield state
     app.router.lifespan_context=lifespan
     @app.middleware('http')
@@ -126,6 +128,9 @@ def create_docker_app(web_directory,*,blended_translation=False):
             motion_profile='docker_blended_candidate' if backend.position_blended_translation else 'docker_functional',startup_velocity_factor_percent=getattr(backend,'_docker_velocity_factor',None),
             translation_step_mm=4. if backend.position_blended_translation else backend.position_step_m*1000,angle_step_deg=math.degrees(backend.position_angle_step_rad),
             blended_translation=backend.position_blended_translation,
+            blended_rotation=backend.position_blended_rotation,
+            rotation_blend_step_deg=.5 if backend.position_blended_rotation else None,
+            rotation_blend_lead_deg=1. if backend.position_blended_rotation else None,
             joint_speed_cap_radps=backend.settings.control.max_joint_speed_radps,
             tcp_speed_cap_mps=backend.settings.control.max_tcp_speed_mps,
             moves=getattr(client,'move_entries',0),claws=getattr(client,'claw_entries',0),

@@ -82,6 +82,8 @@ class BlendedPositionSession:
         target = None
         native_entered = False
         try:
+            begin=getattr(self.port,'begin_cycle',None)
+            if begin is not None:begin()
             sample = await self._read()
             target = self.gate.reserve(self.binding, sample.position, sample.captured_ns)
             if target is None:
@@ -127,6 +129,8 @@ class BlendedPositionSession:
         finally:
             if target is not None:
                 self.gate.cancel_unsent(target)
+            end=getattr(self.port,'end_cycle',None)
+            if end is not None:end()
 
     async def advance(self):
         if self.closed:

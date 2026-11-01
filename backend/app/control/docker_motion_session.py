@@ -3,6 +3,7 @@ from dataclasses import replace
 from app.control.blended_position_session import BlendedPositionSession
 from app.control.finite_position_session import FinitePositionSession
 from app.robots.blended_position_docker import DockerBlendPort
+from app.robots.blended_rotation_docker import DockerRotationPort
 
 
 class DockerMotionSession:
@@ -28,14 +29,19 @@ class DockerMotionSession:
             if self.active.busy or self.active.phase != 'ready' or self.active.closed:
                 raise ValueError('position_busy')
             self.completed_steps += self.active.view().entered_steps
-            if self.kind == 'translation':
+            if self.kind in ('translation','pitch','spin'):
                 self.active.port.check()
                 self.active.port.closed = True
         self.kind = kind
-        if kind == 'translation':
-            port = DockerBlendPort(self.adapter, self.binding, authorize=self.authorize)
+        if kind in ('translation','pitch','spin'):
+            if kind=='translation':
+                port = DockerBlendPort(self.adapter, self.binding, authorize=self.authorize)
+                lower,upper=self.adapter.settings.startup_tcp_min_m,self.adapter.settings.startup_tcp_max_m
+            else:
+                port=DockerRotationPort(self.adapter,self.binding,authorize=self.authorize,axis=kind)
+                lower,upper=(-port.coordinate_limit,)*3,(port.coordinate_limit,)*3
             self.active = BlendedPositionSession(port, self.binding,
-                lower=self.adapter.settings.startup_tcp_min_m, upper=self.adapter.settings.startup_tcp_max_m,
+                lower=lower, upper=upper,
                 clock=self.clock, authorize=self.authorize)
         else:
             self.active = FinitePositionSession(self.adapter, self.binding, clock=self.clock,
@@ -55,6 +61,9 @@ class DockerMotionSession:
         if intent.seq <= self.seq or self.source not in (None, intent.session_id):
             raise ValueError('position_input_rejected')
         desired = 'rotation' if intent.pitch or intent.spin else 'translation'
+        if getattr(self.adapter,'position_blended_rotation',False) is True and not any(intent.vector):
+            if intent.pitch and not intent.spin:desired='pitch'
+            elif intent.spin and not intent.pitch:desired='spin'
         if intent.kind != 'release' and desired != self.kind:
             if not self.active.busy and self.active.phase == 'ready' and not self.active.closed:
                 self._select(desired)
@@ -62,6 +71,9 @@ class DockerMotionSession:
                 # Finish the existing mode, never run two executors together.
                 # A later fresh held frame must request the new mode again.
                 intent = replace(intent, kind='release', vector=(0.,0.,0.), pitch=0., spin=0.)
+        if self.kind in ('pitch','spin') and intent.kind!='release':
+            value=intent.pitch if self.kind=='pitch' else intent.spin
+            intent=replace(intent,vector=(value,0.,0.) if self.kind=='pitch' else (0.,0.,value),pitch=0.,spin=0.)
         self.active.offer(intent)
         self.seq, self.source = intent.seq, intent.session_id
 

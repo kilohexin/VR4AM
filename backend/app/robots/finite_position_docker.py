@@ -52,7 +52,8 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             backend_label='LEBAI_DOCKER',**kwargs)
         self._position_sources.add(Path(__file__))
         self._position_sources.update((Path(__file__).with_name('blended_position_docker.py'),
-            Path(__file__).with_name('blended_position_path.py')))
+            Path(__file__).with_name('blended_position_path.py'),
+            Path(__file__).with_name('blended_rotation_docker.py'),Path(__file__).with_name('blended_rotation_path.py')))
         self._position_sources.update((Path(__file__).parents[1]/'digital_twin/docker_kinematics.py',
             Path(__file__).parents[1]/'commissioning/native_jog_mdh.py',
             Path(__file__).parents[1]/'commissioning/finite_position_site.py'))

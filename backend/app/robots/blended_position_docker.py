@@ -37,6 +37,20 @@ class DockerBlendPort:
         self.plan = None
         self.model_sha = adapter.position_model.model_sha256
         self.closed = False
+        self._page_owner=None
+
+    def begin_cycle(self):
+        self.check()
+        a=self.adapter
+        if a._docker_entry_owner is not None:raise ValueError('position_busy')
+        self._page_owner=object()
+        a._docker_entry_owner=self._page_owner
+        a._docker_page_reads.clear()
+
+    def end_cycle(self):
+        if self._page_owner is not None:
+            self.adapter._release_page_reads(self._page_owner)
+            self._page_owner=None
 
     def check(self):
         a = self.adapter
@@ -74,14 +88,22 @@ class DockerBlendPort:
                     or any(abs(v)>1e-8 for rates in (s.actual_qd,s.target_qd,s.actual_qdd,s.target_qdd) for v in rates)):
                 raise ValueError('blend_preflight')
             self.orientation = tuple(s.actual_tcp.q)
-        from app.robots.finite_position_plan import angle
-        if angle(s.actual_tcp.q, self.orientation) > math.radians(.2):
-            raise ValueError('blend_orientation_changed')
+            self._initialize_reference(s)
+        self._validate_pose(s)
         self.sample = s
         a._docker_display_sample = (self.client, self.binding, self.generation, s)
         stationary = all(abs(v) <= .002 for rates in (s.actual_qd, s.target_qd) for v in rates)
-        return BlendFeedback(tuple(s.actual_tcp.p), s.captured_ns, tuple(finished),
+        return BlendFeedback(self._coordinates(s), s.captured_ns, tuple(finished),
                              str(s.robot_state) == 'IDLE', stationary)
+
+    def _initialize_reference(self,s):pass
+
+    def _coordinates(self,s):return tuple(s.actual_tcp.p)
+
+    def _validate_pose(self,s):
+        from app.robots.finite_position_plan import angle
+        if angle(s.actual_tcp.q, self.orientation) > math.radians(.2):
+            raise ValueError('blend_orientation_changed')
 
     async def audit(self, target):
         self.check()
@@ -121,9 +143,10 @@ class DockerBlendPort:
             a._position_feedback_limits(s)
             delta = tuple(y-x for x,y in zip(plan.start,plan.target.position))
             length2 = sum(x*x for x in delta)
-            projection = sum((x-y)*d for x,y,d in zip(s.actual_tcp.p,plan.start,delta))/length2
+            actual = self._coordinates(s)
+            projection = sum((x-y)*d for x,y,d in zip(actual,plan.start,delta))/length2
             nearest = tuple(x+min(1.,max(0.,projection))*d for x,d in zip(plan.start,delta))
-            if math.dist(s.actual_tcp.p,nearest) > .0001:
+            if math.dist(actual,nearest) > .0001:
                 raise ValueError('blend_path_changed')
             entering()
             if not a.position_busy:
