@@ -225,7 +225,8 @@ class _FinitePositionCore(RealLebaiAdapter):
                     settings=self.settings,model=self.position_model,target_q=q,
                     pitch_reference=self._position_pitch_reference if self.position_pitch_enabled else None,
                     duration_limit_s=getattr(self,'_position_estimated_duration_s',1.8),
-                    joint_speed_cap=getattr(self,'_position_joint_speed_cap',.05),rotation_range_rad=self.position_rotation_range_rad)
+                    joint_speed_cap=getattr(self,'_position_joint_speed_cap',.05),rotation_range_rad=self.position_rotation_range_rad,
+                    optimize_short_steps=getattr(self,'position_policy',None)=='finite_position_docker')
                 live()
                 await self._emit_event(dict(kind='finite_position_plan',input_seq=intent.seq,
                     start_tcp=list(start.tcp_p),target_tcp=list(p),target_orientation=list(q),

@@ -87,3 +87,15 @@ def test_explicit_simulation_speed_cap_does_not_change_default_planner():
 def test_simulation_speed_cap_rejects_invalid_values(cap):
     with pytest.raises(ValueError,match='speed_cap'):
         api().audit_position_path(sample(),(),fk_samples=(),settings=None,model=None,joint_speed_cap=cap)
+
+def test_short_step_peak_preserves_acceleration_without_raising_rate_limits():
+    s=sample();settings,_,_=fixture();model=LinearModel()
+    settings=replace(settings,control=replace(settings.control,max_joint_speed_radps=.6,
+        max_tcp_speed_mps=.06,max_tcp_acceleration_mps2=.3))
+    goal=tuple(x+(.002 if i==0 else 0) for i,x in enumerate(s.actual_q))
+    fk=tuple(model.forward(tuple(a+(b-a)*f for a,b in zip(s.actual_q,goal))) for f in api().FRACTIONS)
+    args=dict(fk_samples=fk,settings=settings,model=model,joint_speed_cap=.6,duration_limit_s=4.8)
+    old=api().audit_position_path(s,goal,**args)
+    new=api().audit_position_path(s,goal,**args,optimize_short_steps=True)
+    assert new.joint_acceleration>old.joint_acceleration
+    assert new.joint_acceleration<=.2 and new.joint_speed<=.03

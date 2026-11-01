@@ -52,8 +52,8 @@ export class HoldControlPanel {
           <button type="button" data-hold="z+" disabled>上升 +Z</button>
           <button type="button" data-hold="z-" disabled>下降 −Z</button>
           <span>工具俯仰</span>
-          <button type="button" data-hold="pitch+" disabled>抬头 ＋</button>
-          <button type="button" data-hold="pitch-" disabled>低头 −</button>
+          <button type="button" data-hold="pitch+" disabled>抬头</button>
+          <button type="button" data-hold="pitch-" disabled>低头</button>
           <span>工具自转</span><div class="spin-buttons">
             <button type="button" data-hold="spin-" disabled aria-label="逆向自转">↶</button>
             <button type="button" data-hold="spin+" disabled aria-label="顺向自转">↷</button>
@@ -131,7 +131,7 @@ export class HoldControlPanel {
       else this.cancel(!fresh?'feedback_or_tracking':'frame_gap');
     }
     if(this.positionCandidate&&this.motionHeld()&&fresh){
-      if(this.action?.startsWith('pitch'))this.positionIntent([0,0,0],'held',undefined,this.action==='pitch+'?1:-1);
+      if(this.action?.startsWith('pitch'))this.positionIntent([0,0,0],'held',undefined,this.action==='pitch+'?-1:1);
       else if(this.action?.startsWith('spin'))this.positionIntent([0,0,0],'held',undefined,0,this.action==='spin+'?1:-1);
       else {
         const v:Vec3=this.action==='joystick'?[this.xy.x,this.xy.y,0]:[0,0,this.action==='z+'?1:-1];

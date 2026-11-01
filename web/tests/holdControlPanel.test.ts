@@ -77,7 +77,7 @@ it('holds tool pitch through the finite intent and keeps the TCP translation zer
  const r=rig(true),button=r.find('[data-hold="pitch+"]');expect(button).not.toBeNull();
  expect(button.disabled).toBe(false);button.dispatchEvent(pointer('pointerdown'));
  const f=r.panel.applyFrame(frame(0));expect(f.right.grip).toBe(false);
- expect(r.position.mock.calls.at(-1)).toEqual([[0,0,0],'held',undefined,1]);
+ expect(r.position.mock.calls.at(-1)).toEqual([[0,0,0],'held',undefined,-1]);
  button.dispatchEvent(pointer('pointerup'));expect(r.position.mock.calls.at(-1)?.[1]).toBe('release');
  expect(r.release).not.toHaveBeenCalled();
 });

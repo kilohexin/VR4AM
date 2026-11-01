@@ -29,7 +29,7 @@ def angle(a,b):
     return (Rotation.from_quat(a)*Rotation.from_quat(b).inv()).magnitude()
 
 
-def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=None,pitch_reference=None,duration_limit_s=1.8,joint_speed_cap=.05,rotation_range_rad=MAX_PITCH_RANGE_RAD):
+def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=None,pitch_reference=None,duration_limit_s=1.8,joint_speed_cap=.05,rotation_range_rad=MAX_PITCH_RANGE_RAD,optimize_short_steps=False):
     if (type(joint_speed_cap) not in (int,float) or not math.isfinite(joint_speed_cap)
             or not 0<joint_speed_cap<=.6):raise ValueError('position_invalid_speed_cap')
     if (type(duration_limit_s) not in (int,float) or not math.isfinite(duration_limit_s)
@@ -61,6 +61,9 @@ def audit_position_path(start,goal_joints,*,fk_samples,settings,model,target_q=N
     v=min(joint_speed_cap,settings.control.max_joint_speed_radps)
     a=min(.2,settings.control.max_joint_acceleration_radps2)
     for _ in range(11):
+        # Request the attainable rest-to-rest triangular peak for a short move.
+        # Audits still use the full requested peak, including Jdot acceleration.
+        if optimize_short_steps:v=min(v,math.sqrt(a*distance))
         speeds=[];accels=[];angular=[];angular_acc=[]
         for f in FRACTIONS:
             q=tuple(q0+f*dq);qd=direction*v
