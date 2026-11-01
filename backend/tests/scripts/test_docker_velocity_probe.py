@@ -16,10 +16,12 @@ class Client:
         return 'FINISHED'
     async def stop_move(self):self.stops+=1
 
-async def test_bounded_blend_never_submits_more_than_two_unfinished_targets():
-    c=Client();r=await probe(c,bounded=True)
+@pytest.mark.parametrize('geometric',[False,True])
+async def test_bounded_blend_never_submits_more_than_two_unfinished_targets(geometric):
+    c=Client();r=await probe(c,bounded=True,geometric=geometric)
     assert r['passed'] and len(r['commands'])==6 and c.stops==0
     assert c.pose['z']==pytest.approx(.324)
+    if geometric:assert max(x['lead_m'] for x in r['commands'])<=.008
 
 async def test_failed_motion_is_not_retried_and_stops_once():
     c=Client()
@@ -28,3 +30,19 @@ async def test_failed_motion_is_not_retried_and_stops_once():
     r=await probe(c,bounded=True)
     assert not r['passed'] and c.calls==1 and c.stops==1
     assert r['unknown']==['movel']
+
+
+async def test_geometric_reverse_drains_before_opposite_target():
+    c=Client();seen=set();original=c.get_motion_state
+    async def wait_then_finish(ident):
+        if ident not in seen:seen.add(ident);return 'WAIT'
+        return await original(ident)
+    c.get_motion_state=wait_then_finish
+    r=await probe(c,geometric=True,reverse=True)
+    assert r['passed'] and c.stops==0 and not r['unknown']
+    assert c.pose['z']==pytest.approx(.3)
+    assert len(r['commands'])==6
+    assert r['reverse_drained_t']-r['reverse_requested_t']>=.2
+    assert r['commands'][2]['t']<r['reverse_requested_t']<r['reverse_drained_t']<r['commands'][3]['t']
+    assert all(x['t']<r['release_t'] for x in r['commands'])
+    assert max(x['lead_m'] for x in r['commands'])<=.008

@@ -4,6 +4,12 @@
 
 ## 11月1日：原厂续接语义专项实验
 
+后续新增可复用的 `BlendedPositionGate`：固定工作区、4mm目标、最多2个未完成ID，并且每次发送前以新鲜实际位置计算路径余量，前方目标距离不超过8mm；完成ID不会清除几何积压。松手撤销未发送目标，迟到回执仍归原会话收尾；反向先排空旧ID并连续观察200ms稳定，重复/过期间隔/漂移反馈不算稳定。此门目前只接入专项实验，未接入网页或VR生产会话。
+
+官方Docker报告 `.tmp/velocity-probe/geometric-blend.json` 同向6段通过，发送时最大计算余量约7.959mm；`.tmp/velocity-probe/geometric-reverse-fixed.json` 正向3段、反向3段通过，反向等待约1.107秒，释放后约0.933秒读到自然结束，释放样本至终点约7.19mm，两轮均零stop_move、未知为空。它们证明有限路径实验可运行，不证明恒定速度、真实残余上界或硬件制动。首轮反向误拒绝排队中的WAIT，保留失败报告 `geometric-reverse.json`，后续按[原厂状态定义](https://help.lebai.ltd/sdk/motion.html)修复。
+
+最终尾段再增加全部己方ID已完成和连续稳定观察检查，11项定向回归通过；此最后加强版的两次Docker复测都在ROBOT_ON起始状态零写入拒绝，报告 `geometric-final.json` / `geometric-reverse-final.json`，不能沿用前一版本成功替代该版本验收。网页8773已恢复原有限位置模式。下一步仍是最终尾段仿真核对、接入网页/VR会话和补齐Cartesian路径/速率校验；不开放真实控制。
+
 新增默认只预览的 scripts/docker_velocity_probe.py，只能核验本机官方Docker后连接127.0.0.1模拟端口；无真机地址参数。固定最多8次speedl，或4次movel圆滑目标，或最多2个未确认完成ID的6段movel实验。错误不重发，最多一次stop_move，未知结果保留；该实验不是生产停止验证。
 
 实测speedl 0.2秒/10mm/s、约80ms续发不能当作即时速度覆盖：同向中间仍出现IDLE，反向延迟；停止追加后约0.62～0.66秒才读到三组稳定IDLE。不能据此接入连续速度操纵。
