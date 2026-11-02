@@ -205,12 +205,12 @@ class RealFinitePositionAdapter(_FinitePositionCore):
             return await super()._read_snapshot_fields(client,latencies,deadline_ns,**kwargs)
         return await self._web_parallel_snapshot_fields(client,latencies,deadline_ns,**kwargs)
 
-    async def _web_parallel_snapshot_fields(self,client,latencies,deadline_ns,**kwargs):
+    async def _web_parallel_snapshot_fields(self,client,latencies,deadline_ns,*,check_motion_generation=True,**kwargs):
         owner=self._snapshot_calls;generation=self._pump.generation
         def check():
             if (client is not self._client or owner is not self._snapshot_calls or owner.closed
                     or owner.unknown_methods
-                    or (kwargs['read_purpose']!='state' and generation!=self._pump.generation)):
+                    or (check_motion_generation and kwargs['read_purpose']!='state' and generation!=self._pump.generation)):
                 raise BackendCommandError('position_snapshot_binding_changed')
         from app.commissioning.finite_diagnostic import FiniteWindowDiagnosticAdapter
         return await FiniteWindowDiagnosticAdapter._parallel_snapshot_fields(self,client,latencies,

@@ -151,7 +151,12 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
         # Connection overlaps normal reads; stop verification still checks it first.
         # Retained task state remains after this group.
         # Keep all fields and original stop predicates; only scheduling differs.
-        return await self._web_parallel_snapshot_fields(client,latencies,deadline_ns,**kwargs)
+        # Stop observations remain owned by the connection/read owner, even if
+        # a concurrent preparation failure revokes motion permission again.
+        # They confer no permission to send motion. All fields/deadlines and
+        # unknown-result checks remain mandatory, as in the serial stop reader.
+        return await self._web_parallel_snapshot_fields(client,latencies,deadline_ns,
+            check_motion_generation=kwargs['read_purpose']!='stop_verification',**kwargs)
 
     async def _position_progress(self,motion_id,authorize):
         # Task IDs refer to one immutable owned target. Read its state first,

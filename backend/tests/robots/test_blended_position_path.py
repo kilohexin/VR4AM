@@ -26,7 +26,7 @@ def test_cartesian_path_uses_inverse_jacobian_rate_limits():
     p,q,s,m=fixture();m.gain=.1
     q=[tuple(x/.1 for x in row) for row in q]
     result=audit_blended_path(p,q,(0,0,0,1),model=m,settings=s)
-    assert result.speed==.02 and result.acceleration/.1<=s.control.max_joint_acceleration_radps2
+    assert result.speed==.02 and result.acceleration/.1<=.8*s.control.max_joint_acceleration_radps2
     assert result.samples==5
 
 

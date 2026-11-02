@@ -24,7 +24,9 @@ def audited_rates(q, matrices, direction, *, model, limits, speed, acceleration)
             jd=np.asarray(model.jdot(tuple(configuration),tuple(qd)))
             if jd.shape!=(6,6) or not np.isfinite(jd).all():raise ValueError('blend_invalid_model')
             curvature=np.abs(np.linalg.solve(j,jd@qd))
-            room=limits.max_joint_acceleration_radps2-curvature
+            # Leave model/sampling headroom for controller blending. This
+            # changes planned acceleration, never the feedback rejection limit.
+            room=.8*limits.max_joint_acceleration_radps2-curvature
             if np.max(np.abs(qd))>limits.max_joint_speed_radps or np.any(room<=0):
                 valid=False;break
             nonzero=np.abs(gain)>1e-12

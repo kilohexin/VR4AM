@@ -121,3 +121,25 @@ async def test_ready_display_evidence_cannot_arm_a_revoked_preflight():
         assert a._preflight_ready is False
         assert not c.write_calls
     finally:await a.disconnect()
+
+
+@pytest.mark.parametrize('purpose',['stop_verification','prepare'])
+async def test_docker_stop_observation_survives_motion_revocation_only(purpose):
+    from app.robots.finite_position_docker import DockerFinitePositionAdapter
+    from types import MethodType
+    a,c=await rig();tcp=c.get_tcp
+    a._read_snapshot_fields=MethodType(DockerFinitePositionAdapter._read_snapshot_fields,a)
+    async def revoked():
+        a._pump.invalidate()
+        return await tcp()
+    c.get_tcp=revoked
+    try:
+        if purpose=='prepare':
+            with pytest.raises(BackendCommandError,match='binding_changed'):
+                await a._read_snapshot(read_purpose=purpose)
+        else:
+            sample=await a._read_snapshot(read_purpose=purpose)
+            assert sample.robot_state.value=='IDLE'
+            assert not a._snapshot_calls.unknown_methods
+        assert not c.write_calls
+    finally:await a.disconnect()
