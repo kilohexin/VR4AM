@@ -1,6 +1,16 @@
 # 项目整理与当前状态
 
-更新：2026-11-02。当前交付顺序为Docker网页/VR基本控制、操作者体验、后续真机；物理抓取排在其后。
+更新：2026-11-03。当前交付顺序为Docker网页/VR基本控制、操作者体验、后续真机；物理抓取排在其后。
+
+## 11月3日：控制器内部PVAT及轨迹时间编码对照
+
+新增`docker_pvat_local.py/.lua`。入口核验官方本机容器、要求产品服务退出，通过docker exec连接容器回环3010服务，一次传入有界Lua程序；关闭auto_sync，使用timestamp/rt_sleep，不安装依赖、不新增端口、不保存场景。先读取静止起点，J1参考总幅度0.01rad、总参考时间2秒，最多100点，异常最多一次stop_move并保留收尾结果。不是网页执行器，也不接真机。
+
+记录均在`.tmp/pvat-local-20261103/`：`complete.json`在控制器内部发送51个80ms窗口，最大调用耗时11ms/间隔41ms，虽最终完成0.01rad，但停止发送后到200ms连续静止确认仍需2520ms。这与时间窗累计执行的解释相符，不能把每20ms重发80ms未来参考当成无积压的覆盖式伺服。
+
+`phase-clock.json`改成连续、不重叠的40ms参考区间，以轨迹时间而非每次新建预测窗推进，名义提前量最多120ms。50点完成0.01rad，调用最大11ms/间隔41ms，发送结束至静止确认521ms；`phase-clock-interrupt.json`在一秒截断，共27点，最终位移0.005746806rad、静止确认520ms。两轮均没有异常stop_move，中段400～1600ms范围内所采关节速度没有低于0.0001rad/s的样本（中断轮仅覆盖其已有样本）。521/520ms包括200ms观察时间，不是物理制动保证。最大间隔41ms略超过40ms参数，当前不能声称严格周期满足或所有瞬间均连续；需继续降低监测与发送之间的耦合。
+
+另探索内置Lua `move_pvat`替代Lua SDK：数组参数报invalid pose，显式j1～j6参数返回boolean false，均执行异常收尾且静止观察通过（`direct-api.json`、`direct-joints.json`、`direct-return.json`），未把拒绝改判成功。已知可执行路线仍为控制器内部的`lebai:move_pvat`。原厂依据：https://help.lebai.ltd/api/common.html 、 https://help.lebai.ltd/dev/lua.html 、 https://help.lebai.ltd/sdk/motion.html 。9项探针相关回归通过；下一步是最新输入传递、控制器内有界轨迹生成及VR接线，现有网页仍保留movel体验。
 
 ## 11月2日：连续PVAT执行方式实测，尚未接入产品
 
