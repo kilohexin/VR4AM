@@ -77,6 +77,35 @@ async def test_initial_page_gap_without_authority_or_writes_does_not_send_stop()
     finally:await adapter.disconnect()
 
 
+async def test_idle_display_budget_never_changes_motion_or_stop_deadlines():
+    control,a,c,clock,_latest=await rig()
+    try:
+        assert control.idle_display_period_s()==.2
+        assert a._snapshot_read_timeout_ns('state')==1_000_000_000
+        for purpose in ('prepare','preflight','position_progress','stop_verification'):
+            assert a._snapshot_read_timeout_ns(purpose)==300_000_000
+        await control.arm()
+        assert control.idle_display_period_s()==0
+        a._client.move_entries=1
+        assert a._snapshot_read_timeout_ns('state')==300_000_000
+    finally:await a.disconnect()
+
+
+async def test_slow_idle_display_finishes_but_cannot_supply_fresh_motion_feedback():
+    import asyncio,time
+    from app.robots.base import BackendCommandError
+    _control,a,c,_clock,_latest=await rig();original=c.get_tcp
+    a._clock=time.perf_counter_ns
+    async def delayed():await asyncio.sleep(.4);return await original()
+    c.get_tcp=delayed
+    try:
+        state=await a.get_state()
+        assert time.perf_counter_ns()-state.server_mono_ns>=350_000_000
+        assert not a._snapshot_calls.unknown_methods and not c.write_calls
+        with pytest.raises(BackendCommandError,match='snapshot_expired'):a._web_fresh_feedback()
+    finally:await a.disconnect()
+
+
 async def test_old_idle_snapshot_cannot_create_stop_obligation_before_any_actuation():
     control,adapter,client,clock,_latest=await rig()
     try:

@@ -1585,6 +1585,12 @@ class RobotControl:
             and not self.backend._latched_fault and not self.backend._motion_calls.unknown_methods
             and not self.backend._snapshot_calls.unknown_methods)
 
+    def idle_display_period_s(self):
+        proof=getattr(self.backend,'docker_idle_input_safe',None)
+        if (self._preparation_unlock is None and self._position_idle_deadline_rebase()
+                and callable(proof) and proof()):return .2
+        return 0.
+
     def _install_position_session(self):
         from app.control.finite_position_session import FinitePositionSession
         binding=self.backend.bind_position_generation(self._control_generation)

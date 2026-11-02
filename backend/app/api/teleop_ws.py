@@ -61,6 +61,8 @@ async def state_sender(
     clock = asyncio.get_running_loop().time
     while True:
         if close_requested is not None and close_requested.is_set():return
+        idle_period=getattr(control,'idle_display_period_s',lambda:0.)()
+        cycle_period=max(period_s,idle_period)
         async with send_lock:
             if close_requested is not None and close_requested.is_set():return
             started = clock()
@@ -74,7 +76,7 @@ async def state_sender(
         # full period after that work ages feedback beyond the settling gate.
         # Drop missed slots rather than issuing a catch-up burst of SDK reads.
         now = clock()
-        deadline = started + period_s if now < started + period_s else now + period_s
+        deadline = started + cycle_period if now < started + cycle_period else now + cycle_period
         while (remaining := deadline - clock()) > 0:
             # Recheck the remaining period after an early scheduler wakeup.
             await asyncio.sleep(remaining)

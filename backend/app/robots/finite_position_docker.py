@@ -147,6 +147,12 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             and not self._snapshot_calls.closed and not self._pump.has_pending
             and all(x==0 for v in (s.actual_qd,s.target_qd,s.actual_qdd,s.target_qdd) for x in v))
 
+    def _snapshot_read_timeout_ns(self,read_purpose):
+        # Presentation before any owned actuation tolerates host scheduling
+        # pauses. Captured time stays unchanged: this cannot freshen a command.
+        if read_purpose=='state' and self.docker_idle_input_safe():return 1_000_000_000
+        return super()._snapshot_read_timeout_ns(read_purpose)
+
     async def _read_snapshot_fields(self,client,latencies,deadline_ns,**kwargs):
         # Connection overlaps normal reads; stop verification still checks it first.
         # Retained task state remains after this group.

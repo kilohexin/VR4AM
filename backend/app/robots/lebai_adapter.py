@@ -2227,7 +2227,7 @@ class RealLebaiAdapter:
             performance_timing["acquired_ns"] = sample_performance_ns()
             captured_ns = self._clock()
             sdk_lock_wait_ms = (captured_ns - read_requested_ns) / 1_000_000
-            deadline_ns = captured_ns + _SNAPSHOT_READ_TIMEOUT_NS
+            deadline_ns = captured_ns + self._snapshot_read_timeout_ns(read_purpose)
             fields = await self._read_snapshot_input_fields(client, latencies, deadline_ns,
                 read_purpose=read_purpose, include_raw_kinematics=include_raw_kinematics)
             raw_state, raw_estop, raw_kin, raw_tcp, raw_claw, raw_running = fields['values']
@@ -2398,6 +2398,9 @@ class RealLebaiAdapter:
             raise BackendCommandError(f"sdk_call_failed:{name}") from None
         finally:
             latencies[name] = max(0.0, (self._clock() - started) / 1_000_000)
+
+    def _snapshot_read_timeout_ns(self, read_purpose: str) -> int:
+        return _SNAPSHOT_READ_TIMEOUT_NS
 
     def _command_snapshot_max_age_ns(self) -> int:
         return _SNAPSHOT_READ_TIMEOUT_NS + int(
