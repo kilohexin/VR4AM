@@ -10,7 +10,7 @@ async def test_local_claw_ramps_to_selected_opening_and_holds_without_native_cla
     now=[0];client=DockerArmWithVirtualClaw(Native(),clock=lambda:now[0])
     await client.set_claw(30,40)
     assert (await client.get_claw())['amplitude']==0
-    now[0]=250_000_000
+    now[0]=60_000_000
     assert (await client.get_claw())['amplitude']==pytest.approx(15)
     now[0]=1_000_000_000
     assert (await client.get_claw())['amplitude']==40
@@ -23,3 +23,18 @@ async def test_local_claw_ramps_to_selected_opening_and_holds_without_native_cla
 async def test_local_claw_rejects_invalid_or_excessive_targets(force,amplitude):
     client=DockerArmWithVirtualClaw(object(),clock=lambda:0)
     with pytest.raises(ValueError):await client.set_claw(force,amplitude)
+
+
+async def test_full_stroke_finishes_in_400ms_and_reversal_starts_at_actual_opening():
+    now=[0];c=DockerArmWithVirtualClaw(object(),clock=lambda:now[0])
+    await c.set_claw(30,100)
+    now[0]=100_000_000
+    assert (await c.get_claw())['amplitude']==25
+    await c.set_claw(30,0)
+    assert (await c.get_claw())['amplitude']==25
+    now[0]=200_000_000
+    assert (await c.get_claw())['amplitude']==0
+    await c.set_claw(30,100)
+    now[0]=600_000_000
+    result=await c.get_claw()
+    assert result['amplitude']==100 and result['hold_on']

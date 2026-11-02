@@ -9,6 +9,7 @@ import time
 
 class DockerArmWithVirtualClaw:
     gripper_provider='local_virtual'
+    full_stroke_seconds=.4  # Presentation model only; no physical speed claim.
 
     def __init__(self,native,*,clock=time.perf_counter_ns):
         self.native=native;self.clock=clock
@@ -18,7 +19,7 @@ class DockerArmWithVirtualClaw:
 
     def _advance(self):
         now=self.clock();delta=max(0,now-self._updated)/1_000_000_000;self._updated=now
-        step=60*delta;difference=self._target-self._amplitude
+        step=100/self.full_stroke_seconds*delta;difference=self._target-self._amplitude
         self._amplitude+=max(-step,min(step,difference))
 
     async def get_claw(self):
