@@ -98,3 +98,19 @@ def test_reserved_target_rechecks_input_age_and_unknown_reply_revokes():
     offer(g,b,n,2);t=g.reserve(b,(0,0,0),n[0])
     with pytest.raises(ValueError,match='reply_unknown'):g.acknowledge(b,t,None)
     with pytest.raises(ValueError,match='revoked'):offer(g,b,n,3)
+
+
+def test_combined_pose_lead_is_bounded_and_release_cancels_all_components():
+    import math
+    n=[1_000_000_000];b=object()
+    g=BlendedPositionGate(b,(-1.,)*6,(1.,)*6,clock=lambda:n[0],dimensions=6)
+    g.offer(b,1,n[0],(0,0,1,1,0,-1))
+    first=send(g,b,n,p=(0.,)*6)
+    second=send(g,b,n,p=(0.,)*6,ident=2)
+    assert math.dist((0.,)*6,second.position)==pytest.approx(.008)
+    assert math.dist((0.,)*3,second.position[:3])<=.008
+    assert math.hypot(*second.position[3:])<=.008
+    assert g.reserve(b,(0.,)*6,n[0]) is None
+    g.release_expired()
+    assert g.draining and g.released and g.stamp==n[0]
+    assert g.reserve(b,first.position,n[0]) is None

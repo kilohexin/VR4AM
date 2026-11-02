@@ -1,9 +1,11 @@
-"""Opt-in Docker translation blending; rotations retain the finite executor."""
+"""Docker continuation selector; combined pose mode never falls back to movej."""
 from dataclasses import replace
+import math
 from app.control.blended_position_session import BlendedPositionSession
 from app.control.finite_position_session import FinitePositionSession
 from app.robots.blended_position_docker import DockerBlendPort
 from app.robots.blended_rotation_docker import DockerRotationPort
+from app.robots.blended_pose_docker import DockerPosePort
 
 
 class DockerMotionSession:
@@ -21,7 +23,7 @@ class DockerMotionSession:
         self.seq = -1
         self.source = None
         self.completed_steps = 0
-        self._select('translation')
+        self._select('pose' if getattr(adapter,'position_blended_rotation',False) is True else 'translation')
 
     def _select(self, kind):
         if self.active is not None:
@@ -29,12 +31,17 @@ class DockerMotionSession:
             if self.active.busy or self.active.phase != 'ready' or self.active.closed:
                 raise ValueError('position_busy')
             self.completed_steps += self.active.view().entered_steps
-            if self.kind in ('translation','pitch','spin'):
+            if self.kind in ('translation','pitch','spin','pose'):
                 self.active.port.check()
                 self.active.port.closed = True
         self.kind = kind
-        if kind in ('translation','pitch','spin'):
-            if kind=='translation':
+        if kind in ('translation','pitch','spin','pose'):
+            if kind=='pose':
+                port=DockerPosePort(self.adapter,self.binding,authorize=self.authorize)
+                limit=(math.pi/2)/port.radians_per_unit
+                lower=tuple(self.adapter.settings.startup_tcp_min_m)+(-limit,)*3
+                upper=tuple(self.adapter.settings.startup_tcp_max_m)+(limit,)*3
+            elif kind=='translation':
                 port = DockerBlendPort(self.adapter, self.binding, authorize=self.authorize)
                 lower,upper=self.adapter.settings.startup_tcp_min_m,self.adapter.settings.startup_tcp_max_m
             else:
@@ -64,6 +71,7 @@ class DockerMotionSession:
         if getattr(self.adapter,'position_blended_rotation',False) is True and not any(intent.vector):
             if intent.pitch and not intent.spin:desired='pitch'
             elif intent.spin and not intent.pitch:desired='spin'
+        if self.kind=='pose':desired='pose'
         if intent.kind != 'release' and desired != self.kind:
             if not self.active.busy and self.active.phase == 'ready' and not self.active.closed:
                 self._select(desired)

@@ -12,6 +12,7 @@ let state:any=null,generation=-1,seq=0,timer:any=null,closed=false;
 let continuous=false;
 let noisyDirection=false;
 let directInput=false;
+let mixedInput=false;
 const timing={maxFrameGapMs:0,maxStateGapMs:0,inputRejections:0};
 let lastFrameAt:number|null=null,lastStateAt:number|null=null;
 const replies=new Map<string,any>();
@@ -31,7 +32,7 @@ ws.onmessage=e=>{
   lastStateAt=received;
   if(m.backend!=='LEBAI_DOCKER')throw Error('not_Docker');
   if(m.finite_position.generation!==generation){generation=m.finite_position.generation;input.reset('xr-finite-synthetic',generation);}
-  state=m;input.observe(m.finite_position.phase);xr.update(m,performance.now());
+  state=m;input.observe(m.finite_position.phase);if(!directInput)xr.update(m,performance.now());
  }else{
   if(m.request_id)replies.set(m.request_id,m);
   if(m.type==='position_input_rejected')timing.inputRejections++;
@@ -70,18 +71,39 @@ try{
   const frame:any={v:1,type:'vr_frame',session_id:'quest-synthetic',seq:++seq,
    client_mono_ms:now,tracking_valid:hand.tracked,visibility:'visible',
    right:{p:[...hand.p],q:[...hand.q],grip:hand.grip,trigger:hand.trigger}};
-  if(noisyDirection)input.offer([.025*Math.sin(seq),0,1]);
+  if(mixedInput)input.offer([.02*Math.sin(seq),0,1],.0,-1);
+  else if(noisyDirection)input.offer([.025*Math.sin(seq),0,1]);
   else if(continuous)input.offer([0,0,0],0,Math.floor(state.finite_position.entered_steps/2)%2===0?1:-1);
   else if(!directInput)xr.apply(frame);
   send(finiteXRTransportFrame(frame));
  },20);
  await prepare('initial');
  const preparedGeneration=generation;
+ if(process.argv.includes('--mixed-continuous')){
+  const started=performance.now(),steps=state.finite_position.entered_steps;
+  directInput=true;mixedInput=true;
+  await wait(()=>state.finite_position.entered_steps>=steps+6,'mixed_blended_continuation',25000);
+  // Keep live VR health frames but interrupt only motion intents, reproducing
+  // a transport/input gap without fabricating timestamps or changing limits.
+  mixedInput=false;
+  await wait(()=>state.finite_position.phase==='hold','input_gap_natural_drain',10000);
+  if(state.finite_position.reason!=='position_input_expired')throw Error('missing_input_gap_hold');
+  const count=(await status()).moves;
+  mixedInput=true;await sleep(250);mixedInput=false;
+  if((await status()).moves!==count)throw Error('late_held_restarted');
+  input.release();await sleep(120);
+  const previous=state.finite_position.entered_steps;mixedInput=true;
+  await wait(()=>state.finite_position.entered_steps>previous,'release_then_regrip',10000);
+  mixedInput=false;input.release();
+  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','mixed_continuous_release');
+  console.log('PASS mixed continuous / input gap drain / explicit regrip',JSON.stringify({steps:state.finite_position.entered_steps-steps,totalMs:performance.now()-started}));
+  xr.reset();directInput=false;await sleep(100);
+ }
  if(process.argv.includes('--grip-claw')){
-  const baseline=await status();hand.grip=true;await sleep(80);
+  const baseline=await status(),baselineSteps=state.finite_position.entered_steps;hand.grip=true;await sleep(80);
   hand.p=[.018,0,0];hand.q=[Math.sin(.02),0,0,Math.cos(.02)];
   const jitter=setInterval(()=>{hand.p[1]=.00015*Math.sin(performance.now()/40);},20);
-  try{await wait(()=>state.finite_position.entered_steps>=1,'mixed_hand_motion',12000);}
+  try{await wait(()=>state.finite_position.entered_steps>baselineSteps,'mixed_hand_motion',12000);}
   finally{clearInterval(jitter);}
   for(let i=1;i<=20;i++){hand.trigger=.6*i/20;await sleep(20);}
   await wait(()=>state.gripper>.55&&pendingClaws.size===0,'grip_held_claw',10000);

@@ -1,4 +1,4 @@
-"""Unregistered Docker translation session, using product web/XR intents.
+"""Bounded continuation session, using product web/XR intents.
 
 The injected port must audit Cartesian paths and enforce entry at the native
 boundary. No native client or application selector is provided by this module.
@@ -26,7 +26,7 @@ class BlendedPositionSession:
             if type(port) is not RealBlendTrialPort:
                 raise ValueError('blend_docker_candidate_required')
         self.port, self.binding, self.clock, self.authorize = port, binding, clock, authorize
-        self.gate = BlendedPositionGate(binding, lower, upper, clock=clock)
+        self.gate = BlendedPositionGate(binding, lower, upper, clock=clock,dimensions=getattr(port,'dimensions',3))
         self.phase, self.reason = 'ready', None
         self.closed = False
         self.worker = None
@@ -36,6 +36,8 @@ class BlendedPositionSession:
         self._session_id = None
         self._stop_task = None
         self._obligation = False
+        self._input_hold = False
+        self._release_seen = False
 
     @property
     def busy(self):
@@ -48,11 +50,22 @@ class BlendedPositionSession:
         if (intent.generation != self.binding.generation
                 or self._session_id not in (None, intent.session_id)):
             raise ValueError('position_input_rejected')
-        # Rotation must use its separately audited executor. Never silently
-        # treat pitch/spin as translation or release during an owned stream.
-        if intent.pitch or intent.spin:
+        if (intent.seq <= self.gate.seq or intent.received_ns < self.gate.stamp
+                or not 0 <= self.clock()-intent.received_ns < INPUT_NS):
+            raise ValueError('position_input_rejected')
+        # The port must explicitly audit every requested pose component.
+        mapper = getattr(self.port, 'input_direction', None)
+        if mapper is None and (intent.pitch or intent.spin):
             raise ValueError('blend_translation_only')
-        self.gate.offer(self.binding, intent.seq, intent.received_ns, intent.vector)
+        direction = mapper(intent) if mapper is not None else intent.vector
+        if self._input_hold:
+            # No late held packet can resume a timed-out gesture. Require an
+            # explicit release, completed drain, then a NEW held input.
+            if intent.kind == 'release':self._release_seen = True
+            elif self._release_seen and not self.busy and self.gate.tail is None:
+                self._input_hold = False;self._release_seen = False;self.reason = None
+            if self._input_hold:direction = (0.,)*self.gate.dimensions
+        self.gate.offer(self.binding, intent.seq, intent.received_ns, direction)
         self.intent = intent
         self._session_id = intent.session_id
         if self.gate.draining:
@@ -62,9 +75,14 @@ class BlendedPositionSession:
         self.authorize()
         if self.closed:
             raise ValueError('position_session_revoked')
-        if (self.intent is not None and self.intent.kind != 'release'
+        if (not self._input_hold and self.intent is not None and self.intent.kind != 'release'
                 and not 0 <= self.clock()-self.intent.received_ns < INPUT_NS):
-            raise ValueError('position_input_expired')
+            if getattr(self.port,'input_expiry_drains',False) is True:
+                self._input_hold = True;self._release_seen = False
+                self.reason = 'position_input_expired'
+                self.gate.release_expired()
+                self.phase = 'draining' if self.gate.tail is not None else 'hold'
+            else:raise ValueError('position_input_expired')
 
     async def _read(self):
         self._monitor()
@@ -89,7 +107,7 @@ class BlendedPositionSession:
             sample = await self._read()
             target = self.gate.reserve(self.binding, sample.position, sample.captured_ns)
             if target is None:
-                self.phase = ('ready' if self.gate.tail is None else
+                self.phase = (('hold' if self._input_hold else 'ready') if self.gate.tail is None else
                               'draining' if self.gate.draining or self.gate.released else 'executing')
                 return
             self.phase = 'planning'
@@ -123,7 +141,7 @@ class BlendedPositionSession:
         except Exception as error:
             if not self.closed:
                 if str(error) == 'blend_entry_revoked' and not native_entered and not self._obligation:
-                    self.phase = 'ready'
+                    self.phase = 'hold' if self._input_hold else 'ready'
                 elif str(error) == 'blend_entry_revoked' and not native_entered and self.gate.draining:
                     self.phase = 'draining'
                 else:
@@ -148,7 +166,7 @@ class BlendedPositionSession:
         except Exception as error:
             await self.abort(str(error))
             return
-        if self.worker is None and ((self.intent is not None and self.intent.kind != 'release') or self.gate.tail is not None):
+        if self.worker is None and ((not self._input_hold and self.intent is not None and self.intent.kind != 'release') or self.gate.tail is not None):
             self.worker = asyncio.create_task(self._tick(), name='docker-blended-tick')
 
     async def abort(self, reason):
@@ -170,4 +188,5 @@ class BlendedPositionSession:
 
     def view(self):
         return PositionView(self.phase, self.binding.generation, self.entered_steps,
-                            self.motion_id, self.reason)
+                            self.motion_id, self.reason,
+                            blocked_input_seq=self.intent.seq if self._input_hold and self.intent else None)

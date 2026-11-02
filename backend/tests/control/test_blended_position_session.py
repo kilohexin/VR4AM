@@ -191,3 +191,46 @@ async def test_page_read_pause_is_released_on_success_and_failure(fail):
     offer(s,p,1);await tick(s,p)
     assert events==['begin','end']
     assert len(p.writes)==(0 if fail else 1)
+
+
+async def test_docker_expiry_drains_and_requires_release_before_fresh_rearm():
+    s,p=rig();p.input_expiry_drains=True
+    offer(s,p,1);await tick(s,p)
+    p.now+=101_000_000
+    await tick(s,p)
+    count=len(p.writes)
+    for seq in range(2,18):
+        offer(s,p,seq);await tick(s,p)
+    assert not s.closed and not p.stops and len(p.writes)==count
+    assert s.phase=='hold' and s.reason=='position_input_expired'
+    offer(s,p,18,(0.,0.,0.));await tick(s,p)
+    offer(s,p,19);await tick(s,p)
+    assert len(p.writes)==count+1 and s.reason is None
+
+
+async def test_docker_expiry_during_audit_is_zero_write_hold():
+    s,p=rig();p.input_expiry_drains=True
+    async def expire():p.now+=101_000_000
+    p.on_audit=expire
+    offer(s,p,1);await tick(s,p)
+    assert s.phase=='hold' and not p.writes and not p.stops and not s.closed
+
+
+async def test_invalid_release_cannot_rearm_expired_docker_input():
+    s,p=rig();p.input_expiry_drains=True
+    offer(s,p,1);await tick(s,p);p.now+=101_000_000
+    for _ in range(15):await tick(s,p)
+    assert s.phase=='hold'
+    with pytest.raises(ValueError):offer(s,p,1,(0.,0.,0.))
+    offer(s,p,2);await tick(s,p)
+    assert s.phase=='hold' and len(p.writes)==1
+
+
+async def test_docker_expiry_does_not_mask_unknown_native_reply():
+    s,p=rig();p.input_expiry_drains=True
+    async def failed(plan,*,entering):
+        entering();p.now+=101_000_000;s._monitor()
+        raise ValueError('native_unknown')
+    p.submit=failed;p.stop_confirmed=False
+    offer(s,p,1);await tick(s,p)
+    assert s.closed and s.reason=='stop_unverified' and p.stops==1

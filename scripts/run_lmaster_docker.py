@@ -16,7 +16,7 @@ def main(argv=None):
     parser.add_argument('--run',action='store_true',help='Start the virtual controller and web app')
     parser.add_argument('--port',type=int,default=8773)
     parser.add_argument('--blended-translation',action='store_true',help='Opt-in experimental bounded Cartesian translation')
-    parser.add_argument('--blended-rotation',action='store_true',help='Opt-in pure pitch/spin continuation; implies blended translation')
+    parser.add_argument('--blended-rotation',action='store_true',help='Opt-in combined translation/pitch/spin continuation; implies blended translation')
     parser.add_argument('--host',choices=('127.0.0.1','0.0.0.0'),default='127.0.0.1')
     parser.add_argument('--cert');parser.add_argument('--key')
     args=parser.parse_args(argv)

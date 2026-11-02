@@ -18,9 +18,11 @@ class BlendTarget:
 class BlendedPositionGate:
     step=.004
     max_lead=.008
-    def __init__(self,binding,lower,upper,*,clock):
+    def __init__(self,binding,lower,upper,*,clock,dimensions=3):
         self.binding=binding;self.clock=clock
-        self.lower=vector(lower,3);self.upper=vector(upper,3)
+        if dimensions not in (3,6):raise ValueError('blend_dimensions')
+        self.dimensions=dimensions
+        self.lower=vector(lower,dimensions);self.upper=vector(upper,dimensions)
         if any(a>=b for a,b in zip(self.lower,self.upper)):raise ValueError('blend_region')
         self.latest=None;self.seq=-1;self.stamp=-1;self.direction=None
         self.tail=None;self.pending=[];self.reserved=None;self.ids=set()
@@ -35,7 +37,7 @@ class BlendedPositionGate:
     def released(self):return self.latest is None
 
     def offer(self,binding,seq,stamp,direction):
-        now=self._live(binding);integer(seq);integer(stamp);d=vector(direction,3)
+        now=self._live(binding);integer(seq);integer(stamp);d=vector(direction,self.dimensions)
         if seq<=self.seq or stamp<self.stamp or not 0<=now-stamp<INPUT_NS:raise ValueError('blend_input_expired')
         n=math.hypot(*d);d=tuple(x/n for x in d) if n>.15 else None
         # Keep a fixed heading inside a small cone; compare to the issued or
@@ -50,7 +52,7 @@ class BlendedPositionGate:
         self.seq,self.stamp,self.latest=seq,stamp,d
 
     def observe(self,binding,actual,stamp,*,finished=(),idle=False,stationary=False):
-        now=self._live(binding);actual=vector(actual,3);integer(stamp)
+        now=self._live(binding);actual=vector(actual,self.dimensions);integer(stamp)
         if not 0<=now-stamp<INPUT_NS or stamp<=self.observed_stamp:
             raise ValueError('blend_feedback_expired')
         if any(x not in self.ids for x in finished):raise ValueError('blend_foreign_task')
@@ -66,7 +68,7 @@ class BlendedPositionGate:
         else:self.quiet_since=None;self.quiet_anchor=None
 
     def reserve(self,binding,actual,stamp):
-        now=self._live(binding);actual=vector(actual,3)
+        now=self._live(binding);actual=vector(actual,self.dimensions)
         if not 0<=now-stamp<INPUT_NS:raise ValueError('blend_feedback_expired')
         if self.latest is None or self.draining or self.reserved is not None or len(self.pending)>=2:return None
         if not 0<=now-self.stamp<INPUT_NS:raise ValueError('blend_input_expired')
@@ -79,7 +81,7 @@ class BlendedPositionGate:
         return self.reserved
 
     def require_entry(self,binding,target,actual,stamp):
-        now=self._live(binding);actual=vector(actual,3)
+        now=self._live(binding);actual=vector(actual,self.dimensions)
         if (target is not self.reserved or target.barrier!=self.barrier or self.draining
                 or target.direction!=self.latest or not 0<=now-self.stamp<INPUT_NS
                 or not 0<=now-stamp<INPUT_NS or len(self.pending)>=2
@@ -97,5 +99,10 @@ class BlendedPositionGate:
 
     def cancel_unsent(self,target):
         if target is self.reserved:self.reserved=None
+
+    def release_expired(self):
+        # Revoke unsent work without inventing a fresh operator timestamp.
+        self.latest=None;self.barrier+=1
+        if self.tail is not None:self.draining=True
 
     def revoke(self):self.revoked=True;self.latest=None;self.barrier+=1
