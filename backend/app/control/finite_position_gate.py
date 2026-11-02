@@ -1,11 +1,14 @@
 """Latest intent only; release is a barrier, never remote cancellation."""
+import math
 from app.control.finite_position_types import PositionBinding,PositionIntent,integer,INPUT_NS,SESSION_NS
 
 
 class PositionGate:
-    def __init__(self,binding,*,clock,diagnostic_limits=True):
+    def __init__(self,binding,*,clock,diagnostic_limits=True,direction_tolerance_rad=0.):
         self.binding,self.clock=binding,clock
         self.diagnostic_limits=diagnostic_limits
+        if not 0<=direction_tolerance_rad<=math.radians(5):raise ValueError('position_direction_tolerance')
+        self.direction_tolerance_rad=direction_tolerance_rad
         self.latest=self.active=None
         self.started_ns=None;self.deadline_ns=None
         self.entered_steps=0;self.released=True;self.reason=None
@@ -43,8 +46,12 @@ class PositionGate:
 
     def require_entry(self,intent):
         now=self._live()
+        direction_matches=self.latest is not None and self.latest.vector==intent.vector
+        if (not direction_matches and self.latest is not None and self.direction_tolerance_rad
+                and any(self.latest.vector) and any(intent.vector)):
+            direction_matches=sum(a*b for a,b in zip(self.latest.vector,intent.vector))>=math.cos(self.direction_tolerance_rad)-1e-12
         if (intent is not self.active or self._entered or self.exhausted
-                or self.released or self.latest is None or self.latest.vector!=intent.vector
+                or self.released or self.latest is None or not direction_matches
                 or self.latest.pitch!=intent.pitch or self.latest.spin!=intent.spin
                 or self._taken_barrier!=self._barrier
                 or not 0<=now-self.latest.received_ns<INPUT_NS):

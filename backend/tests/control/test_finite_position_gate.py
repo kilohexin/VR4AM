@@ -25,6 +25,23 @@ def test_release_leaves_no_next_goal():
     assert g.take_latest() is None
 
 
+@pytest.mark.parametrize('tolerance',[0.,math.radians(5)])
+def test_mixed_direction_jitter_uses_fixed_plan_reference(tolerance):
+    m,g,_=fixture();g.direction_tolerance_rad=tolerance
+    first=m.PositionIntent('xr',1,1,0,'held',(0.,1.,0.),1.,-1.)
+    g.offer(first);plan=g.take_latest()
+    for seq in range(2,6):
+        deg=seq-1
+        g.offer(m.PositionIntent('xr',1,seq,0,'held',(math.sin(math.radians(deg)),math.cos(math.radians(deg)),0.),1.,-1.))
+        if tolerance:g.require_entry(plan)
+        else:
+            with pytest.raises(ValueError,match='entry_revoked'):g.require_entry(plan)
+    g.offer(m.PositionIntent('xr',1,6,0,'held',(.2,1.,0.),1.,-1.))
+    with pytest.raises(ValueError,match='entry_revoked'):g.require_entry(plan)
+    g.offer(m.PositionIntent('xr',1,7,0,'release',(0.,0.,0.)))
+    with pytest.raises(ValueError,match='entry_revoked'):g.require_entry(plan)
+
+
 def test_reentering_deadzone_revokes_unsent_plan_without_a_next_goal():
     m,g,_=fixture();offer(m,g);plan=g.take_latest()
     center=offer(m,g,2,vector=(.1,.1,0.))

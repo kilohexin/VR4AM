@@ -26,6 +26,7 @@ export class FiniteXRInput {
  private anchor:{hand:Vec3;tcp:Vec3;handQ:Quat;tcpQ:Quat}|null=null;private mustRelease=true;
  private lastTime:number|null=null;private trigger:number|null=null;
  private pending:string|null=null;private lastClaw=-Infinity;private sequence=0;
+ private clawPause=false;
  constructor(private position:FinitePositionInput,private sendClaw:(m:GripperRequestMessage)=>void,
   private cancelClaw:(id:string)=>void,private now:()=>number=()=>performance.now()){}
  update(state:RobotStateMessage|null,receivedAt:number):void {
@@ -37,7 +38,7 @@ export class FiniteXRInput {
  reset(reason='xr_reset'):void {
   this.position.abort(reason);
   if(this.pending)this.cancelClaw(this.pending);
-  this.pending=null;this.anchor=null;this.mustRelease=true;this.lastTime=null;this.trigger=null;
+  this.pending=null;this.anchor=null;this.mustRelease=true;this.lastTime=null;this.trigger=null;this.clawPause=false;
  }
  apply(frame:VRFrame):void {
   const s=this.state,t=this.now();
@@ -54,7 +55,8 @@ export class FiniteXRInput {
   const displayWindow=s.backend==='LEBAI_DOCKER'&&s.finite_position?.policy==='finite_position_docker'?500:100;
   const feedbackFresh=t>=this.receivedAt&&t-this.receivedAt<displayWindow;
   const clawFeedbackFresh=t>=this.receivedAt&&t-this.receivedAt<100;
-  if(this.pending&&(!clawFeedbackFresh||frame.right.grip)){
+  const docker=s.backend==='LEBAI_DOCKER'&&s.finite_position?.policy==='finite_position_docker';
+  if(!docker&&this.pending&&(!clawFeedbackFresh||frame.right.grip)){
    if(!clawFeedbackFresh)this.trigger=null;
    this.position.release();this.anchor=null;this.mustRelease=true;return;
   }
@@ -62,6 +64,26 @@ export class FiniteXRInput {
    // Display latency cannot authorize another target. Release the finite
    // gesture; its owned step still runs the backend's fresh-feedback checks.
    this.position.release();this.anchor=null;this.mustRelease=true;this.trigger=null;return;
+  }
+  if(docker){
+   const value=Math.max(0,Math.min(1,frame.right.trigger));
+   if(!clawFeedbackFresh&&!this.clawPause&&!this.pending)this.trigger=value;
+   if(this.trigger===null)this.trigger=value;
+   if(Math.abs(value-this.trigger)>=.005)this.clawPause=true;
+   if(this.clawPause||this.pending){
+    // Trigger owns a pause, not a competing motion. Only current live input
+    // may be sent after the existing arm segment naturally drains.
+    this.position.release();this.anchor=null;
+    if(!frame.right.grip)this.mustRelease=false;
+    if(!this.pending&&clawFeedbackFresh&&s.robot_state==='IDLE'
+      &&['ready','hold'].includes(s.finite_position!.phase)&&t-this.lastClaw>=100){
+     if(Math.abs(value-this.trigger)>=.005){
+      this.trigger=value;this.lastClaw=t;this.pending=`xr-claw-${++this.sequence}-${Date.now()}`;
+      this.sendClaw({v:1,type:'gripper_request',request_id:this.pending,value});
+     }else this.clawPause=false;
+    }
+    return;
+   }
   }
   if(!frame.right.grip){this.position.release();this.anchor=null;this.mustRelease=false;}
   else if(!this.mustRelease){
@@ -74,7 +96,6 @@ export class FiniteXRInput {
    const distance=Math.hypot(...error);
    const handPitch=Math.max(-Math.PI/9,Math.min(Math.PI/9,relativeToolPitch(this.anchor.handQ,frame.right.q)));
    const pitchError=s.finite_position!.pitch_enabled?handPitch-relativeToolPitch(this.anchor.tcpQ,s.actual_tcp.q):0;
-   const docker=s.backend==='LEBAI_DOCKER'&&s.finite_position?.policy==='finite_position_docker';
    const translationDeadband=docker ? .004 : .001;
    const angleDeadband=docker?Math.PI/240:Math.PI/600;
    const handSpin=Math.max(-Math.PI/2,Math.min(Math.PI/2,relativeToolSpin(this.anchor.handQ,frame.right.q)));
@@ -86,6 +107,7 @@ export class FiniteXRInput {
   }
   // No default opening on preparation. Once Trigger changes, its analogue
   // value controls closure; a pending target finishes even on normal release.
+  if(docker)return;
   if(!clawFeedbackFresh){this.trigger=null;return;}
   if(this.trigger===null){this.trigger=frame.right.trigger;return;}
   const value=Math.max(0,Math.min(1,frame.right.trigger));

@@ -24,6 +24,24 @@ function rig(){
  return {xr,input,inputs,claws,cancelled,stops,frame,setNow:(t:number)=>{now=t;}};
 }
 
+it('Docker Trigger drains arm, grasps with Grip held, then recaptures without chasing queued hand motion',()=>{
+ const r=rig();let s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{...state.finite_position!,policy:'finite_position_docker'}};
+ const apply=(t:number,grip:boolean,x:number,trigger:number)=>{
+  r.setNow(t);r.xr.update(s,t);r.xr.apply({v:1,type:'vr_frame',session_id:'test',seq:t,client_mono_ms:t,
+   tracking_valid:true,visibility:'visible',right:{p:[x,0,0],q:[0,0,0,1],grip,trigger}});
+ };
+ apply(0,false,0,0);apply(20,true,0,0);apply(40,true,.01,0);
+ s={...s,robot_state:'MOVING',finite_position:{...s.finite_position!,phase:'executing'}};
+ apply(60,true,.02,.6);expect(r.inputs.at(-1).kind).toBe('release');expect(r.claws).toHaveLength(0);
+ s={...s,robot_state:'IDLE',finite_position:{...s.finite_position!,phase:'ready'}};
+ apply(100,true,.2,.6);expect(r.claws).toHaveLength(1);expect(r.claws[0].value).toBe(.6);
+ const count=r.inputs.length;apply(120,true,.3,.6);expect(r.inputs).toHaveLength(count);
+ r.xr.onGripperResult({v:1,type:'gripper_result',request_id:r.claws[0].request_id,accepted:true,message:'returned'});
+ apply(200,true,.3,.6);apply(220,true,.3,.6);expect(r.inputs).toHaveLength(count);
+ apply(240,true,.31,.6);expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[1,0,0]});
+ expect(r.stops).toEqual([]);
+});
+
 it('Docker uses half-step deadbands and tool spin without chasing an overshot 8mm goal',()=>{
  const r=rig();let s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{...state.finite_position!,policy:'finite_position_docker',pitch_enabled:true,spin_enabled:true}};
  const apply=(t:number,grip:boolean,p:[number,number,number],q:[number,number,number,number]=[0,0,0,1])=>{

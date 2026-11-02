@@ -77,6 +77,23 @@ try{
  },20);
  await prepare('initial');
  const preparedGeneration=generation;
+ if(process.argv.includes('--grip-claw')){
+  const baseline=await status();hand.grip=true;await sleep(80);
+  hand.p=[.018,0,0];hand.q=[Math.sin(.02),0,0,Math.cos(.02)];
+  const jitter=setInterval(()=>{hand.p[1]=.00015*Math.sin(performance.now()/40);},20);
+  try{await wait(()=>state.finite_position.entered_steps>=1,'mixed_hand_motion',12000);}
+  finally{clearInterval(jitter);}
+  for(let i=1;i<=20;i++){hand.trigger=.6*i/20;await sleep(20);}
+  await wait(()=>state.gripper>.55&&pendingClaws.size===0,'grip_held_claw',10000);
+  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','grip_claw_drain');
+  await sleep(250);
+  const previous=state.finite_position.entered_steps;hand.p[2]+=.015;
+  await wait(()=>state.finite_position.entered_steps>previous,'same_grip_move_after_claw',12000);
+  hand.grip=false;
+  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','mixed_release');
+  console.log('PASS mixed noisy hand / Trigger during Grip / same-Grip movement',JSON.stringify({before:baseline.moves,after:(await status()).moves}));
+  hand.p=[0,0,0];hand.q=[0,0,0,1];await sleep(120);
+ }
  if(process.argv.includes('--direction-noise')){
   const started=performance.now(),steps=state.finite_position.entered_steps,z=state.actual_tcp.p[2];
   directInput=true;noisyDirection=true;

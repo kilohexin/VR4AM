@@ -1,5 +1,6 @@
 """One offline finite goal at a time; normal release drains, faults stop."""
 import asyncio
+import math
 from app.control.finite_position_gate import PositionGate
 from app.control.finite_position_types import PositionView,INPUT_NS,POSITION_PLANNING_BOUNDARIES
 from app.robots.base import StopReason
@@ -16,7 +17,8 @@ class FinitePositionSession:
     def _new_gate(self):
         continuous=(getattr(self.adapter,'position_policy',None)=='finite_position_docker'
             and getattr(self.adapter,'position_continuous_gestures',False) is True)
-        return PositionGate(self.binding,clock=self.clock,diagnostic_limits=not continuous)
+        return PositionGate(self.binding,clock=self.clock,diagnostic_limits=not continuous,
+            direction_tolerance_rad=math.radians(5) if continuous else 0.)
 
     @property
     def busy(self):return self.worker is not None
