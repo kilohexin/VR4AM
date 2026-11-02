@@ -54,3 +54,12 @@ def test_tool_input_log_coordinates_match_small_local_rotation():
     d=p.input_direction(i)
     exact=((rotation*Rotation.from_rotvec([1e-6,0,-1e-6])).as_rotvec()-rotation.as_rotvec())/1e-6
     assert np.allclose(d[3:],exact,atol=1e-6)
+
+
+def test_micrometre_translation_drift_does_not_collapse_rotation_speed():
+    p,r,j,s,m=fixture()
+    p=[(0.,0.,.000005*i/4) for i in range(5)]
+    j=[(*point,*old[3:]) for point,old in zip(p,j)]
+    a=audit_pose_path(p,r,j,model=m,settings=s,reference=(0,0,0,1))
+    assert a.speed>.02 and a.speed<=.12
+    assert a.acceleration<=.2

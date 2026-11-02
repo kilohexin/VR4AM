@@ -13,6 +13,7 @@ let continuous=false;
 let noisyDirection=false;
 let directInput=false;
 let mixedInput=false;
+let liveHand:((dt:number)=>void)|null=null;
 const timing={maxFrameGapMs:0,maxStateGapMs:0,inputRejections:0};
 let lastFrameAt:number|null=null,lastStateAt:number|null=null;
 const replies=new Map<string,any>();
@@ -67,7 +68,8 @@ try{
  timer=setInterval(()=>{
   const now=performance.now();
   if(lastFrameAt!==null)timing.maxFrameGapMs=Math.max(timing.maxFrameGapMs,now-lastFrameAt);
-  lastFrameAt=now;
+  const dt=lastFrameAt===null?0:Math.min(.05,(now-lastFrameAt)/1000);
+  lastFrameAt=now;liveHand?.(dt);
   const frame:any={v:1,type:'vr_frame',session_id:'quest-synthetic',seq:++seq,
    client_mono_ms:now,tracking_valid:hand.tracked,visibility:'visible',
    right:{p:[...hand.p],q:[...hand.q],grip:hand.grip,trigger:hand.trigger}};
@@ -101,17 +103,17 @@ try{
  }
  if(process.argv.includes('--grip-claw')){
   const baseline=await status(),baselineSteps=state.finite_position.entered_steps;hand.grip=true;await sleep(80);
-  hand.p=[.018,0,0];hand.q=[Math.sin(.02),0,0,Math.cos(.02)];
+  let handAngle=0;liveHand=dt=>{hand.p[0]+=.04*dt;handAngle+=.15*dt;hand.q=[Math.sin(handAngle/2),0,0,Math.cos(handAngle/2)];};
   const jitter=setInterval(()=>{hand.p[1]=.00015*Math.sin(performance.now()/40);},20);
   try{await wait(()=>state.finite_position.entered_steps>baselineSteps,'mixed_hand_motion',12000);}
-  finally{clearInterval(jitter);}
+  finally{clearInterval(jitter);liveHand=null;}
   for(let i=1;i<=20;i++){hand.trigger=.6*i/20;await sleep(20);}
   await wait(()=>state.gripper>.55&&pendingClaws.size===0,'grip_held_claw',10000);
   await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','grip_claw_drain');
   await sleep(250);
-  const previous=state.finite_position.entered_steps;hand.p[2]+=.015;
+  const previous=state.finite_position.entered_steps;liveHand=dt=>{hand.p[2]+=.04*dt;};
   await wait(()=>state.finite_position.entered_steps>previous,'same_grip_move_after_claw',12000);
-  hand.grip=false;
+  liveHand=null;hand.grip=false;
   await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','mixed_release');
   console.log('PASS mixed noisy hand / Trigger during Grip / same-Grip movement',JSON.stringify({before:baseline.moves,after:(await status()).moves}));
   hand.p=[0,0,0];hand.q=[0,0,0,1];await sleep(120);
@@ -137,28 +139,28 @@ try{
  }
  for(const axis of [0,1])for(const sign of [1,-1]){
   hand.p=[0,0,0];hand.q=[0,0,0,1];hand.grip=false;await sleep(100);
-  const x=state.actual_tcp.p[axis];hand.grip=true;await sleep(80);hand.p[axis]=sign*.018;
+  const x=state.actual_tcp.p[axis];hand.grip=true;await sleep(80);liveHand=dt=>{hand.p[axis]+=sign*.04*dt;};
   await wait(()=>sign*(state.actual_tcp.p[axis]-x)>.012,'XR_planar_continuation',12000);
-  hand.grip=false;
+  liveHand=null;hand.grip=false;
   await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_planar_release');
   if(generation!==preparedGeneration)throw Error('unexpected_reprepare');
   console.log('PASS XR planar continuation/reversal',axis,sign,state.actual_tcp.p[axis]-x);
  }
  hand.p=[0,0,0];await sleep(100);
- const z=state.actual_tcp.p[2];hand.grip=true;await sleep(80);hand.p[2]=.01;
- await wait(()=>state.actual_tcp.p[2]>z+.004,'XR_translation');hand.grip=false;
+ const z=state.actual_tcp.p[2];hand.grip=true;await sleep(80);liveHand=dt=>{hand.p[2]+=.04*dt;};
+ await wait(()=>state.actual_tcp.p[2]>z+.004,'XR_translation');liveHand=null;hand.grip=false;
  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_translation_arrival');
  console.log('PASS XR translation/release',state.actual_tcp.p[2]-z);
  const q=[...state.actual_tcp.q];hand.p=[0,0,0];hand.q=[0,0,0,1];await sleep(80);
- hand.grip=true;await sleep(80);hand.q=[Math.sin(.032/2),0,0,Math.cos(.032/2)];
- await wait(()=>Math.abs(relativeToolPitch(q as any,state.actual_tcp.q))>.013,'XR_pitch');hand.grip=false;
+ hand.grip=true;await sleep(80);let pitchAngle=0;const pitchStarted=performance.now();liveHand=dt=>{pitchAngle+=.35*dt;hand.q=[Math.sin(pitchAngle/2),0,0,Math.cos(pitchAngle/2)];};
+ await wait(()=>relativeToolPitch(q as any,state.actual_tcp.q)>.08,'XR_pitch',12000);liveHand=null;hand.grip=false;
  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_pitch_arrival');
- console.log('PASS XR pitch/release',relativeToolPitch(q as any,state.actual_tcp.q));
+ console.log('PASS XR pitch/release',JSON.stringify({radians:relativeToolPitch(q as any,state.actual_tcp.q),elapsedMs:performance.now()-pitchStarted}));
  const spinQ=[...state.actual_tcp.q];hand.p=[0,0,0];hand.q=[0,0,0,1];await sleep(100);
- hand.grip=true;await sleep(80);hand.q=[0,0,Math.sin(.032/2),Math.cos(.032/2)];
- await wait(()=>Math.abs(relativeToolSpin(spinQ as any,state.actual_tcp.q))>.013,'XR_spin');hand.grip=false;
+ hand.grip=true;await sleep(80);let spinAngle=0;const spinStarted=performance.now();liveHand=dt=>{spinAngle+=.35*dt;hand.q=[0,-Math.sin(spinAngle/2),0,Math.cos(spinAngle/2)];};
+ await wait(()=>relativeToolSpin(spinQ as any,state.actual_tcp.q)>.08,'XR_spin',12000);liveHand=null;hand.grip=false;
  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_spin_arrival');
- console.log('PASS XR spin/release',relativeToolSpin(spinQ as any,state.actual_tcp.q));
+ console.log('PASS XR forearm twist/release',JSON.stringify({radians:relativeToolSpin(spinQ as any,state.actual_tcp.q),elapsedMs:performance.now()-spinStarted}));
  // Reposition a released hand far away, then regrip without moving it.
  // Reacquisition must anchor to the current TCP, not replay the old hand target.
  hand.p=[.3,.2,.1];hand.q=[0,Math.sin(.2),0,Math.cos(.2)];await sleep(120);
@@ -179,8 +181,8 @@ try{
  // A visible opening can precede the command reply. Keep sending released
  // frames until the claw owns no request before starting a fresh Grip.
  hand.grip=false;await sleep(120);
- hand.p=[0,0,0];await sleep(80);hand.grip=true;await sleep(80);hand.p[2]=.01;
- await wait(()=>state.finite_position.phase==='executing','XR_loss_entry');hand.tracked=false;
+ hand.p=[0,0,0];await sleep(80);hand.grip=true;await sleep(80);liveHand=dt=>{hand.p[2]+=.04*dt;};
+ await wait(()=>state.finite_position.phase==='executing','XR_loss_entry');liveHand=null;hand.tracked=false;
  await wait(()=>['DISARMED','READY'].includes(state.mode)&&state.robot_state==='IDLE','XR_tracking_stop',6000);
  hand.grip=false;hand.tracked=true;hand.p=[0,0,0];hand.q=[0,0,0,1];await sleep(100);
  await prepare('after_tracking_loss');console.log('PASS tracking loss/reprepare');

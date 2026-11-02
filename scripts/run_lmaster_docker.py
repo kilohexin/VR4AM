@@ -32,7 +32,7 @@ def main(argv=None):
         controls='unlock,prepare,translation,pitch/spin,progressive claw',startup_velocity_factor_percent=100,
         blended_translation=args.blended_translation,translation_step_mm=4 if args.blended_translation else 8,
         blended_rotation=args.blended_rotation,
-        rotation_blend_step_deg=.5 if args.blended_rotation else None,
+        rotation_blend_step_deg=1. if args.blended_rotation else None,
         gripper_provider='local_virtual',gripper_physics=False,hardware_verified=False)),flush=True)
     if not args.run:return 0
     import uvicorn

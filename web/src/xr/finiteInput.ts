@@ -1,4 +1,5 @@
 import {Quaternion} from 'three';
+import {DockerGesture} from './dockerGesture';
 import type {GripperRequestMessage,GripperResultMessage,RobotStateMessage,Vec3,Quat,VRFrame} from '../protocol/messages';
 import {FinitePositionInput} from '../ui/finitePositionInput';
 import {enteredFiniteHold} from '../ui/finitePositionFeedback';
@@ -26,19 +27,19 @@ export class FiniteXRInput {
  private anchor:{hand:Vec3;tcp:Vec3;handQ:Quat;tcpQ:Quat}|null=null;private mustRelease=true;
  private lastTime:number|null=null;private trigger:number|null=null;
  private pending:string|null=null;private lastClaw=-Infinity;private sequence=0;
- private clawPause=false;
+ private clawPause=false;private gesture=new DockerGesture();
  constructor(private position:FinitePositionInput,private sendClaw:(m:GripperRequestMessage)=>void,
   private cancelClaw:(id:string)=>void,private now:()=>number=()=>performance.now()){}
  update(state:RobotStateMessage|null,receivedAt:number):void {
   const enteredHold=enteredFiniteHold(this.state?.finite_position,state?.finite_position);
   if(this.state?.finite_position?.generation!==state?.finite_position?.generation)this.reset('xr_generation_changed');
   this.state=state;this.receivedAt=receivedAt;
-  if(enteredHold){this.position.release();this.anchor=null;this.mustRelease=true;}
+  if(enteredHold){this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=true;}
  }
  reset(reason='xr_reset'):void {
   this.position.abort(reason);
   if(this.pending)this.cancelClaw(this.pending);
-  this.pending=null;this.anchor=null;this.mustRelease=true;this.lastTime=null;this.trigger=null;this.clawPause=false;
+  this.pending=null;this.anchor=null;this.gesture.reset();this.mustRelease=true;this.lastTime=null;this.trigger=null;this.clawPause=false;
  }
  apply(frame:VRFrame):void {
   const s=this.state,t=this.now();
@@ -58,12 +59,12 @@ export class FiniteXRInput {
   const docker=s.backend==='LEBAI_DOCKER'&&s.finite_position?.policy==='finite_position_docker';
   if(!docker&&this.pending&&(!clawFeedbackFresh||frame.right.grip)){
    if(!clawFeedbackFresh)this.trigger=null;
-   this.position.release();this.anchor=null;this.mustRelease=true;return;
+   this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=true;return;
   }
   if(!feedbackFresh){
    // Display latency cannot authorize another target. Release the finite
    // gesture; its owned step still runs the backend's fresh-feedback checks.
-   this.position.release();this.anchor=null;this.mustRelease=true;this.trigger=null;return;
+   this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=true;this.trigger=null;return;
   }
   if(docker){
    const value=Math.max(0,Math.min(1,frame.right.trigger));
@@ -73,7 +74,7 @@ export class FiniteXRInput {
    if(this.clawPause||this.pending){
     // Trigger owns a pause, not a competing motion. Only current live input
     // may be sent after the existing arm segment naturally drains.
-    this.position.release();this.anchor=null;
+    this.position.release();this.anchor=null;this.gesture.reset();
     if(!frame.right.grip)this.mustRelease=false;
     if(!this.pending&&clawFeedbackFresh&&s.robot_state==='IDLE'
       &&['ready','hold'].includes(s.finite_position!.phase)&&t-this.lastClaw>=100){
@@ -85,19 +86,27 @@ export class FiniteXRInput {
     return;
    }
   }
-  if(!frame.right.grip){this.position.release();this.anchor=null;this.mustRelease=false;}
+  if(!frame.right.grip){this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=false;}
   else if(!this.mustRelease){
    if(!this.anchor){
     if(['planning','executing','draining'].includes(s.finite_position!.phase)){this.mustRelease=true;return;}
     this.anchor={hand:[...frame.right.p],tcp:[...s.actual_tcp.p],handQ:[...frame.right.q],tcpQ:[...s.actual_tcp.q]};
    }
    const scale=s.translation_scale??1;
+   if(docker){
+    const intent=this.gesture.sample(frame.client_mono_ms,frame.right.p,frame.right.q,scale);
+    const pitch=s.finite_position!.pitch_enabled?intent.pitch:0;
+    const spin=s.finite_position!.spin_enabled?intent.spin:0;
+    if(!intent.vector.some(Boolean)&&!pitch&&!spin)this.position.release();
+    else this.position.offer(intent.vector,pitch,spin);
+    return;
+   }
    const error=this.anchor.tcp.map((v,i)=>v+(frame.right.p[i]-this.anchor!.hand[i])*scale-s.actual_tcp.p[i]) as Vec3;
    const distance=Math.hypot(...error);
    const handPitch=Math.max(-Math.PI/9,Math.min(Math.PI/9,relativeToolPitch(this.anchor.handQ,frame.right.q)));
    const pitchError=s.finite_position!.pitch_enabled?handPitch-relativeToolPitch(this.anchor.tcpQ,s.actual_tcp.q):0;
-   const translationDeadband=docker ? .004 : .001;
-   const angleDeadband=docker?Math.PI/240:Math.PI/600;
+   const translationDeadband=.001;
+   const angleDeadband=Math.PI/600;
    const handSpin=Math.max(-Math.PI/2,Math.min(Math.PI/2,relativeToolSpin(this.anchor.handQ,frame.right.q)));
    const spinError=s.finite_position!.spin_enabled?handSpin-relativeToolSpin(this.anchor.tcpQ,s.actual_tcp.q):0;
    const pitch=Math.abs(pitchError)>angleDeadband?Math.sign(pitchError):0;

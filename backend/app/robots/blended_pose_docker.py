@@ -18,7 +18,7 @@ from app.schemas.messages import Pose
 class DockerPosePort(DockerBlendPort):
     dimensions = 6
     input_expiry_drains = True
-    radians_per_unit = math.radians(.5)/.004
+    radians_per_unit = math.radians(1.)/.004
 
     def input_direction(self, intent):
         if intent.kind == 'release':return (0.,)*6
@@ -77,7 +77,7 @@ def audit_pose_path(positions, orientations, joints, *, model, settings, referen
     first=Rotation.from_quat(orientations[0])
     rotation=(Rotation.from_quat(orientations[-1])*first.inv()).as_rotvec()
     radians=float(np.linalg.norm(rotation))
-    if distance>.008000001 or radians>math.radians(1.01) or max(distance,radians)<1e-6:
+    if distance>.008000001 or radians>math.radians(2.01) or max(distance,radians)<1e-6:
         raise ValueError('blend_pose_length')
     if not np.allclose(p,p[0]+np.linspace(0,1,5)[:,None]*delta,atol=1e-9,rtol=0):
         raise ValueError('blend_path_not_linear')
@@ -96,12 +96,16 @@ def audit_pose_path(positions, orientations, joints, *, model, settings, referen
         j=np.asarray(model.jacobian(tuple(configuration)))
         if j.shape!=(6,6) or not np.isfinite(j).all() or np.linalg.cond(j)>1e6:raise ValueError('blend_singular_path')
         matrices.append(j)
-    # movel uses linear speed for translating paths, angular speed for pure
-    # rotation. Bound both components when translating and turning together.
-    length=distance if distance>1e-6 else radians
+    # Classify sub-0.1mm translation as rotation-dominated for rate scaling.
+    # Otherwise micrometre feedback drift collapses the native speed argument.
+    # Both measured path components remain in the twist/J/Jdot audit; this is
+    # a Docker-tested parameterization, not a physical SDK unit guarantee.
+    translating=distance>.0001 or radians<1e-6
+    length=distance if translating else radians
     twist=np.r_[delta,rotation]/length
     limits=settings.control
-    speed=.02;acceleration=.1
+    speed=.02 if translating else .12
+    acceleration=.1 if translating else .2
     for gain,v,a in ((distance/length,limits.max_tcp_speed_mps,limits.max_tcp_acceleration_mps2),
                      (radians/length,limits.max_tcp_rotation_radps,limits.max_tcp_angular_acceleration_radps2)):
         if gain>1e-12:speed=min(speed,v/gain);acceleration=min(acceleration,a/gain)

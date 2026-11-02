@@ -42,7 +42,7 @@ it('Docker Trigger drains arm, grasps with Grip held, then recaptures without ch
  expect(r.stops).toEqual([]);
 });
 
-it('Docker uses half-step deadbands and tool spin without chasing an overshot 8mm goal',()=>{
+it('Docker ignores robot endpoint error and releases a stationary hand before forearm spin',()=>{
  const r=rig();let s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{...state.finite_position!,policy:'finite_position_docker',pitch_enabled:true,spin_enabled:true}};
  const apply=(t:number,grip:boolean,p:[number,number,number],q:[number,number,number,number]=[0,0,0,1])=>{
   r.setNow(t);r.xr.update(s,t);r.xr.apply({v:1,type:'vr_frame',session_id:'test',seq:t,client_mono_ms:t,
@@ -50,10 +50,11 @@ it('Docker uses half-step deadbands and tool spin without chasing an overshot 8m
  };
  apply(0,false,[0,0,0]);apply(20,true,[0,0,0]);apply(40,true,[.005,0,0]);
  expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[1,0,0]});
- s={...s,actual_tcp:{...s.actual_tcp,p:[.308,0,.4]}};apply(60,true,[.005,0,0]);
+ s={...s,actual_tcp:{...s.actual_tcp,p:[.308,0,.4]}};
+ for(let t=60;t<=160;t+=20)apply(t,true,[.005,0,0]);
  expect(r.inputs.at(-1).kind).toBe('release');
- apply(80,false,[0,0,0]);apply(100,true,[0,0,0]);
- apply(120,true,[0,0,0],[0,0,Math.sin(.02),Math.cos(.02)]);
+ apply(180,false,[0,0,0]);apply(200,true,[0,0,0]);
+ apply(240,true,[0,0,0],[0,-Math.sin(.02),0,Math.cos(.02)]);
  expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[0,0,0],spin:1});
 });
 it('follows relative hand pitch while keeping pure pitch translation zero and holds on release',()=>{
@@ -108,7 +109,7 @@ it('uses the Docker display window only while live XR samples remain fresh',()=>
    tracking_valid:true,visibility:'visible',right:{p,q:[0,0,0,1],grip,trigger:0}});
  }
  r.xr.update(docker,0);apply(0,false,[0,0,0]);apply(20,true,[0,0,0]);
- for(let t=40;t<=520;t+=20){apply(t,true,[.005,0,0]);if(t===200)expect(r.inputs.at(-1).kind).toBe('held');}
+ for(let t=40;t<=520;t+=20){apply(t,true,[t*.00005,0,0]);if(t===200)expect(r.inputs.at(-1).kind).toBe('held');}
  expect(r.inputs.at(-1).kind).toBe('release');expect(r.stops).toEqual([]);
  const n=r.inputs.length;r.xr.update(docker,540);apply(540,true,[.01,0,0]);expect(r.inputs).toHaveLength(n);
 });
@@ -219,4 +220,16 @@ it('does not replay Trigger release after a pending claw crosses a display gap',
  r.xr.onGripperResult({v:1,type:'gripper_result',request_id:r.claws[0].request_id,accepted:true,message:'returned'});
  r.frame(140,false,[0,0,0],0);r.frame(160,false,[0,0,0],0);
  expect(r.claws).toHaveLength(1);expect(r.cancelled).toEqual([]);
+});
+
+it('Docker live hand motion stops without requiring release of Grip or arrival at an old target',()=>{
+ const r=rig();const s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{...state.finite_position!,policy:'finite_position_docker',pitch_enabled:true,spin_enabled:true}};
+ const apply=(t:number,grip:boolean,x:number)=>{r.setNow(t);r.xr.update(s,t);r.xr.apply({v:1,type:'vr_frame',session_id:'test',seq:t,client_mono_ms:t,tracking_valid:true,visibility:'visible',right:{p:[x,0,0],q:[0,0,0,1],grip,trigger:0}});};
+ apply(0,false,0);apply(20,true,0);
+ for(let t=40;t<=120;t+=20)apply(t,true,t*.0001);
+ expect(r.inputs.at(-1).kind).toBe('held');
+ for(let t=140;t<=260;t+=20)apply(t,true,.012);
+ expect(r.inputs.at(-1).kind).toBe('release');
+ apply(280,true,.016);expect(r.inputs.at(-1).kind).toBe('held');
+ expect(r.stops).toEqual([]);
 });
