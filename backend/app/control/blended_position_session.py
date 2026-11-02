@@ -22,7 +22,9 @@ class BlendFeedback:
 class BlendedPositionSession:
     def __init__(self, port, binding, *, lower, upper, clock, authorize):
         if port.policy != 'docker_blended_candidate':
-            raise ValueError('blend_docker_candidate_required')
+            from app.commissioning.blended_trial import RealBlendTrialPort
+            if type(port) is not RealBlendTrialPort:
+                raise ValueError('blend_docker_candidate_required')
         self.port, self.binding, self.clock, self.authorize = port, binding, clock, authorize
         self.gate = BlendedPositionGate(binding, lower, upper, clock=clock)
         self.phase, self.reason = 'ready', None

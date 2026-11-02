@@ -18,6 +18,7 @@ class DockerBlendPlan:
     audit: object
     binding: object
     start: tuple
+    joints: tuple = ()
 
 
 class DockerBlendPort:
@@ -124,7 +125,7 @@ class DockerBlendPort:
             audit = await asyncio.to_thread(audit_blended_path, points, joints, self.orientation,
                                            model=a.position_model, settings=a.settings)
         self.check()
-        self.plan = DockerBlendPlan(target, pose_to_lebai(Pose(p=target.position, q=self.orientation)), audit, self.binding, start)
+        self.plan = DockerBlendPlan(target, pose_to_lebai(Pose(p=target.position, q=self.orientation)), audit, self.binding, start,tuple(joints))
         return self.plan
 
     async def submit(self, plan, *, entering):

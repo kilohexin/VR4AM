@@ -122,6 +122,8 @@ def metadata(paths):
 
 
 class Inputs:
+    def expected_preview(self):return preview(self.p)
+    def confirmation(self):return CONFIRM
     def __init__(self,p,approved,digest,expires,confirm):
         self.p,self.approved,self.digest,self.expires,self.confirm=p,approved,digest,expires,confirm
         self.runtime_metadata=None;self.input_metadata=None;self.copies={}
@@ -130,9 +132,9 @@ class Inputs:
         try:
             expiry=datetime.fromisoformat(self.expires.replace('Z','+00:00'));now=datetime.now(UTC)
             if (expiry.utcoffset()!=timedelta(0) or not now<expiry<=now+timedelta(minutes=10)
-                    or self.expires!=self.p['authorization_expires_utc'] or self.confirm!=CONFIRM):raise ValueError
+                    or self.expires!=self.p['authorization_expires_utc'] or self.confirm!=self.confirmation()):raise ValueError
             raw=Path(self.approved).read_bytes()
-            if hashlib.sha256(raw).hexdigest()!=self.digest or json.loads(raw)!=preview(self.p):raise ValueError
+            if hashlib.sha256(raw).hexdigest()!=self.digest or json.loads(raw)!=self.expected_preview():raise ValueError
             if sha(self.p['config'])!=self.p['input_hashes'][str(self.p['config'])]:raise ValueError
             paths=(*self.p['input_hashes'],*self.copies)
             if self.input_metadata is not None and metadata(paths)!=self.input_metadata:raise ValueError
