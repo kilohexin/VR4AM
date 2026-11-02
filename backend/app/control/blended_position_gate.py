@@ -38,6 +38,12 @@ class BlendedPositionGate:
         now=self._live(binding);integer(seq);integer(stamp);d=vector(direction,3)
         if seq<=self.seq or stamp<self.stamp or not 0<=now-stamp<INPUT_NS:raise ValueError('blend_input_expired')
         n=math.hypot(*d);d=tuple(x/n for x in d) if n>.15 else None
+        # Keep a fixed heading inside a small cone; compare to the issued or
+        # reserved heading, never accumulate small turns from frame to frame.
+        reference=self.direction or (self.reserved.direction if self.reserved else self.latest)
+        if (d is not None and reference is not None and not self.draining
+                and sum(x*y for x,y in zip(d,reference))>=math.cos(math.radians(5))-1e-12):
+            d=reference
         if d!=self.latest:
             self.barrier+=1
             if self.tail is not None:self.draining=True

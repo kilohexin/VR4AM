@@ -89,6 +89,18 @@ async def test_release_during_planning_prevents_write():
     assert not p.writes and not p.stops and not s.closed
 
 
+async def test_live_hand_direction_noise_does_not_drain_each_segment():
+    s,p=rig()
+    for seq in range(1,13):
+        offer(s,p,seq,(0. if seq==1 else .02*(-1)**seq,0.,1.))
+        await tick(s,p)
+        assert not s.gate.draining
+    assert len(p.writes)==12 and not p.stops
+    offer(s,p,13,(0.,0.,0.))
+    for _ in range(15):await tick(s,p)
+    assert s.phase=='ready' and len(p.writes)==12
+
+
 async def test_release_during_rpc_owns_late_result_and_drains():
     s, p = rig()
     async def release():offer(s, p, 2, (0., 0., 0.))

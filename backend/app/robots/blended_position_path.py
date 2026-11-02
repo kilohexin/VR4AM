@@ -14,6 +14,27 @@ class BlendPathAudit:
     samples: int
 
 
+def audited_rates(q, matrices, direction, *, model, limits, speed, acceleration):
+    """Reduce tangential acceleration independently of feasible speed."""
+    for _ in range(10):
+        candidate=acceleration;valid=True
+        for configuration,j in zip(q,matrices):
+            gain=np.linalg.solve(j,direction)
+            qd=gain*speed
+            jd=np.asarray(model.jdot(tuple(configuration),tuple(qd)))
+            if jd.shape!=(6,6) or not np.isfinite(jd).all():raise ValueError('blend_invalid_model')
+            curvature=np.abs(np.linalg.solve(j,jd@qd))
+            room=limits.max_joint_acceleration_radps2-curvature
+            if np.max(np.abs(qd))>limits.max_joint_speed_radps or np.any(room<=0):
+                valid=False;break
+            nonzero=np.abs(gain)>1e-12
+            if np.any(nonzero):candidate=min(candidate,float(np.min(room[nonzero]/np.abs(gain[nonzero])))*.999999)
+        if valid and candidate>1e-6:
+            return speed,candidate
+        speed/=2
+    raise ValueError('blend_model_rates')
+
+
 def audit_blended_path(positions, joints, orientation, *, model, settings):
     if len(positions) != 5 or len(joints) != 5:
         raise ValueError('blend_path_samples')
@@ -48,20 +69,5 @@ def audit_blended_path(positions, joints, orientation, *, model, settings):
     limits = settings.control
     speed = min(.02, limits.max_tcp_speed_mps)
     acceleration = min(.1, limits.max_tcp_acceleration_mps2)
-    for _ in range(10):
-        valid = True
-        for configuration, j in zip(q, matrices):
-            qd = np.linalg.solve(j, direction*speed)
-            jd = np.asarray(model.jdot(tuple(configuration), tuple(qd)))
-            if jd.shape != (6, 6) or not np.isfinite(jd).all():
-                raise ValueError('blend_invalid_model')
-            # Both signs of tangential acceleration; includes curvature in
-            # joint coordinates even though the Cartesian path is straight.
-            acceleration_bound = np.abs(np.linalg.solve(j, direction*acceleration)) + np.abs(np.linalg.solve(j, jd@qd))
-            valid &= (np.max(np.abs(qd)) <= limits.max_joint_speed_radps
-                      and np.max(acceleration_bound) <= limits.max_joint_acceleration_radps2)
-        if valid:
-            return BlendPathAudit(speed, acceleration, model.model_sha256, len(q))
-        speed /= 2
-        acceleration /= 4
-    raise ValueError('blend_model_rates')
+    speed,acceleration=audited_rates(q,matrices,direction,model=model,limits=limits,speed=speed,acceleration=acceleration)
+    return BlendPathAudit(speed,acceleration,model.model_sha256,len(q))

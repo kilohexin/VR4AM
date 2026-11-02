@@ -10,6 +10,7 @@ if(admitted.runtime!=='LEBAI_DOCKER'||admitted.sdk_target!=='127.0.0.1:3030'||ad
 const ws=new WebSocket(`ws://127.0.0.1:${port}/ws/v1/teleop`);
 let state:any=null,generation=-1,seq=0,timer:any=null,closed=false;
 let continuous=false;
+let noisyDirection=false;
 let directInput=false;
 const timing={maxFrameGapMs:0,maxStateGapMs:0,inputRejections:0};
 let lastFrameAt:number|null=null,lastStateAt:number|null=null;
@@ -69,12 +70,24 @@ try{
   const frame:any={v:1,type:'vr_frame',session_id:'quest-synthetic',seq:++seq,
    client_mono_ms:now,tracking_valid:hand.tracked,visibility:'visible',
    right:{p:[...hand.p],q:[...hand.q],grip:hand.grip,trigger:hand.trigger}};
-  if(continuous)input.offer([0,0,0],0,Math.floor(state.finite_position.entered_steps/2)%2===0?1:-1);
+  if(noisyDirection)input.offer([.025*Math.sin(seq),0,1]);
+  else if(continuous)input.offer([0,0,0],0,Math.floor(state.finite_position.entered_steps/2)%2===0?1:-1);
   else if(!directInput)xr.apply(frame);
   send(finiteXRTransportFrame(frame));
  },20);
  await prepare('initial');
  const preparedGeneration=generation;
+ if(process.argv.includes('--direction-noise')){
+  const started=performance.now(),steps=state.finite_position.entered_steps,z=state.actual_tcp.p[2];
+  directInput=true;noisyDirection=true;
+  await wait(()=>state.finite_position.entered_steps>=steps+6,'noisy_direction_continuation',20000);
+  noisyDirection=false;input.release();const released=performance.now(),releaseZ=state.actual_tcp.p[2];
+  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','noisy_direction_release');
+  console.log('PASS noisy direction continuation',JSON.stringify({steps:state.finite_position.entered_steps-steps,
+   totalMs:performance.now()-started,releaseToReadyMs:performance.now()-released,
+   reportedDistanceMm:(state.actual_tcp.p[2]-z)*1000,reportedReleaseResidualMm:(state.actual_tcp.p[2]-releaseZ)*1000}));
+  xr.reset();directInput=false;await sleep(100);
+ }
  if(process.argv.includes('--continuous')){
   const started=performance.now();directInput=true;continuous=true;
   await wait(()=>state.finite_position.entered_steps>=12&&performance.now()-started>11000,'continuous_gesture',45000);

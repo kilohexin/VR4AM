@@ -26,8 +26,19 @@ def test_cartesian_path_uses_inverse_jacobian_rate_limits():
     p,q,s,m=fixture();m.gain=.1
     q=[tuple(x/.1 for x in row) for row in q]
     result=audit_blended_path(p,q,(0,0,0,1),model=m,settings=s)
-    assert result.speed<=.02 and result.acceleration/.1<=s.control.max_joint_acceleration_radps2
+    assert result.speed==.02 and result.acceleration/.1<=s.control.max_joint_acceleration_radps2
     assert result.samples==5
+
+
+@pytest.mark.parametrize('curved',[False,True])
+def test_speed_and_curvature_limits_still_reduce_infeasible_speed(curved):
+    p,q,s,m=fixture()
+    s=replace(s,control=replace(s.control,max_joint_speed_radps=.012))
+    if curved:m.jdot=lambda q,qd:np.eye(6)*30
+    result=audit_blended_path(p,q,(0,0,0,1),model=m,settings=s)
+    assert result.speed<=.012
+    assert result.acceleration+(30*result.speed if curved else 0)<=s.control.max_joint_acceleration_radps2
+    if curved:assert result.speed<.01
 
 
 @pytest.mark.parametrize('damage,reason',[

@@ -21,6 +21,23 @@ def test_finished_id_does_not_erase_geometric_backlog():
     t=g.reserve(b,(0,0,.005),n[0]);assert t.position==(0.,0.,.012)
 
 
+def test_small_direction_noise_keeps_fixed_heading_without_accumulating_turn():
+    import math
+    g,b,n=rig();offer(g,b,n);send(g,b,n)
+    for seq,deg in enumerate((1,-2,3,-4,5),2):
+        offer(g,b,n,seq,(math.sin(math.radians(deg)),0,math.cos(math.radians(deg))))
+        assert not g.draining and g.latest==(0.,0.,1.)
+    offer(g,b,n,7,(math.sin(math.radians(6)),0,math.cos(math.radians(6))))
+    assert g.draining
+
+
+def test_noise_during_reservation_preserves_entry_but_release_still_revokes():
+    g,b,n=rig();offer(g,b,n);t=g.reserve(b,(0,0,0),n[0])
+    offer(g,b,n,2,(.01,0,1));g.require_entry(b,t,(0,0,0),n[0])
+    offer(g,b,n,3,(0,0,0))
+    with pytest.raises(ValueError,match='entry_revoked'):g.require_entry(b,t,(0,0,0),n[0])
+
+
 def test_release_revokes_unsent_and_late_reply_still_drains():
     g,b,n=rig();offer(g,b,n);t=g.reserve(b,(0,0,0),n[0])
     offer(g,b,n,2,(0,0,0))

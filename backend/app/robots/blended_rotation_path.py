@@ -2,7 +2,7 @@
 import math
 import numpy as np
 from scipy.spatial.transform import Rotation
-from app.robots.blended_position_path import BlendPathAudit
+from app.robots.blended_position_path import BlendPathAudit,audited_rates
 from app.robots.finite_position_plan import angle
 
 
@@ -32,14 +32,5 @@ def audit_rotation_path(position, orientations, joints, *, model, settings, refe
         matrices.append(j)
     limits=settings.control
     speed=min(.02,limits.max_tcp_rotation_radps);acceleration=min(.1,limits.max_tcp_angular_acceleration_radps2)
-    for _ in range(10):
-        valid=True
-        for configuration,j in zip(q,matrices):
-            qd=np.linalg.solve(j,twist*speed)
-            jd=np.asarray(model.jdot(tuple(configuration),tuple(qd)))
-            if jd.shape!=(6,6) or not np.isfinite(jd).all():raise ValueError('blend_invalid_model')
-            bound=np.abs(np.linalg.solve(j,twist*acceleration))+np.abs(np.linalg.solve(j,jd@qd))
-            valid &= np.max(np.abs(qd))<=limits.max_joint_speed_radps and np.max(bound)<=limits.max_joint_acceleration_radps2
-        if valid:return BlendPathAudit(speed,acceleration,model.model_sha256,5)
-        speed/=2;acceleration/=4
-    raise ValueError('blend_model_rates')
+    speed,acceleration=audited_rates(q,matrices,twist,model=model,limits=limits,speed=speed,acceleration=acceleration)
+    return BlendPathAudit(speed,acceleration,model.model_sha256,5)
