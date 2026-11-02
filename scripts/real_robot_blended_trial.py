@@ -28,8 +28,8 @@ def preview(p):
         sdk_binary_sha256=single.identity.SDK_SHA,model_sha256=p['model'].model_sha256,
         session_s=20,cleanup_s=5,max_reads=4096,readonly_tail_s=2,
         prepare_tolerance_rad=.001,
-        pending=['injected_full_run_and_sdk_loopback','native_activation',
-                 'current_readonly_site_survey','fresh_onsite_authorization','physical_empty_load_acceptance'])
+        native_entry_available=True,
+        pending=['current_readonly_site_survey','fresh_onsite_authorization','physical_empty_load_acceptance'])
     return result
 
 
@@ -39,11 +39,11 @@ class Inputs(single.Inputs):
 
 
 async def run(p,inputs,*,client_factory=None,clock=time.perf_counter_ns,sleep=asyncio.sleep):
-    # Keep hardware closed until full-run/SDK loopback acceptance is available.
-    if client_factory is None:raise ValueError('blend_trial_native_activation_pending_validation')
     inputs.cold()
     if single.existing_rpc_connections():raise ValueError('blend_trial_existing_rpc')
-    if client_factory is None:single.identity.require_execution_runtime()
+    if client_factory is None:
+        single.identity.require_execution_runtime()
+        if clock is not time.perf_counter_ns or sleep is not asyncio.sleep:raise ValueError('blend_trial_native_clock_override')
     output=p['output'];output.mkdir(parents=True,exist_ok=False)
     (output/'admission.json').write_text(json.dumps(preview(p),indent=2),encoding='utf-8')
     window=TrialWindow(inputs.write,clock);session=None;adapter=None;port=None
@@ -74,6 +74,7 @@ async def run(p,inputs,*,client_factory=None,clock=time.perf_counter_ns,sleep=as
             upper=p['settings'].startup_tcp_max_m,clock=clock,authorize=inputs.read)
         seq=0;released=False
         while clock()-window.start<18_000_000_000:
+            if session.closed:raise ValueError(session.reason)
             seq+=1;released=released or session.entered_steps>=2
             session.offer(PositionIntent('bounded-trial',1,seq,clock(),
                 'release' if released else 'held',(0.,0.,0.) if released else (0.,0.,1.)))
@@ -84,6 +85,9 @@ async def run(p,inputs,*,client_factory=None,clock=time.perf_counter_ns,sleep=as
         else:raise ValueError('blend_trial_completion_timeout')
         # Observe the same fixed arrival anchor; do not install a new motion.
         import math
+        expected=tuple(x+(.008 if i==2 else 0.) for i,x in enumerate(port.origin))
+        if session.entered_steps!=2 or math.dist(port.sample.actual_tcp.p,expected)>.001:
+            raise ValueError('blend_trial_endpoint_error')
         anchor=tuple(port.sample.actual_tcp.p);tail_start=clock();tail=[]
         while clock()-tail_start<2_000_000_000:
             feedback=await port.read(())
@@ -103,13 +107,16 @@ async def run(p,inputs,*,client_factory=None,clock=time.perf_counter_ns,sleep=as
             await asyncio.wait({session.worker},timeout=1.)
             if not session.worker.done():result['complete']=False
         if adapter:
-            result.update(unknown_reads=sorted(adapter._snapshot_calls.unknown_methods),
-                unknown_writes=sorted(adapter._motion_calls.unknown_methods),fault=adapter._latched_fault)
+            owner,motion=adapter._snapshot_calls,adapter._motion_calls
             try:await adapter.disconnect()
             except BaseException as error:result.update(complete=False,close_error=type(error).__name__)
+            result.update(unknown_reads=sorted(owner.unknown_methods),
+                unknown_writes=sorted(motion.unknown_methods),fault=adapter._latched_fault,
+                pending_reads=sum(not t.done() for t in owner.tasks),
+                pending_writes=sum(not t.done() for t in motion.tasks))
         result['counts']=dict(window.entries)
         if port is not None:result['observations']=port.observations
-        if result.get('fault') or result.get('unknown_reads') or result.get('unknown_writes'):result['complete']=False
+        if any(result.get(k) for k in ('fault','unknown_reads','unknown_writes','pending_reads','pending_writes','connection_unknown')):result['complete']=False
         (output/'result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
     return result
 
@@ -124,7 +131,18 @@ def main():
     if not args.execute_once:print(json.dumps(preview(p),indent=2));return 0
     inputs=Inputs(p,args.approved_preview,args.approved_preview_sha256,args.authorization_expires_utc,args.confirm)
     from app.commissioning.qpc_event_loop import new_qpc_loop
-    with asyncio.Runner(loop_factory=new_qpc_loop) as runner:result=runner.run(run(p,inputs))
+    loop=new_qpc_loop();task=loop.create_task(run(p,inputs))
+    try:result=loop.run_until_complete(task)
+    except KeyboardInterrupt:
+        task.cancel()
+        try:loop.run_until_complete(asyncio.wait({task},timeout=5.))
+        except KeyboardInterrupt:pass
+        result=dict(complete=False,interrupted=True)
+        if task.done() and not task.cancelled():result.update(task.result(),complete=False,interrupted=True)
+    finally:pending=single.close_loop_bounded(loop)
+    result['pending_tasks_at_process_exit']=pending
+    if pending:result['complete']=False
+    if p['output'].exists():(p['output']/'result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
     print(json.dumps(result));return 0 if result['complete'] else 2
 
 

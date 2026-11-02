@@ -32,6 +32,9 @@ async def test_unknown_native_write_is_not_replayed():
     assert len(calls)==1 and w.unknown
 
 
-async def test_unvalidated_native_activation_rejects_before_any_inputs_or_sdk():
+async def test_native_activation_rejects_bad_scope_before_sdk(monkeypatch):
     from scripts.real_robot_blended_trial import run
-    with pytest.raises(ValueError,match='activation_pending'):await run({},None)
+    from scripts import real_robot_blended_trial as entry
+    def reject():raise ValueError('bad_scope')
+    monkeypatch.setattr(entry.single,'load_sdk',lambda:pytest.fail('SDK must not load'))
+    with pytest.raises(ValueError,match='bad_scope'):await run({},NS(cold=reject))
