@@ -168,13 +168,14 @@ try{
   throw Error('stationary_regrip_moved');
  console.log('PASS stationary regrip no jump');
  const clawStarted=performance.now();
- // Model an operator squeezing over fresh frames. A single change during a
- // display gap is intentionally discarded by the product's no-replay rule.
- for(let i=1;i<=30;i++){hand.trigger=.35*i/30;await sleep(20);}
- await wait(()=>state.gripper<.5,'XR_claw_open');
- for(let i=1;i<=30;i++){hand.trigger=.35+.3*i/30;await sleep(20);}
+ // Model an operator squeezing over fresh frames. The 40% waypoint proves
+ // that Docker preserves analogue Trigger values instead of collapsing to
+ // open/closed. A display gap still never replays an old target.
+ for(let i=1;i<=30;i++){hand.trigger=.4*i/30;await sleep(20);}
+ await wait(()=>state.gripper>.3&&state.gripper<.5&&pendingClaws.size===0,'XR_claw_analogue_40');
+ for(let i=1;i<=30;i++){hand.trigger=.4+.6*i/30;await sleep(20);}
  await wait(()=>state.gripper>.95&&pendingClaws.size===0,'XR_claw_close');
- console.log('PASS XR Trigger close',state.gripper,'two gesture ramps and travel ms',performance.now()-clawStarted);
+ console.log('PASS XR Trigger analogue waypoint and close',state.gripper,'two gesture ramps and travel ms',performance.now()-clawStarted);
  // Same prepared generation: closed claw -> lift -> carry -> lower -> open.
  for(const [axis,sign] of [[2,1],[0,1],[2,-1]]){
   hand.grip=false;await sleep(120);hand.grip=true;await sleep(80);

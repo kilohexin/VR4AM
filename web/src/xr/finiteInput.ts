@@ -27,7 +27,7 @@ export class FiniteXRInput {
  private anchor:{hand:Vec3;tcp:Vec3;handQ:Quat;tcpQ:Quat}|null=null;private mustRelease=true;
  private lastTime:number|null=null;private trigger:number|null=null;
  private pending:string|null=null;private lastClaw=-Infinity;private sequence=0;
- private clawPause=false;private gesture=new DockerGesture();private triggerClosed=false;
+ private clawPause=false;private gesture=new DockerGesture();
  constructor(private position:FinitePositionInput,private sendClaw:(m:GripperRequestMessage)=>void,
   private cancelClaw:(id:string)=>void,private now:()=>number=()=>performance.now()){}
  update(state:RobotStateMessage|null,receivedAt:number):void {
@@ -39,7 +39,7 @@ export class FiniteXRInput {
  reset(reason='xr_reset'):void {
   this.position.abort(reason);
   if(this.pending)this.cancelClaw(this.pending);
-  this.pending=null;this.anchor=null;this.gesture.reset();this.mustRelease=true;this.lastTime=null;this.trigger=null;this.triggerClosed=false;this.clawPause=false;
+  this.pending=null;this.anchor=null;this.gesture.reset();this.mustRelease=true;this.lastTime=null;this.trigger=null;this.clawPause=false;
  }
  apply(frame:VRFrame):void {
   const s=this.state,t=this.now();
@@ -68,13 +68,13 @@ export class FiniteXRInput {
   }
   if(docker){
    const raw=Math.max(0,Math.min(1,frame.right.trigger));
-   // Two deliberate states avoid repeated arm pauses from analogue jitter.
-   if(raw>=.55)this.triggerClosed=true;
-   else if(raw<=.35)this.triggerClosed=false;
-   const value=this.triggerClosed?1:0;
+   // Preserve analogue grasp intent, but quantise it to stable 5% targets.
+   // At most one request is in flight; later frames coalesce to the newest
+   // live value instead of queueing every controller sample.
+   const value=Math.round(raw*20)/20;
    if(!clawFeedbackFresh&&!this.clawPause&&!this.pending)this.trigger=value;
    if(this.trigger===null)this.trigger=value;
-   if(Math.abs(value-this.trigger)>=.005)this.clawPause=true;
+   if(Math.abs(value-this.trigger)>=.025)this.clawPause=true;
    if(this.clawPause||this.pending){
     // Trigger owns a pause, not a competing motion. Only current live input
     // may be sent after the existing arm segment naturally drains.
@@ -82,7 +82,7 @@ export class FiniteXRInput {
     if(!frame.right.grip)this.mustRelease=false;
     if(!this.pending&&clawFeedbackFresh&&s.robot_state==='IDLE'
       &&['ready','hold'].includes(s.finite_position!.phase)&&t-this.lastClaw>=100){
-     if(Math.abs(value-this.trigger)>=.005){
+     if(Math.abs(value-this.trigger)>=.025){
       this.trigger=value;this.lastClaw=t;this.pending=`xr-claw-${++this.sequence}-${Date.now()}`;
       this.sendClaw({v:1,type:'gripper_request',request_id:this.pending,value});
      }else this.clawPause=false;

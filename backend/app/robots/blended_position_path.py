@@ -69,7 +69,11 @@ def audit_blended_path(positions, joints, orientation, *, model, settings):
             raise ValueError('blend_singular_path')
         matrices.append(j)
     limits = settings.control
-    speed = min(.02, limits.max_tcp_speed_mps)
-    acceleration = min(.1, limits.max_tcp_acceleration_mps2)
+    # Docker experience profile: 30 mm/s keeps a 4 mm segment long enough for
+    # the next audited target to be queued while improving hand response. The
+    # inverse-Jacobian/Jdot audit below still reduces either rate when a joint
+    # or curvature limit requires it. Real selectors do not use this port.
+    speed = min(.03, limits.max_tcp_speed_mps)
+    acceleration = min(.15, limits.max_tcp_acceleration_mps2)
     speed,acceleration=audited_rates(q,matrices,direction,model=model,limits=limits,speed=speed,acceleration=acceleration)
     return BlendPathAudit(speed,acceleration,model.model_sha256,len(q))

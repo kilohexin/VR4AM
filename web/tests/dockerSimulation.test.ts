@@ -30,7 +30,8 @@ it('sends Docker pitch through finite inputs and releases without a legacy grip 
   event('pointerdown');const frame:VRFrame={v:1,type:'vr_frame',session_id:'desktop',seq:1,
    client_mono_ms:0,tracking_valid:true,visibility:'visible',right:{p:[0,0,0],q:[0,0,0,1],grip:false,trigger:0}};
   expect(panel.applyFrame(frame).right.grip).toBe(false);
-  expect(intents.at(-1)).toEqual([[0,0,0],'held',undefined,1]);
+  // UI “抬头” uses the corrected controller-local pitch sign.
+  expect(intents.at(-1)).toEqual([[0,0,0],'held',undefined,-1]);
   event('pointerup');expect(intents.at(-1)?.[1]).toBe('release');
  }finally{panel.dispose();root.remove();}
 });

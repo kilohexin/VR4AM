@@ -113,7 +113,7 @@ describe('grasp block resources', () => {
 });
 
 describe('desktop VR frame path', () => {
-  it('keeps left-drag, Space and wheel neutral while retaining right-drag camera orbit', () => {
+  it('keeps canvas input robot-neutral while left-drag orbits and the wheel zooms', () => {
     Object.defineProperty(document, 'visibilityState', {configurable: true, value: 'visible'});
     const canvas = document.createElement('canvas');
     document.body.append(canvas);
@@ -135,25 +135,29 @@ describe('desktop VR frame path', () => {
     });
     scene.addListeners();
     try {
+      const beforeOrbit = camera.position.clone();
       canvas.dispatchEvent(pointerEvent('pointerdown', 3));
       canvas.dispatchEvent(pointerEvent('pointermove', 3, 0, 50, -40));
+      canvas.dispatchEvent(pointerEvent('pointerup', 3));
+      expect(camera.position.equals(beforeOrbit)).toBe(false);
+      const beforeZoom = camera.position.clone();
       const key = new KeyboardEvent('keydown', {code: 'Space', bubbles: true, cancelable: true});
       canvas.dispatchEvent(key);
       const wheel = new WheelEvent('wheel', {deltaY: 100, cancelable: true});
       canvas.dispatchEvent(wheel);
+      expect(camera.position.equals(beforeZoom)).toBe(false);
       scene.sendDesktopFrame(20);
       expect(scene.controllerPosition.toArray()).toEqual([0.56, 0.42, 0.18]);
       expect(onFrame.mock.calls[0][0].right).toEqual({
         p: [0.56, 0.42, 0.18], q: [0, 0, 0, 1], grip: false, trigger: 0,
       });
       expect(key.defaultPrevented).toBe(false);
-      expect(wheel.defaultPrevented).toBe(false);
-      const beforeOrbit = camera.position.clone();
-      canvas.dispatchEvent(pointerEvent('pointerup', 3));
+      expect(wheel.defaultPrevented).toBe(true);
+      const beforeRight = camera.position.clone();
       canvas.dispatchEvent(pointerEvent('pointerdown', 4, 2));
       canvas.dispatchEvent(pointerEvent('pointermove', 4, 2, 30, 20));
       canvas.dispatchEvent(pointerEvent('pointerup', 4, 2));
-      expect(camera.position.equals(beforeOrbit)).toBe(false);
+      expect(camera.position.equals(beforeRight)).toBe(true);
       scene.sendDesktopFrame(40);
       expect(onFrame.mock.calls[1][0].right).toEqual(onFrame.mock.calls[0][0].right);
     } finally {
