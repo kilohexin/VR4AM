@@ -70,7 +70,7 @@ export function describeVrSafety(
       core.title=finite.phase==='planning'?'正在规划小步':finite.phase==='draining'?'正在完成当前小步':'小步执行中';
       core.instruction='松开 Grip 后完成当前小步 · B 请求停止';
     }else if(state.phase==='armed')core.instruction=finite.policy==='finite_position_docker'
-      ?'Grip：移动/屈伸/拧前臂 · 手停收尾 · Trigger开合'
+      ?'Grip：前后左右上下 · 固定朝向 · Trigger夹紧/松开'
       :finite.pitch_enabled?'Grip 控制平移和手腕俯仰 · Trigger 控制开合':'Grip 控制平移 · Trigger 控制开合';
   }
   const statusLine = formatRuntimeSummary(summary)

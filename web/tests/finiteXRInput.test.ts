@@ -34,7 +34,7 @@ it('Docker Trigger drains arm, grasps with Grip held, then recaptures without ch
  s={...s,robot_state:'MOVING',finite_position:{...s.finite_position!,phase:'executing'}};
  apply(60,true,.02,.6);expect(r.inputs.at(-1).kind).toBe('release');expect(r.claws).toHaveLength(0);
  s={...s,robot_state:'IDLE',finite_position:{...s.finite_position!,phase:'ready'}};
- apply(100,true,.2,.6);expect(r.claws).toHaveLength(1);expect(r.claws[0].value).toBe(.6);
+ apply(100,true,.2,.6);expect(r.claws).toHaveLength(1);expect(r.claws[0].value).toBe(1);
  const count=r.inputs.length;apply(120,true,.3,.6);expect(r.inputs).toHaveLength(count);
  r.xr.onGripperResult({v:1,type:'gripper_result',request_id:r.claws[0].request_id,accepted:true,message:'returned'});
  apply(200,true,.3,.6);apply(220,true,.3,.6);expect(r.inputs).toHaveLength(count);
@@ -42,7 +42,7 @@ it('Docker Trigger drains arm, grasps with Grip held, then recaptures without ch
  expect(r.stops).toEqual([]);
 });
 
-it('Docker ignores robot endpoint error and releases a stationary hand before forearm spin',()=>{
+it('Docker ignores robot endpoint error and all wrist rotations',()=>{
  const r=rig();let s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{...state.finite_position!,policy:'finite_position_docker',pitch_enabled:true,spin_enabled:true}};
  const apply=(t:number,grip:boolean,p:[number,number,number],q:[number,number,number,number]=[0,0,0,1])=>{
   r.setNow(t);r.xr.update(s,t);r.xr.apply({v:1,type:'vr_frame',session_id:'test',seq:t,client_mono_ms:t,
@@ -55,7 +55,7 @@ it('Docker ignores robot endpoint error and releases a stationary hand before fo
  expect(r.inputs.at(-1).kind).toBe('release');
  apply(180,false,[0,0,0]);apply(200,true,[0,0,0]);
  apply(240,true,[0,0,0],[0,-Math.sin(.02),0,Math.cos(.02)]);
- expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[0,0,0],spin:1});
+ expect(r.inputs.at(-1).kind).toBe('release');
 });
 it('follows relative hand pitch while keeping pure pitch translation zero and holds on release',()=>{
  const r=rig();const s={...state,finite_position:{...state.finite_position!,pitch_enabled:true}};
@@ -123,7 +123,7 @@ it('does not dispatch or replay a new Docker claw target across a 100ms display 
  }
  r.xr.update(docker,0);apply(0,0);apply(80,0);apply(120,.7);expect(r.claws).toHaveLength(0);
  r.xr.update(docker,140);apply(140,.7);expect(r.claws).toHaveLength(0);
- apply(160,.8);expect(r.claws).toHaveLength(1);
+ apply(160,.2);expect(r.claws).toHaveLength(1);expect(r.claws[0].value).toBe(0);
 });
 it('uses reported TCP to stop following a reached target instead of accumulating goals',()=>{
  const r=rig();r.frame(0);r.frame(20,true);r.frame(40,true,[.002,0,0]);
@@ -232,4 +232,14 @@ it('Docker live hand motion stops without requiring release of Grip or arrival a
  expect(r.inputs.at(-1).kind).toBe('release');
  apply(280,true,.016);expect(r.inputs.at(-1).kind).toBe('held');
  expect(r.stops).toEqual([]);
+});
+
+it('Docker Trigger hysteresis avoids repeated targets while held near the threshold',()=>{
+ const r=rig();const s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{...state.finite_position!,policy:'finite_position_docker'}};
+ const apply=(t:number,trigger:number)=>{r.setNow(t);r.xr.update(s,t);r.xr.apply({v:1,type:'vr_frame',session_id:'test',seq:t,client_mono_ms:t,tracking_valid:true,visibility:'visible',right:{p:[0,0,0],q:[0,0,0,1],grip:true,trigger}});};
+ apply(0,0);apply(20,.6);expect(r.claws[0].value).toBe(1);
+ r.xr.onGripperResult({v:1,type:'gripper_result',request_id:r.claws[0].request_id,accepted:true,message:'returned'});
+ for(let t=40;t<=240;t+=20)apply(t,t%40?.48:.52);
+ expect(r.claws).toHaveLength(1);
+ apply(260,.3);expect(r.claws).toHaveLength(2);expect(r.claws[1].value).toBe(0);
 });

@@ -27,7 +27,7 @@ export class FiniteXRInput {
  private anchor:{hand:Vec3;tcp:Vec3;handQ:Quat;tcpQ:Quat}|null=null;private mustRelease=true;
  private lastTime:number|null=null;private trigger:number|null=null;
  private pending:string|null=null;private lastClaw=-Infinity;private sequence=0;
- private clawPause=false;private gesture=new DockerGesture();
+ private clawPause=false;private gesture=new DockerGesture();private triggerClosed=false;
  constructor(private position:FinitePositionInput,private sendClaw:(m:GripperRequestMessage)=>void,
   private cancelClaw:(id:string)=>void,private now:()=>number=()=>performance.now()){}
  update(state:RobotStateMessage|null,receivedAt:number):void {
@@ -39,7 +39,7 @@ export class FiniteXRInput {
  reset(reason='xr_reset'):void {
   this.position.abort(reason);
   if(this.pending)this.cancelClaw(this.pending);
-  this.pending=null;this.anchor=null;this.gesture.reset();this.mustRelease=true;this.lastTime=null;this.trigger=null;this.clawPause=false;
+  this.pending=null;this.anchor=null;this.gesture.reset();this.mustRelease=true;this.lastTime=null;this.trigger=null;this.triggerClosed=false;this.clawPause=false;
  }
  apply(frame:VRFrame):void {
   const s=this.state,t=this.now();
@@ -67,7 +67,11 @@ export class FiniteXRInput {
    this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=true;this.trigger=null;return;
   }
   if(docker){
-   const value=Math.max(0,Math.min(1,frame.right.trigger));
+   const raw=Math.max(0,Math.min(1,frame.right.trigger));
+   // Two deliberate states avoid repeated arm pauses from analogue jitter.
+   if(raw>=.55)this.triggerClosed=true;
+   else if(raw<=.35)this.triggerClosed=false;
+   const value=this.triggerClosed?1:0;
    if(!clawFeedbackFresh&&!this.clawPause&&!this.pending)this.trigger=value;
    if(this.trigger===null)this.trigger=value;
    if(Math.abs(value-this.trigger)>=.005)this.clawPause=true;
