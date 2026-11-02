@@ -33,3 +33,9 @@ it('rejects small tracking jitter',()=>{
   expect(g.sample(t,[sign*.0001,0,0],[Math.sin(sign*.0005),0,0,Math.cos(sign*.0005)],1)).toEqual({vector:[0,0,0],pitch:0,spin:0});
  }
 });
+
+it('filters wrist pivot translation and weaker cross-axis wobble',()=>{
+ const g=new DockerGesture();g.sample(0,[0,0,0],[0,0,0,1],1);
+ const q=new Quaternion().setFromAxisAngle(new Vector3(1,.1,0).normalize(),.03).toArray() as Quat;
+ expect(g.sample(40,[.001,.0003,0],q,1)).toEqual({vector:[0,0,0],pitch:1,spin:0});
+});

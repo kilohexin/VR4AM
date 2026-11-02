@@ -17,6 +17,7 @@ from app.schemas.messages import Pose
 
 class DockerPosePort(DockerBlendPort):
     dimensions = 6
+    direction_cone_deg = 35
     input_expiry_drains = True
     radians_per_unit = math.radians(1.)/.004
 

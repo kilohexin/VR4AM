@@ -114,3 +114,18 @@ def test_combined_pose_lead_is_bounded_and_release_cancels_all_components():
     g.release_expired()
     assert g.draining and g.released and g.stamp==n[0]
     assert g.reserve(b,first.position,n[0]) is None
+
+
+def test_docker_pose_cone_survives_live_heading_jitter_but_not_reverse_or_release():
+    import math
+    n=[1_000_000_000];b=object()
+    g=BlendedPositionGate(b,(-1.,)*6,(1.,)*6,clock=lambda:n[0],dimensions=6,direction_cone_deg=35)
+    g.offer(b,1,n[0],(0,0,0,1,0,0));target=g.reserve(b,(0.,)*6,n[0])
+    for seq,degrees in enumerate((10,-20,30),2):
+        theta=math.radians(degrees)
+        g.offer(b,seq,n[0],(0,0,0,math.cos(theta),0,math.sin(theta)))
+        g.require_entry(b,target,(0.,)*6,n[0])
+    g.offer(b,5,n[0],(0,0,0,-1,0,0))
+    with pytest.raises(ValueError,match='entry_revoked'):g.require_entry(b,target,(0.,)*6,n[0])
+    g.offer(b,6,n[0],(0.,)*6)
+    with pytest.raises(ValueError,match='entry_revoked'):g.require_entry(b,target,(0.,)*6,n[0])

@@ -26,10 +26,16 @@ export class DockerGesture {
   // https://www.w3.org/TR/webxr/#dom-xrinputsource-gripspace
   const pitch=rotation.x*factor,spin=-rotation.y*factor;
   const angularDeadband=Math.max(.0035,.045*dt/1000);
+  const strongest=Math.max(Math.abs(pitch),Math.abs(spin));
+  const pitchActive=Math.abs(pitch)>Math.max(angularDeadband,strongest*.35);
+  const spinActive=Math.abs(spin)>Math.max(angularDeadband,strongest*.35);
+  // A wrist pivot also moves the tracked grip origin. Do not turn that
+  // millimetre arc into a full-strength translation command.
+  const translationThreshold=(pitchActive||spinActive)?Math.max(.002,.025*dt/1000):Math.max(.0006,.008*dt/1000);
   return {
-   vector:distance>Math.max(.0006,.008*dt/1000)?delta.map(v=>v/distance) as Vec3:zero.vector,
-   pitch:Math.abs(pitch)>angularDeadband?Math.sign(pitch):0,
-   spin:Math.abs(spin)>angularDeadband?Math.sign(spin):0,
+   vector:distance>translationThreshold?delta.map(v=>v/distance) as Vec3:zero.vector,
+   pitch:pitchActive?Math.sign(pitch):0,
+   spin:spinActive?Math.sign(spin):0,
   };
  }
 }

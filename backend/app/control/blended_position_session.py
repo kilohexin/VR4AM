@@ -26,7 +26,8 @@ class BlendedPositionSession:
             if type(port) is not RealBlendTrialPort:
                 raise ValueError('blend_docker_candidate_required')
         self.port, self.binding, self.clock, self.authorize = port, binding, clock, authorize
-        self.gate = BlendedPositionGate(binding, lower, upper, clock=clock,dimensions=getattr(port,'dimensions',3))
+        self.gate = BlendedPositionGate(binding, lower, upper, clock=clock,dimensions=getattr(port,'dimensions',3),
+            direction_cone_deg=getattr(port,'direction_cone_deg',5))
         self.phase, self.reason = 'ready', None
         self.closed = False
         self.worker = None

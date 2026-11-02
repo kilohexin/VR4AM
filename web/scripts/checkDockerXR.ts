@@ -152,12 +152,12 @@ try{
  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_translation_arrival');
  console.log('PASS XR translation/release',state.actual_tcp.p[2]-z);
  const q=[...state.actual_tcp.q];hand.p=[0,0,0];hand.q=[0,0,0,1];await sleep(80);
- hand.grip=true;await sleep(80);let pitchAngle=0;const pitchStarted=performance.now();liveHand=dt=>{pitchAngle+=.35*dt;hand.q=[Math.sin(pitchAngle/2),0,0,Math.cos(pitchAngle/2)];};
+ hand.grip=true;await sleep(80);let pitchAngle=0;const pitchStarted=performance.now();liveHand=dt=>{pitchAngle+=.35*dt;hand.p=[.0003*Math.sin(performance.now()/90),.0003*Math.cos(performance.now()/80),0];hand.q=[Math.sin(pitchAngle/2),0,0,Math.cos(pitchAngle/2)];};
  await wait(()=>relativeToolPitch(q as any,state.actual_tcp.q)>.08,'XR_pitch',12000);liveHand=null;hand.grip=false;
  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_pitch_arrival');
  console.log('PASS XR pitch/release',JSON.stringify({radians:relativeToolPitch(q as any,state.actual_tcp.q),elapsedMs:performance.now()-pitchStarted}));
  const spinQ=[...state.actual_tcp.q];hand.p=[0,0,0];hand.q=[0,0,0,1];await sleep(100);
- hand.grip=true;await sleep(80);let spinAngle=0;const spinStarted=performance.now();liveHand=dt=>{spinAngle+=.35*dt;hand.q=[0,-Math.sin(spinAngle/2),0,Math.cos(spinAngle/2)];};
+ hand.grip=true;await sleep(80);let spinAngle=0;const spinStarted=performance.now();liveHand=dt=>{spinAngle+=.35*dt;hand.p=[.0003*Math.sin(performance.now()/90),.0003*Math.cos(performance.now()/80),0];hand.q=[0,-Math.sin(spinAngle/2),0,Math.cos(spinAngle/2)];};
  await wait(()=>relativeToolSpin(spinQ as any,state.actual_tcp.q)>.08,'XR_spin',12000);liveHand=null;hand.grip=false;
  await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','XR_spin_arrival');
  console.log('PASS XR forearm twist/release',JSON.stringify({radians:relativeToolSpin(spinQ as any,state.actual_tcp.q),elapsedMs:performance.now()-spinStarted}));

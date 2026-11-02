@@ -18,9 +18,11 @@ class BlendTarget:
 class BlendedPositionGate:
     step=.004
     max_lead=.008
-    def __init__(self,binding,lower,upper,*,clock,dimensions=3):
+    def __init__(self,binding,lower,upper,*,clock,dimensions=3,direction_cone_deg=5):
         self.binding=binding;self.clock=clock
         if dimensions not in (3,6):raise ValueError('blend_dimensions')
+        if not 0<=direction_cone_deg<=35:raise ValueError('blend_direction_cone')
+        self.direction_cone_deg=direction_cone_deg
         self.dimensions=dimensions
         self.lower=vector(lower,dimensions);self.upper=vector(upper,dimensions)
         if any(a>=b for a,b in zip(self.lower,self.upper)):raise ValueError('blend_region')
@@ -44,7 +46,7 @@ class BlendedPositionGate:
         # reserved heading, never accumulate small turns from frame to frame.
         reference=self.direction or (self.reserved.direction if self.reserved else self.latest)
         if (d is not None and reference is not None and not self.draining
-                and sum(x*y for x,y in zip(d,reference))>=math.cos(math.radians(5))-1e-12):
+                and sum(x*y for x,y in zip(d,reference))>=math.cos(math.radians(self.direction_cone_deg))-1e-12):
             d=reference
         if d!=self.latest:
             self.barrier+=1
