@@ -3,6 +3,7 @@ disable_auto_sync()
 local interrupt = __INTERRUPT__
 local phase_clock = __PHASE_CLOCK__
 local direct_api = __DIRECT_API__
+local pvt = __PVT__
 local horizon = phase_clock and (direct_api and 0.02 or 0.04) or 0.08
 local entered = false
 local start = timestamp()
@@ -75,11 +76,13 @@ local ok,err = pcall(function()
             local accepted=move_pvat(jp,jv,ja,horizon)
             print('PVAT_NATIVE_RESULT',type(accepted),tostring(accepted))
             assert(accepted==true, 'native_pvat_rejected')
+        elseif pvt then lebai:move_pvt(p,v,horizon)
         else lebai:move_pvat(p,v,a,horizon) end
         local returned=timestamp()
         last=now;count=count+1
         local _,feedback=sample()
-        print('PVAT_POINT',elapsed,p[1],feedback.actual_joint_pose[1],feedback.actual_joint_speed[1],returned-now)
+        print('PVAT_POINT',elapsed,p[1],feedback.actual_joint_pose[1],feedback.actual_joint_speed[1],returned-now,
+            timestamp()-start,feedback.actual_joint_acc[1])
         due=phase_clock and (start+math.max(0,(count+1)*horizon*1000-3*horizon*1000))
             or (start+(math.floor((timestamp()-start)/20)+1)*20)
     end
