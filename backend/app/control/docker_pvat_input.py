@@ -30,6 +30,23 @@ def encode_direction(stamp_ms,direction):
     return (stamp_ms%65536)*32768+quantized[0]*1024+quantized[1]*32+quantized[2]
 
 
+def encode_pose(stamp_ms,direction):
+    """Atomic 31 bits: 11-bit clock and five signed 4-bit components.
+
+    A >100ms input gap permanently retires the pump/controller; a delayed
+    controller also rejects >160ms cadence loss before writing any point.
+    """
+    if (type(stamp_ms) is not int or stamp_ms<0 or type(direction) not in (tuple,list)
+            or len(direction)!=5 or any(type(x) not in (int,float) or not math.isfinite(x) for x in direction)
+            or any(abs(x)>1 for x in direction[3:])):raise ValueError('invalid_pvat_pose')
+    length=math.hypot(*direction[:3])
+    if not math.isfinite(length):raise ValueError('invalid_pvat_pose')
+    v=tuple(x/length for x in direction[:3]) if length else (0.,0.,0.)
+    word=stamp_ms%2048
+    for x in (*v,*direction[3:]):word=word*16+max(0,min(14,round(x*7)+7))
+    return word
+
+
 class ExecutorLease:
     def __init__(self):self.owner=None
 

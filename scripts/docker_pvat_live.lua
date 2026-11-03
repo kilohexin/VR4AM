@@ -4,9 +4,36 @@ disable_auto_sync()
 -- One int32 mailbox holds timestamp and direction atomically (no pose queue).
 local channel=240
 local vector_mailbox = false
+local pose_mailbox = false
 local tcp_speed = 0.005
+local function matrix(p)
+    local sx,cx=math.sin(p.rx),math.cos(p.rx)
+    local sy,cy=math.sin(p.ry),math.cos(p.ry)
+    local sz,cz=math.sin(p.rz),math.cos(p.rz)
+    return {cz*cy,cz*sy*sx-sz*cx,cz*sy*cx+sz*sx,
+        sz*cy,sz*sy*sx+cz*cx,sz*sy*cx-cz*sx,-sy,cy*sx,cy*cx}
+end
+local function tool_offset(p,axis,angle)
+    local r=matrix(p);local c,s=math.cos(angle),math.sin(angle)
+    for row=0,2 do
+        local first=axis==4 and row*3+2 or row*3+1
+        local second=axis==4 and row*3+3 or row*3+2
+        local x,y=r[first],r[second]
+        r[first]=x*c+y*s;r[second]=-x*s+y*c
+    end
+    local out={};for key,value in pairs(p) do out[key]=value end
+    out.ry=math.asin(math.max(-1,math.min(1,-r[7])))
+    if math.abs(math.cos(out.ry))<1e-8 then out.rx=0;out.rz=math.atan2(-r[2],r[5])
+    else out.rx=math.atan2(r[8],r[9]);out.rz=math.atan2(r[4],r[1]) end
+    return out
+end
+local function rotation_distance(p,reference)
+    local a,b=matrix(p),matrix(reference);local trace=0
+    for i=1,9 do trace=trace+a[i]*b[i] end
+    return math.acos(math.max(-1,math.min(1,(trace-1)/2)))
+end
 local function product_boundary(k,goal,direction) return nil end
-local modulus=vector_mailbox and 65536 or 33554432
+local modulus=pose_mailbox and 2048 or vector_mailbox and 65536 or 33554432
 local step=0.08
 local start=timestamp()
 local entered=false
@@ -43,11 +70,14 @@ end
 local function input()
     local word=lebai:get_signal(channel)
     assert(word>=0 and word<2147483648 and word==math.floor(word),'mailbox_invalid')
-    if vector_mailbox and word==0 then return nil end
-    local width=vector_mailbox and 32768 or 64
+    if (vector_mailbox or pose_mailbox) and word==0 then return nil end
+    local width=pose_mailbox and 1048576 or vector_mailbox and 32768 or 64
     local stamp=math.floor(word/width)
     local action=word%width
-    if vector_mailbox then
+    if pose_mailbox then
+        for i=0,4 do assert(math.floor(action/16^i)%16<15,'mailbox_pose') end
+        action=action+1
+    elseif vector_mailbox then
         assert(math.floor(action/1024)<31 and math.floor(action/32)%32<31 and action%32<31,'mailbox_vector')
         action=action+1
     else assert(action<=6,'mailbox_action') end
@@ -100,10 +130,22 @@ local ok,err=pcall(function()
             gain[axis][i]=d
         end
     end
+    if pose_mailbox then
+        for axis=4,5 do
+            local solution=lebai:kinematics_inverse(tool_offset(base,axis,0.001),origin)
+            assert(solution and #solution==6,'angular_ik_unreachable');gain[axis]={}
+            for i=1,6 do
+                local d=(solution[i]-origin[i])/0.001
+                assert(d==d and math.abs(d)<30,'angular_ik_gain');gain[axis][i]=d
+            end
+        end
+    end
     start=timestamp();print('LIVE_READY',start)
     local due=start;local started=nil;local last_send=nil
     while timestamp()-start<10000 and moves<125 do
+        if not started and timestamp()-start>=1500 then break end
         local action=input()
+        if not started and timestamp()-start>=1500 then break end
         if not action then
             if started then expired=true;print('LIVE_EXPIRED',timestamp()-start,moves);break end
             if timestamp()-start>=1500 then break end
@@ -119,10 +161,21 @@ local ok,err=pcall(function()
             action,input_age=input()
             local captured=timestamp()
             if not action then expired=true;print('LIVE_EXPIRED',timestamp()-start,moves);break end
+            if not last_send then assert(timestamp()-started<100,'startup_feedback_expired') end
             if last_send then assert(timestamp()-last_send<160,'cadence_lost') end
             local goal={0,0,0,0,0,0}
             local direction={0,0,0}
-            if vector_mailbox then
+            if pose_mailbox then
+                local payload=action-1;direction={}
+                for axis=1,5 do direction[axis]=(math.floor(payload/16^(5-axis))%16-7)/7 end
+                local length=math.sqrt(direction[1]^2+direction[2]^2+direction[3]^2)
+                if length>0 then for axis=1,3 do direction[axis]=direction[axis]/length end end
+                for i=1,6 do
+                    for axis=1,5 do
+                        goal[i]=goal[i]+gain[axis][i]*(axis<=3 and tcp_speed or 0.04)*direction[axis]
+                    end
+                end
+            elseif vector_mailbox then
                 local payload=action-1
                 direction={math.floor(payload/1024)-15,math.floor(payload/32)%32-15,payload%32-15}
                 local length=math.sqrt(direction[1]^2+direction[2]^2+direction[3]^2)

@@ -17,7 +17,7 @@ def intent(seq=1,**kwargs):
         kwargs.pop('kind','held'),kwargs.pop('vector',(0,0,1)),**kwargs)
 
 
-@pytest.mark.parametrize('i',[intent(generation=3),intent(session_id='desktop'),intent(pitch=1)])
+@pytest.mark.parametrize('i',[intent(generation=3),intent(session_id='desktop')])
 def test_other_generation_or_unsupported_source_cannot_enter(i):
     _,s=make()
     with pytest.raises(ValueError):s.offer(i)
@@ -34,7 +34,7 @@ def test_release_retires_forwarding_until_worker_drains():
     _,s=make();forwarded=[]
     s.pump=NS(closed=False,offer=lambda **kw:forwarded.append(kw))
     s.worker=object()
-    s.offer(intent());assert forwarded[-1]['action']==(0.,0.,1.)
+    s.offer(intent(pitch=1));assert forwarded[-1]['action']==(0.,0.,1.,1.,0.)
     s.offer(intent(2,kind='release',vector=(0,0,0)))
     s.offer(intent(3));assert len(forwarded)==1 and s._withdraw.is_set()
 
@@ -82,6 +82,7 @@ async def test_known_reference_rejection_is_distinct_from_unverified_stop(monkey
     a.settings=NS(startup_tcp_min_m=(-1.,)*3,startup_tcp_max_m=(1.,)*3,
         soft_joint_min_rad=(-3.,)*6,soft_joint_max_rad=(3.,)*6,joint_limit_margin_rad=.01)
     a._docker_admission={'container_id':'fake'}
+    a._position_pitch_reference=(0.,0.,0.,1.)
     a._docker_ready_client=NS(get_signal=AsyncMock(return_value=0),set_signal=AsyncMock())
     s.recorder.write_event=AsyncMock()
     s.offer(intent())

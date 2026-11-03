@@ -1,12 +1,14 @@
 // Synthetic XR through the product WebSocket, verified local Docker only.
 import {FinitePositionInput} from '../src/ui/finitePositionInput';
 import {finiteXRTransportFrame} from '../src/xr/finiteInput';
+import {Quaternion} from 'three';
 const port=process.argv[2]??'8774',origin=`http://127.0.0.1:${port}`;
 if(!/^\d{4,5}$/.test(port))throw Error('invalid_port');
 const before:any=await(await fetch(origin+'/simulation/status')).json();
 if(before.runtime!=='LEBAI_DOCKER'||!before.pvat_vr||before.sdk_target!=='127.0.0.1:3030')throw Error('wrong_runtime');
 const ws=new WebSocket(`ws://127.0.0.1:${port}/ws/v1/teleop`);
 let state:any=null,generation=-1,seq=0,vector=[0,0,0],timer:any;
+let pitch=0,spin=0;
 let transportSession=process.argv.includes('--source-switch')?'desktop-pvat-handoff':'quest-pvat-test';
 const replies=new Map();const send=(m:any)=>{if(ws.readyState===1)ws.send(JSON.stringify(m));};
 const input=new FinitePositionInput(send,()=>{});
@@ -25,7 +27,7 @@ try{
  timer=setInterval(()=>{
   const frame:any={v:1,type:'vr_frame',session_id:transportSession,seq:++seq,client_mono_ms:performance.now(),tracking_valid:true,visibility:'visible',right:{p:[0,0,0],q:[0,0,0,1],grip:vector.some(Boolean),trigger:0}};
   send(finiteXRTransportFrame(frame));
-  if(vector.some(Boolean))input.offer(vector as [number,number,number]);
+  if(vector.some(Boolean)||pitch||spin)input.offer(vector as [number,number,number],pitch,spin);
  },20);
  await wait(()=>state?.mode==='READY'&&state.ack_seq>0,'ready');
  if(process.argv.includes('--source-switch')){
@@ -46,7 +48,7 @@ try{
   vector=[0,0,0];input.release();await wait(()=>state.finite_position.phase==='ready','parallel_release');
   console.log('PASS virtual claw moves while PVAT keeps streaming');
  }
- for(const direction of [[1,0,0],[0,1,0],[0,0,1],[1,1,0],[0,-1,1],[-1,0,-1]]){
+ for(const direction of process.argv.includes('--wrist-only')?[]:[[1,0,0],[0,1,0],[0,0,1],[1,1,0],[0,-1,1],[-1,0,-1]]){
   const start=[...state.actual_tcp.p];
   const steps=state.finite_position.entered_steps;vector=direction;
   await wait(()=>state.finite_position.entered_steps>=steps+8,'pvat_points');
@@ -54,6 +56,21 @@ try{
   await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','release_drain');
   for(let axis=0;axis<3;axis++)if(direction[axis]&&(state.actual_tcp.p[axis]-start[axis])*direction[axis]<.0003)throw Error('insufficient_actual_progress_axis_'+axis);
   console.log('PASS XR PVAT direction / release',direction,state.finite_position.entered_steps);
+ }
+ if(process.argv.includes('--wrist')){
+  for(const [p,s] of [[1,0],[-1,0],[0,1],[0,-1],[1,-1]]){
+   const q=[...state.actual_tcp.q],tcp=[...state.actual_tcp.p],steps=state.finite_position.entered_steps;
+   pitch=p;spin=s;vector=p&&s?[.6,0,.8]:[0,0,0];
+   await wait(()=>state.finite_position.entered_steps>=steps+10,'wrist_pvat');
+   pitch=0;spin=0;vector=[0,0,0];input.release();
+   await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','wrist_release');
+   const relative=new Quaternion(...q as [number,number,number,number]).invert().multiply(new Quaternion(...state.actual_tcp.q));
+   if(p&&!s&&2*Math.atan2(relative.x,relative.w)*p<.002)throw Error('pitch_wrong_direction_or_no_progress');
+   if(s&&!p&&2*Math.atan2(relative.z,relative.w)*s<.002)throw Error('spin_wrong_direction_or_no_progress');
+   if(!(p&&s)&&Math.hypot(...state.actual_tcp.p.map((x:number,i:number)=>x-tcp[i]))>.001)throw Error('pure_wrist_translation_drift');
+   if(p&&s&&relative.angleTo(new Quaternion())<.002)throw Error('mixed_pose_no_rotation');
+   console.log('PASS tool-local pitch/spin and release',p,s);
+  }
  }
  if(process.argv.includes('--reference-rollover')){
   const count=(await(await fetch(origin+'/simulation/status')).json() as any).pvat_reference_rollovers;
@@ -96,7 +113,7 @@ try{
  }else{
  await command('disarm','disarm');
  }
-}finally{vector=[0,0,0];input.release();if(timer)clearInterval(timer);ws.close();}
+}finally{vector=[0,0,0];pitch=0;spin=0;input.release();if(timer)clearInterval(timer);ws.close();}
 await sleep(3500);
 const after:any=await(await fetch(origin+'/simulation/status')).json();
 if(after.control_fault||after.session_owned||after.unknown_reads.length||after.unknown_writes.length)throw Error('unclean_end:'+JSON.stringify(after));

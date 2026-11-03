@@ -1,7 +1,7 @@
 """Opt-in Docker XR executor; normal release drains the bounded Lua stream."""
 import asyncio
 from pathlib import Path
-from app.control.docker_pvat_input import DockerPvatInput,ExecutorLease,encode_direction
+from app.control.docker_pvat_input import DockerPvatInput,ExecutorLease,encode_pose
 from app.control.finite_position_gate import PositionGate
 from app.control.finite_position_types import PositionView,INPUT_NS
 
@@ -28,8 +28,8 @@ class DockerPvatSession:
 
     def offer(self,intent):
         self.check()
-        if not intent.session_id.startswith('xr-finite-') or intent.pitch or intent.spin:
-            raise ValueError('pvat_xr_translation_only')
+        if not intent.session_id.startswith('xr-finite-'):
+            raise ValueError('pvat_xr_source_required')
         self.gate.offer(intent)
         if intent.kind=='release':
             self._withdraw.set()
@@ -38,7 +38,7 @@ class DockerPvatSession:
             self._forward(intent)
 
     def _forward(self,intent):
-        self.pump.offer(seq=intent.seq,captured_ns=intent.received_ns,action=intent.vector)
+        self.pump.offer(seq=intent.seq,captured_ns=intent.received_ns,action=(*intent.vector,intent.pitch,intent.spin))
 
     async def _run(self):
         a=self.adapter;proc=None;done=False;quiet=False;okay=False
@@ -58,6 +58,7 @@ class DockerPvatSession:
             bridge='exec 3<>/dev/tcp/127.0.0.1/3010; cat >&3; while IFS= read -r -t 12 line <&3; do printf "%s\\n" "$line"; case "$line" in *LIVE_DONE*) break;; esac; done'
             program=(Path(__file__).resolve().parents[3]/'scripts/docker_pvat_live.lua').read_text(encoding='utf-8')
             program=program.replace('local vector_mailbox = false','local vector_mailbox = true')
+            program=program.replace('local pose_mailbox = false','local pose_mailbox = true')
             program=program.replace('local tcp_speed = 0.005','local tcp_speed = 0.010')
             # Add the product's fixed workspace, in addition to the local box.
             lo,hi=a.settings.startup_tcp_min_m,a.settings.startup_tcp_max_m
@@ -66,12 +67,19 @@ class DockerPvatSession:
             joint_hi=tuple(x-a.settings.joint_limit_margin_rad for x in a.settings.soft_joint_max_rad)
             bounds+='\n'+'\n'.join(f"assert(k.actual_joint_pose[{i+1}]>={joint_lo[i]!r} and k.actual_joint_pose[{i+1}]<={joint_hi[i]!r},'product_joint_limit')" for i in range(6))
             if program.count('-- PRODUCT_HARD_BOUNDS')!=1:raise ValueError('pvat_program_marker')
-            program=program.replace('-- PRODUCT_HARD_BOUNDS','if not for_stop then\n'+bounds+'\n end')
             soft=[]
             for i,name in enumerate(('x','y','z')):
                 soft.append(f"if (k.actual_tcp_pose.{name}<={lo[i]+.006!r} and direction[{i+1}]<0) or (k.actual_tcp_pose.{name}>={hi[i]-.006!r} and direction[{i+1}]>0) then return 'workspace_boundary' end")
             for i in range(6):
                 soft.append(f"if (k.actual_joint_pose[{i+1}]<={joint_lo[i]+.025!r} and goal[{i+1}]<0) or (k.actual_joint_pose[{i+1}]>={joint_hi[i]-.025!r} and goal[{i+1}]>0) then return 'joint_boundary' end")
+            from scipy.spatial.transform import Rotation
+            reference=Rotation.from_quat(a._position_pitch_reference).as_euler('xyz')
+            fixed='{rx='+repr(float(reference[0]))+',ry='+repr(float(reference[1]))+',rz='+repr(float(reference[2]))+'}'
+            soft.append('local reference='+fixed+'\nlocal angular=rotation_distance(k.actual_tcp_pose,reference)')
+            for axis in (4,5):
+                soft.append(f"if direction[{axis}] and direction[{axis}]~=0 and angular>=math.pi/2-0.1 and rotation_distance(tool_offset(k.actual_tcp_pose,{axis},direction[{axis}]*0.001),reference)>angular then return 'rotation_boundary' end")
+            bounds+="\nassert(rotation_distance(k.actual_tcp_pose,"+fixed+")<=math.pi/2,'product_orientation')"
+            program=program.replace('-- PRODUCT_HARD_BOUNDS','if not for_stop then\n'+bounds+'\n end')
             program=program.replace('local function product_boundary(k,goal,direction) return nil end',
                 'local function product_boundary(k,goal,direction)\n'+'\n'.join(soft)+'\n return nil end')
             absolute='\n'.join(f"assert(np[{i+1}]>={joint_lo[i]!r} and np[{i+1}]<={joint_hi[i]!r},'product_joint_reference')" for i in range(6))
@@ -85,7 +93,7 @@ class DockerPvatSession:
                     await self.recorder.write_event(dict(kind='docker_pvat_controller',fields=fields),self.clock())
                     if fields[0]=='LIVE_READY':
                         if self.pump:raise ValueError('pvat_duplicate_ready')
-                        self.pump=DockerPvatInput(ExecutorLease(),clock=self.clock,authorize=self.check,encoder=encode_direction)
+                        self.pump=DockerPvatInput(ExecutorLease(),clock=self.clock,authorize=self.check,encoder=encode_pose)
                         self.pump.start(client,int(fields[1]))
                         # Wait for a frame captured after the controller handshake.
                         self.phase='executing'

@@ -11,7 +11,7 @@ import type {TeleopConnectionStatus} from '../transport/teleopSocket';
 import type {XRSessionStatus} from '../xr/session';
 
 const DESKTOP_INPUT_HELP='3D 视图：鼠标左键拖动旋转视角 · 滚轮缩放';
-const XR_INPUT_HELP='右 Grip 控制末端 · 左 X 长按打开、Y 长按闭合，松开保持 · 左摇杆平移平台 · 左 Grip+摇杆调高度';
+const XR_INPUT_HELP='右 Grip 控制末端平移/俯仰/自转 · 左 X 长按打开、Y 长按闭合，松开保持 · 左摇杆平移平台 · 左 Grip+摇杆调高度';
 
 export interface ControllerHudState {
   tracking: boolean;

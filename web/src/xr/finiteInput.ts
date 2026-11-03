@@ -126,7 +126,7 @@ export class FiniteXRInput {
    }
    const scale=(s.translation_scale??1)*(docker&&s.finite_position?.parallel_virtual_claw?2:1);
    if(docker){
-    const intent=this.gesture.sample(frame.client_mono_ms,frame.right.p,frame.right.q,scale);
+    const intent=this.gesture.sample(frame.client_mono_ms,frame.right.p,frame.right.q,scale,parallel);
     const pitch=s.finite_position!.pitch_enabled?intent.pitch:0;
     const spin=s.finite_position!.spin_enabled?intent.spin:0;
     if(!intent.vector.some(Boolean)&&!pitch&&!spin)this.position.release();

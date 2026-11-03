@@ -1,6 +1,6 @@
 import asyncio
 import pytest
-from app.control.docker_pvat_input import DockerPvatInput,ExecutorLease,EXPIRY_NS,encode_direction
+from app.control.docker_pvat_input import DockerPvatInput,ExecutorLease,EXPIRY_NS,encode_direction,encode_pose
 
 
 class Client:
@@ -101,3 +101,24 @@ def test_atomic_vector_preserves_direction_and_bounds(v):
 @pytest.mark.parametrize('v',[(float('nan'),0,0),(float('inf'),0,0),(True,0,0),(1,2)])
 def test_invalid_vector_cannot_enter_mailbox(v):
     with pytest.raises(ValueError):encode_direction(1,v)
+
+
+@pytest.mark.parametrize('pose',[(1,0,0,0,0),(0,0,0,1,0),(0,0,0,0,-1),(1,1,1,-1,1)])
+def test_pose_mailbox_is_atomic_bounded_and_preserves_each_component(pose):
+    word=encode_pose(2047,pose)
+    assert 0<word<2**31 and word//1048576==2047
+    decoded=tuple(((word//16**(4-i))%16-7)/7 for i in range(5))
+    assert decoded[3:]==pose[3:]
+    assert all((a==0)==(b==0) and (a*b>=0) for a,b in zip(decoded,pose))
+    assert encode_pose(2048+12,pose)==encode_pose(12,pose)
+
+
+async def test_pose_clock_wrap_cannot_refresh_expired_hand_input():
+    now,lease,_=make()
+    pump=DockerPvatInput(ExecutorLease(),clock=lambda:now[0],authorize=lambda:None,encoder=encode_pose)
+    client=Client();pump.start(client,2040)
+    pump.offer(seq=0,captured_ns=now[0],action=(0,0,0,1,0));await client.sent.wait()
+    now[0]+=2_048_000_000
+    await asyncio.wait_for(pump.worker,.2)
+    assert len(client.writes)==1 and pump.reason=='pvat_input_expired' and pump.closed
+    with pytest.raises(ValueError):pump.offer(seq=1,captured_ns=now[0],action=(0,0,0,-1,0))
