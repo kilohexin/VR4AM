@@ -10,6 +10,8 @@
 
 前提：本机官方 L Master Docker 容器运行，模拟 SDK 端口3030、管理端口3020已映射。启动器核对本机 Docker、官方镜像和端口，不重建容器，不连接真实机器人。
 
+依赖与网页构建已就绪时，Windows可运行`./scripts/start_docker_web.ps1 -Run`，独立后台启动8773后端（PVAT VR候选）与8443 HTTPS代理。省略`-Run`仅预览。重复执行复用健康服务，不自动清除故障或重启已有服务；日志和进程信息在`.tmp/docker-web-services/`。Docker Desktop和官方容器需先运行。头显使用电脑局域网IP的HTTPS8443地址，电脑使用HTTP8773。
+
 从仓库根目录执行（Python 3.11+、Node.js 22+ / npm）：
 
 ```powershell
