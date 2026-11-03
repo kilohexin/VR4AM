@@ -34,7 +34,7 @@ def test_release_retires_forwarding_until_worker_drains():
     _,s=make();forwarded=[]
     s.pump=NS(closed=False,offer=lambda **kw:forwarded.append(kw))
     s.worker=object()
-    s.offer(intent());assert forwarded[-1]['action']==5
+    s.offer(intent());assert forwarded[-1]['action']==(0.,0.,1.)
     s.offer(intent(2,kind='release',vector=(0,0,0)))
     s.offer(intent(3));assert len(forwarded)==1 and s._withdraw.is_set()
 

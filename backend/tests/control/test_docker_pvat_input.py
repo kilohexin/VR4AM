@@ -1,6 +1,6 @@
 import asyncio
 import pytest
-from app.control.docker_pvat_input import DockerPvatInput,ExecutorLease,EXPIRY_NS
+from app.control.docker_pvat_input import DockerPvatInput,ExecutorLease,EXPIRY_NS,encode_direction
 
 
 class Client:
@@ -84,3 +84,20 @@ async def test_releasing_before_start_does_not_clear_an_unowned_mailbox():
     now,lease,pump=make();client=Client()
     with pytest.raises(ValueError):await pump.complete(client,controller_ok=True,quiet_observed=True)
     assert not client.writes and lease.owner is pump.token
+
+
+@pytest.mark.parametrize('v',[(1,0,0),(-1,0,0),(1,1,0),(1,-2,3),(0,0,0),(-1,-1,-1)])
+def test_atomic_vector_preserves_direction_and_bounds(v):
+    import math
+    word=encode_direction(65535,v)
+    assert 0<word<2**31 and word//32768==65535
+    p=word%32768;decoded=(p//1024-15,p//32%32-15,p%32-15)
+    length=math.hypot(*v);dlen=math.hypot(*decoded)
+    if length:assert sum(a*b for a,b in zip(v,decoded))/(length*dlen)>.998
+    else:assert decoded==(0,0,0)
+    assert encode_direction(65536+42,v)==encode_direction(42,v)
+
+
+@pytest.mark.parametrize('v',[(float('nan'),0,0),(float('inf'),0,0),(True,0,0),(1,2)])
+def test_invalid_vector_cannot_enter_mailbox(v):
+    with pytest.raises(ValueError):encode_direction(1,v)

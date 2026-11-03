@@ -4,6 +4,7 @@ No endpoint selection or automatic motion restart. The caller must obtain
 Docker admission and observe controller completion before releasing ownership.
 """
 import asyncio
+import math
 from dataclasses import dataclass
 
 CHANNEL=240
@@ -15,6 +16,18 @@ def encode(stamp_ms,action):
     if type(stamp_ms) is not int or stamp_ms<0 or type(action) is not int or not 0<=action<=6:
         raise ValueError('invalid_live_input')
     return (stamp_ms%MODULUS)*64+action
+
+
+def encode_direction(stamp_ms,direction):
+    """One atomic int32: 16-bit ms clock plus three signed 5-bit components."""
+    if (type(stamp_ms) is not int or stamp_ms<0 or type(direction) not in (tuple,list)
+            or len(direction)!=3 or any(type(x) not in (int,float) or not math.isfinite(x) for x in direction)):
+        raise ValueError('invalid_pvat_direction')
+    length=math.hypot(*direction)
+    if not math.isfinite(length):raise ValueError('invalid_pvat_direction')
+    unit=tuple(x/length for x in direction) if length else (0.,0.,0.)
+    quantized=tuple(max(-15,min(15,round(x*15)))+15 for x in unit)
+    return (stamp_ms%65536)*32768+quantized[0]*1024+quantized[1]*32+quantized[2]
 
 
 class ExecutorLease:
@@ -36,13 +49,14 @@ class ExecutorLease:
 class LiveInput:
     seq:int
     captured_ns:int
-    action:int
+    action:object
 
 
 class DockerPvatInput:
-    def __init__(self,lease,*,clock,authorize):
+    def __init__(self,lease,*,clock,authorize,encoder=encode):
         self.lease,self.clock,self.authorize=lease,clock,authorize
         self.token=lease.acquire()
+        self.encoder=encoder
         self.latest=None;self.seq=-1;self.closed=False;self.unknown=False
         self.reason=None;self.worker=None;self.writes=[]
         self._finish=asyncio.Event();self.anchor=None
@@ -52,7 +66,7 @@ class DockerPvatInput:
         if self.closed:raise ValueError('pvat_input_closed')
 
     def offer(self,*,seq,captured_ns,action):
-        self._check();encode(0,action)
+        self._check();self.encoder(0,action)
         if (type(seq) is not int or seq<=self.seq or type(captured_ns) is not int
                 or not 0<=self.clock()-captured_ns<EXPIRY_NS
                 or self.latest is not None and captured_ns<self.latest.captured_ns):
@@ -77,7 +91,7 @@ class DockerPvatInput:
                     # repeating the signal. Pre-handshake samples are rejected.
                     delta=sample.captured_ns-self.anchor[0]
                     if delta<0:raise ValueError('pvat_input_before_handshake')
-                    word=encode(self.anchor[1]+delta//1_000_000,sample.action)
+                    word=self.encoder(self.anchor[1]+delta//1_000_000,sample.action)
                     try:await asyncio.wait_for(client.set_signal(CHANNEL,word),.1)
                     except BaseException:
                         self.unknown=True;raise

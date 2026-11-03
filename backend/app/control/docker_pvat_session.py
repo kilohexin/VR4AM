@@ -1,7 +1,7 @@
 """Opt-in Docker XR executor; normal release drains the bounded Lua stream."""
 import asyncio
 from pathlib import Path
-from app.control.docker_pvat_input import DockerPvatInput,ExecutorLease
+from app.control.docker_pvat_input import DockerPvatInput,ExecutorLease,encode_direction
 from app.control.finite_position_gate import PositionGate
 from app.control.finite_position_types import PositionView,INPUT_NS
 
@@ -38,10 +38,7 @@ class DockerPvatSession:
             self._forward(intent)
 
     def _forward(self,intent):
-        # The first product candidate uses the six validated base directions.
-        axis=max(range(3),key=lambda i:abs(intent.vector[i]))
-        action=axis*2+(1 if intent.vector[axis]>0 else 2)
-        self.pump.offer(seq=intent.seq,captured_ns=intent.received_ns,action=action)
+        self.pump.offer(seq=intent.seq,captured_ns=intent.received_ns,action=intent.vector)
 
     async def _run(self):
         a=self.adapter;proc=None;done=False;quiet=False;okay=False
@@ -59,6 +56,7 @@ class DockerPvatSession:
             a.position_busy=True;a._motion_accepted=a._motion_write_stop_required=True
             bridge='exec 3<>/dev/tcp/127.0.0.1/3010; cat >&3; while IFS= read -r -t 12 line <&3; do printf "%s\\n" "$line"; case "$line" in *LIVE_DONE*) break;; esac; done'
             program=(Path(__file__).resolve().parents[3]/'scripts/docker_pvat_live.lua').read_text(encoding='utf-8')
+            program=program.replace('local vector_mailbox = false','local vector_mailbox = true')
             # Add the product's fixed workspace, in addition to the local box.
             lo,hi=a.settings.startup_tcp_min_m,a.settings.startup_tcp_max_m
             bounds='\n'.join(f"assert(k.actual_tcp_pose.{axis}>={lo[i]!r} and k.actual_tcp_pose.{axis}<={hi[i]!r},'product_workspace')" for i,axis in enumerate(('x','y','z')))
@@ -72,7 +70,7 @@ class DockerPvatSession:
                     await self.recorder.write_event(dict(kind='docker_pvat_controller',fields=fields),self.clock())
                     if fields[0]=='LIVE_READY':
                         if self.pump:raise ValueError('pvat_duplicate_ready')
-                        self.pump=DockerPvatInput(ExecutorLease(),clock=self.clock,authorize=self.check)
+                        self.pump=DockerPvatInput(ExecutorLease(),clock=self.clock,authorize=self.check,encoder=encode_direction)
                         self.pump.start(client,int(fields[1]))
                         # Wait for a frame captured after the controller handshake.
                         self.phase='executing'

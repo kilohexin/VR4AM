@@ -3,7 +3,8 @@ disable_auto_sync()
 -- Isolated Cartesian-direction experiment, not a product or physical selector.
 -- One int32 mailbox holds timestamp and direction atomically (no pose queue).
 local channel=240
-local modulus=33554432
+local vector_mailbox = false
+local modulus=vector_mailbox and 65536 or 33554432
 local step=0.08
 local start=timestamp()
 local entered=false
@@ -29,9 +30,14 @@ end
 local function input()
     local word=lebai:get_signal(channel)
     assert(word>=0 and word<2147483648 and word==math.floor(word),'mailbox_invalid')
-    local stamp=math.floor(word/64)
-    local action=word%64
-    assert(action<=6,'mailbox_action')
+    if vector_mailbox and word==0 then return nil end
+    local width=vector_mailbox and 32768 or 64
+    local stamp=math.floor(word/width)
+    local action=word%width
+    if vector_mailbox then
+        assert(math.floor(action/1024)<31 and math.floor(action/32)%32<31 and action%32<31,'mailbox_vector')
+        action=action+1
+    else assert(action<=6,'mailbox_action') end
     local age=(timestamp()%modulus-stamp+modulus)%modulus
     if age>=100 then return nil end
     -- Once input expires this program may only drain, never restart on a late packet.
@@ -102,7 +108,16 @@ local ok,err=pcall(function()
             if not action then expired=true;print('LIVE_EXPIRED',timestamp()-start,moves);break end
             if last_send then assert(timestamp()-last_send<160,'cadence_lost') end
             local goal={0,0,0,0,0,0}
-            if action>0 then
+            if vector_mailbox then
+                local payload=action-1
+                local direction={math.floor(payload/1024)-15,math.floor(payload/32)%32-15,payload%32-15}
+                local length=math.sqrt(direction[1]^2+direction[2]^2+direction[3]^2)
+                if length>0 then
+                    for i=1,6 do
+                        for axis=1,3 do goal[i]=goal[i]+gain[axis][i]*0.005*direction[axis]/length end
+                    end
+                end
+            elseif action>0 then
                 local axis=math.floor((action-1)/2)+1
                 local sign=action%2==1 and 1 or -1
                 for i=1,6 do goal[i]=gain[axis][i]*0.005*sign end

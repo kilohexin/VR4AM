@@ -28,15 +28,27 @@ try{
  },20);
  await wait(()=>state?.mode==='READY'&&state.ack_seq>0,'ready');
  await command('arm_request','unlock');await command('prepare_request','prepare');await wait(()=>state?.manual_input_ready,'prepared');
- for(const direction of [[1,0,0],[0,1,0],[0,0,1]]){
+ for(const direction of [[1,0,0],[0,1,0],[0,0,1],[1,1,0],[0,-1,1],[-1,0,-1]]){
   const start=[...state.actual_tcp.p];
   const steps=state.finite_position.entered_steps;vector=direction;
   await wait(()=>state.finite_position.entered_steps>=steps+8,'pvat_points');
   vector=[0,0,0];input.release();
   await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','release_drain');
-  const axis=direction.findIndex(Boolean);
-  if((state.actual_tcp.p[axis]-start[axis])*direction[axis]<.0003)throw Error('insufficient_actual_progress');
+  for(let axis=0;axis<3;axis++)if(direction[axis]&&(state.actual_tcp.p[axis]-start[axis])*direction[axis]<.0003)throw Error('insufficient_actual_progress_axis_'+axis);
   console.log('PASS XR PVAT direction / release',direction,state.finite_position.entered_steps);
+ }
+ if(process.argv.includes('--long-hold')){
+  const started=performance.now();vector=[0,1,0];
+  const alternate=setInterval(()=>{vector=[0,Math.floor((performance.now()-started)/800)%2?1:-1,0];},80);
+  try{await wait(()=>state.finite_position.phase==='hold','bounded_hold',14000);}
+  finally{clearInterval(alternate);}
+  const stopped=state.finite_position.entered_steps;
+  await sleep(250);
+  if(state.finite_position.entered_steps!==stopped)throw Error('held_restarted_after_limit');
+  vector=[0,0,0];input.release();await wait(()=>state.finite_position.phase==='ready','release_after_limit');
+  vector=[0,-1,0];await wait(()=>state.finite_position.entered_steps>=stopped+6,'regrip_after_limit');
+  vector=[0,0,0];input.release();await wait(()=>state.finite_position.phase==='ready','regrip_drain');
+  console.log('PASS bounded continuous hold / no automatic restart / explicit regrip');
  }
  send({v:1,type:'gripper_request',request_id:'claw-middle',value:.4});
  await wait(()=>replies.has('claw-middle'),'claw_reply');
