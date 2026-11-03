@@ -125,6 +125,8 @@ def create_docker_app(web_directory,*,blended_translation=False,blended_rotation
         return dict(runtime='LEBAI_DOCKER',provider='official_lmaster',sdk_target='127.0.0.1:3030',
             simulator=True,hardware_verified=False,run_id=run_id,pid=os.getpid(),pvat_vr=pvat_vr,
             pvat_controller_points=getattr(backend,'position_pvat_points',0),
+            pvat_reference_rollovers=getattr(backend,'position_pvat_reference_rollovers',0),
+            pvat_nominal_speed_mmps=10 if pvat_vr else None,
             gripper_provider='local_virtual',gripper_physics=False,
             kinematics_provider='controller_ik_verified_local_fk',native_fk_admission_queries=3,
             timing_profile='virtual_controller',stop_rpc_timeout_ms=1000,stop_verification_timeout_ms=2000,

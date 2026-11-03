@@ -4,6 +4,8 @@ disable_auto_sync()
 -- One int32 mailbox holds timestamp and direction atomically (no pose queue).
 local channel=240
 local vector_mailbox = false
+local tcp_speed = 0.005
+local function product_boundary(k,goal,direction) return nil end
 local modulus=vector_mailbox and 65536 or 33554432
 local step=0.08
 local start=timestamp()
@@ -11,6 +13,7 @@ local entered=false
 local expired=false
 local moves=0
 local braking=false
+local brake_reason='reference_boundary'
 local origin,q,v,a,gain,base
 local function read_feedback()
     local state=lebai:get_robot_state()
@@ -109,19 +112,30 @@ local ok,err=pcall(function()
             if not action then expired=true;print('LIVE_EXPIRED',timestamp()-start,moves);break end
             if last_send then assert(timestamp()-last_send<160,'cadence_lost') end
             local goal={0,0,0,0,0,0}
+            local direction={0,0,0}
             if vector_mailbox then
                 local payload=action-1
-                local direction={math.floor(payload/1024)-15,math.floor(payload/32)%32-15,payload%32-15}
+                direction={math.floor(payload/1024)-15,math.floor(payload/32)%32-15,payload%32-15}
                 local length=math.sqrt(direction[1]^2+direction[2]^2+direction[3]^2)
                 if length>0 then
+                    for axis=1,3 do direction[axis]=direction[axis]/length end
                     for i=1,6 do
-                        for axis=1,3 do goal[i]=goal[i]+gain[axis][i]*0.005*direction[axis]/length end
+                        for axis=1,3 do goal[i]=goal[i]+gain[axis][i]*tcp_speed*direction[axis] end
                     end
                 end
             elseif action>0 then
                 local axis=math.floor((action-1)/2)+1
                 local sign=action%2==1 and 1 or -1
-                for i=1,6 do goal[i]=gain[axis][i]*0.005*sign end
+                direction[axis]=sign
+                for i=1,6 do goal[i]=gain[axis][i]*tcp_speed*sign end
+            end
+            if not braking then
+                local reason=product_boundary(feedback,goal,direction)
+                for axis,name in ipairs({'x','y','z'}) do
+                    local delta=feedback.actual_tcp_pose[name]-base[name]
+                    if math.abs(delta)>=0.020 and delta*direction[axis]>0 then reason=reason or 'reference_boundary' end
+                end
+                if reason then braking=true;brake_reason=reason;print('LIVE_BRAKE',timestamp()-start,reason) end
             end
             -- Reserve room to decelerate before the hard 0.08 rad reference
             -- guard. A held input cannot override this gesture-local boundary.
@@ -136,7 +150,7 @@ local ok,err=pcall(function()
                     goal[i]=0
                     settled=settled and math.abs(v[i])<0.0002 and math.abs(a[i])<0.002
                 end
-                if settled then print('LIVE_BOUNDARY',timestamp()-start,'reference_boundary');break end
+                if settled then print('LIVE_BOUNDARY',timestamp()-start,brake_reason);break end
             end
             local maximum=0
             for i=1,6 do maximum=math.max(maximum,math.abs(goal[i])) end

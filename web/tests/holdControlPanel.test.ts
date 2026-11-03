@@ -42,7 +42,7 @@ it('uses a visible progressive Docker opening rate and holds the selected openin
   entered_steps:0,motion_id:null,reason:null,hardware_verified:false}};
  r.panel.update(s,true,0);const button=r.find('[data-claw="open"]');button.dispatchEvent(pointer('pointerdown'));
  r.panel.applyFrame(frame(0));r.clock(20);r.panel.update(s,true,20);r.panel.applyFrame(frame(20));
- expect(r.send.mock.calls.at(-1)?.[0].value).toBeCloseTo(.47);
+ expect(r.send.mock.calls.at(-1)?.[0].value).toBeCloseTo(.476);
  button.dispatchEvent(pointer('pointerup'));r.clock(40);r.panel.update(s,true,40);r.panel.applyFrame(frame(40));
  expect(r.send).toHaveBeenCalledTimes(1);expect(r.cancel).not.toHaveBeenCalled();
 });

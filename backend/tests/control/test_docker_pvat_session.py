@@ -78,7 +78,8 @@ async def test_known_reference_rejection_is_distinct_from_unverified_stop(monkey
     import app.control.docker_pvat_session as module
     import app.digital_twin.docker_runtime as runtime
     a,s=make();a.position_busy=False;a._docker_entry_owner=None
-    a.settings=NS(startup_tcp_min_m=(-1.,)*3,startup_tcp_max_m=(1.,)*3)
+    a.settings=NS(startup_tcp_min_m=(-1.,)*3,startup_tcp_max_m=(1.,)*3,
+        soft_joint_min_rad=(-3.,)*6,soft_joint_max_rad=(3.,)*6,joint_limit_margin_rad=.01)
     a._docker_admission={'container_id':'fake'}
     a._docker_ready_client=NS(get_signal=AsyncMock(return_value=0),set_signal=AsyncMock())
     s.recorder.write_event=AsyncMock()

@@ -55,6 +55,18 @@ try{
   for(let axis=0;axis<3;axis++)if(direction[axis]&&(state.actual_tcp.p[axis]-start[axis])*direction[axis]<.0003)throw Error('insufficient_actual_progress_axis_'+axis);
   console.log('PASS XR PVAT direction / release',direction,state.finite_position.entered_steps);
  }
+ if(process.argv.includes('--reference-rollover')){
+  const count=(await(await fetch(origin+'/simulation/status')).json() as any).pvat_reference_rollovers;
+  vector=[-1,0,0];const end=performance.now()+15000;
+  while((await(await fetch(origin+'/simulation/status')).json() as any).pvat_reference_rollovers<=count){
+   if(state?.fault)throw Error('reference_rollover:'+state.fault);
+   if(performance.now()>end)throw Error('reference_rollover_timeout');await sleep(100);
+  }
+  const steps=state.finite_position.entered_steps;
+  await wait(()=>state.finite_position.entered_steps>=steps+6,'motion_after_reference_rollover');
+  vector=[0,0,0];input.release();await wait(()=>state.finite_position.phase==='ready','reference_rollover_drain');
+  console.log('PASS local reference renews with current held input, without regrip');
+ }
  if(process.argv.includes('--long-hold')||process.argv.includes('--reference-boundary')){
   const started=performance.now();vector=[0,1,0];
   const alternate=setInterval(()=>{vector=process.argv.includes('--reference-boundary')?[-1,0,0]:[0,Math.floor((performance.now()-started)/800)%2?1:-1,0];},80);

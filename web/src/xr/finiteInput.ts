@@ -83,7 +83,7 @@ export class FiniteXRInput {
    const dt=this.clawTime===null?0:Math.max(0,Math.min(50,t-this.clawTime))/1000;
    this.clawTime=t;
    if(this.clawTarget===null)this.clawTarget=s.gripper;
-   if(direction)this.clawTarget=Math.max(0,Math.min(1,this.clawTarget+direction*dt*(docker?1.5:.15)));
+   if(direction)this.clawTarget=Math.max(0,Math.min(1,this.clawTarget+direction*dt*(docker?1.2:.15)));
    frame={...frame,right:{...frame.right,trigger:this.clawTarget}};
   }
   const parallel=docker&&s.finite_position?.parallel_virtual_claw===true;
@@ -124,7 +124,7 @@ export class FiniteXRInput {
     if(['planning','executing','draining'].includes(s.finite_position!.phase)){this.mustRelease=true;return;}
     this.anchor={hand:[...frame.right.p],tcp:[...s.actual_tcp.p],handQ:[...frame.right.q],tcpQ:[...s.actual_tcp.q]};
    }
-   const scale=s.translation_scale??1;
+   const scale=(s.translation_scale??1)*(docker&&s.finite_position?.parallel_virtual_claw?2:1);
    if(docker){
     const intent=this.gesture.sample(frame.client_mono_ms,frame.right.p,frame.right.q,scale);
     const pitch=s.finite_position!.pitch_enabled?intent.pitch:0;

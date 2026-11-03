@@ -42,7 +42,7 @@ class DockerPvatSession:
 
     async def _run(self):
         a=self.adapter;proc=None;done=False;quiet=False;okay=False
-        boundary=False;reference_rejected=False;abort_confirmed=False
+        boundary=None;reference_rejected=False;abort_confirmed=False
         try:
             from app.digital_twin.docker_runtime import verify_local_docker
             admitted=await asyncio.to_thread(verify_local_docker)
@@ -58,10 +58,23 @@ class DockerPvatSession:
             bridge='exec 3<>/dev/tcp/127.0.0.1/3010; cat >&3; while IFS= read -r -t 12 line <&3; do printf "%s\\n" "$line"; case "$line" in *LIVE_DONE*) break;; esac; done'
             program=(Path(__file__).resolve().parents[3]/'scripts/docker_pvat_live.lua').read_text(encoding='utf-8')
             program=program.replace('local vector_mailbox = false','local vector_mailbox = true')
+            program=program.replace('local tcp_speed = 0.005','local tcp_speed = 0.010')
             # Add the product's fixed workspace, in addition to the local box.
             lo,hi=a.settings.startup_tcp_min_m,a.settings.startup_tcp_max_m
             bounds='\n'.join(f"assert(k.actual_tcp_pose.{axis}>={lo[i]!r} and k.actual_tcp_pose.{axis}<={hi[i]!r},'product_workspace')" for i,axis in enumerate(('x','y','z')))
+            joint_lo=tuple(x+a.settings.joint_limit_margin_rad for x in a.settings.soft_joint_min_rad)
+            joint_hi=tuple(x-a.settings.joint_limit_margin_rad for x in a.settings.soft_joint_max_rad)
+            bounds+='\n'+'\n'.join(f"assert(k.actual_joint_pose[{i+1}]>={joint_lo[i]!r} and k.actual_joint_pose[{i+1}]<={joint_hi[i]!r},'product_joint_limit')" for i in range(6))
             program=program.replace('if base then',bounds+'\n    if base then')
+            soft=[]
+            for i,name in enumerate(('x','y','z')):
+                soft.append(f"if (k.actual_tcp_pose.{name}<={lo[i]+.006!r} and direction[{i+1}]<0) or (k.actual_tcp_pose.{name}>={hi[i]-.006!r} and direction[{i+1}]>0) then return 'workspace_boundary' end")
+            for i in range(6):
+                soft.append(f"if (k.actual_joint_pose[{i+1}]<={joint_lo[i]+.025!r} and goal[{i+1}]<0) or (k.actual_joint_pose[{i+1}]>={joint_hi[i]-.025!r} and goal[{i+1}]>0) then return 'joint_boundary' end")
+            program=program.replace('local function product_boundary(k,goal,direction) return nil end',
+                'local function product_boundary(k,goal,direction)\n'+'\n'.join(soft)+'\n return nil end')
+            absolute='\n'.join(f"assert(np[{i+1}]>={joint_lo[i]!r} and np[{i+1}]<={joint_hi[i]!r},'product_joint_reference')" for i in range(6))
+            program=program.replace('entered=true;last_send=timestamp()',absolute+'\n            entered=true;last_send=timestamp()')
             proc=await asyncio.create_subprocess_exec('docker','exec','-i',admitted['container_id'],'bash','-c',bridge,
                 stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
             proc.stdin.write(program.encode());await proc.stdin.drain();proc.stdin.close()
@@ -80,7 +93,7 @@ class DockerPvatSession:
                         a.position_pvat_points=getattr(a,'position_pvat_points',0)+1
                     elif fields[0]=='LIVE_QUIET':quiet=True
                     elif fields[0]=='LIVE_BRAKE':self.phase='draining'
-                    elif fields[0]=='LIVE_BOUNDARY':boundary=True
+                    elif fields[0]=='LIVE_BOUNDARY':boundary=fields[2]
                     elif fields[0]=='LIVE_ABORT':abort_confirmed=fields[1:3]==['true','true']
                     elif fields[0]=='LIVE_DONE':
                         done=True;okay=fields[1]=='true'
@@ -104,12 +117,13 @@ class DockerPvatSession:
                 # A verified time-window completion may roll over using a
                 # CURRENT held input. Boundary, expiry and revocation may not.
                 latest=self.gate.latest
-                continue_held=(not boundary and self.pump is not None and self.pump.reason is None
+                continue_held=(boundary in (None,'reference_boundary') and self.pump is not None and self.pump.reason is None
                     and not self.closed and not self._withdraw.is_set() and latest is not None
                     and latest.kind=='held' and 0<=self.clock()-latest.received_ns<INPUT_NS)
                 self.hold=not self.gate.released and not continue_held
+                if continue_held and boundary=='reference_boundary':a.position_pvat_reference_rollovers=getattr(a,'position_pvat_reference_rollovers',0)+1
                 self.phase='hold' if self.hold else 'ready'
-                self.reason=('pvat_reference_boundary' if boundary else
+                self.reason=('pvat_'+boundary if boundary else
                     'position_input_expired' if self.pump and self.pump.reason=='pvat_input_expired' else
                     'pvat_gesture_complete') if self.hold else None
         except BaseException as error:
