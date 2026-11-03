@@ -10,6 +10,7 @@ export function finiteHoldTitle(status:FinitePositionStatus|null|undefined):stri
  if(status?.phase!=='hold')return null;
  switch(status.reason){
   case 'pvat_gesture_complete':return '本次连续控制已结束，请松开 Grip 后重新握持';
+  case 'pvat_reference_boundary':return '本段运动范围已到，请松开 Grip 后重新握持';
   case 'position_input_expired':return '手柄输入中断，请松开后重新按住';
   case 'position_workspace':return '工作区边界';
   case 'position_joint_limit':return '关节边界';

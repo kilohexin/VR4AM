@@ -43,11 +43,12 @@ try{
   for(let axis=0;axis<3;axis++)if(direction[axis]&&(state.actual_tcp.p[axis]-start[axis])*direction[axis]<.0003)throw Error('insufficient_actual_progress_axis_'+axis);
   console.log('PASS XR PVAT direction / release',direction,state.finite_position.entered_steps);
  }
- if(process.argv.includes('--long-hold')){
+ if(process.argv.includes('--long-hold')||process.argv.includes('--reference-boundary')){
   const started=performance.now();vector=[0,1,0];
-  const alternate=setInterval(()=>{vector=[0,Math.floor((performance.now()-started)/800)%2?1:-1,0];},80);
+  const alternate=setInterval(()=>{vector=process.argv.includes('--reference-boundary')?[-1,0,0]:[0,Math.floor((performance.now()-started)/800)%2?1:-1,0];},80);
   try{await wait(()=>state.finite_position.phase==='hold','bounded_hold',14000);}
   finally{clearInterval(alternate);}
+  if(process.argv.includes('--reference-boundary')&&state.finite_position.reason!=='pvat_reference_boundary')throw Error('reference_boundary_not_observed');
   const stopped=state.finite_position.entered_steps;
   await sleep(250);
   if(state.finite_position.entered_steps!==stopped)throw Error('held_restarted_after_limit');

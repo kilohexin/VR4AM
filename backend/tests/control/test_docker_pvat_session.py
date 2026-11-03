@@ -69,3 +69,33 @@ async def test_cancelled_page_reader_joins_owned_snapshot_before_exit():
     complete.set()
     with pytest.raises(asyncio.CancelledError):await task
     assert outcomes==['returned']
+
+
+@pytest.mark.parametrize('confirmed,error,reason',[(True,'reference_limit','pvat_reference_limit'),
+    (False,'reference_limit','stop_unverified'),(True,'rpc_unknown','stop_unverified')])
+async def test_known_reference_rejection_is_distinct_from_unverified_stop(monkeypatch,confirmed,error,reason):
+    from unittest.mock import AsyncMock
+    import app.control.docker_pvat_session as module
+    import app.digital_twin.docker_runtime as runtime
+    a,s=make();a.position_busy=False;a._docker_entry_owner=None
+    a.settings=NS(startup_tcp_min_m=(-1.,)*3,startup_tcp_max_m=(1.,)*3)
+    a._docker_admission={'container_id':'fake'}
+    a._docker_ready_client=NS(get_signal=AsyncMock(return_value=0),set_signal=AsyncMock())
+    s.recorder.write_event=AsyncMock()
+    s.offer(intent())
+    lines=iter([b'LIVE_READY\t1234\n',b'LIVE_QUIET\t1000\t0\t0\t0\n',
+        f'LIVE_ABORT\t{str(confirmed).lower()}\ttrue\n'.encode(),
+        f'LIVE_DONE\tfalse\t[string main]:42: {error}\t47\n'.encode()])
+    class Stdin:
+        def write(self,data):pass
+        async def drain(self):pass
+        def close(self):pass
+    async def read():return next(lines,b'')
+    proc=NS(stdin=Stdin(),stdout=NS(readline=read),wait=AsyncMock(return_value=0))
+    monkeypatch.setattr(runtime,'verify_local_docker',lambda:a._docker_admission)
+    monkeypatch.setattr(module.asyncio,'create_subprocess_exec',AsyncMock(return_value=proc))
+    await s._run()
+    assert s.phase=='fault' and s.reason==reason
+    proc.wait.assert_awaited_once()
+    assert a.position_busy==(reason=='stop_unverified')
+    assert s.pump.lease.owner is (None if reason=='pvat_reference_limit' else s.pump.token)

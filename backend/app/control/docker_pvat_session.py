@@ -42,6 +42,7 @@ class DockerPvatSession:
 
     async def _run(self):
         a=self.adapter;proc=None;done=False;quiet=False;okay=False
+        boundary=False;reference_rejected=False;abort_confirmed=False
         try:
             from app.digital_twin.docker_runtime import verify_local_docker
             admitted=await asyncio.to_thread(verify_local_docker)
@@ -78,19 +79,33 @@ class DockerPvatSession:
                         self.steps+=1
                         a.position_pvat_points=getattr(a,'position_pvat_points',0)+1
                     elif fields[0]=='LIVE_QUIET':quiet=True
+                    elif fields[0]=='LIVE_BRAKE':self.phase='draining'
+                    elif fields[0]=='LIVE_BOUNDARY':boundary=True
+                    elif fields[0]=='LIVE_ABORT':abort_confirmed=fields[1:3]==['true','true']
                     elif fields[0]=='LIVE_DONE':
                         done=True;okay=fields[1]=='true'
+                        reference_rejected=not okay and fields[2].endswith(': reference_limit')
                         if self.pump:await self.pump.withdraw()
                         break
                     if self.pump and self._withdraw.is_set():await self.pump.withdraw()
-                okay=okay and await proc.wait()==0
+                transport_ok=await proc.wait()==0
+                okay=okay and transport_ok
+            known_rejection=reference_rejected and abort_confirmed and transport_ok
             if self.pump:
-                await self.pump.complete(client,controller_ok=done and okay,quiet_observed=quiet)
+                await self.pump.complete(client,controller_ok=done and (okay or known_rejection),quiet_observed=quiet)
             elif not (done and okay and quiet):raise ValueError('pvat_completion_unverified')
             a.position_busy=False;a._motion_accepted=a._motion_write_stop_required=False
-            self.hold=not self.gate.released
-            self.phase='hold' if self.hold else 'ready'
-            self.reason='pvat_gesture_complete' if self.hold else None
+            await self.recorder.write_event(dict(kind='docker_pvat_outcome',controller_passed=okay,
+                reference_rejected=known_rejection,boundary=boundary,
+                input_exit_reason=self.pump.reason if self.pump else None),self.clock())
+            if known_rejection:
+                self.phase='fault';self.reason='pvat_reference_limit'
+            else:
+                self.hold=not self.gate.released
+                self.phase='hold' if self.hold else 'ready'
+                self.reason=('pvat_reference_boundary' if boundary else
+                    'position_input_expired' if self.pump and self.pump.reason=='pvat_input_expired' else
+                    'pvat_gesture_complete') if self.hold else None
         except BaseException as error:
             self.phase='fault';self.reason='stop_unverified' if a.position_busy else str(error)
             if a.position_busy:a._latched_fault='stop_unverified'

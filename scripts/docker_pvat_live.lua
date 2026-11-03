@@ -10,6 +10,7 @@ local start=timestamp()
 local entered=false
 local expired=false
 local moves=0
+local braking=false
 local origin,q,v,a,gain,base
 local function read_feedback()
     local state=lebai:get_robot_state()
@@ -121,6 +122,21 @@ local ok,err=pcall(function()
                 local axis=math.floor((action-1)/2)+1
                 local sign=action%2==1 and 1 or -1
                 for i=1,6 do goal[i]=gain[axis][i]*0.005*sign end
+            end
+            -- Reserve room to decelerate before the hard 0.08 rad reference
+            -- guard. A held input cannot override this gesture-local boundary.
+            for i=1,6 do
+                if not braking and math.abs(q[i]-origin[i])>=0.06 and (q[i]-origin[i])*v[i]>0 then
+                    braking=true;print('LIVE_BRAKE',timestamp()-start,'reference_boundary')
+                end
+            end
+            if braking then
+                local settled=true
+                for i=1,6 do
+                    goal[i]=0
+                    settled=settled and math.abs(v[i])<0.0002 and math.abs(a[i])<0.002
+                end
+                if settled then print('LIVE_BOUNDARY',timestamp()-start,'reference_boundary');break end
             end
             local maximum=0
             for i=1,6 do maximum=math.max(maximum,math.abs(goal[i])) end
