@@ -62,16 +62,26 @@ export function describeVrSafety(
     core.footer = CONTROL_FOOTER.replace('A解锁 B停止/Home', 'A解锁/再按A准备 B停止');
   }
   const finite=summary.finitePosition;
+  const poseFollow=summary.backend==='LEBAI_DOCKER'&&finite?.policy==='finite_position_docker'
+    &&finite.pose_follow_enabled===true;
+  if(poseFollow)core.footer=core.footer.replace('右Grip末端','右Grip位姿对齐');
   if(finite&&core.tone==='cyan'&&!state.stopPending){
     const boundary=finiteHoldTitle(finite);
     if(boundary){
       core.title=boundary;core.instruction='松开 Grip 后重新握持，反向或更换方向调整';core.tone='amber';core.shape='warning';
     }else if(['planning','executing','draining'].includes(finite.phase)){
-      core.title=finite.phase==='planning'?'正在规划小步':finite.phase==='draining'?'正在完成当前小步':'小步执行中';
-      core.instruction='松开 Grip 后完成当前小步 · B 请求停止';
-    }else if(state.phase==='armed')core.instruction=finite.policy==='finite_position_docker'
-    ?'Grip：前后左右上下，手腕抬低/扭转 · 回中心停止 · 左X打开/Y闭合'
+      core.title=poseFollow
+        ?finite.phase==='planning'?'正在对齐位姿':finite.phase==='draining'?'正在结束位姿跟随':'位姿跟随中'
+        :finite.phase==='planning'?'正在规划小步':finite.phase==='draining'?'正在完成当前小步':'小步执行中';
+      core.instruction=poseFollow?'手停时目标固定 · 松开 Grip 结束跟随 · B 请求停止'
+        :'松开 Grip 后完成当前小步 · B 请求停止';
+    }else if(state.phase==='armed'){
+      if(poseFollow)core.title='可操纵 · 位姿跟随';
+      core.instruction=poseFollow?'Grip 对齐：平移2倍、朝向1倍目标 · 左X打开/Y闭合'
+      :finite.policy==='finite_position_docker'
+      ?'Grip：前后左右上下，手腕抬低/扭转 · 回中心停止 · 左X打开/Y闭合'
       :finite.pitch_enabled?'Grip 控制平移和手腕俯仰 · 左X打开/Y闭合':'Grip 控制平移 · 左X打开/Y闭合';
+    }
   }
   const statusLine = formatRuntimeSummary(summary)
     + (target ? ' · 分段候选 · 未真机验收' : '');

@@ -370,6 +370,25 @@ it('explains a finite workspace hold without replacing a fault warning',()=>{
  expect(describeVrSafety({...state('armed'),fault:'stop_unverified'},true,summary).tone).toBe('red');
 });
 
+it('distinguishes Docker pose following from the direction-mode centre instructions',()=>{
+ const summary:RobotRuntimeSummary={backend:'LEBAI_DOCKER',realRobotMode:'control',actualTcp:null,gripper:0,
+  latencyMs:0,hardwareVerified:false,finitePosition:{policy:'finite_position_docker',phase:'executing',
+  generation:1,entered_steps:2,motion_id:null,reason:null,hardware_verified:false,pose_follow_enabled:true}};
+ const active=describeVrSafety(state('active'),true,summary);
+ expect(active.title).toBe('位姿跟随中');
+ expect(active.instruction).toContain('手停时目标固定');
+ expect(active.instruction).not.toContain('小步');
+ expect(active.footer).toContain('右Grip位姿对齐');
+ summary.finitePosition!.phase='ready';
+ const ready=describeVrSafety(state('armed'),true,summary);
+ expect(ready.title).toContain('位姿跟随');
+ expect(ready.instruction).toContain('平移2倍');
+ expect(ready.instruction).not.toContain('回中心停止');
+ expect(describeVrSafety({...state('armed'),fault:'stop_unverified'},true,summary).title).toBe('停止状态未确认');
+ summary.finitePosition!.pose_follow_enabled=false;
+ expect(describeVrSafety(state('armed'),true,summary).instruction).toContain('回中心停止');
+});
+
 describe('VR safety sprite resources', () => {
   let context: CanvasRenderingContext2D;
 

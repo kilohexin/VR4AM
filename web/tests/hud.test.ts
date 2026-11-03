@@ -114,6 +114,16 @@ describe('Chinese simulator HUD', () => {
     expect(document.body.textContent).toContain('目标不可达');
   });
 
+  it('identifies the enabled VR pose mode and clears it on disconnect',()=>{
+    const hud=new Hud(document.querySelector('#app')!);
+    hud.setRobotState({mode:'READY',backendState:'IDLE',sampleAgeMs:0,fault:null,
+      constraint:null,recoveryPhase:null,poseFollow:true});
+    expect(document.querySelector('[data-field="target-control"]')?.textContent).toContain('VR 位姿跟随');
+    expect(document.querySelector('[data-field="target-control"]')?.textContent).toContain('2:1');
+    hud.setConnectionStatus({state:'disconnected'});
+    expect(document.querySelector('[data-field="target-control"]')?.textContent).toBe('未确认');
+  });
+
   it('keeps a latched fault visible when the backend mode already returned to READY', () => {
     const hud = new Hud(document.querySelector('#app')!);
 

@@ -267,6 +267,8 @@ function onRobotState(state: RobotStateMessage): void {
     targetControl: state.target_control ?? null,
     preparationRequired: state.preparation_required ?? false,
     preparationUnlocked: state.preparation_unlocked ?? false,
+    poseFollow: state.backend==='LEBAI_DOCKER'&&state.finite_position?.policy==='finite_position_docker'
+      &&state.finite_position.pose_follow_enabled===true,
   });
   diagnosticsUpdates.onRobotState(state, recordAcknowledgement);
   refreshSettingsPanel();

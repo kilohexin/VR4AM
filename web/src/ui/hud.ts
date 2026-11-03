@@ -29,6 +29,7 @@ export interface RobotHudState {
   targetControl?: TargetControlStatus | null;
   preparationRequired?: boolean;
   preparationUnlocked?: boolean;
+  poseFollow?: boolean;
 }
 
 export class Hud {
@@ -224,7 +225,9 @@ export class Hud {
   }
 
   setRobotState(state: RobotHudState): void {
-    this.targetControlValue.textContent = state.targetControl
+    this.targetControlValue.textContent = state.poseFollow
+      ? 'VR 位姿跟随 · 平移2:1 / 朝向1:1目标'
+      : state.targetControl
       ? `分段候选 · 未真机验收 · ${readableTargetControl(state.targetControl)}`
       : '默认控制';
     this.lastFault = state.fault;

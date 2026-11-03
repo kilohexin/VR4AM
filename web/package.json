@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "docker:vr": "vite --config vite.docker.config.ts",
+    "docker:pose-test": "vite --config vite.docker-pose-test.config.ts",
     "test:docker-xr": "node scripts/checkDockerXR.mjs",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run"

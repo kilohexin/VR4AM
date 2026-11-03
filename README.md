@@ -12,7 +12,24 @@
 
 独立PVAT工具`scripts/docker_pvat_live.py`仍默认预览，执行需先关闭8773/8774。产品候选启动：`.venv/Scripts/python.exe scripts/run_lmaster_docker.py --run --pvat-vr`；定向合成验证：在`web`运行`node scripts/checkDockerPvat.mjs 8773 --disconnect-active`。详见`docs/project-status.md`。本机Windows当前保留5173端口，临时VR HTTPS入口以`--port 8443`启动，旧5173链接不可用。
 
-## 推荐启动
+## 新版位姿跟随体验入口
+
+`codex/vr-pose-continuation`提供独立头显入口8444→测试后端8774→独立仿真SDK13030，不替换现有8773/8443。网页“控制方式”和头显应显示“位姿跟随”；新模式不再提示“回中心停止”。右Grip重新对齐，平移目标2:1、朝向目标1:1，手停时目标固定，左X/Y长按渐进夹爪。
+
+本机已创建的`vr4arm-pose-webfix-20261103`目前停止；需先运行该独立官方实例，并通过启动预览核验固定回环映射。按以下顺序启动（每条在相应目录/终端执行）：
+
+```powershell
+docker start vr4arm-pose-webfix-20261103
+.venv/Scripts/python.exe scripts/run_lmaster_docker.py --isolated-test-container vr4arm-pose-webfix-20261103 --port 8774 --pose-follow-vr
+# 核对预览后启动；此终端保持运行，十分钟后正常退出。
+.venv/Scripts/python.exe scripts/run_lmaster_docker.py --run --isolated-test-container vr4arm-pose-webfix-20261103 --port 8774 --pose-follow-vr --test-seconds 600
+# 另开终端，在web目录：
+npm run docker:pose-test
+```
+
+电脑访问`http://127.0.0.1:8774/`，头显访问`https://电脑局域网IP:8444/`。同一测试后端一次只由一个页面控制；十分钟是服务体验期限，每次Grip仍最多五分钟。测试后端正常退出且收尾已确认后，停止专用容器并关闭代理；发生故障/未知不自动重试或复用旧输入。本轮只验证了代理启动及正常关闭，尚未启动真人头显体验；原厂仿真长期崩溃与真实设备验收仍待完成。
+
+## 原方向模式启动
 
 前提：本机官方 L Master Docker 容器运行，模拟 SDK 端口3030、管理端口3020已映射。启动器核对本机 Docker、官方镜像和端口，不重建容器，不连接真实机器人。
 
