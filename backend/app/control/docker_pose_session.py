@@ -5,6 +5,7 @@ from pathlib import Path
 from app.control.docker_pvat_input import ExecutorLease
 from app.control.docker_pvat_session import DockerPvatSession
 from app.control.vr_pose_input import VRPoseInput
+from app.control.docker_pose_profile import POSE_PROFILE
 
 
 def build_pose_program(adapter):
@@ -19,7 +20,9 @@ def build_pose_program(adapter):
     s = adapter.settings
     lower = tuple(q + s.joint_limit_margin_rad for q in s.soft_joint_min_rad)
     upper = tuple(q - s.joint_limit_margin_rad for q in s.soft_joint_max_rad)
-    bounds = ['local function product_bounds(p,q)']
+    bounds = ['local pose_joint_min={' + ','.join(repr(v) for v in lower) + '}',
+              'local pose_joint_max={' + ','.join(repr(v) for v in upper) + '}',
+              'local function product_bounds(p,q)']
     for i, axis in enumerate(('x', 'y', 'z')):
         bounds.append(f"if p and (p.{axis}<{s.startup_tcp_min_m[i]!r} or p.{axis}>{s.startup_tcp_max_m[i]!r}) then return 'workspace_boundary' end")
     for i in range(6):
@@ -29,7 +32,13 @@ def build_pose_program(adapter):
     bounds.extend(["if p and angle(p," + fixed + ")>math.pi/2 then return 'rotation_boundary' end", 'return nil end'])
     if source.count('-- PRODUCT_POSE_BOUNDS') != 1:
         raise ValueError('pose_program_marker')
-    return source.replace('-- PRODUCT_POSE_BOUNDS', '\n'.join(bounds))
+    if source.count('-- PRODUCT_POSE_PROFILE') != 1:
+        raise ValueError('pose_program_marker')
+    profile = ('local pose_profile={duration_ms=' + str(POSE_PROFILE.duration_ms)
+        + ',maximum_points=' + str(POSE_PROFILE.maximum_points)
+        + ',target_tcp_span=' + repr(POSE_PROFILE.target_tcp_span_m)
+        + ',feedback_tcp_span=' + repr(POSE_PROFILE.feedback_tcp_span_m) + '}')
+    return source.replace('-- PRODUCT_POSE_BOUNDS', '\n'.join(bounds)).replace('-- PRODUCT_POSE_PROFILE',profile)
 
 
 class DockerPoseSession(DockerPvatSession):
@@ -121,7 +130,7 @@ class DockerPoseSession(DockerPvatSession):
             done = okay = quiet = False
             boundary = None
             expired = False
-            async with asyncio.timeout(15):
+            async with asyncio.timeout(POSE_PROFILE.duration_ms/1000+8):
                 while line := await proc.stdout.readline():
                     fields = line.decode('utf-8', errors='replace').strip().split('\t')
                     await self.recorder.write_event(dict(kind='docker_pose_controller', fields=fields), self.clock())

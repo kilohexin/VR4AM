@@ -3,6 +3,9 @@ disable_auto_sync()
 local mailbox=(function()
 __POSE_MAILBOX_MODULE__
 end)()
+local tracker_module=(function()
+__POSE_TRACKER_MODULE__
+end)()
 
 local function near(a,b,tol) assert(math.abs(a-b)<=tol, 'probe_numeric_mismatch') end
 local function expect_error(fn,code)
@@ -52,6 +55,34 @@ end
 
 local ok,err=pcall(function()
     test('empty',function() local f=fake();assert(f.reader().read_latest()==nil) end)
+    test('absolute_joint_reference',function()
+        local lo={-1,-1,-1,-1,-1,-1};local hi={1,1,1,1,1,1}
+        local t=tracker_module.new({0,0,0,0,0,0},{joint_min=lo,joint_max=hi})
+        lo[1]=.2;hi[1]=.01 -- Cannot move a bound through the caller's arrays.
+        local function advance(goal,count)
+            for tick=1,count do
+                if tick%5==0 then rt_sleep(1) end
+                local oldv,olda=t.v[1],t.a[1]
+                local p,v,a=t.advance({goal,0,0,0,0,0})
+                assert(math.abs(v[1])<=.060000000001 and math.abs(a[1])<=.150000000001,'extended_reference_rate')
+                local jerk=(a[1]-olda)/.08
+                assert(math.abs(jerk)<=.500000000001,'extended_reference_jerk')
+                for sub=0,10 do
+                    local dt=sub*.008
+                    assert(math.abs(oldv+olda*dt+jerk*dt*dt/2)<=.060000000001,'interior_velocity_peak')
+                end
+            end
+        end
+        advance(.3,30) -- Reverse while still travelling at the positive cap.
+        advance(-.3,300);near(t.q[1],-.3,1e-5)
+        advance(.3,300)
+        near(t.q[1],.3,1e-5)
+        local steps=t.steps;local previous=t.q[1]
+        expect_error(function() t.advance({0,0,0,0,0,1.01}) end,'target_region')
+        assert(t.steps==steps and t.q[1]==previous,'reference_rejection_changed_state')
+        local diagnostic=tracker_module.new({0,0,0,0,0,0})
+        expect_error(function() diagnostic.advance({.081,0,0,0,0,0}) end,'target_region')
+    end)
     test('latest',function()
         local f=fake();f.publish(0,1000,1,1000);f.publish(1,1001,2,2000);f.now=1001
         local s=f.reader(1000).read_latest();assert(s.sequence_mod==2);near(s.pose.x,.002,1e-9)

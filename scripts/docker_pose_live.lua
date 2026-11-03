@@ -23,6 +23,7 @@ local function equivalent_pose(a,b,position_tolerance,angle_tolerance)
     return d2<=(position_tolerance or .00025)^2 and angle(a,b)<=(angle_tolerance or .002)
 end
 -- PRODUCT_POSE_BOUNDS
+-- PRODUCT_POSE_PROFILE
 local entered=false;local moves=0;local start=timestamp();local origin,base
 local function feedback(for_stop)
     local state=lebai:get_robot_state();local k=lebai:get_kin_data()
@@ -32,14 +33,13 @@ local function feedback(for_stop)
         assert(p==p and v==v and math.abs(p)<1000000 and math.abs(v)<1000000,'pose_nonfinite')
         if not for_stop then
             assert(math.abs(v)<=.3,'pose_speed')
-            if origin then assert(math.abs(p-origin[i])<=.1,'pose_joint_region') end
         end
     end
     if not for_stop then
         assert(not product_bounds(k.actual_tcp_pose,k.actual_joint_pose),'pose_product_bounds')
         if base then
             for _,axis in ipairs({'x','y','z'}) do
-                assert(math.abs(k.actual_tcp_pose[axis]-base[axis])<=.025,'pose_tcp_region')
+                assert(math.abs(k.actual_tcp_pose[axis]-base[axis])<=pose_profile.feedback_tcp_span,'pose_tcp_region')
             end
         end
     end
@@ -65,7 +65,9 @@ local ok,err=pcall(function()
     local state,k=feedback(false);assert(state=='IDLE','pose_requires_idle')
     for i=1,6 do assert(math.abs(k.actual_joint_speed[i])<=.002,'pose_requires_quiet') end
     origin=k.actual_joint_pose;base=k.actual_tcp_pose
-    local tracker=tracker_module.new(origin)
+    -- Full IK supplies each goal. Use the fixed absolute product joint limits,
+    -- not the old differential-IK probe's .08rad box around its first point.
+    local tracker=tracker_module.new(origin,{joint_min=pose_joint_min,joint_max=pose_joint_max})
     start=timestamp()
     local reader=mailbox.new(function(ch) return lebai:get_signal(ch) end,timestamp,start,function() end,
         function(ch,n) return lebai:get_signals(ch,n) end)
@@ -89,7 +91,7 @@ local ok,err=pcall(function()
                 error(sample)
             end
             if sample then latest=sample end
-            if timestamp()-start>=10000 then finish=true;return end
+            if timestamp()-start>=pose_profile.duration_ms then finish=true;return end
             rt_sleep(5)
         end
     end)
@@ -108,7 +110,7 @@ local ok,err=pcall(function()
                 else
                 boundary=product_bounds(sample.pose,nil)
                 for _,axis in ipairs({'x','y','z'}) do
-                    if math.abs(sample.pose[axis]-base[axis])>.020 then boundary=boundary or 'reference_boundary' end
+                    if math.abs(sample.pose[axis]-base[axis])>pose_profile.target_tcp_span then boundary=boundary or 'reference_boundary' end
                 end
                 if boundary then finish=true;return end
                 local joints
@@ -123,7 +125,6 @@ local ok,err=pcall(function()
                 assert(joints and #joints==6,'pose_ik_unreachable')
                 for i=1,6 do
                     assert(joints[i]==joints[i] and math.abs(joints[i])<1000000,'pose_ik_nonfinite')
-                    if math.abs(joints[i]-origin[i])>.070 then boundary='reference_boundary' end
                     assert(math.abs(joints[i]-seed[i])<.15,'pose_ik_branch')
                     assert(math.abs(f.actual_joint_pose[i]-tracker.q[i])<.03,'pose_tracking_error')
                 end
@@ -150,7 +151,7 @@ local ok,err=pcall(function()
             if timestamp()-start>=1500 then finish=true;return end
             rt_sleep(5)
         end
-        for tick=1,125 do
+        for tick=1,pose_profile.maximum_points do
             if finish then return end
             local due=phase_start and phase_start+math.max(0,(tick-2)*80) or timestamp()
             if timestamp()<due then rt_sleep(due-timestamp()) end

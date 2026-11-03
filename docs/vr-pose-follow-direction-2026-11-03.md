@@ -65,7 +65,7 @@ API依据：[原厂SDK运动](https://help.lebai.ltd/sdk/motion.html)、[Lua协�
 
 真机适配和现场验收另见`real-control-readiness-2026-11-03.md`。这一方向不授权真机连接，不保证零延迟或所有姿态可达。
 
-## 产品接线与当前验收（同日后续）
+## 产品首次接线与验收（同日后续，范围扩展见末节）
 
 `--pose-follow-vr`隐含`--pvat-vr`和既有网页模式，仅核验本机官方模拟端口3030，不存在真实端口回退。`FiniteXRInput`收到后端能力位才传完整位置/四元数，静止握持也传；右Trigger仍不控制夹爪，左X/Y保持原渐进控制。`hand_pose`与旧vector/pitch/spin互斥，非原厂Docker/未启用/非XR来源在发送SDK前拒绝。默认启动器未切换模式。
 
@@ -80,3 +80,36 @@ Lua解算和发送分成任务，只保留最新完成的IK。完全相同或相
 最新产品合成验证使用实际前端FiniteXRInput，经WebSocket到host批量邮箱和原厂控制器，不是只在Lua内产生目标。记录`logs/commissioning/20261103T124529Z-6ee51399/`：7个手势共107点，XYZ、两种四元数变化、固定手柄不积分、松手、变换手柄位置再捕获零点、持Grip同时X/Y渐进夹爪及干净断连全部通过。各手势最大host发布耗时约15.8～28.3ms，均正常release结束，最终故障null、未知读写为空、所有权释放；虚拟夹爪没有物理SDK写入。结果摘要`.tmp/vr-pose-follow-20261103/product-final-107-status.json` SHA256 `3f4268b9d0e41714f5a42515b7256a5f848c7b53a374bd088ed24ab9a2baec58`。原始日志不提交。
 
 开发验证（已有对应模式的单一后端运行后，在web目录）：`node scripts/checkDockerPose.mjs 8774 --extended`。候选仅作为后续真人Docker体验的基础，不声明所有动作流畅、无限持续、真实抓取或物理停止已解决。
+
+## 持续跟随范围扩展：隔离原厂Docker验证
+
+独立分支`codex/vr-pose-continuation`中的`DockerPoseProfile`统一启动预览、状态报告与产品Lua：每次最多300秒/3750点，目标相对最初Grip捕获位置各轴±100mm、实际反馈固定框±120mm。移除早期差分IK探针的局部关节范围，产品完整IK目标、参考和反馈均使用原配置的绝对软关节限位及margin；旧独立探针不传绝对范围时仍默认起点±0.08rad。Grip零点与全局工作区不移动，全局90°朝向、分支连续性、实际跟踪误差、100ms输入门、已知完成后清理和未知锁存保持。此扩展只适用于原厂Docker，不提高真实设备权限。
+
+参考器仍限制速度0.06rad/s、加速度0.15rad/s²、jerk 0.5rad/s³。扩大目标后的数学回归发现，旧算法只约束下个区间终点速度，接近速限时可能没有足够jerk消除加速度，下一步无可行解。现增加制动可行性包络，同时约束区间内部的速度峰值；仅对1e-12内浮点根差作数值收敛，不放宽既有速率。原厂Lua无运动回归覆盖运动中反向及正负0.3rad收敛、内部速度、越界拒绝不改变状态、固定限位副本；12项契约与20组信号/IK/FK通过，最大整组41ms。
+
+新增默认仅预览的`docker_pose_continuation_probe.py`。只允许本机无网络、无端口/挂载/设备、非特权官方实例；一次准备movej后使用**确切build_pose_program产物**，唯一注入是合成位姿生产器与对应协程等待。不调用主机SDK，不冒充真人头显或主机WebSocket长运行；失败或未知不自动重试/重启，原始输出保留。例：
+
+```powershell
+.venv/Scripts/python.exe scripts/docker_pose_continuation_probe.py --container vr4arm-pose-isolated-20261103 --output .tmp/continuation.json
+.venv/Scripts/python.exe scripts/docker_pose_continuation_probe.py --container vr4arm-pose-isolated-20261103 --scenario boundary --output .tmp/boundary.json
+```
+
+省略`--run`只预览，不启动容器。执行必须保持与现有服务隔离；测试后已正常停止该专用实例，保留容器与日志。通过证据：
+
+| 场景 | 结果 |
+| --- | --- |
+| 单次连续Grip、30mm目标往返 | 44秒、551个PVAT区间、1102包输入，已观察序号回绕；实际X峰值29.994mm、参考关节最大偏移0.1517rad；输入静默后过期并自然排空，未异常停止 |
+| 固定框外+120mm目标 | 26点后reference_boundary，约1µm报告漂移；没有重锚或追赶越界目标，自然收尾通过 |
+| 最大发送间隔 | 长运行91ms、边界90ms，仍未严格小于80ms；不证明无卡顿或真人端到端实时性 |
+
+本机证据目录为当前独立工作树`.tmp/continuation-evidence/`，原始日志不提交：
+
+| 文件 | SHA256 |
+| --- | --- |
+| continuation-44s.json | d98a9f18e23cdd75bb7dadb006a9ece98bbc2877dc2ccf9ed49d385fc75a13b3 |
+| boundary.json | d80da139000824c194c8a967e72129be37e9d49651ec403d6d0b6c6f1773924a |
+| native-reference-reversal.json | a51d0fc5fbb2e377027ea3f8136e98b3d5fcc639458c665583c1ec631f36a416 |
+
+前期两次数学失败记录及最初40秒/501点记录保留：40秒轮运动和收尾完成，但只有1001包，未覆盖1024包回绕，所以总体判定未通过，没有重判旧轮。44秒通过不等于已测满5分钟，也不证明70°实机或真人体验通过。新增主机产品驱动`checkDockerPose --continuation`供下一轮独立部署验证，本轮未运行该长场景。
+
+当前8773/8443仍为原方向模式，源文件与run_id未变、READY、无故障/未知。自动审批拒绝终止现有开发后端，只返回`blocked by policy`，因此未修改该源工作树或切换当前入口；扩展保留在独立分支。未连接真机，也未修复原厂长期线程崩溃。

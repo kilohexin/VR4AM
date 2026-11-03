@@ -9,6 +9,7 @@ import time
 from dataclasses import replace
 from app.config import TcpExpectation
 from app.digital_twin.runtime import load_digital_twin_settings
+from app.control.docker_pose_profile import POSE_PROFILE
 
 IMAGE='registry.cn-shanghai.aliyuncs.com/lebai/l-master'
 
@@ -127,6 +128,8 @@ def create_docker_app(web_directory,*,blended_translation=False,blended_rotation
         return dict(runtime='LEBAI_DOCKER',provider='official_lmaster',sdk_target='127.0.0.1:3030',
             simulator=True,hardware_verified=False,run_id=run_id,pid=os.getpid(),pvat_vr=pvat_vr,
             pose_follow_vr=pose_follow_vr,
+            pose_follow_window_s=POSE_PROFILE.duration_ms/1000 if pose_follow_vr else None,
+            pose_follow_grip_span_mm=POSE_PROFILE.target_tcp_span_m*1000 if pose_follow_vr else None,
             pvat_controller_points=getattr(backend,'position_pvat_points',0),
             pvat_reference_rollovers=getattr(backend,'position_pvat_reference_rollovers',0),
             pvat_nominal_speed_mmps=10 if pvat_vr and not pose_follow_vr else None,

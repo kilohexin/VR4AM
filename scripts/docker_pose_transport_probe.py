@@ -19,6 +19,7 @@ CONTRACT_CHECKS = {
     'empty', 'latest', 'torn_each_field', 'other_bank_does_not_starve',
     'expiry_permanent', 'rollback', 'immutable_duplicate', 'revocation_permanent',
     'clock_wrap', 'quaternion_rejected', 'rotation_conventions',
+    'absolute_joint_reference',
 }
 
 
@@ -50,6 +51,7 @@ def program():
     from app.control.vr_pose_mailbox import pack
     from app.schemas.messages import Pose
     module = (ROOT / 'scripts/vr_pose_mailbox.lua').read_text(encoding='utf-8')
+    tracker = (ROOT / 'scripts/vr_pose_tracker.lua').read_text(encoding='utf-8')
     harness = (ROOT / 'scripts/docker_pose_transport_probe.lua').read_text(encoding='utf-8')
     cases = []
     for angles in ((0, 0, 0), (0, 70, 0), (30, 90, 40), (10, -90, -30),
@@ -59,7 +61,7 @@ def program():
         values = ','.join(str(v) for v in pack(pose))
         matrix = ','.join(repr(float(v)) for v in rotation.as_matrix().ravel())
         cases.append('{values={' + values + '},rotation={' + matrix + '}}')
-    return harness.replace('__POSE_MAILBOX_MODULE__', module).replace(
+    return harness.replace('__POSE_MAILBOX_MODULE__', module).replace('__POSE_TRACKER_MODULE__',tracker).replace(
         '__ROTATION_CASES__', '{' + ','.join(cases) + '}')
 
 

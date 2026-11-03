@@ -57,15 +57,19 @@ async def test_virtual_start_only_occurs_from_unstarted_states_and_never_resumes
     assert writes==(['start_sys'] if initial in ('STOP','ROBOT_ON') else [])
 
 
-def test_launcher_preview_never_loads_or_connects_sdk(monkeypatch,capsys):
+@pytest.mark.parametrize('pose',[False,True])
+def test_launcher_preview_never_loads_or_connects_sdk(monkeypatch,capsys,pose):
     import sys
     from app.digital_twin import docker_runtime as d
     from scripts.run_lmaster_docker import main
     before='lebai_sdk' in sys.modules
     monkeypatch.setattr(d,'verify_local_docker',lambda:dict(container_id='local-id',image_id='image-id',target='127.0.0.1',port=3030))
-    assert main([])==0
+    assert main(['--pose-follow-vr'] if pose else [])==0
     report=json.loads(capsys.readouterr().out)
     assert report['execute'] is False and report['sdk_target']=='127.0.0.1:3030'
+    assert report['pose_follow_vr'] is pose
+    assert report['pose_follow_window_s']==(300 if pose else None)
+    assert report['pose_follow_grip_span_mm']==(100 if pose else None)
     assert ('lebai_sdk' in sys.modules)==before
 
 

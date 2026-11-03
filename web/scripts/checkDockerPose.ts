@@ -10,14 +10,17 @@ if(before.runtime!=='LEBAI_DOCKER'||before.sdk_target!=='127.0.0.1:3030'||!befor
 const socket=new WebSocket(`ws://127.0.0.1:${port}/ws/v1/teleop`);
 let state:any=null,generation=-1,seq=0,received=-Infinity,grip=false,hand=[0,0,0],timer:any;
 let handQ:[number,number,number,number]=[0,0,0,1],clawDirection:-1|0|1=0;
+let lastPoseSeq=0;const holds=new Set<string>();
 const replies=new Map();
-const send=(m:any)=>{if(socket.readyState===1)socket.send(JSON.stringify(m));};
+const send=(m:any)=>{if(socket.readyState===1){socket.send(JSON.stringify(m));
+ if(m.type==='finite_position_input'&&m.hand_pose)lastPoseSeq=m.seq;}};
 const input=new FinitePositionInput(send,()=>send({v:1,type:'disarm',request_id:'input-abort'}));
 const xr=new FiniteXRInput(input,m=>send(m),id=>send({v:1,type:'gripper_cancel',request_id:id}));
 socket.onmessage=e=>{
  const m=JSON.parse(String(e.data));
  if(m.type==='robot_state'){
   state=m;received=performance.now();
+  if(m.finite_position?.phase==='hold'&&m.finite_position.reason)holds.add(m.finite_position.reason);
   if(generation!==m.finite_position.generation){generation=m.finite_position.generation;input.reset('xr-finite-pose-check',generation);}
   input.observe(m.finite_position.phase);xr.update(m,received);
  }else if(m.request_id){replies.set(m.request_id,m);if(m.type==='gripper_result')xr.onGripperResult(m);}
@@ -55,6 +58,35 @@ try{
  if(Math.hypot(...state.actual_tcp.p.map((v:number,i:number)=>v-second[i]))>.001)throw Error('regrip_jump');
  grip=false;input.release();await wait(()=>state.finite_position.phase==='ready','second_release');
  console.log('PASS re-grip captures a fresh zero');
+ if(process.argv.includes('--continuation')){
+  if(before.pose_follow_window_s!==300||before.pose_follow_grip_span_mm!==100)throw Error('wrong_pose_profile');
+  const initial=[...state.actual_tcp.p],handOrigin=[...hand],initialSteps=state.finite_position.entered_steps;
+  grip=true;await wait(()=>state.finite_position.phase==='executing','continuation_start');
+  const since=performance.now();let peak=0,maxJointSpan=0;const joints=[...state.actual_q];
+  while(performance.now()-since<40000){
+   const t=(performance.now()-since)/1000;
+   const u=t<10?t/10:t<22?1:t<32?(32-t)/10:0;
+   hand=[handOrigin[0]+.015*u,handOrigin[1],handOrigin[2]];
+   peak=Math.max(peak,state.actual_tcp.p[0]-initial[0]);
+   maxJointSpan=Math.max(maxJointSpan,...state.actual_q.map((v:number,i:number)=>Math.abs(v-joints[i])));
+   if(state.fault||state.finite_position.phase==='hold'||state.finite_position.phase==='fault'
+      ||state.finite_position.phase==='ready')throw Error('continuation_interrupted:'+JSON.stringify(state.finite_position));
+   await sleep(25);
+  }
+  if(peak<.022||state.finite_position.entered_steps-initialSteps<400||lastPoseSeq<1024)throw Error('continuation_insufficient');
+  grip=false;input.release();await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','continuation_release');
+  console.log('PASS single Grip >40s, >400 points, beyond 20mm, sequence wrap',JSON.stringify({peak,maxJointSpan,lastPoseSeq}));
+  const stationary=[...state.actual_tcp.p];grip=true;
+  await wait(()=>state.finite_position.phase==='executing','boundary_start');
+  hand=[hand[0]+.06,hand[1],hand[2]]; // +120mm target outside fixed 100mm Grip box.
+  await wait(()=>holds.has('pvat_reference_boundary'),'fixed_grip_boundary');
+  await wait(()=>state.finite_position.phase==='ready','boundary_drain');
+  const stoppedSteps=state.finite_position.entered_steps;await sleep(300);
+  if(state.finite_position.entered_steps!==stoppedSteps||Math.hypot(...state.actual_tcp.p.map((v:number,i:number)=>v-stationary[i]))>.002)throw Error('boundary_moved_or_restarted');
+  grip=false;await sleep(150);grip=true;await wait(()=>state.finite_position.phase==='executing','after_boundary_regrip');
+  await sleep(400);grip=false;input.release();await wait(()=>state.finite_position.phase==='ready','after_boundary_release');
+  console.log('PASS fixed Grip box holds without reanchoring; explicit re-grip works');
+ }
  if(process.argv.includes('--extended')){
   for(const [handAxis,sign,robotAxis] of [[1,1,2],[2,-1,1]]){
    const initial=[...state.actual_tcp.p];grip=true;

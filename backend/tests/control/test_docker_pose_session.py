@@ -49,6 +49,20 @@ def test_native_program_has_no_implicit_prepare_and_fixed_absolute_bounds():
         assert forbidden not in source
 
 
+def test_extended_profile_keeps_fixed_grip_and_absolute_joint_limits():
+    from app.control.docker_pose_profile import POSE_PROFILE
+    _,a,_=rig();source=build_pose_program(a)
+    assert POSE_PROFILE.duration_ms==300000 and POSE_PROFILE.maximum_points==3750
+    assert POSE_PROFILE.target_tcp_span_m==.1 and POSE_PROFILE.feedback_tcp_span_m==.12
+    assert '-- PRODUCT_POSE_PROFILE' not in source
+    assert 'joint_min=pose_joint_min,joint_max=pose_joint_max' in source
+    assert 'joints[i]-origin[i]' not in source
+    # Fixed base is assigned once from the original observation; it never
+    # follows the hand or reference to silently enlarge an active gesture.
+    assert source.count('base=k.actual_tcp_pose')==1
+    assert 'base=sample' not in source
+
+
 @pytest.mark.parametrize('expired',[False,True])
 async def test_delayed_start_keeps_grip_anchor_and_known_release_cleans_up(monkeypatch,expired):
     from app.digital_twin import docker_runtime

@@ -33,6 +33,8 @@ def main(argv=None):
     print(json.dumps(dict(execute=args.run,runtime='LEBAI_DOCKER',sdk_target='127.0.0.1:3030',
         simulator=True,web_host=args.host,web_port=args.port,admission=admission,pvat_vr=args.pvat_vr,
         pose_follow_vr=args.pose_follow_vr,
+        pose_follow_window_s=runtime.POSE_PROFILE.duration_ms/1000 if args.pose_follow_vr else None,
+        pose_follow_grip_span_mm=runtime.POSE_PROFILE.target_tcp_span_m*1000 if args.pose_follow_vr else None,
         startup='STOP/ROBOT_ON -> start_sys -> IDLE; otherwise require IDLE',
         controls='unlock,prepare,translation,pitch/spin,progressive claw',startup_velocity_factor_percent=100,
         blended_translation=args.blended_translation,translation_step_mm=4 if args.blended_translation else 8,
