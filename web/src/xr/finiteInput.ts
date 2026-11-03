@@ -28,6 +28,9 @@ export class FiniteXRInput {
  private lastTime:number|null=null;private trigger:number|null=null;
  private pending:string|null=null;private lastClaw=-Infinity;private sequence=0;
  private clawPause=false;private gesture=new DockerGesture();
+ private buttonClaw=false;private clawDirection=0;private clawInputAt=-Infinity;
+ private clawButtonsReleased=false;
+ private clawTime:number|null=null;private clawTarget:number|null=null;
  constructor(private position:FinitePositionInput,private sendClaw:(m:GripperRequestMessage)=>void,
   private cancelClaw:(id:string)=>void,private now:()=>number=()=>performance.now()){}
  update(state:RobotStateMessage|null,receivedAt:number):void {
@@ -40,6 +43,15 @@ export class FiniteXRInput {
   this.position.abort(reason);
   if(this.pending)this.cancelClaw(this.pending);
   this.pending=null;this.anchor=null;this.gesture.reset();this.mustRelease=true;this.lastTime=null;this.trigger=null;this.clawPause=false;
+  this.clawDirection=0;this.clawTarget=null;this.clawTime=null;
+  this.clawButtonsReleased=false;
+ }
+ holdClaw(direction:-1|0|1,stamp:number):void {
+  this.buttonClaw=true;
+  if(direction===0)this.clawButtonsReleased=true;
+  else if(!this.clawButtonsReleased)direction=0;
+  if(direction&&this.clawDirection===0){this.clawTarget=this.state?.gripper??null;this.clawTime=stamp;}
+  this.clawDirection=direction;this.clawInputAt=stamp;
  }
  apply(frame:VRFrame):void {
   const s=this.state,t=this.now();
@@ -66,7 +78,23 @@ export class FiniteXRInput {
    // gesture; its owned step still runs the backend's fresh-feedback checks.
    this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=true;this.trigger=null;return;
   }
-  if(docker){
+  if(this.buttonClaw){
+   const direction=t>=this.clawInputAt&&t-this.clawInputAt<100?this.clawDirection:0;
+   const dt=this.clawTime===null?0:Math.max(0,Math.min(50,t-this.clawTime))/1000;
+   this.clawTime=t;
+   if(this.clawTarget===null)this.clawTarget=s.gripper;
+   if(direction)this.clawTarget=Math.max(0,Math.min(1,this.clawTarget+direction*dt*(docker?1.5:.15)));
+   frame={...frame,right:{...frame.right,trigger:this.clawTarget}};
+  }
+  const parallel=docker&&s.finite_position?.parallel_virtual_claw===true;
+  if(parallel){
+   const value=Math.round(frame.right.trigger*100)/100;
+   if(this.trigger===null)this.trigger=value;
+   if(!this.pending&&Math.abs(value-this.trigger)>=.005&&t-this.lastClaw>=50){
+    this.trigger=value;this.lastClaw=t;this.pending=`xr-claw-${++this.sequence}-${Date.now()}`;
+    this.sendClaw({v:1,type:'gripper_request',request_id:this.pending,value});
+   }
+  }else if(docker){
    const raw=Math.max(0,Math.min(1,frame.right.trigger));
    // Preserve analogue grasp intent, but quantise it to stable 5% targets.
    // At most one request is in flight; later frames coalesce to the newest

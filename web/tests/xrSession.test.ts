@@ -122,6 +122,7 @@ function setup(options: {
   const armRequests: string[] = [];
   const stopRequests: string[] = [];
   const controllerSupport: Array<boolean | null> = [];
+  const clawHolds:Array<[number,number]>=[];
   let sessionIndex = 0;
   const controller = new XRSessionController({
     xr: options.missingXR ? undefined : xr,
@@ -138,6 +139,7 @@ function setup(options: {
       armRequests.push('arm');
       options.events?.push('arm');
     },
+    onClawHold:(direction,time)=>clawHolds.push([direction,time]),
     onStopOrResetRequest: () => {
       stopRequests.push('stop');
       options.events?.push('stop');
@@ -164,6 +166,7 @@ function setup(options: {
     armRequests,
     stopRequests,
     controllerSupport,
+    clawHolds,
   };
 }
 
@@ -181,6 +184,22 @@ function emitQuest(
 beforeEach(() => vi.restoreAllMocks());
 
 describe('XRSessionController lifecycle', () => {
+  it('uses left X/Y holds, requires release first, and cancels conflicting or lost tracking',async()=>{
+    const {controller,session,host,clawHolds}=setup();await controller.enterVR();
+    const emit=(t:number,x:boolean,y:boolean,tracked=true)=>{
+      const left=questSource({a:x,b:y}) as unknown as {handedness:string;gripSpace:object};left.handedness='left';left.gripSpace={handedness:'left'};
+      session.inputSources=[questSource({grip:true}),left as unknown as XRInputSource];
+      host.loop?.(t,poseFrame(true,tracked));
+    };
+    emit(100,true,false);expect(clawHolds.at(-1)?.[0]).toBe(0);
+    emit(120,false,false);emit(140,true,false);expect(clawHolds.at(-1)?.[0]).toBe(-1);
+    emit(160,true,false);expect(clawHolds.at(-1)?.[0]).toBe(-1);
+    emit(180,true,true);expect(clawHolds.at(-1)?.[0]).toBe(0);
+    emit(200,false,false);emit(220,false,true);expect(clawHolds.at(-1)?.[0]).toBe(1);
+    emit(240,false,true,false);expect(clawHolds.at(-1)?.[0]).toBe(0);
+    emit(260,false,true);expect(clawHolds.at(-1)?.[0]).toBe(0);
+    await controller.exitVR();
+  });
   it('publishes controller and support before the frame, then emits one A edge', async () => {
     const events: string[] = [];
     const {controller, session, host, armRequests} = setup({events});
@@ -338,6 +357,7 @@ describe('XRSessionController lifecycle', () => {
     ]);
     expect(host.updateXRPresentation).toHaveBeenLastCalledWith({
       left: {
+        openButton:false,closeButton:false,faceButtonsSupported:false,
         p: [-0.1, 0.2, 0.3],
         q: [0, 0, 0, 1],
         trackingValid: true,

@@ -279,3 +279,18 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
 
     async def _wait_for_next_stop_sample(self,read_started_ns):
         await self._position_progress_pause(read_started_ns)
+
+    def parallel_virtual_claw_available(self):
+        from app.digital_twin.virtual_claw import DockerArmWithVirtualClaw
+        return (type(self) is DockerFinitePositionAdapter and self._docker_native
+            and getattr(self,'position_pvat_vr',False) is True
+            and type(self._docker_ready_client) is DockerArmWithVirtualClaw)
+
+    async def command_parallel_virtual_claw(self,value,*,authorize):
+        if not self.parallel_virtual_claw_available():raise ValueError('virtual_parallel_claw_unavailable')
+        if type(value) not in (int,float) or not math.isfinite(value) or not 0<=value<=1:
+            raise ValueError('virtual_claw_invalid_target')
+        authorize();self._position_health(self.position_binding)
+        # This exact local model does not yield or call the physical SDK.
+        await self._docker_ready_client.set_claw(30.,(1-value)*100)
+        authorize()

@@ -149,11 +149,11 @@ export class HoldControlPanel {
         this.rotation!.premultiply(new Quaternion().setFromAxisAngle(this.spinAxis, angle));
       } else this.position.z += (this.action === 'z+' ? 1 : -1) * seconds * .02;
     }
-    if (fresh && (this.action === 'open' || this.action === 'close') && !this.pending && this.clawReady()) {
+    if (fresh && (this.action === 'open' || this.action === 'close') && this.clawReady()) {
       const seconds = Math.min(50, Math.max(0, delta)) / 1000;
-      const rate=this.state?.backend==='LEBAI_DOCKER' ? .6 : CLAW_RATE;
+      const rate=this.state?.backend==='LEBAI_DOCKER' ? 1.5 : CLAW_RATE;
       this.clawTarget = Math.max(0, Math.min(1, this.clawTarget + (this.action === 'close' ? 1 : -1) * seconds * rate));
-      if (Math.abs(this.clawTarget - this.clawLastSent) >= .005 && this.now() - this.clawLastSendMs >= CLAW_INTERVAL_MS) {
+      if (!this.pending && Math.abs(this.clawTarget - this.clawLastSent) >= .005 && this.now() - this.clawLastSendMs >= CLAW_INTERVAL_MS) {
         this.pending = `web-claw-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         this.pendingCancelled = false;
         this.clawLastSent = this.clawTarget; this.clawLastSendMs = this.now();

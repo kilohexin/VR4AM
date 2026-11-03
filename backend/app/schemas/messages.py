@@ -172,6 +172,7 @@ class FinitePositionInputMessage(StrictMessage):
 
 
 class FinitePositionStatus(StrictMessage):
+    parallel_virtual_claw: bool = Field(default=False,strict=True)
     vr_enabled: bool = Field(default=False,strict=True)
     pitch_enabled: bool = Field(default=False,strict=True)
     spin_enabled: bool = Field(default=False,strict=True)

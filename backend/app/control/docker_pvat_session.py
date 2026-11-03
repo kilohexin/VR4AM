@@ -101,7 +101,13 @@ class DockerPvatSession:
             if known_rejection:
                 self.phase='fault';self.reason='pvat_reference_limit'
             else:
-                self.hold=not self.gate.released
+                # A verified time-window completion may roll over using a
+                # CURRENT held input. Boundary, expiry and revocation may not.
+                latest=self.gate.latest
+                continue_held=(not boundary and self.pump is not None and self.pump.reason is None
+                    and not self.closed and not self._withdraw.is_set() and latest is not None
+                    and latest.kind=='held' and 0<=self.clock()-latest.received_ns<INPUT_NS)
+                self.hold=not self.gate.released and not continue_held
                 self.phase='hold' if self.hold else 'ready'
                 self.reason=('pvat_reference_boundary' if boundary else
                     'position_input_expired' if self.pump and self.pump.reason=='pvat_input_expired' else

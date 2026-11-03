@@ -45,6 +45,7 @@ export interface XRSessionControllerOptions {
   onFrame(frame: VRFrame): void;
   onController(state: {tracking: boolean; grip: boolean; trigger: number}): void;
   onArmRequest?(): void;
+  onClawHold?(direction:-1|0|1,nowMs:number):void;
   onStopOrResetRequest?(): void;
   onControllerSupport?(supported: boolean | null): void;
   onDisarm(): void;
@@ -70,6 +71,7 @@ interface SessionContext {
   lastSample: ControllerSample;
   armLatch: {pressed: boolean; releaseSeen: boolean};
   stopLatch: {pressed: boolean; releaseSeen: boolean};
+  clawReleasedSeen:boolean;
   suspended: boolean;
   activationComplete: boolean;
   ending: boolean;
@@ -286,6 +288,7 @@ export class XRSessionController {
       lastSample: invalidControllerSample(),
       armLatch: {pressed: false, releaseSeen: false},
       stopLatch: {pressed: false, releaseSeen: false},
+      clawReleasedSeen:false,
       suspended: false,
       activationComplete: false,
       ending: false,
@@ -299,6 +302,13 @@ export class XRSessionController {
     if (!this.ownsLiveContext(context)) return;
     if (context.suspended || context.session.visibilityState !== 'visible') return;
     const pair = readControllers(frame, context.referenceSpace, context.session.inputSources);
+    const left=pair.left;
+    if(!left.trackingValid||!left.faceButtonsSupported||left.openButton&&left.closeButton){
+      context.clawReleasedSeen=false;this.options.onClawHold?.(0,nowMs);
+    }else{
+      if(!left.openButton&&!left.closeButton)context.clawReleasedSeen=true;
+      this.options.onClawHold?.(context.clawReleasedSeen?(left.openButton?-1:left.closeButton?1:0):0,nowMs);
+    }
     const viewerPose = frame.getViewerPose(context.referenceSpace);
     const headOrientation = viewerPose?.transform.orientation;
     const headQ: Quat | null = headOrientation
@@ -443,6 +453,8 @@ export class XRSessionController {
   }
 
   private signalSafety(context?: SessionContext): void {
+    this.options.onClawHold?.(0,this.now());
+    if(context)context.clawReleasedSeen=false;
     this.lastConstraint = null;
     if (context) this.options.host.updateXRPresentation(invalidPresentationSample(), this.now());
     this.options.onDisarm();
@@ -527,6 +539,7 @@ function takeReleasedEdge(
 }
 
 function resetFaceLatches(context: SessionContext): void {
+  context.clawReleasedSeen=false;
   context.armLatch = {pressed: false, releaseSeen: false};
   context.stopLatch = {pressed: false, releaseSeen: false};
 }

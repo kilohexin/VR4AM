@@ -34,6 +34,18 @@ try{
   console.log('PASS desktop to XR source switch returns READY with fresh released frames');
  }
  await command('arm_request','unlock');await command('prepare_request','prepare');await wait(()=>state?.manual_input_ready,'prepared');
+ if(process.argv.includes('--parallel-claw')){
+  if(!state.finite_position.parallel_virtual_claw)throw Error('parallel_capability_missing');
+  const steps=state.finite_position.entered_steps;vector=[0,0,1];
+  await wait(()=>state.finite_position.entered_steps>=steps+5,'parallel_move');
+  send({v:1,type:'gripper_request',request_id:'claw-moving',value:.25});
+  await wait(()=>replies.has('claw-moving'),'parallel_claw_reply');
+  if(!replies.get('claw-moving').accepted)throw Error('parallel_claw_rejected');
+  await wait(()=>Math.abs(state.gripper-.25)<.05&&state.finite_position.entered_steps>=steps+9,'parallel_claw_progress');
+  if(state.finite_position.phase!=='executing')throw Error('claw_interrupted_arm');
+  vector=[0,0,0];input.release();await wait(()=>state.finite_position.phase==='ready','parallel_release');
+  console.log('PASS virtual claw moves while PVAT keeps streaming');
+ }
  for(const direction of [[1,0,0],[0,1,0],[0,0,1],[1,1,0],[0,-1,1],[-1,0,-1]]){
   const start=[...state.actual_tcp.p];
   const steps=state.finite_position.entered_steps;vector=direction;
@@ -46,16 +58,18 @@ try{
  if(process.argv.includes('--long-hold')||process.argv.includes('--reference-boundary')){
   const started=performance.now();vector=[0,1,0];
   const alternate=setInterval(()=>{vector=process.argv.includes('--reference-boundary')?[-1,0,0]:[0,Math.floor((performance.now()-started)/800)%2?1:-1,0];},80);
-  try{await wait(()=>state.finite_position.phase==='hold','bounded_hold',14000);}
+  const initialSteps=state.finite_position.entered_steps;
+  try{await wait(()=>process.argv.includes('--reference-boundary')?state.finite_position.phase==='hold':state.finite_position.entered_steps>=initialSteps+135,'bounded_hold',16000);}
   finally{clearInterval(alternate);}
   if(process.argv.includes('--reference-boundary')&&state.finite_position.reason!=='pvat_reference_boundary')throw Error('reference_boundary_not_observed');
   const stopped=state.finite_position.entered_steps;
-  await sleep(250);
-  if(state.finite_position.entered_steps!==stopped)throw Error('held_restarted_after_limit');
+  if(process.argv.includes('--reference-boundary')){
+   await sleep(250);if(state.finite_position.entered_steps!==stopped)throw Error('held_restarted_after_limit');
+  }
   vector=[0,0,0];input.release();await wait(()=>state.finite_position.phase==='ready','release_after_limit');
   vector=[0,-1,0];await wait(()=>state.finite_position.entered_steps>=stopped+6,'regrip_after_limit');
   vector=[0,0,0];input.release();await wait(()=>state.finite_position.phase==='ready','regrip_drain');
-  console.log('PASS bounded continuous hold / no automatic restart / explicit regrip');
+  console.log(process.argv.includes('--reference-boundary')?'PASS boundary hold / no automatic restart / explicit regrip':'PASS fresh held input continues across the ten-second window');
  }
  send({v:1,type:'gripper_request',request_id:'claw-middle',value:.4});
  await wait(()=>replies.has('claw-middle'),'claw_reply');

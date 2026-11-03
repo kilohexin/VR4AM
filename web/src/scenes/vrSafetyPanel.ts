@@ -4,7 +4,7 @@ import type {ArmSafetySnapshot} from '../ui/armPanel';
 import {finiteHoldTitle} from '../ui/finitePositionFeedback';
 import {isStopFailure, readableConstraint, readableFault, readableTargetControl} from '../ui/hud';
 
-const CONTROL_FOOTER = 'A解锁 B停止/Home · 右Grip末端 Trigger夹爪 · 左摇杆平台/按下归零 · 左Grip+摇杆升降' as const;
+const CONTROL_FOOTER = 'A解锁 B停止/Home · 右Grip末端 · 左X长按打开 Y长按闭合 · 左摇杆平台/按下归零 · 左Grip+摇杆升降' as const;
 
 export interface RobotRuntimeSummary {
   backend: RuntimeBackend | null;
@@ -70,8 +70,8 @@ export function describeVrSafety(
       core.title=finite.phase==='planning'?'正在规划小步':finite.phase==='draining'?'正在完成当前小步':'小步执行中';
       core.instruction='松开 Grip 后完成当前小步 · B 请求停止';
     }else if(state.phase==='armed')core.instruction=finite.policy==='finite_position_docker'
-    ?'Grip：偏离中心持续前后左右上下 · 回中心停止 · Trigger比例开合'
-      :finite.pitch_enabled?'Grip 控制平移和手腕俯仰 · Trigger 控制开合':'Grip 控制平移 · Trigger 控制开合';
+    ?'Grip：偏离中心持续前后左右上下 · 左X打开/Y闭合，松开保持'
+      :finite.pitch_enabled?'Grip 控制平移和手腕俯仰 · 左X打开/Y闭合':'Grip 控制平移 · 左X打开/Y闭合';
   }
   const statusLine = formatRuntimeSummary(summary)
     + (target ? ' · 分段候选 · 未真机验收' : '');

@@ -14,6 +14,25 @@ it('keeps XR Grip and Trigger out of legacy transport without mutating controlle
  expect(finiteXRTransportFrame(f).right).toMatchObject({grip:false,trigger:0});
  expect(f.right).toMatchObject({grip:true,trigger:.8});
 });
+
+it('held left buttons progress the virtual claw while Grip keeps streaming and Trigger is ignored',()=>{
+ const r=rig();const s={...state,backend:'LEBAI_DOCKER' as const,robot_state:'MOVING' as const,
+  finite_position:{...state.finite_position!,policy:'finite_position_docker' as const,parallel_virtual_claw:true}};
+ const apply=(t:number,dir:-1|0|1,grip:boolean,x:number,trigger=0)=>{
+  r.setNow(t);r.xr.update(s,t);r.xr.holdClaw(dir,t);
+  r.xr.apply({v:1,type:'vr_frame',session_id:'test',seq:t,client_mono_ms:t,tracking_valid:true,visibility:'visible',right:{p:[x,0,0],q:[0,0,0,1],grip,trigger}});
+ };
+ apply(0,0,false,0);apply(20,0,true,0);apply(40,-1,true,.02,1);
+ apply(60,-1,true,.02,1);apply(80,-1,true,.02,1);
+ expect(r.claws[0].value).toBeLessThan(.5);expect(r.claws[0].value).toBeGreaterThan(0);
+ expect(r.inputs.at(-1).kind).toBe('held');
+ const count=r.claws.length;apply(100,-1,true,.02);expect(r.claws.length).toBe(count);
+ r.xr.onGripperResult({v:1,type:'gripper_result',request_id:r.claws[0].request_id,accepted:true,message:'ok'});
+ apply(120,0,true,.02);const selected=r.claws.at(-1).value;
+ r.xr.onGripperResult({v:1,type:'gripper_result',request_id:r.claws.at(-1).request_id,accepted:true,message:'ok'});
+ apply(180,0,true,.02,0);expect(r.claws.at(-1).value).toBe(selected);
+ expect(r.inputs.at(-1).kind).toBe('held');expect(r.stops).toEqual([]);
+});
 function rig(){
  let now=0;const inputs:any[]=[],claws:any[]=[],cancelled:string[]=[],stops:string[]=[];
  const input=new FinitePositionInput(m=>inputs.push(m),r=>stops.push(r??'stop'));input.reset('xr-finite-test',1);

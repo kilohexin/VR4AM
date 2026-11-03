@@ -14,6 +14,7 @@ export interface FinitePositionStatus {
  vr_enabled?:boolean;
  pitch_enabled?:boolean;
  spin_enabled?:boolean;
+ parallel_virtual_claw?:boolean;
  blocked_input_seq?:number|null;
 }
 export function isFinitePositionInputMessage(value:unknown):value is FinitePositionInputMessage {
@@ -27,7 +28,7 @@ export function isFinitePositionInputMessage(value:unknown):value is FinitePosit
   &&(value.kind!=='release'||(value.vector.every(x=>x===0)&&(!value.pitch||value.pitch===0)&&(!value.spin||value.spin===0)));
 }
 export function isFinitePositionStatus(value:unknown):value is FinitePositionStatus {
- if(!isRecord(value)||!hasExactKeys(value,['policy','phase','generation','entered_steps','motion_id','reason','hardware_verified'],['vr_enabled','pitch_enabled','spin_enabled','blocked_input_seq']))return false;
+ if(!isRecord(value)||!hasExactKeys(value,['policy','phase','generation','entered_steps','motion_id','reason','hardware_verified'],['vr_enabled','pitch_enabled','spin_enabled','blocked_input_seq','parallel_virtual_claw']))return false;
  return ['finite_position_offline','finite_position_web','finite_position_docker'].includes(String(value.policy))&&['inactive','ready','planning','executing','draining','hold','fault'].includes(String(value.phase))
   &&Number.isSafeInteger(value.generation)&&Number(value.generation)>=0&&Number.isSafeInteger(value.entered_steps)
   &&Number(value.entered_steps)>=0&&(value.policy==='finite_position_docker'||Number(value.entered_steps)<=10)&&value.hardware_verified===false
@@ -36,6 +37,7 @@ export function isFinitePositionStatus(value:unknown):value is FinitePositionSta
   &&(!Object.hasOwn(value,'vr_enabled')||typeof value.vr_enabled==='boolean')
   &&(!Object.hasOwn(value,'pitch_enabled')||typeof value.pitch_enabled==='boolean')
   &&(!Object.hasOwn(value,'spin_enabled')||typeof value.spin_enabled==='boolean')
+  &&(!Object.hasOwn(value,'parallel_virtual_claw')||typeof value.parallel_virtual_claw==='boolean')
   &&(!Object.hasOwn(value,'blocked_input_seq')||value.blocked_input_seq===null
     ||(Number.isSafeInteger(value.blocked_input_seq)&&Number(value.blocked_input_seq)>=0));
 }

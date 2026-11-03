@@ -17,6 +17,9 @@ export interface TrackedPoseSample {
 }
 
 export interface LeftControllerSample extends TrackedPoseSample {
+  openButton?:boolean;
+  closeButton?:boolean;
+  faceButtonsSupported?:boolean;
   thumbstickX: number;
   thumbstickY: number;
   grip: boolean;
@@ -71,6 +74,9 @@ function readLeftController(
 
   return {
     ...pose,
+    openButton:supportsQuestFaceButtons(source,source.gamepad?.buttons??[])&&pressed(source.gamepad?.buttons?.[4]),
+    closeButton:supportsQuestFaceButtons(source,source.gamepad?.buttons??[])&&pressed(source.gamepad?.buttons?.[5]),
+    faceButtonsSupported:supportsQuestFaceButtons(source,source.gamepad?.buttons??[]),
     thumbstickX: normalizeAxis(source.gamepad?.axes?.[THUMBSTICK_X_AXIS_INDEX]),
     thumbstickY: normalizeAxis(source.gamepad?.axes?.[THUMBSTICK_Y_AXIS_INDEX]),
     grip: pressed(source.gamepad?.buttons?.[GRIP_BUTTON_INDEX]),

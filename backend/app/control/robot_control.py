@@ -1682,7 +1682,8 @@ class RobotControl:
         return FinitePositionStatus(**asdict(view),policy=getattr(self.backend,'position_policy','finite_position_offline'),
             vr_enabled=getattr(self.backend,'position_vr_enabled',False),
             pitch_enabled=getattr(self.backend,'position_pitch_enabled',False),
-            spin_enabled=getattr(self.backend,'position_spin_enabled',False))
+            spin_enabled=getattr(self.backend,'position_spin_enabled',False),
+            parallel_virtual_claw=self._parallel_virtual_claw_available())
 
     async def _record_state_message(self, message: RobotStateMessage) -> None:
         """Record the composed message and retain the existing failure response."""
@@ -1714,7 +1715,7 @@ class RobotControl:
             self._advance_control_generation()
 
     async def command_gripper(self, value: float, *, is_current: Callable[[], bool] | None = None) -> None:
-        if self.finite_position_session is not None and self.finite_position_session.busy:
+        if self.finite_position_session is not None and self.finite_position_session.busy and not self._parallel_virtual_claw_available():
             raise RuntimeError('position_busy')
         if self._explicit_gripper_current is not None:
             raise RuntimeError('gripper_command_busy')
@@ -1737,6 +1738,20 @@ class RobotControl:
         generation = self._control_generation
         if not self._gripper_authority_is_current(generation):
             raise RuntimeError("gripper_command_requires_armed")
+        if self._parallel_virtual_claw_available():
+            def checked():
+                received=self.latest.snapshot()
+                if (not self._gripper_authority_is_current(generation) or received is None
+                        or not 0<=self.clock.now_ns()-received.received_ns<100_000_000
+                        or not received.frame.tracking_valid or received.frame.visibility!='visible'):
+                    raise RuntimeError('gripper_command_authority_changed')
+            checked()
+            if not await self._record_critical('parallel_virtual_claw',{'value':value}):
+                raise RuntimeError('gripper_command_recording_unavailable')
+            checked()
+            await self.backend.command_parallel_virtual_claw(value,authorize=checked)
+            self._last_gripper_sent=value;self._last_gripper_sent_ns=self.clock.now_ns()
+            return
         preflight = await self.backend.preflight()
         if not self._gripper_authority_is_current(generation):
             raise RuntimeError("gripper_command_authority_changed")
@@ -1772,6 +1787,10 @@ class RobotControl:
         except GripperCommandRevoked:
             return False
         return True
+
+    def _parallel_virtual_claw_available(self):
+        capability=getattr(self.backend,'parallel_virtual_claw_available',None)
+        return callable(capability) and capability() is True
 
     def _gripper_authority_is_current(self, generation: int) -> bool:
         return (
