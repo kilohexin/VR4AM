@@ -83,7 +83,7 @@ local ok,err=pcall(function()
     end
     start=timestamp();print('LIVE_READY',start)
     local due=start;local started=nil;local last_send=nil
-    while timestamp()-start<8000 and moves<100 do
+    while timestamp()-start<10000 and moves<125 do
         local action=input()
         if not action then
             if started then expired=true;print('LIVE_EXPIRED',timestamp()-start,moves);break end

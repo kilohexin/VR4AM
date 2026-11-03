@@ -13,19 +13,12 @@ import time
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'backend'))
-MODULUS=33554432
-CHANNEL=240
-
-
-def encode(stamp_ms,action):
-    if type(stamp_ms) is not int or stamp_ms<0 or type(action) is not int or not 0<=action<=6:
-        raise ValueError('invalid_live_input')
-    return (stamp_ms%MODULUS)*64+action
+from app.control.docker_pvat_input import CHANNEL,MODULUS,encode,DockerPvatInput,ExecutorLease
 
 
 def schedule(elapsed):
     # Same-clutch direction changes, explicit releases, then silent input loss.
-    phases=((.4,0),(1.1,1),(1.6,0),(2.3,2),(2.8,0),(3.5,3),(4.,0),(4.7,4),(5.2,0),(5.9,5),(6.4,0),(7.1,6))
+    phases=((.4,0),(1.3,1),(1.8,0),(2.7,2),(3.2,0),(4.1,3),(4.6,0),(5.5,4),(6.,0),(6.9,5),(7.4,0),(8.3,6))
     return next((action for end,action in phases if elapsed<end),None)
 
 
@@ -62,19 +55,15 @@ async def run(admission):
         stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
     proc.stdin.write(Path(__file__).with_suffix('.lua').read_bytes());await proc.stdin.drain();proc.stdin.close()
     report=dict(lines=[],inputs=[],passed=False,unknown_input=False)
-    feeder=None;done=False;finish=asyncio.Event()
+    feeder=None;pump=None;done=False;finish=asyncio.Event()
     async def feed(controller_stamp):
         # Receipt time makes the encoded clock conservative by handshake delay.
-        origin=time.perf_counter()
+        origin=time.perf_counter();seq=0
         while not finish.is_set():
             elapsed=time.perf_counter()-origin;action=schedule(elapsed)
             if action is None:return
-            captured=time.perf_counter();word=encode(controller_stamp+int(elapsed*1000),action)
-            try:await asyncio.wait_for(client.set_signal(CHANNEL,word),.1)
-            except BaseException:
-                report['unknown_input']=True
-                raise
-            report['inputs'].append(dict(t=elapsed,action=action,rpc_ms=(time.perf_counter()-captured)*1000))
+            pump.offer(seq=seq,captured_ns=time.perf_counter_ns(),action=action);seq+=1
+            report['inputs'].append(dict(t=elapsed,action=action))
             await asyncio.sleep(.025)
     try:
         async with asyncio.timeout(15):
@@ -83,9 +72,13 @@ async def run(admission):
                 fields=line.split('\t')
                 if fields[0]=='LIVE_READY':
                     if feeder is not None:raise ValueError('duplicate_ready')
+                    pump=DockerPvatInput(ExecutorLease(),clock=time.perf_counter_ns,authorize=lambda:None)
+                    pump.start(client,int(fields[1]))
                     feeder=asyncio.create_task(feed(int(fields[1])))
                 if fields[0]=='LIVE_DONE':
-                    done=True;finish.set();report['controller_passed']=fields[1]=='true';break
+                    done=True;finish.set();report['controller_passed']=fields[1]=='true'
+                    if pump:await pump.withdraw()
+                    break
             report['transport_returncode']=await proc.wait()
         if feeder:await feeder
         report['passed']=done and report.get('controller_passed',False) and not report['unknown_input'] and report['transport_returncode']==0
@@ -97,11 +90,19 @@ async def run(admission):
             feeder.cancel();await asyncio.gather(feeder,return_exceptions=True)
         # Only clear the dedicated mailbox after a known program completion.
         # No retry after an unknown write, and never terminate/restart motion.
-        if done and report['inputs'] and not report['unknown_input']:
+        if pump:
+            await pump.withdraw()
+            report['unknown_input']=pump.unknown
+            report['input_exit_reason']=pump.reason
+            report['mailbox_writes']=len(pump.writes)
+        if done and pump and report['controller_passed'] and any(s.startswith('LIVE_QUIET') for s in report['lines']):
             try:
-                await asyncio.wait_for(client.set_signal(CHANNEL,0),.1)
-                report['mailbox_cleared']=await asyncio.wait_for(client.get_signal(CHANNEL),.1)==0
-            except Exception:report['mailbox_cleared']=False;report['unknown_input']=True
+                await pump.complete(client,controller_ok=True,quiet_observed=True)
+                report['mailbox_cleared']=True
+            except Exception:report['mailbox_cleared']=False
+        if pump:
+            report['unknown_input']=pump.unknown
+            report['lease_released']=pump.lease.owner is None
         report['passed']=report['passed'] and report.get('mailbox_cleared',False)
         report['completed']=done
         report.update(analyze(report['lines']))
@@ -117,7 +118,7 @@ def main():
     admission=verify_local_docker()
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admission,signal=CHANNEL,input_expiry_ms=100,
-            duration_s=8,maximum_packets=100,cartesian_speed_mps=.005,reference_joint_speed_cap=.06)))
+            duration_s=10,maximum_packets=125,cartesian_speed_mps=.005,reference_joint_speed_cap=.06)))
         return 0
     for port in (8773,8774):
         with socket.socket() as check:

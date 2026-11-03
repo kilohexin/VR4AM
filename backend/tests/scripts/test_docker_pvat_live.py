@@ -21,9 +21,9 @@ def test_invalid_inputs_cannot_encode(stamp,action):
 
 def test_input_loss_is_silence_and_not_a_release_packet():
     assert m.schedule(0)==0 and m.schedule(.4)==1
-    assert m.schedule(1.2)==0 and m.schedule(1.8)==2
-    assert m.schedule(6.39)==0 and m.schedule(6.4)==6
-    assert m.schedule(7.1) is None
+    assert m.schedule(1.3)==0 and m.schedule(1.8)==2
+    assert m.schedule(7.39)==0 and m.schedule(7.4)==6
+    assert m.schedule(8.3) is None
 
 
 def test_completion_without_motion_and_expiry_cannot_pass():
@@ -75,6 +75,5 @@ async def test_controller_end_stops_input_and_unknown_write_is_never_cleared(mon
     result=await m.run({'container_id':'fake-local'})
     assert result['completed'] and not result['passed']
     assert result['unknown_input']==unknown
-    assert len(writes)==(1 if unknown else 2)
-    if unknown:assert 'mailbox_cleared' not in result
-    else:assert writes[-1]==0 and result['mailbox_cleared']
+    assert len(writes)==1
+    assert 'mailbox_cleared' not in result and not result['lease_released']

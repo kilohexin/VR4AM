@@ -1,0 +1,108 @@
+"""Latest-input mailbox and exclusive lease for the isolated Docker PVAT path.
+
+No endpoint selection or automatic motion restart. The caller must obtain
+Docker admission and observe controller completion before releasing ownership.
+"""
+import asyncio
+from dataclasses import dataclass
+
+CHANNEL=240
+MODULUS=33554432
+EXPIRY_NS=100_000_000
+
+
+def encode(stamp_ms,action):
+    if type(stamp_ms) is not int or stamp_ms<0 or type(action) is not int or not 0<=action<=6:
+        raise ValueError('invalid_live_input')
+    return (stamp_ms%MODULUS)*64+action
+
+
+class ExecutorLease:
+    def __init__(self):self.owner=None
+
+    def acquire(self):
+        if self.owner is not None:raise ValueError('executor_occupied')
+        self.owner=object()
+        return self.owner
+
+    def require(self,token):
+        if token is not self.owner or token is None:raise ValueError('executor_revoked')
+
+    def release(self,token):
+        self.require(token);self.owner=None
+
+
+@dataclass(frozen=True)
+class LiveInput:
+    seq:int
+    captured_ns:int
+    action:int
+
+
+class DockerPvatInput:
+    def __init__(self,lease,*,clock,authorize):
+        self.lease,self.clock,self.authorize=lease,clock,authorize
+        self.token=lease.acquire()
+        self.latest=None;self.seq=-1;self.closed=False;self.unknown=False
+        self.reason=None;self.worker=None;self.writes=[]
+        self._finish=asyncio.Event();self.anchor=None
+
+    def _check(self):
+        self.lease.require(self.token);self.authorize()
+        if self.closed:raise ValueError('pvat_input_closed')
+
+    def offer(self,*,seq,captured_ns,action):
+        self._check();encode(0,action)
+        if (type(seq) is not int or seq<=self.seq or type(captured_ns) is not int
+                or not 0<=self.clock()-captured_ns<EXPIRY_NS
+                or self.latest is not None and captured_ns<self.latest.captured_ns):
+            raise ValueError('pvat_input_rejected')
+        self.seq=seq;self.latest=LiveInput(seq,captured_ns,action)
+
+    def start(self,client,controller_ms):
+        self._check();encode(controller_ms,0)
+        if self.worker is not None:raise ValueError('pvat_input_already_started')
+        self.anchor=(self.clock(),controller_ms)
+        self.worker=asyncio.create_task(self._pump(client))
+
+    async def _pump(self,client):
+        try:
+            while not self._finish.is_set():
+                self._check();sample=self.latest
+                if sample is not None:
+                    age=self.clock()-sample.captured_ns
+                    if not 0<=age<EXPIRY_NS:
+                        self.reason='pvat_input_expired';return
+                    # Encode capture time, never refresh a cached intent while
+                    # repeating the signal. Pre-handshake samples are rejected.
+                    delta=sample.captured_ns-self.anchor[0]
+                    if delta<0:raise ValueError('pvat_input_before_handshake')
+                    word=encode(self.anchor[1]+delta//1_000_000,sample.action)
+                    try:await asyncio.wait_for(client.set_signal(CHANNEL,word),.1)
+                    except BaseException:
+                        self.unknown=True;raise
+                    self.writes.append((sample.seq,word))
+                try:await asyncio.wait_for(self._finish.wait(),.025)
+                except TimeoutError:pass
+        except asyncio.CancelledError:
+            self.reason='pvat_input_cancelled';raise
+        except Exception as error:self.reason=type(error).__name__+':'+str(error)
+        finally:self.closed=True
+
+    async def withdraw(self):
+        # Join rather than cancelling an in-flight SDK write. Unknown outcomes
+        # retain the lease even if subsequent feedback looks quiet.
+        self._finish.set();self.closed=True
+        if self.worker is not None:await asyncio.shield(self.worker)
+
+    async def complete(self,client,*,controller_ok,quiet_observed):
+        await self.withdraw();self.lease.require(self.token)
+        if self.worker is None or not controller_ok or not quiet_observed or self.unknown:
+            raise ValueError('pvat_completion_unverified')
+        try:
+            await asyncio.wait_for(client.set_signal(CHANNEL,0),.1)
+            if await asyncio.wait_for(client.get_signal(CHANNEL),.1)!=0:
+                raise ValueError('pvat_mailbox_not_cleared')
+        except BaseException:
+            self.unknown=True;raise
+        self.lease.release(self.token)
