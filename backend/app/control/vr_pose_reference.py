@@ -1,4 +1,4 @@
-"""Offline clutch-relative XR pose reference; no robot or dispatcher access."""
+"""Clutch-relative XR pose math; no robot or dispatcher access."""
 from scipy.spatial.transform import Rotation
 from app.schemas.messages import Pose
 from app.control.coordinate_mapper import CoordinateMapper

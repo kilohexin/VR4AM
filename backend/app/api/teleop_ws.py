@@ -396,9 +396,12 @@ async def _receive_operator_messages(
             except (RuntimeError,ValueError):
                 await _send_json(websocket,dict(v=1,type='position_input_rejected',reason='not_authorized'),send_lock)
             else:
-                await control.recorder.write_event(dict(kind='finite_position_input',
+                event=dict(kind='finite_position_input',
                     input_seq=message.seq,generation=message.generation,event=message.kind,
-                    vector=list(message.vector),pitch=message.pitch,spin=message.spin,received_ns=received_ns),received_ns)
+                    vector=list(message.vector),pitch=message.pitch,spin=message.spin,received_ns=received_ns)
+                if message.hand_pose is not None:
+                    event['hand_pose']=message.hand_pose.model_dump()
+                await control.recorder.write_event(event,received_ns)
             continue
 
         if isinstance(message,GripperRequestMessage):

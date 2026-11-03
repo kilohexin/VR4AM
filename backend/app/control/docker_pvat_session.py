@@ -182,7 +182,10 @@ class DockerPvatOrWebSession:
     def offer(self,intent):
         if self.source is None:
             if intent.session_id.startswith('xr-finite-'):
-                self.active=DockerPvatSession(self.adapter,self.binding,**self.kwargs)
+                if getattr(self.adapter,'position_pose_follow_vr',False) is True:
+                    from app.control.docker_pose_session import DockerPoseSession
+                    self.active=DockerPoseSession(self.adapter,self.binding,**self.kwargs)
+                else:self.active=DockerPvatSession(self.adapter,self.binding,**self.kwargs)
             self.source=intent.session_id
         if self.source!=intent.session_id:raise ValueError('position_source_requires_preparation')
         self.active.offer(intent)

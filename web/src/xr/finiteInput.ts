@@ -125,6 +125,11 @@ export class FiniteXRInput {
     this.anchor={hand:[...frame.right.p],tcp:[...s.actual_tcp.p],handQ:[...frame.right.q],tcpQ:[...s.actual_tcp.q]};
    }
    const scale=(s.translation_scale??1)*(docker&&s.finite_position?.parallel_virtual_claw?2:1);
+   if(docker&&s.finite_position?.pose_follow_enabled===true){
+    // Send the unscaled hand sample, including a stationary held pose. The
+    // backend owns capture, calibrated axes and translation/orientation gain.
+    this.position.offerPose({p:frame.right.p,q:frame.right.q});return;
+   }
    if(docker){
     const intent=this.gesture.sample(frame.client_mono_ms,frame.right.p,frame.right.q,scale,parallel);
     const pitch=s.finite_position!.pitch_enabled?intent.pitch:0;

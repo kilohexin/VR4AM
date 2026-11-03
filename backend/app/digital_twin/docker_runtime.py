@@ -87,7 +87,8 @@ async def ensure_docker_speed(client,*,check=lambda:None):
     return factor
 
 
-def create_docker_app(web_directory,*,blended_translation=False,blended_rotation=False,pvat_vr=False):
+def create_docker_app(web_directory,*,blended_translation=False,blended_rotation=False,pvat_vr=False,pose_follow_vr=False):
+    if pose_follow_vr:pvat_vr=True
     if pvat_vr:blended_rotation=True
     if blended_rotation is True:blended_translation=True
     import os
@@ -106,6 +107,7 @@ def create_docker_app(web_directory,*,blended_translation=False,blended_rotation
             application.state.backend.position_blended_translation=blended_translation is True
             application.state.backend.position_blended_rotation=blended_rotation is True
             application.state.backend.position_pvat_vr=pvat_vr is True
+            application.state.backend.position_pose_follow_vr=pose_follow_vr is True
             yield state
     app.router.lifespan_context=lifespan
     @app.middleware('http')
@@ -124,9 +126,10 @@ def create_docker_app(web_directory,*,blended_translation=False,blended_rotation
         backend=app.state.backend;client=backend._client
         return dict(runtime='LEBAI_DOCKER',provider='official_lmaster',sdk_target='127.0.0.1:3030',
             simulator=True,hardware_verified=False,run_id=run_id,pid=os.getpid(),pvat_vr=pvat_vr,
+            pose_follow_vr=pose_follow_vr,
             pvat_controller_points=getattr(backend,'position_pvat_points',0),
             pvat_reference_rollovers=getattr(backend,'position_pvat_reference_rollovers',0),
-            pvat_nominal_speed_mmps=10 if pvat_vr else None,
+            pvat_nominal_speed_mmps=10 if pvat_vr and not pose_follow_vr else None,
             gripper_provider='local_virtual',gripper_physics=False,
             kinematics_provider='controller_ik_verified_local_fk',native_fk_admission_queries=3,
             timing_profile='virtual_controller',stop_rpc_timeout_ms=1000,stop_verification_timeout_ms=2000,

@@ -13,6 +13,32 @@ def test_new_position_input_parses_without_reinterpreting_stop():
     assert parsed.type=='finite_position_input' and parsed.vector==(1.,0.,0.)
     assert _parse_message(dict(v=1,type='disarm',request_id='stop')).type=='disarm'
 
+def test_full_pose_wire_is_separate_from_direction_and_release():
+    row=message(hand_pose={'p':[.1,.2,.3],'q':[0,0,0,1]});row['vector']=[0,0,0]
+    parsed=_parse_message(row)
+    from app.control.finite_position_types import PositionIntent
+    i=PositionIntent(parsed.session_id,1,1,1000,parsed.kind,parsed.vector,hand_pose=parsed.hand_pose)
+    assert i.kind=='held' and i.hand_pose.p==(.1,.2,.3)
+    for change in ({'vector':[1,0,0]},{'pitch':1},{'spin':1},{'kind':'release'}):
+        with pytest.raises((ValueError,ValidationError)):_parse_message({**row,**change})
+
+async def test_pose_wire_cannot_enable_fake_or_physical_executor():
+    from app.control.robot_control import RobotControl,LatestVRFrame
+    from app.recording.noop import NoopRecorder
+    from app.schemas.messages import TeleopMode
+    from tests.robots.test_finite_position_adapter import prepared
+    a,c,clock,_=await prepared()
+    control=RobotControl(backend=a,latest=LatestVRFrame(),clock=clock,recorder=NoopRecorder())
+    try:
+        control.machine.mode=TeleopMode.ARMED;control._install_position_session()
+        row=message(hand_pose={'p':[0,0,0],'q':[0,0,0,1]});row['vector']=[0,0,0]
+        row['generation']=control.control_generation
+        a.position_pose_follow_vr=True
+        with pytest.raises(ValueError,match='pose_follow_not_enabled'):
+            control.accept_position_input(_parse_message(row),clock.now_ns())
+        assert not c.write_calls
+    finally:await control.stop();await a.disconnect()
+
 
 @pytest.mark.parametrize('field',['pitch','spin'])
 def test_optional_rotation_keeps_old_input_and_validates_release(field):

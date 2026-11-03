@@ -97,9 +97,10 @@ local ok,err=pcall(function()
     origin=prepared.actual_joint_pose;base=prepared.actual_tcp_pose
     local tracker=tracker_module.new(origin)
     started=timestamp()
-    local reader=mailbox.new(function(ch) return lebai:get_signal(ch) end,timestamp,started,function() end)
+    local reader=mailbox.new(function(ch) return lebai:get_signal(ch) end,timestamp,started,function() end,
+        function(ch,n) return lebai:get_signals(ch,n) end)
     local seed=origin;local last_send=nil;local phase_start=nil
-    local finish=false;local failure=nil;local latest=nil
+    local finish=false;local failure=nil;local latest=nil;local planned=nil
     print('POSE_FOLLOW_BEGIN',base.x,base.y,base.z)
     local function worker(fn)
         return async_task(function()
@@ -123,7 +124,7 @@ local ok,err=pcall(function()
             local payload=values(target);local offset=240+(seq%2)*8
             seq=seq+1
             lebai:set_signal(offset,0)
-            for i=1,7 do lebai:set_signal(offset+i,payload[i]) end
+            lebai:set_signals(offset+1,payload)
             assert(timestamp()-now+1<100,'pose_follow_publish_expired')
             lebai:set_signal(offset,(now%2097152)*1024+seq%1024)
             previous=now
@@ -137,8 +138,33 @@ local ok,err=pcall(function()
             rt_sleep(5)
         end
     end)
+    local planner=worker(function()
+        local previous=nil
+        while not finish do
+            local sample=latest
+            if sample and sample.captured_ms~=previous then
+            local _,feedback=read_feedback()
+            for i=1,6 do assert(math.abs(feedback.actual_joint_pose[i]-tracker.q[i])<.03,'pose_follow_tracking_error') end
+            for _,axis in ipairs({'x','y','z'}) do
+                assert(math.abs(feedback.actual_tcp_pose[axis]-base[axis])<=.025,'pose_follow_tcp_region')
+            end
+            -- Feedback RPCs yield: choose the newest input AFTER that wait,
+            -- rather than spending its freshness budget on unrelated reads.
+            sample=latest
+            assert(sample and timestamp()-sample.captured_ms+1<100,'pose_follow_sample_expired')
+            local solved=lebai:kinematics_inverse(sample.pose,seed)
+            assert(solved and #solved==6,'pose_follow_ik')
+            for i=1,6 do assert(solved[i]==solved[i] and math.abs(solved[i]-seed[i])<.03,'pose_follow_branch') end
+            assert(timestamp()-sample.captured_ms+1<100,'pose_follow_plan_expired')
+            -- One newest completed solution, not a historical endpoint queue.
+            planned={sample=sample,joints=solved,feedback=feedback}
+            previous=sample.captured_ms;seed=solved
+            end
+            rt_sleep(5)
+        end
+    end)
     local motion=worker(function()
-        while not latest do
+        while not planned do
             assert(not finish and timestamp()-started<1500,'pose_follow_first_frame')
             rt_sleep(5)
         end
@@ -147,24 +173,16 @@ local ok,err=pcall(function()
             -- Unique phase intervals, at most two nominal intervals ahead.
             local due=phase_start and phase_start+math.max(0,(tick-2)*80) or timestamp()
             if timestamp()<due then rt_sleep(due-timestamp()) end
-            local _,feedback=read_feedback()
-            for i=1,6 do assert(math.abs(feedback.actual_joint_pose[i]-tracker.q[i])<.03,'pose_follow_tracking_error') end
-            for _,axis in ipairs({'x','y','z'}) do
-                assert(math.abs(feedback.actual_tcp_pose[axis]-base[axis])<=.025,'pose_follow_tcp_region')
-            end
-            local sample=latest
-            assert(sample and timestamp()-sample.captured_ms+1<100,'pose_follow_sample_expired')
-            local solved=lebai:kinematics_inverse(sample.pose,seed)
-            assert(solved and #solved==6,'pose_follow_ik')
-            for i=1,6 do assert(solved[i]==solved[i] and math.abs(solved[i]-seed[i])<.03,'pose_follow_branch') end
-            local p,v,a,dt=tracker.advance(solved)
+            local plan=planned
+            local sample,feedback=plan.sample,plan.feedback
+            local p,v,a,dt=tracker.advance(plan.joints)
             assert(not finish and timestamp()-sample.captured_ms+1<100,'pose_follow_write_expired')
             assert(not last_send or timestamp()-last_send<160,'pose_follow_cadence')
             last_send=timestamp()
             phase_start=phase_start or last_send
             local entry_age=last_send-sample.captured_ms
             lebai:move_pvat(p,v,a,dt)
-            count=count+1;seed=solved
+            count=count+1
             print('POSE_FOLLOW_POINT',tick,last_send-started,sample.pose.x,feedback.actual_tcp_pose.x,
                 feedback.actual_tcp_pose.y,feedback.actual_tcp_pose.z,v[1],entry_age,timestamp()-last_send)
             assert(timestamp()-(phase_start+math.max(0,(tick-1)*80))<80,'pose_follow_clock_lost')
@@ -173,7 +191,7 @@ local ok,err=pcall(function()
     end)
     -- Join all work, including any signal/SDK calls already entered. A worker
     -- failure revokes siblings before another motion, without cancelling I/O.
-    wait_all(source,receiver,motion)
+    wait_all(source,receiver,planner,motion)
     assert(not failure,tostring(failure))
     print('POSE_FOLLOW_RELEASE',timestamp()-started,count)
     local final=quiet_tail(timestamp()+3000)

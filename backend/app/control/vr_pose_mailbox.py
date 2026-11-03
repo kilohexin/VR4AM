@@ -1,9 +1,9 @@
-"""Offline full-pose transport candidate with injected signal I/O only.
+"""Full-pose transport candidate with injected signal I/O only.
 
 Two banks (240..255), each with a header, micrometre XYZ and quaternion*1e7.
 Invalidate the inactive header BEFORE payload mutation, commit it LAST, and
-recheck the chosen header after reading. This candidate is NOT registered with
-the SDK/product: signal ownership, Lua timing and IK integration remain pending.
+recheck the chosen header after reading. No endpoint factory lives here; the
+opt-in native Docker executor owns admission, clock binding and completion.
 """
 import asyncio
 from dataclasses import dataclass
@@ -68,7 +68,11 @@ class ReceivedPose:
 
 
 class PoseMailboxWriter:
-    def __init__(self, client, lease, *, clock, stamp_for_capture, authorize):
+    def __init__(self, client, lease, *, clock, stamp_for_capture, authorize, bulk=False, before_commit=None):
+        if type(bulk) is not bool:
+            raise ValueError('pose_mailbox_bulk_mode')
+        self.bulk = bulk
+        self.before_commit = before_commit
         self.client, self.lease = client, lease
         self.token = lease.acquire()
         self.clock, self.stamp_for_capture, self.authorize = clock, stamp_for_capture, authorize
@@ -77,6 +81,7 @@ class PoseMailboxWriter:
         self.last_stamp_ns = self.last_controller_ms = -1
         self.active = 1
         self.opened = self.closed = self.unknown = self.busy = False
+        self.read_unknown = False
 
     def _check(self):
         if self.closed:
@@ -95,7 +100,11 @@ class PoseMailboxWriter:
         self.busy = True
         try:
             for channel in (BASE, BASE + BANK_SIZE):
-                value = await asyncio.wait_for(self.client.get_signal(channel), .1)
+                try:
+                    value = await asyncio.wait_for(self.client.get_signal(channel), .1)
+                except BaseException:
+                    self.read_unknown = True
+                    raise
                 self._check()
                 if type(value) is not int or value != 0:
                     raise ValueError('pose_mailbox_occupied')
@@ -131,11 +140,12 @@ class PoseMailboxWriter:
             self.closed = True
             raise ValueError('pose_mailbox_input_expired')
 
-    async def _write(self, channel, value, captured_ns):
+    async def _write(self, channel, value, captured_ns, *, bulk=False):
         self._check()
         self._fresh(captured_ns)
         try:
-            await asyncio.wait_for(self.client.set_signal(channel, value), .1)
+            operation = self.client.set_signals(channel, list(value)) if bulk else self.client.set_signal(channel, value)
+            await asyncio.wait_for(operation, .1)
         except BaseException:
             self.unknown = self.closed = True
             raise
@@ -156,8 +166,17 @@ class PoseMailboxWriter:
             bank = 1 - self.active
             offset = BASE + bank * BANK_SIZE
             await self._write(offset, 0, captured_ns)
-            for i, value in enumerate(payload, 1):
-                await self._write(offset + i, value, captured_ns)
+            if self.bulk:
+                await self._write(offset + 1, payload, captured_ns, bulk=True)
+            else:
+                for i, value in enumerate(payload, 1):
+                    await self._write(offset + i, value, captured_ns)
+            if self.before_commit is not None:
+                try:
+                    self.before_commit()
+                except BaseException:
+                    self.closed = True
+                    raise
             await self._write(offset, word, captured_ns)
             self._fresh(captured_ns)
             self.active, self.written_seq = bank, seq
@@ -173,7 +192,10 @@ class PoseMailboxWriter:
 
 
 class PoseMailboxReader:
-    def __init__(self, client, *, controller_ms, not_before_ms, authorize):
+    def __init__(self, client, *, controller_ms, not_before_ms, authorize, bulk=False):
+        if type(bulk) is not bool:
+            raise ValueError('pose_mailbox_bulk_mode')
+        self.bulk = bulk
         if type(not_before_ms) is not int or not_before_ms < 0:
             raise ValueError('pose_mailbox_epoch')
         self.client, self.controller_ms, self.authorize = client, controller_ms, authorize
@@ -190,9 +212,13 @@ class PoseMailboxReader:
                 or now - self.not_before_ms >= STAMP_MOD // 2):
             raise ValueError('pose_mailbox_clock')
         self.last_now = now
+        return now
+
+    def _no_fresh_sample(self):
+        now = self._check()
         if self.last_capture_ms is not None and now - self.last_capture_ms + 1 >= TTL_MS:
             raise ValueError('pose_mailbox_input_expired')
-        return now
+        return None
 
     async def _read(self, channel):
         self._check()
@@ -219,16 +245,24 @@ class PoseMailboxReader:
                 if word and age + 1 < TTL_MS and capture >= self.not_before_ms:
                     candidates.append((capture, bank))
             if not candidates:
-                return None
+                return self._no_fresh_sample()
             if len(candidates) == 2 and candidates[0][0] == candidates[1][0]:
                 raise ValueError('pose_mailbox_ambiguous_stamp')
             capture, bank = max(candidates)
             if self.last_capture_ms is not None and capture < self.last_capture_ms:
                 raise ValueError('pose_mailbox_target_rollback')
             offset, word = BASE + bank * BANK_SIZE, heads[bank]
-            payload = tuple([await self._read(offset + i) for i in range(1, 8)])
+            if self.bulk:
+                self._check()
+                values = await asyncio.wait_for(self.client.get_signals(offset + 1, 7), .1)
+                self._check()
+                if type(values) not in (tuple, list) or len(values) != 7:
+                    raise ValueError('pose_mailbox_payload')
+                payload = tuple(values)
+            else:
+                payload = tuple([await self._read(offset + i) for i in range(1, 8)])
             if await self._read(offset) != word:
-                return None  # Never combine a replaced bank with its old header.
+                return self._no_fresh_sample()  # Never return mixed fields.
             now = self._check()
             if now - capture + 1 >= TTL_MS:
                 raise ValueError('pose_mailbox_input_expired')

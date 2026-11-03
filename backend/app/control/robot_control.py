@@ -1625,6 +1625,12 @@ class RobotControl:
 
     def accept_position_input(self,message,received_ns):
         from app.control.finite_position_types import PositionIntent
+        if message.hand_pose is not None:
+            from app.robots.finite_position_docker import DockerFinitePositionAdapter
+            if (type(self.backend) is not DockerFinitePositionAdapter or not self.backend._docker_native
+                    or getattr(self.backend,'position_pose_follow_vr',False) is not True
+                    or not message.session_id.startswith('xr-finite-')):
+                raise ValueError('position_pose_follow_not_enabled')
         if message.spin and not getattr(self.backend,'position_spin_enabled',False):
             raise ValueError('position_spin_not_authorized')
         if message.pitch and not getattr(self.backend,'position_pitch_enabled',False):
@@ -1635,7 +1641,7 @@ class RobotControl:
         if not self._finite_position_enabled or session is None:
             raise ValueError('position_not_prepared')
         session.offer(PositionIntent(message.session_id,message.generation,message.seq,received_ns,
-            message.kind,message.vector,message.pitch,message.spin))
+            message.kind,message.vector,message.pitch,message.spin,message.hand_pose))
 
     def _compose_state_message(self, state: RobotStateMessage) -> RobotStateMessage:
         """Overlay current control metadata without I/O or control transitions.
@@ -1680,6 +1686,7 @@ class RobotControl:
         from app.schemas.messages import FinitePositionStatus
         view=self.finite_position_session.view() if self.finite_position_session is not None else PositionView(generation=self._control_generation)
         return FinitePositionStatus(**asdict(view),policy=getattr(self.backend,'position_policy','finite_position_offline'),
+            pose_follow_enabled=getattr(self.backend,'position_pose_follow_vr',False) is True,
             vr_enabled=getattr(self.backend,'position_vr_enabled',False),
             pitch_enabled=getattr(self.backend,'position_pitch_enabled',False),
             spin_enabled=getattr(self.backend,'position_spin_enabled',False),

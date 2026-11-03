@@ -26,7 +26,7 @@ function M.decode(values)
     return {x=values[1]/1e6,y=values[2]/1e6,z=values[3]/1e6,rx=rx,ry=ry,rz=rz}, {x,y,z,w}
 end
 
-function M.new(io, clock, not_before, authorize)
+function M.new(io, clock, not_before, authorize, read_many)
     assert(type(not_before)=='number' and not_before>=0 and not_before==math.floor(not_before), 'pose_mailbox_epoch')
     local self={closed=false,busy=false,last_now=not_before,last_capture=nil,last_word=nil,last_values=nil}
     local function check()
@@ -36,8 +36,12 @@ function M.new(io, clock, not_before, authorize)
         assert(type(now)=='number' and now==math.floor(now) and now>=self.last_now
             and now-not_before<MOD/2, 'pose_mailbox_clock')
         self.last_now=now
-        assert(not self.last_capture or now-self.last_capture+1<TTL, 'pose_mailbox_input_expired')
         return now
+    end
+    local function no_fresh_sample()
+        local now=check()
+        assert(not self.last_capture or now-self.last_capture+1<TTL,'pose_mailbox_input_expired')
+        return nil
     end
     local function read(channel)
         check()
@@ -61,12 +65,18 @@ function M.new(io, clock, not_before, authorize)
                 if not capture or stamp>capture then selected=bank;capture=stamp end
             end
         end
-        if not selected then return nil end
+        if not selected then return no_fresh_sample() end
         assert(not self.last_capture or capture>=self.last_capture, 'pose_mailbox_target_rollback')
         local offset=BASE+(selected-1)*SIZE
         local word,values=heads[selected],{}
-        for i=1,7 do values[i]=read(offset+i) end
-        if read(offset)~=word then return nil end
+        if read_many then
+            check();values=read_many(offset+1,7);check()
+            assert(type(values)=='table' and #values==7,'pose_mailbox_payload')
+            for i=1,7 do assert(integer(values[i]),'pose_mailbox_payload') end
+        else
+            for i=1,7 do values[i]=read(offset+i) end
+        end
+        if read(offset)~=word then return no_fresh_sample() end
         now=check()
         assert(now-capture+1<TTL, 'pose_mailbox_input_expired')
         if capture==self.last_capture then

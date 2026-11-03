@@ -1,4 +1,4 @@
-import type {FinitePositionInputMessage,Vec3} from '../protocol/messages';
+import type {FinitePositionInputMessage,Vec3,Pose} from '../protocol/messages';
 
 export const FINITE_POSITION_DEADZONE=.15;
 
@@ -22,6 +22,13 @@ export class FinitePositionInput {
   if(!this.held)return;this.held=false;
   this.send({v:1,type:'finite_position_input',session_id:this.sessionId,generation:this.generation,
    seq:++this.seq,kind:'release',vector:[0,0,0]});
+ }
+ offerPose(pose:Pose):void {
+  if(!this.sessionId.startsWith('xr-finite-')||!pose.p.every(Number.isFinite)
+    ||!pose.q.every(Number.isFinite)||Math.abs(Math.hypot(...pose.q)-1)>1e-3)return;
+  this.held=true;this.outstanding=true;
+  this.send({v:1,type:'finite_position_input',session_id:this.sessionId,generation:this.generation,
+   seq:++this.seq,kind:'held',vector:[0,0,0],hand_pose:{p:[...pose.p],q:[...pose.q]}});
  }
  observe(phase:string):void {
   if(['planning','executing','draining'].includes(phase))this.sawBusy=true;

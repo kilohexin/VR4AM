@@ -61,6 +61,10 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
         self._position_sources.update((Path(__file__).parents[1]/'control/docker_pvat_input.py',
             Path(__file__).parents[1]/'control/docker_pvat_session.py',
             Path(__file__).parents[3]/'scripts/docker_pvat_live.lua'))
+        self._position_sources.update(Path(__file__).parents[1]/'control'/name for name in (
+            'docker_pose_session.py','vr_pose_reference.py','vr_pose_input.py','vr_pose_mailbox.py'))
+        self._position_sources.update(Path(__file__).parents[3]/'scripts'/name for name in (
+            'docker_pose_live.lua','vr_pose_mailbox.lua','vr_pose_tracker.lua'))
         self._position_identity=self._source_identity();self._position_metadata=self._source_metadata()
 
     async def connect(self):
@@ -231,9 +235,10 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             raise
 
     async def get_state(self):
-        if getattr(self,'position_pvat_vr',False) and self.position_busy:
+        if self._docker_native:
             # Socket task cancellation must not abandon snapshot RPC ownership
-            # while the independent controller stream is naturally draining.
+            # during motion OR after it drains. Closing an idle page can still
+            # overlap a native presentation read; join it before disconnecting.
             task=asyncio.create_task(self._get_docker_state())
             try:return await asyncio.shield(task)
             except asyncio.CancelledError:
@@ -260,7 +265,13 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
         if self._docker_entry_owner is not None:
             try:await asyncio.wait_for(self._docker_page_reads.wait(),timeout=1.)
             except TimeoutError:pass
-        return await super().get_state()
+        state=await super().get_state()
+        if (getattr(self,'position_pose_follow_vr',False) is True and self.position_busy
+                and self._snapshot is not None):
+            # Presentation can reuse this just-completed owned read, with its
+            # ORIGINAL capture time. Controller feedback/freshness are separate.
+            self._docker_display_sample=(self._client,self.position_binding,self._pump.generation,self._snapshot)
+        return state
 
     async def execute_step(self,*args,**kwargs):
         self._docker_finished_task=None

@@ -151,6 +151,7 @@ class FinitePositionInputMessage(StrictMessage):
     vector: Vec3
     pitch: float=0.
     spin: float=0.
+    hand_pose: Pose|None=None
 
     @field_validator('pitch','spin',mode='before')
     @classmethod
@@ -168,10 +169,13 @@ class FinitePositionInputMessage(StrictMessage):
     @model_validator(mode='after')
     def release_is_zero(self):
         if self.kind=='release' and (any(self.vector) or self.pitch or self.spin):raise ValueError('position_release_vector')
+        if self.hand_pose is not None and (self.kind!='held' or any(self.vector) or self.pitch or self.spin):
+            raise ValueError('position_pose_mixed_input')
         return self
 
 
 class FinitePositionStatus(StrictMessage):
+    pose_follow_enabled: bool = Field(default=False,strict=True)
     parallel_virtual_claw: bool = Field(default=False,strict=True)
     vr_enabled: bool = Field(default=False,strict=True)
     pitch_enabled: bool = Field(default=False,strict=True)

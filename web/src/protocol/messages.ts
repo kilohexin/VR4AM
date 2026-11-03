@@ -6,7 +6,7 @@ export type JointVector = [number, number, number, number, number, number];
 
 export interface FinitePositionInputMessage {
  v:1;type:'finite_position_input';session_id:string;generation:number;seq:number;
- kind:'held'|'release';vector:Vec3;pitch?:number;spin?:number;
+ kind:'held'|'release';vector:Vec3;pitch?:number;spin?:number;hand_pose?:Pose|null;
 }
 export interface FinitePositionStatus {
  policy:'finite_position_offline'|'finite_position_web'|'finite_position_docker';phase:'inactive'|'ready'|'planning'|'executing'|'draining'|'hold'|'fault';
@@ -15,20 +15,22 @@ export interface FinitePositionStatus {
  pitch_enabled?:boolean;
  spin_enabled?:boolean;
  parallel_virtual_claw?:boolean;
+ pose_follow_enabled?:boolean;
  blocked_input_seq?:number|null;
 }
 export function isFinitePositionInputMessage(value:unknown):value is FinitePositionInputMessage {
- if(!isRecord(value)||!hasExactKeys(value,['v','type','session_id','generation','seq','kind','vector'],['pitch','spin']))return false;
+ if(!isRecord(value)||!hasExactKeys(value,['v','type','session_id','generation','seq','kind','vector'],['pitch','spin','hand_pose']))return false;
  return value.v===1&&value.type==='finite_position_input'&&typeof value.session_id==='string'
   &&value.session_id.length>0&&value.session_id.length<=128&&Number.isSafeInteger(value.generation)
   &&Number(value.generation)>=0&&Number.isSafeInteger(value.seq)&&Number(value.seq)>=0
   &&(value.kind==='held'||value.kind==='release')&&isVec3(value.vector)
   &&(!Object.hasOwn(value,'pitch')||(typeof value.pitch==='number'&&Number.isFinite(value.pitch)&&Math.abs(value.pitch)<=1))
   &&(!Object.hasOwn(value,'spin')||(typeof value.spin==='number'&&Number.isFinite(value.spin)&&Math.abs(value.spin)<=1))
+  &&(value.hand_pose==null||(isPose(value.hand_pose)&&value.kind==='held'&&value.vector.every(x=>x===0)&&!value.pitch&&!value.spin))
   &&(value.kind!=='release'||(value.vector.every(x=>x===0)&&(!value.pitch||value.pitch===0)&&(!value.spin||value.spin===0)));
 }
 export function isFinitePositionStatus(value:unknown):value is FinitePositionStatus {
- if(!isRecord(value)||!hasExactKeys(value,['policy','phase','generation','entered_steps','motion_id','reason','hardware_verified'],['vr_enabled','pitch_enabled','spin_enabled','blocked_input_seq','parallel_virtual_claw']))return false;
+ if(!isRecord(value)||!hasExactKeys(value,['policy','phase','generation','entered_steps','motion_id','reason','hardware_verified'],['vr_enabled','pitch_enabled','spin_enabled','blocked_input_seq','parallel_virtual_claw','pose_follow_enabled']))return false;
  return ['finite_position_offline','finite_position_web','finite_position_docker'].includes(String(value.policy))&&['inactive','ready','planning','executing','draining','hold','fault'].includes(String(value.phase))
   &&Number.isSafeInteger(value.generation)&&Number(value.generation)>=0&&Number.isSafeInteger(value.entered_steps)
   &&Number(value.entered_steps)>=0&&(value.policy==='finite_position_docker'||Number(value.entered_steps)<=10)&&value.hardware_verified===false
@@ -38,6 +40,7 @@ export function isFinitePositionStatus(value:unknown):value is FinitePositionSta
   &&(!Object.hasOwn(value,'pitch_enabled')||typeof value.pitch_enabled==='boolean')
   &&(!Object.hasOwn(value,'spin_enabled')||typeof value.spin_enabled==='boolean')
   &&(!Object.hasOwn(value,'parallel_virtual_claw')||typeof value.parallel_virtual_claw==='boolean')
+  &&(!Object.hasOwn(value,'pose_follow_enabled')||typeof value.pose_follow_enabled==='boolean')
   &&(!Object.hasOwn(value,'blocked_input_seq')||value.blocked_input_seq===null
     ||(Number.isSafeInteger(value.blocked_input_seq)&&Number(value.blocked_input_seq)>=0));
 }

@@ -49,7 +49,7 @@ def test_program_embeds_real_mailbox_and_pvat_generator_without_host_target():
     assert '__POSE_MAILBOX_MODULE__' not in source and '__POSE_TRACKER_MODULE__' not in source
     assert 'kinematics_inverse(sample.pose,seed)' in source
     assert 'lebai:move_pvat(p,v,a,dt)' in source
-    assert 'wait_all(source,receiver,motion)' in source
+    assert 'wait_all(source,receiver,planner,motion)' in source
     assert 'for tick=1,70 do' in source
     for forbidden in ('stop_sys', 'connect_real', 'set_claw'):
         assert forbidden not in source

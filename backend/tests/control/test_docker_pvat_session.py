@@ -55,9 +55,10 @@ def test_fake_adapter_cannot_enable_native_controller_program():
     with pytest.raises(ValueError,match='native_docker'):DockerPvatSession(NS(),NS(),clock=lambda:0,recorder=None,authorize=lambda:None)
 
 
-async def test_cancelled_page_reader_joins_owned_snapshot_before_exit():
+@pytest.mark.parametrize('pvat,busy',[(True,True),(True,False),(False,False)])
+async def test_cancelled_page_reader_joins_owned_snapshot_before_exit(pvat,busy):
     import asyncio
-    a,_=make();a.position_pvat_vr=True;a.position_busy=True
+    a,_=make();a.position_pvat_vr=pvat;a.position_busy=busy
     entered=asyncio.Event();complete=asyncio.Event();outcomes=[]
     async def read():
         entered.set()

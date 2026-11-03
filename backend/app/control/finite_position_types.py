@@ -83,6 +83,7 @@ class PositionIntent:
     vector: tuple
     pitch: float=0.
     spin: float=0.
+    hand_pose: object=None
 
     def __post_init__(self):
         if type(self.session_id) is not str or not 1<=len(self.session_id)<=128:
@@ -97,12 +98,17 @@ class PositionIntent:
             raise ValueError('position_invalid_spin')
         spin=0. if abs(self.spin)<=INPUT_DEADZONE else math.copysign(1.,self.spin)
         if self.kind=='release' and (length or self.pitch or self.spin):raise ValueError('position_release_vector')
+        if self.hand_pose is not None:
+            from app.schemas.messages import Pose
+            if (not isinstance(self.hand_pose,Pose) or self.kind!='held' or length or self.pitch or self.spin):
+                raise ValueError('position_pose_mixed_input')
+            object.__setattr__(self,'hand_pose',Pose.model_validate(self.hand_pose.model_dump()))
         if length<=INPUT_DEADZONE:v=(0.,0.,0.);length=0.
         else:v=tuple(x/length for x in v)
         object.__setattr__(self,'vector',v)
         object.__setattr__(self,'pitch',pitch)
         object.__setattr__(self,'spin',spin)
-        if not length and not pitch and not spin:object.__setattr__(self,'kind','release')
+        if not length and not pitch and not spin and self.hand_pose is None:object.__setattr__(self,'kind','release')
 
 
 @dataclass(frozen=True)

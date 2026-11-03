@@ -114,7 +114,8 @@ local ok,err=pcall(function()
     local base=lebai:kinematics_forward(origin)
     assert(base and base.x and base.rx,'fk_shape')
     local epoch=timestamp()
-    local reader=mailbox.new(function(ch) return lebai:get_signal(ch) end,timestamp,epoch,function() end)
+    local reader=mailbox.new(function(ch) return lebai:get_signal(ch) end,timestamp,epoch,function() end,
+        function(ch,n) return lebai:get_signals(ch,n) end)
     local seed=origin
     for seq=1,20 do
         local p={};for key,value in pairs(base) do p[key]=value end
@@ -125,7 +126,7 @@ local ok,err=pcall(function()
         local values=encode(p)
         local stamp=timestamp();local offset=240+((seq-1)%2)*8
         lebai:set_signal(offset,0)
-        for i=1,7 do lebai:set_signal(offset+i,values[i]) end
+        lebai:set_signals(offset+1,values)
         lebai:set_signal(offset,(stamp%2097152)*1024+seq)
         local written=timestamp()
         local sample=reader.read_latest();assert(sample and sample.sequence_mod==seq,'native_sample_missing')

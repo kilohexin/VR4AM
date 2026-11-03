@@ -8,6 +8,22 @@ const state:RobotStateMessage={v:1,type:'robot_state',server_mono_ns:1,mode:'ARM
  actual_tcp:{p:[.3,0,.4],q:[0,0,0,1]},actual_q:[0,0,0,0,0,0],gripper:.5,backend:'LEBAI_FAKE',manual_input_ready:true,
  translation_scale:1,finite_position:{policy:'finite_position_offline',phase:'ready',generation:1,entered_steps:0,
  motion_id:null,reason:null,hardware_verified:false,vr_enabled:true}};
+it('full-pose capability sends stationary and rotated hand poses, with normal release and parallel claw',()=>{
+ const r=rig();const s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{...state.finite_position!,
+  policy:'finite_position_docker',pose_follow_enabled:true,parallel_virtual_claw:true}};
+ const apply=(t:number,grip:boolean,p:[number,number,number],q:[number,number,number,number],claw:-1|0|1=0)=>{
+  r.setNow(t);r.xr.update(s,t);r.xr.holdClaw(claw,t);
+  r.xr.apply({v:1,type:'vr_frame',session_id:'quest-pose',seq:t,client_mono_ms:t,tracking_valid:true,
+   visibility:'visible',right:{p,q,grip,trigger:0}});
+ };
+ apply(0,false,[0,0,0],[0,0,0,1]);apply(20,true,[0,0,0],[0,0,0,1]);
+ expect(r.inputs.at(-1)).toMatchObject({kind:'held',vector:[0,0,0],hand_pose:{p:[0,0,0],q:[0,0,0,1]}});
+ const q:[number,number,number,number]=[0,Math.sin(35*Math.PI/180),0,Math.cos(35*Math.PI/180)];
+ apply(40,true,[.01,.02,.03],q,-1);apply(60,true,[.01,.02,.03],q,-1);
+ expect(r.inputs.at(-1).hand_pose).toEqual({p:[.01,.02,.03],q});expect(r.claws.length).toBeGreaterThan(0);
+ apply(80,false,[.01,.02,.03],q);expect(r.inputs.at(-1)).toMatchObject({kind:'release',vector:[0,0,0]});
+ expect(r.inputs.at(-1).hand_pose).toBeUndefined();expect(r.stops).toEqual([]);
+});
 it('keeps XR Grip and Trigger out of legacy transport without mutating controller input',()=>{
  const f:VRFrame={v:1,type:'vr_frame',session_id:'quest-test',seq:1,client_mono_ms:1,tracking_valid:true,
   visibility:'visible',right:{p:[0,0,0],q:[0,0,0,1],grip:true,trigger:.8}};
