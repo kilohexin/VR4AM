@@ -172,7 +172,7 @@ local ok,err=pcall(function()
                 if length>0 then for axis=1,3 do direction[axis]=direction[axis]/length end end
                 for i=1,6 do
                     for axis=1,5 do
-                        goal[i]=goal[i]+gain[axis][i]*(axis<=3 and tcp_speed or 0.04)*direction[axis]
+                        goal[i]=goal[i]+gain[axis][i]*(axis<=3 and tcp_speed or axis==5 and 0.10 or 0.04)*direction[axis]
                     end
                 end
             elseif vector_mailbox then
@@ -202,7 +202,8 @@ local ok,err=pcall(function()
             -- Reserve room to decelerate before the hard 0.08 rad reference
             -- guard. A held input cannot override this gesture-local boundary.
             for i=1,6 do
-                if not braking and math.abs(q[i]-origin[i])>=0.06 and (q[i]-origin[i])*v[i]>0 then
+                local reference_brake=math.abs(v[i])>0.031 and 0.050 or 0.060
+                if not braking and math.abs(q[i]-origin[i])>=reference_brake and (q[i]-origin[i])*v[i]>0 then
                     braking=true;print('LIVE_BRAKE',timestamp()-start,'reference_boundary')
                 end
             end
@@ -216,7 +217,8 @@ local ok,err=pcall(function()
             end
             local maximum=0
             for i=1,6 do maximum=math.max(maximum,math.abs(goal[i])) end
-            local scale=maximum>0.03 and 0.03/maximum or 1
+            local cap=pose_mailbox and direction[5]~=0 and 0.045 or 0.03
+            local scale=maximum>cap and cap/maximum or 1
             local np,nv,na={},{},{}
             for i=1,6 do
                 assert(math.abs(feedback.actual_joint_pose[i]-q[i])<0.03,'tracking_error')

@@ -36,6 +36,14 @@ try{
   console.log('PASS desktop to XR source switch returns READY with fresh released frames');
  }
  await command('arm_request','unlock');await command('prepare_request','prepare');await wait(()=>state?.manual_input_ready,'prepared');
+ if(process.argv.includes('--startup-release')){
+  const steps=state.finite_position.entered_steps;
+  vector=[1,0,0];await wait(()=>state.finite_position.phase==='planning','startup_planning');
+  vector=[0,0,0];input.release();
+  await wait(()=>state.finite_position.phase==='ready','startup_release_ready');
+  if(state.finite_position.entered_steps!==steps)throw Error('startup_release_sent_motion');
+  console.log('PASS release during startup returns READY without motion');
+ }
  if(process.argv.includes('--parallel-claw')){
   if(!state.finite_position.parallel_virtual_claw)throw Error('parallel_capability_missing');
   const steps=state.finite_position.entered_steps;vector=[0,0,1];
@@ -66,10 +74,10 @@ try{
    await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','wrist_release');
    const relative=new Quaternion(...q as [number,number,number,number]).invert().multiply(new Quaternion(...state.actual_tcp.q));
    if(p&&!s&&2*Math.atan2(relative.x,relative.w)*p<.002)throw Error('pitch_wrong_direction_or_no_progress');
-   if(s&&!p&&2*Math.atan2(relative.z,relative.w)*s<.002)throw Error('spin_wrong_direction_or_no_progress');
+   if(s&&!p&&2*Math.atan2(relative.z,relative.w)*s<.015)throw Error('spin_wrong_direction_or_insufficient_progress');
    if(!(p&&s)&&Math.hypot(...state.actual_tcp.p.map((x:number,i:number)=>x-tcp[i]))>.001)throw Error('pure_wrist_translation_drift');
    if(p&&s&&relative.angleTo(new Quaternion())<.002)throw Error('mixed_pose_no_rotation');
-   console.log('PASS tool-local pitch/spin and release',p,s);
+   console.log('PASS tool-local pitch/spin and release',p,s,'observed degrees',relative.angleTo(new Quaternion())*180/Math.PI);
   }
  }
  if(process.argv.includes('--reference-rollover')){

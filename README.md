@@ -2,6 +2,8 @@
 
 当前主线：**官方 Docker 仿真 → 操作者网页/头显体验 → 后续真机验收**。真机当前不可用，仿真成功不代表真实抓取或制动已通过。
 
+最新操纵目标是[相对位姿跟随](docs/vr-pose-follow-direction-2026-11-03.md)：Grip对齐后，手柄朝向目标1:1、平移可放大，手停则目标固定。离线映射已验证，但完整目标传输与连续IK执行尚未接入；下面的当前体验入口仍是速度杆，不能把它称作已经实现“指哪打哪”。
+
 执行器分工：网页准备位/关节目标用`movej`，网页XYZ直线操作用`movel`；VR使用`--pvat-vr`开启控制器侧PVAT候选，支持三轴组合、名义参考速度10mm/s，手势灵敏度2倍（约4mm偏移启动）。它是持续方向速度杆，不追赶手柄终点。十秒窗口及局部参考段结束后，只有已知完成且Grip输入仍新鲜有效才续接；真实工作区/关节边界、输入过期或故障仍暂停，交接可能短暂停顿。左手X长按打开夹爪、Y长按闭合，松开保持、同时按下保持；右Trigger不再控制夹爪。Docker网页/VR夹爪目标速率1.2行程/秒（约0.83秒目标全行程，非端到端延迟保证），PVAT模式的本地虚拟夹爪可与机械臂并行；真机并行未开放。仍需真人头显确认长期稳定性。
 
 独立PVAT工具`scripts/docker_pvat_live.py`仍默认预览，执行需先关闭8773/8774。产品候选启动：`.venv/Scripts/python.exe scripts/run_lmaster_docker.py --run --pvat-vr`；定向合成验证：在`web`运行`node scripts/checkDockerPvat.mjs 8773 --disconnect-active`。详见`docs/project-status.md`。本机Windows当前保留5173端口，临时VR HTTPS入口以`--port 8443`启动，旧5173链接不可用。

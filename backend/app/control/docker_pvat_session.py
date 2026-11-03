@@ -53,7 +53,10 @@ class DockerPvatSession:
             client=a._docker_ready_client
             if await asyncio.wait_for(client.get_signal(240),.1)!=0:raise ValueError('pvat_mailbox_occupied')
             self.check()
-            if self.gate.released or not 0<=self.clock()-self.gate.latest.received_ns<INPUT_NS:return
+            if self.gate.released:
+                self.phase='ready';self.reason=None;self.hold=False;return
+            if not 0<=self.clock()-self.gate.latest.received_ns<INPUT_NS:
+                self.phase='hold';self.reason='position_input_expired';self.hold=True;return
             a.position_busy=True;a._motion_accepted=a._motion_write_stop_required=True
             bridge='exec 3<>/dev/tcp/127.0.0.1/3010; cat >&3; while IFS= read -r -t 12 line <&3; do printf "%s\\n" "$line"; case "$line" in *LIVE_DONE*) break;; esac; done'
             program=(Path(__file__).resolve().parents[3]/'scripts/docker_pvat_live.lua').read_text(encoding='utf-8')

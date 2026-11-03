@@ -71,6 +71,25 @@ async def test_cancelled_page_reader_joins_owned_snapshot_before_exit():
     assert outcomes==['returned']
 
 
+async def test_release_while_startup_read_is_inflight_restores_ready_without_launch(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    import app.control.docker_pvat_session as module
+    import app.digital_twin.docker_runtime as runtime
+    a,s=make();a.position_busy=False;a._docker_entry_owner=None
+    a._docker_admission={'container_id':'fake'}
+    entered,finish=asyncio.Event(),asyncio.Event()
+    async def read_signal(_):entered.set();await finish.wait();return 0
+    a._docker_ready_client=NS(get_signal=read_signal)
+    monkeypatch.setattr(runtime,'verify_local_docker',lambda:a._docker_admission)
+    spawn=AsyncMock();monkeypatch.setattr(module.asyncio,'create_subprocess_exec',spawn)
+    s.offer(intent());s.phase='planning';s.worker=asyncio.create_task(s._run())
+    await entered.wait();s.offer(intent(2,kind='release',vector=(0,0,0)));finish.set()
+    await s.worker
+    assert s.phase=='ready' and not s.hold and not a.position_busy
+    spawn.assert_not_called()
+
+
 @pytest.mark.parametrize('confirmed,error,reason',[(True,'reference_limit','pvat_reference_limit'),
     (False,'reference_limit','stop_unverified'),(True,'rpc_unknown','stop_unverified'),
     (True,'tcp_region','pvat_tcp_region'),(False,'tcp_region','stop_unverified')])
