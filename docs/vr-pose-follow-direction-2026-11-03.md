@@ -26,10 +26,40 @@
 
 36项定向测试通过（邮箱32项、既有映射4项），覆盖映射→传输后的70°目标与2倍位移、每个写入边界、逐字段交错覆盖、只取最新目标、松手/撤权、输入过期不恢复、写入取消/超时保留未知与所有权、读取跨期限、序号/时间绕回及损坏数据。全部为确定性内存I/O测试，没有新增Docker或真机动作，当前可用VR仍是原速度杆。
 
+### 原厂隔离Docker：位姿解码、IK与PVAT候选已跑通
+
+后续新增`vr_pose_mailbox.lua`读取端，与Python端相同的字段/时钟/过期规则；独立`vr_pose_tracker.lua`将最新IK关节目标生成连续P/V/A参考，保留0.06rad/s参考速度、0.15rad/s²加速度、0.5rad/s³ jerk及起点附近0.08rad参考区域。滤波会产生跟踪滞后，朝向目标1:1不表示机械臂能以任意速度立刻跟上。
+
+为避开当前体验服务，另建官方同镜像的`vr4arm-pose-isolated-20261103`实例（ID前缀`a337adb7d1a2`），`--network none`、无端口/挂载/设备、非特权。新探针只允许这类隔离实例，通过docker exec进入其回环3010服务；不连接主机SDK，也没有真机地址入口。当前8773/8443服务与原控制容器未切换。
+
+- `docker_pose_transport_probe.py`：默认预览。原厂Lua实际执行11组协议检查（含逐字段覆盖、撤权/过期、绕回及Python/SciPy独立旋转预期），以及20组原生信号写/读和IK/FK往返，零运动。最大写入5ms、读取8ms、IK21ms、整组含FK50ms。未验证主机SDK九次写入的时延和跨主机时钟同步。
+- `docker_pose_follow_probe.py`：默认预览。隔离实例中一次准备movej，然后合成手部目标流→完整位姿邮箱→原厂IK→70个80ms PVAT区间。输入生产、读取和运动提交通过原厂`async_task/wait_all`分开；只缓存最新位姿，不排端点队列。任一工作任务失败先撤销后续提交，等待在途调用返回后再统一异常收尾，不取消后假设完成。
+- 连续两轮70点通过，均无异常stop_move、自然收尾通过、stop_unverified=false。最新一轮写入前输入最大年龄81ms、PVAT调用最大60ms；X目标峰值3mm，报告位置相对起点峰值约2.222mm；固定目标保持后回到起点附近，收尾确认561ms（包含至少200ms连续观察）。未测真人端到端延迟，也未进行实际70°大幅运动。
+- 最大发送间隔两轮均90ms，超过名义80ms区间，报告明确为`strict_interval_cadence=false`。这证明有界跟踪与收敛能执行，**不证明严格周期、无卡顿或足够跟手**。目前不替换头显入口。
+
+失败记录也保留：数学自测曾触发Lua循环看门狗，补主动yield；准备阶段曾因使用小区域速度监测而拒绝；单循环SDK提交曾触发输入过期；内置`move_pvat`再次返回false（与既有`project-status.md`记录一致，不作为可用替代）。最终回到能执行的`lebai:move_pvat`，分离输入任务，并将参考阶段起点绑定首次实际提交，而非前面的准备/输入启动耗时。失败后的已确认停止和专用邮箱清理单独记录，未改判旧轮为成功。未解决官方控制器长期atomic_log崩溃。
+
+100项相关定向回归通过。原始证据仅在本机`.tmp/vr-pose-follow-20261103/`，不提交仓库：
+
+| 文件 | SHA256 |
+| --- | --- |
+| transport-first.json | f4b840cc99b1549a0b4fa107cf1949ec0fc92e68b70c7db0af308dd70361bc11 |
+| follow-phase-epoch.json | 097d51f69fa2a67918bc59e16f8eb5d3c161912deeae885e718aaba1d7b12445 |
+| follow-final.json | d6efb3904ca329a74bdfab1a9c1b380ead016b27f26564429cec294ca724fd6f |
+
+本轮已正常停止专用隔离实例并保留容器/日志，现有体验容器继续运行。后续先单独启动该隔离实例并等内部服务就绪，再用以下探针（省略`--run`时仅预览）；入口本身不会自动启动或重试容器：
+
+```powershell
+.venv/Scripts/python.exe scripts/docker_pose_transport_probe.py --container vr4arm-pose-isolated-20261103 --output .tmp/pose-transport.json
+.venv/Scripts/python.exe scripts/docker_pose_follow_probe.py --container vr4arm-pose-isolated-20261103 --output .tmp/pose-follow.json
+```
+
+API依据：[原厂SDK运动](https://help.lebai.ltd/sdk/motion.html)、[Lua协作式多任务](https://help.lebai.ltd/api/async.html)。原厂要求相邻发送间隔小于运动区间，本轮尚未严格达到；文档所述断流减速不作为真机停止已验证的依据。
+
 ## 仍需实现
 
-1. 将完整位姿邮箱接入专用Docker执行器与Lua读取端，验证信号范围、原生原子语义、时间同步、独占代次与周期预算；离线第一版尚未替代当前5分量方向邮箱。
-2. 控制器内连续IK与P/V/A跟踪，只跟最新目标、不排旧端点队列；在速度/加速度约束下减少手停后的跟踪余量。
+1. 将已通过独立原生探针的完整位姿邮箱接入产品Docker执行器；绑定主机采集时钟、连接/准备代次和独占所有权，实测主机SDK写入周期。当前头显仍发送原方向协议。
+2. 继续压低IK/输入/运动任务之间的周期抖动，测量目标与实际反馈的时间差；封装已有连续IK/PVAT候选并验证较大位姿、边界与操作者舒适度，不能把70点小区域通过当成大工作区体验通过。
 3. 明确松手后自然收尾与异常停止；历史stop_unverified保留，未知结果不能因后续静止而清除。
 4. 解决/隔离官方仿真控制器atomic_log崩溃，验证稳定运行、断连、边界回退与重新准备，再真人体验。
 
