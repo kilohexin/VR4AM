@@ -119,3 +119,22 @@ async def test_release_during_open_does_not_launch_native_program(monkeypatch):
     finish.set();await task
     assert s.phase=='ready' and not a.position_busy
     spawn.assert_not_called()
+
+
+@pytest.mark.parametrize('completed,busy',[(True,False),(False,False),(True,True)])
+async def test_regrip_while_previous_worker_records_its_completed_tail(completed,busy):
+    now,a,s=rig();s.offer(hand(now[0],1));old=s._reference
+    old.release()
+    s.gate.offer(PositionIntent('xr-finite-pose',2,2,now[0],'release',(0,0,0)))
+    # The native program/cleanup finished, but final logging still owns the
+    # worker slot. A ready status must not reuse its retired Grip anchor.
+    s.worker=asyncio.get_running_loop().create_future()
+    s.pump=NS(closed=True,completed=completed)
+    s.phase='ready';a.position_busy=busy
+    s.offer(hand(now[0],3,.1))
+    if completed and not busy:
+        assert s._reference is not old and s._reference.generation==2
+        goal=s._reference.target(Pose(p=(.101,0,0),q=(0,0,0,1)),generation=2,seq=4,captured_ns=now[0])
+        assert goal.p[0]==pytest.approx(.302)
+    else:assert s._reference is old and old.generation is None
+    s.worker.cancel()

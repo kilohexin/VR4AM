@@ -108,12 +108,14 @@ async def connect_real_client(ip: str) -> LebaiClientProtocol:
     return client
 
 
-async def connect_docker_simulator_client() -> LebaiClientProtocol:
-    """Explicit local simulator connection (3030); never a real-port fallback.
+async def connect_docker_simulator_client(*, isolated_test=False) -> LebaiClientProtocol:
+    """Local simulator (3030), or explicit test slot (13030); no real fallback.
 
     Not selected by the ordinary backend. The dedicated simulator caller must
     verify its local container before using this factory.
     """
+    if type(isolated_test) is not bool:
+        raise ValueError('invalid_docker_test_selection')
     try:
         module = importlib.import_module("lebai_sdk")
     except ModuleNotFoundError:
@@ -123,6 +125,6 @@ async def connect_docker_simulator_client() -> LebaiClientProtocol:
     except Exception:
         raise BackendCommandError("lebai_simulator_init_failed") from None
     try:
-        return await module.connect("127.0.0.1", True)
+        return await module.connect("127.0.0.1", 13030 if isolated_test else True)
     except Exception:
         raise BackendCommandError("lebai_simulator_connect_failed") from None

@@ -6,7 +6,9 @@ const port=process.argv[2]??'8774';
 if(!/^\d{4,5}$/.test(port))throw Error('invalid_port');
 const origin=`http://127.0.0.1:${port}`;
 const before:any=await(await fetch(origin+'/simulation/status')).json();
-if(before.runtime!=='LEBAI_DOCKER'||before.sdk_target!=='127.0.0.1:3030'||!before.pose_follow_vr)throw Error('wrong_runtime');
+if(before.runtime!=='LEBAI_DOCKER'||!before.pose_follow_vr||!before.simulator||before.hardware_verified
+ ||!(before.sdk_target==='127.0.0.1:3030'||before.isolated_test===true
+  &&before.sdk_target==='127.0.0.1:13030'&&before.admission?.port===13030))throw Error('wrong_runtime');
 const socket=new WebSocket(`ws://127.0.0.1:${port}/ws/v1/teleop`);
 let state:any=null,generation=-1,seq=0,received=-Infinity,grip=false,hand=[0,0,0],timer:any;
 let handQ:[number,number,number,number]=[0,0,0,1],clawDirection:-1|0|1=0;
@@ -111,9 +113,18 @@ try{
   grip=false;input.release();await wait(()=>state.finite_position.phase==='ready','claw_parallel_release');
   console.log('PASS held X/Y analogue claw while Grip tracking continues');
  }
- await command('disarm','disarm');
+ if(process.argv.includes('--disconnect-active')){
+  grip=true;await wait(()=>state.finite_position.phase==='executing','disconnect_grip');
+  const initial=[...state.actual_tcp.p],steps=state.finite_position.entered_steps;
+  hand[0]+=.002;
+  await wait(()=>state.finite_position.entered_steps>=steps+6&&state.actual_tcp.p[0]-initial[0]>.0005,'active_disconnect_progress');
+  console.log('PASS reached actual pose motion before active disconnect');
+ }else await command('disarm','disarm');
 }finally{
- grip=false;input.release();if(timer)clearInterval(timer);socket.close();
+ // Active-disconnect scenario deliberately sends NO release packet: transport
+ // cleanup and the controller input lease must retire the running stream.
+ grip=false;if(!process.argv.includes('--disconnect-active'))input.release();
+ if(timer)clearInterval(timer);socket.close();
 }
 await sleep(3000);
 const after:any=await(await fetch(origin+'/simulation/status')).json();

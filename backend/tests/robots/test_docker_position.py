@@ -253,3 +253,15 @@ async def test_motion_display_reuses_only_fresh_owned_sample(monkeypatch,damage)
     result=await a.get_state()
     assert result==('fresh-read' if damage else ('display',150_000_000))
     assert reads==([1] if damage else [])
+
+def test_test_target_reverification_stays_bound_to_original_container_id(monkeypatch):
+    from app.digital_twin import docker_runtime as runtime
+    from app.robots.finite_position_docker import DockerFinitePositionAdapter
+    a=DockerFinitePositionAdapter(runtime.docker_settings().lebai,docker_test_container='named-test')
+    calls=[]
+    def verify(container,*,isolated_test):
+        calls.append((container,isolated_test));return {'container_id':'fixed-id'}
+    monkeypatch.setattr(runtime,'verify_local_docker',verify)
+    a._docker_admission=a.verify_docker_target()
+    a.verify_docker_target()
+    assert calls==[('named-test',True),('fixed-id',True)]

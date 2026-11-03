@@ -44,8 +44,7 @@ class DockerPvatSession:
         a=self.adapter;proc=None;done=False;quiet=False;okay=False
         boundary=None;reference_rejected=False;abort_confirmed=False;known_failure=None
         try:
-            from app.digital_twin.docker_runtime import verify_local_docker
-            admitted=await asyncio.to_thread(verify_local_docker)
+            admitted=await asyncio.to_thread(a.verify_docker_target)
             self.check()
             if admitted!=a._docker_admission or a.position_busy or a._docker_entry_owner is not None:
                 raise ValueError('pvat_admission_changed_or_busy')

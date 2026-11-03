@@ -27,7 +27,10 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
     position_offline_prepare_scheduler=True
     position_idle_input_guard=True
 
-    def __init__(self,settings,*,client_factory=None,**kwargs):
+    def __init__(self,settings,*,client_factory=None,docker_test_container=None,**kwargs):
+        if docker_test_container is not None and (type(docker_test_container) is not str or not docker_test_container):
+            raise ValueError('invalid_docker_test_selection')
+        self._docker_test_container=docker_test_container
         if (settings.ip!='127.0.0.1' or settings.mode!='control'
                 or not 0<settings.control.max_joint_speed_radps<=.6
                 or not 0<settings.control.max_joint_acceleration_radps2<=.2):
@@ -51,6 +54,8 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             position_model=MdhPositionModel.from_settings(settings),authorize=lambda:None,
             backend_label='LEBAI_DOCKER',**kwargs)
         self._position_sources.add(Path(__file__))
+        self._position_sources.update((Path(__file__).with_name('lebai_sdk_bridge.py'),
+            Path(__file__).parents[1]/'digital_twin/docker_runtime.py'))
         self._position_sources.update((Path(__file__).with_name('blended_position_docker.py'),
             Path(__file__).with_name('blended_position_path.py'),
             Path(__file__).with_name('blended_pose_docker.py'),
@@ -73,6 +78,13 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
         try:return await self._connect_once()
         finally:self._docker_connecting=False
 
+    def verify_docker_target(self):
+        from app.digital_twin.docker_runtime import verify_local_docker
+        container=getattr(self,'_docker_test_container',None)
+        if container is None:return verify_local_docker()
+        admitted=self._docker_admission
+        return verify_local_docker(admitted['container_id'] if admitted else container,isolated_test=True)
+
     async def _connect_once(self):
         if self._docker_native:
             if self._docker_bootstrap_calls.unknown_methods:
@@ -84,14 +96,14 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             if self._docker_ready_client is not None:
                 return await super().connect()
             from app.digital_twin.docker_runtime import verify_local_docker,ensure_docker_idle,ensure_docker_speed
-            self._docker_admission=await asyncio.to_thread(verify_local_docker)
+            self._docker_admission=await asyncio.to_thread(self.verify_docker_target)
             owner=self._docker_bootstrap_calls
             def check():
                 if (self._docker_bootstrap_closed or owner is not self._docker_bootstrap_calls
                         or owner.unknown_methods):raise ValueError('docker_bootstrap_revoked')
             async def initialize():
                 check()
-                client=await connect_docker_simulator_client()
+                client=await connect_docker_simulator_client(**({'isolated_test':True} if self._docker_test_container is not None else {}))
                 check()
                 await ensure_docker_idle(client,check=check)
                 self._docker_velocity_factor=await ensure_docker_speed(client,check=check)

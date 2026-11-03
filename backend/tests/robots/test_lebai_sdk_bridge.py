@@ -21,6 +21,17 @@ async def test_docker_connector_pins_loopback_and_simulation_without_real_fallba
     assert client is module.client
 
 
+async def test_isolated_test_connector_uses_only_fixed_loopback_test_slot(monkeypatch):
+    from app.robots import lebai_sdk_bridge as bridge
+    module=FakeLebaiModule()
+    monkeypatch.setattr(importlib,'import_module',lambda _name:module)
+    assert await bridge.connect_docker_simulator_client(isolated_test=True) is module.client
+    assert module.connect_calls==[('127.0.0.1',13030)]
+    with pytest.raises(ValueError,match='invalid_docker_test_selection'):
+        await bridge.connect_docker_simulator_client(isolated_test='13031')
+    assert len(module.connect_calls)==1
+
+
 @pytest.mark.parametrize('stage,reason',[
     ('import','lebai_sdk_unavailable'),('init','lebai_simulator_init_failed'),
     ('connect','lebai_simulator_connect_failed')])

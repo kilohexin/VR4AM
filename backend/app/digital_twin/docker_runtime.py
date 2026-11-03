@@ -27,9 +27,13 @@ def docker_settings():
         home_q=ready,teleop_ready_q=ready,control=control),segmented_target=None,transactional_target=None)
 
 
-def verify_local_docker(container=None):
+def verify_local_docker(container=None,*,isolated_test=False):
     """Read metadata only; never pull/restart/reconfigure a container."""
     try:
+        if type(isolated_test) is not bool or isolated_test and not container:
+            raise ValueError('docker_simulator_not_admitted')
+        sdk_port,admin_port=(13030,13020) if isolated_test else (3030,3020)
+        allowed_bind=('127.0.0.1',) if isolated_test else ('127.0.0.1','0.0.0.0')
         if os.environ.get('DOCKER_HOST'):
             raise ValueError('docker_simulator_not_admitted')
         endpoint=json.loads(subprocess.run(['docker','context','inspect','--format','{{json .Endpoints.docker.Host}}'],
@@ -44,16 +48,19 @@ def verify_local_docker(container=None):
         rows=json.loads(subprocess.run(['docker','inspect',container],capture_output=True,text=True,
             check=True,timeout=5).stdout)
         item=rows[0];config=item['Config'];host=item['HostConfig'];ports=item['NetworkSettings']['Ports']
+        if isolated_test and (set(k for k,v in ports.items() if v)!={'3030/tcp','3020/tcp'}
+                or any(len(ports.get(k) or [])!=1 for k in ('3030/tcp','3020/tcp'))):
+            raise ValueError('docker_simulator_not_admitted')
         if (item['State']['Running'] is not True or not config['Image'].startswith(IMAGE+':')
                 or config['Cmd']!=['/data/startup.sh'] or host['Privileged'] or host.get('Devices')
                 or item.get('Mounts') or host['NetworkMode']=='host'
-                or not any(p['HostPort']=='3030' and p.get('HostIp') in ('127.0.0.1','0.0.0.0')
+                or not any(p['HostPort']==str(sdk_port) and p.get('HostIp') in allowed_bind
                     for p in ports.get('3030/tcp',[]) or [])
-                or not any(p['HostPort']=='3020' and p.get('HostIp') in ('127.0.0.1','0.0.0.0')
+                or not any(p['HostPort']==str(admin_port) and p.get('HostIp') in allowed_bind
                     for p in ports.get('3020/tcp',[]) or [])
                 or ports.get('3031/tcp')):
             raise ValueError('docker_simulator_not_admitted')
-        return dict(container_id=item['Id'],image_id=item['Image'],target='127.0.0.1',port=3030)
+        return dict(container_id=item['Id'],image_id=item['Image'],target='127.0.0.1',port=sdk_port)
     except (KeyError,IndexError,TypeError,AttributeError,json.JSONDecodeError,subprocess.SubprocessError,OSError):
         raise ValueError('docker_simulator_not_admitted') from None
 
@@ -88,7 +95,7 @@ async def ensure_docker_speed(client,*,check=lambda:None):
     return factor
 
 
-def create_docker_app(web_directory,*,blended_translation=False,blended_rotation=False,pvat_vr=False,pose_follow_vr=False):
+def create_docker_app(web_directory,*,blended_translation=False,blended_rotation=False,pvat_vr=False,pose_follow_vr=False,docker_test_container=None):
     if pose_follow_vr:pvat_vr=True
     if pvat_vr:blended_rotation=True
     if blended_rotation is True:blended_translation=True
@@ -99,7 +106,8 @@ def create_docker_app(web_directory,*,blended_translation=False,blended_rotation
     from app.main import create_app
     directory=Path(web_directory).resolve()
     if not (directory/'index.html').is_file():raise ValueError('docker_simulator_web_build_missing')
-    app=create_app(settings=docker_settings(),backend_label='LEBAI_DOCKER',docker_simulation=True)
+    app=create_app(settings=docker_settings(),backend_label='LEBAI_DOCKER',docker_simulation=True,
+        docker_test_container=docker_test_container)
     from contextlib import asynccontextmanager
     original_lifespan=app.router.lifespan_context
     @asynccontextmanager
@@ -125,7 +133,9 @@ def create_docker_app(web_directory,*,blended_translation=False,blended_rotation
     @app.get('/simulation/status')
     async def status():
         backend=app.state.backend;client=backend._client
-        return dict(runtime='LEBAI_DOCKER',provider='official_lmaster',sdk_target='127.0.0.1:3030',
+        return dict(runtime='LEBAI_DOCKER',provider='official_lmaster',
+            sdk_target='127.0.0.1:'+str(13030 if docker_test_container is not None else 3030),
+            isolated_test=docker_test_container is not None,
             simulator=True,hardware_verified=False,run_id=run_id,pid=os.getpid(),pvat_vr=pvat_vr,
             pose_follow_vr=pose_follow_vr,
             pose_follow_window_s=POSE_PROFILE.duration_ms/1000 if pose_follow_vr else None,

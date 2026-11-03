@@ -44,6 +44,50 @@ def test_admission_requires_the_inspected_daemon_and_port_to_be_local(monkeypatc
     with pytest.raises(ValueError,match='not_admitted'):d.verify_local_docker('local-sim')
 
 
+@pytest.mark.parametrize('damage',[None,'shared_port','public_bind','no_name','real_port','extra_bind'])
+def test_explicit_test_instance_requires_its_own_fixed_loopback_mappings(monkeypatch,damage):
+    from app.digital_twin import docker_runtime as d
+    row=container()
+    for key,port in (('3030/tcp','13030'),('3020/tcp','13020')):
+        row['NetworkSettings']['Ports'][key]=[dict(HostIp='127.0.0.1',HostPort=port)]
+    if damage=='shared_port':row['NetworkSettings']['Ports']['3030/tcp'][0]['HostPort']='3030'
+    if damage=='public_bind':row['NetworkSettings']['Ports']['3030/tcp'][0]['HostIp']='0.0.0.0'
+    if damage=='real_port':row['NetworkSettings']['Ports']['3031/tcp']=[dict(HostIp='127.0.0.1',HostPort='13031')]
+    if damage=='extra_bind':row['NetworkSettings']['Ports']['3030/tcp'].append(dict(HostIp='0.0.0.0',HostPort='13030'))
+    monkeypatch.delenv('DOCKER_HOST',raising=False)
+    monkeypatch.setattr(d.subprocess,'run',lambda args,**kw:SimpleNamespace(stdout=json.dumps(
+        'npipe:////./pipe/dockerDesktopLinuxEngine' if args[1]=='context' else [row])))
+    if damage:
+        with pytest.raises(ValueError,match='not_admitted'):
+            d.verify_local_docker(None if damage=='no_name' else 'test-instance',isolated_test=True)
+    else:
+        assert d.verify_local_docker('test-instance',isolated_test=True)['port']==13030
+
+
+def test_test_container_is_rejected_outside_explicit_docker_backend(tmp_path):
+    from app.main import create_app
+    with pytest.raises(ValueError,match='explicit_selection_required'):
+        create_app(docker_test_container='test-only')
+
+
+def test_isolated_launcher_preview_pins_verified_id_and_cannot_use_main_ui_port(monkeypatch,capsys):
+    from app.digital_twin import docker_runtime as d
+    from scripts.run_lmaster_docker import main
+    calls=[]
+    def verify(container,*,isolated_test):
+        calls.append((container,isolated_test))
+        return dict(container_id='verified-id',image_id='image-id',target='127.0.0.1',port=13030)
+    monkeypatch.setattr(d,'verify_local_docker',verify)
+    assert main(['--isolated-test-container','test-only','--port','8774','--pose-follow-vr'])==0
+    report=json.loads(capsys.readouterr().out)
+    assert calls==[('test-only',True)] and not report['execute']
+    assert report['sdk_target']=='127.0.0.1:13030' and report['test_seconds']==120
+    with pytest.raises(SystemExit):main(['--isolated-test-container','test-only'])
+    with pytest.raises(SystemExit):main(['--isolated-test-container','','--port','8774'])
+    with pytest.raises(SystemExit):main(['--test-seconds','60'])
+    assert len(calls)==1
+
+
 @pytest.mark.parametrize('initial',['STOP','ROBOT_ON','IDLE','MOVING','PAUSED','ERROR','BOOTING','STARTING'])
 async def test_virtual_start_only_occurs_from_unstarted_states_and_never_resumes_or_resets(initial):
     from app.digital_twin.docker_runtime import ensure_docker_idle

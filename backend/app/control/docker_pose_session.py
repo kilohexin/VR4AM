@@ -53,7 +53,16 @@ class DockerPoseSession(DockerPvatSession):
     def offer(self, intent):
         if intent.kind == 'held' and intent.hand_pose is None:
             raise ValueError('pose_follow_requires_pose')
-        first = self.gate.released and not self.busy and intent.kind == 'held'
+        # Ready can be observed while the old worker is only recording its
+        # final outcome. Its completed pump already retired the old reference;
+        # capture the NEW Grip now, rather than inheriting that released zero.
+        # Pending cleanup or actuator obligations never qualify for this handoff.
+        settled = (self.phase == 'ready' and self.pump is not None
+            and self.pump.completed is True and self.pump.closed is True
+            and not self.adapter.position_busy
+            and not getattr(self.adapter,'_motion_accepted',False)
+            and not getattr(self.adapter,'_motion_write_stop_required',False))
+        first = self.gate.released and (not self.busy or settled) and intent.kind == 'held'
         if first:
             from app.control.vr_pose_reference import VRPoseReference
             self.check()
@@ -85,8 +94,7 @@ class DockerPoseSession(DockerPvatSession):
     async def _run(self):
         a = self.adapter
         try:
-            from app.digital_twin.docker_runtime import verify_local_docker
-            admitted = await asyncio.to_thread(verify_local_docker)
+            admitted = await asyncio.to_thread(a.verify_docker_target)
             self.check()
             if admitted != a._docker_admission or a.position_busy or a._docker_entry_owner is not None:
                 raise ValueError('pose_admission_changed_or_busy')

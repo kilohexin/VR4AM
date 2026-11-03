@@ -95,8 +95,10 @@ def build_backend(
     real_position_vr: bool = False,
     real_position_pitch: bool = False,
     docker_simulation: bool = False,
+    docker_test_container: str | None = None,
 ) -> RobotBackend:
     if type(docker_simulation) is not bool:raise ValueError('invalid_docker_simulator_selection')
+    if docker_test_container is not None and not docker_simulation:raise ValueError('docker_simulator_explicit_selection_required')
     if docker_simulation:
         if (real_finite_position or offline_finite_position or backend_label!='LEBAI_DOCKER'
                 or settings.backend!='lebai' or settings.lebai is None
@@ -104,6 +106,7 @@ def build_backend(
                 or stop_diagnostic_sampling):raise ValueError('docker_simulator_explicit_selection_required')
         from app.robots.finite_position_docker import DockerFinitePositionAdapter
         return DockerFinitePositionAdapter(settings.lebai,
+            docker_test_container=docker_test_container,
             **({'client_factory':client_factory} if client_factory is not connect_real_client else {}),
             event_callback=recorder.write_event)
     if type(real_position_pitch) is not bool or (real_position_pitch and not real_finite_position):
@@ -271,7 +274,9 @@ def create_app(
     real_position_vr: bool = False,
     real_position_pitch: bool = False,
     docker_simulation: bool = False,
+    docker_test_container: str | None = None,
 ) -> FastAPI:
+    if docker_test_container is not None and not docker_simulation:raise ValueError('docker_simulator_explicit_selection_required')
     runtime_settings = settings if settings is not None else Settings.load()
     runtime_backend = backend_label or (
         "SIMULATOR" if runtime_settings.backend == "simulator" else "LEBAI"
@@ -303,6 +308,7 @@ def create_app(
             real_position_vr=real_position_vr,
             real_position_pitch=real_position_pitch,
             docker_simulation=docker_simulation,
+            docker_test_container=docker_test_container,
         )
         latest = LatestVRFrame()
         if docker_simulation:
