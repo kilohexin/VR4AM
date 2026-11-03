@@ -72,7 +72,8 @@ async def test_cancelled_page_reader_joins_owned_snapshot_before_exit():
 
 
 @pytest.mark.parametrize('confirmed,error,reason',[(True,'reference_limit','pvat_reference_limit'),
-    (False,'reference_limit','stop_unverified'),(True,'rpc_unknown','stop_unverified')])
+    (False,'reference_limit','stop_unverified'),(True,'rpc_unknown','stop_unverified'),
+    (True,'tcp_region','pvat_tcp_region'),(False,'tcp_region','stop_unverified')])
 async def test_known_reference_rejection_is_distinct_from_unverified_stop(monkeypatch,confirmed,error,reason):
     from unittest.mock import AsyncMock
     import app.control.docker_pvat_session as module
@@ -99,4 +100,4 @@ async def test_known_reference_rejection_is_distinct_from_unverified_stop(monkey
     assert s.phase=='fault' and s.reason==reason
     proc.wait.assert_awaited_once()
     assert a.position_busy==(reason=='stop_unverified')
-    assert s.pump.lease.owner is (None if reason=='pvat_reference_limit' else s.pump.token)
+    assert s.pump.lease.owner is (s.pump.token if reason=='stop_unverified' else None)

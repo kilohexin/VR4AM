@@ -15,18 +15,27 @@ local moves=0
 local braking=false
 local brake_reason='reference_boundary'
 local origin,q,v,a,gain,base
-local function read_feedback()
+local region_failure=nil
+local function read_feedback(for_stop)
     local state=lebai:get_robot_state()
     local k=lebai:get_kin_data()
     assert(state=='IDLE' or state=='MOVING','robot_state')
     for i=1,6 do
-        assert(k.actual_joint_pose[i]==k.actual_joint_pose[i],'nonfinite_pose')
-        assert(math.abs(k.actual_joint_speed[i])<=0.3,'speed_limit')
-        if origin then assert(math.abs(k.actual_joint_pose[i]-origin[i])<=0.1,'joint_region') end
+        assert(k.actual_joint_pose[i]==k.actual_joint_pose[i] and math.abs(k.actual_joint_pose[i])<1000000,'nonfinite_pose')
+        assert(k.actual_joint_speed[i]==k.actual_joint_speed[i] and math.abs(k.actual_joint_speed[i])<1000000,'nonfinite_speed')
+        if not for_stop then assert(math.abs(k.actual_joint_speed[i])<=0.3,'speed_limit') end
+        if origin and math.abs(k.actual_joint_pose[i]-origin[i])>0.1 then
+            region_failure='joint_region'
+            if not for_stop then error('joint_region') end
+        end
     end
+    -- PRODUCT_HARD_BOUNDS
     if base then
         for _,axis in ipairs({'x','y','z'}) do
-            assert(math.abs(k.actual_tcp_pose[axis]-base[axis])<=0.025,'tcp_region')
+            if math.abs(k.actual_tcp_pose[axis]-base[axis])>0.025 then
+                region_failure='tcp_region'
+                if not for_stop then error('tcp_region') end
+            end
         end
     end
     return state,k
@@ -51,7 +60,7 @@ end
 local function tail()
     local deadline=timestamp()+2500;local since=nil;local previous=timestamp()
     while timestamp()<deadline do
-        local state,k=read_feedback();local now=timestamp()
+        local state,k=read_feedback(true);local now=timestamp()
         local quiet=state=='IDLE'
         for i=1,6 do quiet=quiet and math.abs(k.actual_joint_speed[i])<=0.002 end
         if now<previous or now-previous>=100 then since=nil end
@@ -133,7 +142,7 @@ local ok,err=pcall(function()
                 local reason=product_boundary(feedback,goal,direction)
                 for axis,name in ipairs({'x','y','z'}) do
                     local delta=feedback.actual_tcp_pose[name]-base[name]
-                    if math.abs(delta)>=0.020 and delta*direction[axis]>0 then reason=reason or 'reference_boundary' end
+                    if math.abs(delta)>=0.014 and delta*direction[axis]>0 then reason=reason or 'reference_boundary' end
                 end
                 if reason then braking=true;brake_reason=reason;print('LIVE_BRAKE',timestamp()-start,reason) end
             end
@@ -186,6 +195,7 @@ local ok,err=pcall(function()
     end
     print('LIVE_RELEASE',timestamp()-start,moves)
     assert(tail(),'natural_tail_failed')
+    assert(not region_failure,region_failure)
 end)
 if not ok and entered then
     local stopped=pcall(function() lebai:stop_move() end)

@@ -33,7 +33,8 @@ describe('Chinese simulator HUD', () => {
     expect(hint()).toContain('切换中');
     expect(hint()).not.toContain('拖动');
     hud.setXRInputState('active');
-    expect(hint()).toContain('右 Grip 建立末端零位');
+    expect(hint()).toContain('右 Grip 控制末端');
+    expect(hint()).toContain('左 X 长按打开、Y 长按闭合');
     hud.setXRInputState('error');
     expect(hint()).toContain('鼠标左键');
     hud.setXRInputState('idle');

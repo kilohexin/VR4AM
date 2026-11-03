@@ -57,8 +57,9 @@ try{
  }
  if(process.argv.includes('--reference-rollover')){
   const count=(await(await fetch(origin+'/simulation/status')).json() as any).pvat_reference_rollovers;
-  vector=[-1,0,0];const end=performance.now()+15000;
-  while((await(await fetch(origin+'/simulation/status')).json() as any).pvat_reference_rollovers<=count){
+  vector=process.argv.includes('--rollover-y')?[.1,1,.2]:[-1,0,0];const end=performance.now()+20000;
+  const renewals=process.argv.includes('--rollover-y')?2:1;
+  while((await(await fetch(origin+'/simulation/status')).json() as any).pvat_reference_rollovers<count+renewals){
    if(state?.fault)throw Error('reference_rollover:'+state.fault);
    if(performance.now()>end)throw Error('reference_rollover_timeout');await sleep(100);
   }

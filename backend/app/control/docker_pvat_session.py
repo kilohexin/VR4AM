@@ -42,7 +42,7 @@ class DockerPvatSession:
 
     async def _run(self):
         a=self.adapter;proc=None;done=False;quiet=False;okay=False
-        boundary=None;reference_rejected=False;abort_confirmed=False
+        boundary=None;reference_rejected=False;abort_confirmed=False;known_failure=None
         try:
             from app.digital_twin.docker_runtime import verify_local_docker
             admitted=await asyncio.to_thread(verify_local_docker)
@@ -65,7 +65,8 @@ class DockerPvatSession:
             joint_lo=tuple(x+a.settings.joint_limit_margin_rad for x in a.settings.soft_joint_min_rad)
             joint_hi=tuple(x-a.settings.joint_limit_margin_rad for x in a.settings.soft_joint_max_rad)
             bounds+='\n'+'\n'.join(f"assert(k.actual_joint_pose[{i+1}]>={joint_lo[i]!r} and k.actual_joint_pose[{i+1}]<={joint_hi[i]!r},'product_joint_limit')" for i in range(6))
-            program=program.replace('if base then',bounds+'\n    if base then')
+            if program.count('-- PRODUCT_HARD_BOUNDS')!=1:raise ValueError('pvat_program_marker')
+            program=program.replace('-- PRODUCT_HARD_BOUNDS','if not for_stop then\n'+bounds+'\n end')
             soft=[]
             for i,name in enumerate(('x','y','z')):
                 soft.append(f"if (k.actual_tcp_pose.{name}<={lo[i]+.006!r} and direction[{i+1}]<0) or (k.actual_tcp_pose.{name}>={hi[i]-.006!r} and direction[{i+1}]>0) then return 'workspace_boundary' end")
@@ -98,21 +99,25 @@ class DockerPvatSession:
                     elif fields[0]=='LIVE_DONE':
                         done=True;okay=fields[1]=='true'
                         reference_rejected=not okay and fields[2].endswith(': reference_limit')
+                        if not okay:
+                            for code in ('reference_limit','tcp_region','joint_region'):
+                                if fields[2].endswith(': '+code):known_failure=code
                         if self.pump:await self.pump.withdraw()
                         break
                     if self.pump and self._withdraw.is_set():await self.pump.withdraw()
                 transport_ok=await proc.wait()==0
                 okay=okay and transport_ok
-            known_rejection=reference_rejected and abort_confirmed and transport_ok
+            known_rejection=known_failure is not None and abort_confirmed and transport_ok
             if self.pump:
                 await self.pump.complete(client,controller_ok=done and (okay or known_rejection),quiet_observed=quiet)
             elif not (done and okay and quiet):raise ValueError('pvat_completion_unverified')
             a.position_busy=False;a._motion_accepted=a._motion_write_stop_required=False
             await self.recorder.write_event(dict(kind='docker_pvat_outcome',controller_passed=okay,
-                reference_rejected=known_rejection,boundary=boundary,
+                reference_rejected=reference_rejected and known_rejection,known_rejection=known_rejection,
+                failure_code=known_failure,boundary=boundary,
                 input_exit_reason=self.pump.reason if self.pump else None),self.clock())
             if known_rejection:
-                self.phase='fault';self.reason='pvat_reference_limit'
+                self.phase='fault';self.reason='pvat_'+known_failure
             else:
                 # A verified time-window completion may roll over using a
                 # CURRENT held input. Boundary, expiry and revocation may not.

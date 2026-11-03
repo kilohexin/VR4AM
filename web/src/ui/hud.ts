@@ -313,6 +313,8 @@ export function readableFault(fault: string | null): string {
     position_endpoint_error: '目标到位误差超出当前容差',
     position_session_expired: '本次持按时限已到，请松开后重新操作',
     pvat_reference_limit: '本段轨迹触及范围限制，停止已确认，请重新准备',
+    pvat_tcp_region: '本段位移超出计算区域，停止已确认，请重新准备',
+    pvat_joint_region: '本段关节变化超出计算区域，停止已确认，请重新准备',
     protocol_error: '协议消息无效',
     tracking_lost: '追踪已丢失',
     input_stale: '控制输入已超时',
