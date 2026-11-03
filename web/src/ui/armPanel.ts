@@ -389,6 +389,7 @@ export class ArmPanel {
       : status.state === 'active'
         ? '退出 VR'
         : '进入 VR';
+    if(status.state==='starting'&&status.message)label.textContent=status.message;
   }
 
   setVRAllowed(allowed:boolean):void {

@@ -89,6 +89,27 @@ async def test_release_during_planning_prevents_write():
     assert not p.writes and not p.stops and not s.closed
 
 
+async def test_unsent_audit_boundary_drains_then_allows_explicit_reverse():
+    s,p=rig();p.audit_boundaries={'blend_joint_jump'}
+    offer(s,p,1);await tick(s,p)
+    async def boundary():raise ValueError('blend_joint_jump')
+    p.on_audit=boundary;offer(s,p,2);await tick(s,p)
+    assert s.phase in ('hold','draining') and not s.closed and p.stops==0
+    count=len(p.writes)
+    for seq in range(3,18):offer(s,p,seq);await tick(s,p)
+    assert len(p.writes)==count and s.phase=='hold' and not s.gate.reserved
+    offer(s,p,18,(0,0,0));await tick(s,p)
+    p.on_audit=None;offer(s,p,19,(0,0,-1));await tick(s,p)
+    assert len(p.writes)==count+1 and p.stops==0
+
+
+async def test_same_boundary_after_native_entry_remains_a_fault():
+    s,p=rig();p.audit_boundaries={'blend_joint_jump'}
+    async def after_entry():raise ValueError('blend_joint_jump')
+    p.on_submit=after_entry;offer(s,p,1);await tick(s,p)
+    assert s.closed and s.phase=='fault' and p.stops==1
+
+
 async def test_live_hand_direction_noise_does_not_drain_each_segment():
     s,p=rig()
     for seq in range(1,13):

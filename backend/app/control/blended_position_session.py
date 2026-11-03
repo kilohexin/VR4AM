@@ -102,6 +102,7 @@ class BlendedPositionSession:
     async def _tick(self):
         target = None
         native_entered = False
+        planning = False
         try:
             begin=getattr(self.port,'begin_cycle',None)
             if begin is not None:begin()
@@ -112,7 +113,9 @@ class BlendedPositionSession:
                               'draining' if self.gate.draining or self.gate.released else 'executing')
                 return
             self.phase = 'planning'
+            planning = True
             plan = await self.port.audit(target)
+            planning = False
             self._monitor()
             sample = await self._read()
 
@@ -141,7 +144,15 @@ class BlendedPositionSession:
             raise
         except Exception as error:
             if not self.closed:
-                if str(error) == 'blend_entry_revoked' and not native_entered and not self._obligation:
+                boundary=planning and not native_entered and str(error) in getattr(self.port,'audit_boundaries',())
+                if boundary:
+                    try:self._monitor()
+                    except Exception:boundary=False
+                if boundary:
+                    self.gate.cancel_unsent(target);self.gate.release_expired()
+                    self._input_hold=True;self._release_seen=False;self.reason=str(error)
+                    self.phase='draining' if self.gate.tail is not None else 'hold'
+                elif str(error) == 'blend_entry_revoked' and not native_entered and not self._obligation:
                     self.phase = 'hold' if self._input_hold else 'ready'
                 elif str(error) == 'blend_entry_revoked' and not native_entered and self.gate.draining:
                     self.phase = 'draining'

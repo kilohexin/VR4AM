@@ -23,6 +23,10 @@ class DockerBlendPlan:
 
 class DockerBlendPort:
     policy = 'docker_blended_candidate'
+    # Known rejection of an unsent plan is a local motion boundary. Native
+    # submission, unknown results and feedback failures still use fault stops.
+    audit_boundaries=frozenset({'blend_joint_jump','blend_joint_limit','blend_workspace',
+        'blend_ik_unreachable','blend_singular_path','blend_rotation_range'})
 
     def __init__(self, adapter, binding, *, authorize):
         from app.robots.finite_position_docker import DockerFinitePositionAdapter

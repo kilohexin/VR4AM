@@ -737,6 +737,28 @@ describe('XRSessionController lifecycle', () => {
     expect(controller.isActive).toBe(true);
   });
 
+  it.each(['support','session','render'] as const)('times out a hung %s stage and rejects late activation',async stage=>{
+    vi.useFakeTimers();
+    try{
+      const {controller,xr,host,statuses,session}=setup();
+      let settle!:(value:any)=>void;
+      const pending=new Promise<any>(resolve=>{settle=resolve;});
+      if(stage==='support')vi.mocked(xr.isSessionSupported).mockReturnValueOnce(pending);
+      else if(stage==='session')vi.mocked(xr.requestSession).mockReturnValueOnce(pending);
+      else host.startXR.mockReturnValueOnce(pending);
+      const entering=controller.enterVR();
+      await vi.advanceTimersByTimeAsync(15001);
+      expect(statuses.at(-1)?.state).toBe('error');
+      expect(JSON.stringify(statuses.at(-1))).toContain('启动超时');
+      expect(controller.isActive).toBe(false);
+      settle(stage==='support'?true:stage==='session'?session:undefined);
+      await entering;await vi.advanceTimersByTimeAsync(0);
+      expect(controller.isActive).toBe(false);
+      expect(statuses.some(s=>s.state==='active')).toBe(false);
+      if(stage!=='support')expect(session.end).toHaveBeenCalled();
+    }finally{vi.useRealTimers();}
+  });
+
   it.each([
     ['unsupported browser', {missingXR: true}, '此浏览器不支持 WebXR'],
     ['unsupported headset', {supported: false}, '当前设备不支持沉浸式 VR'],
@@ -754,6 +776,9 @@ describe('XRSessionController lifecycle', () => {
 
   it.each([
     ['request rejection', {requestError: new DOMException('permission raw')}, '无法进入 VR，请确认浏览器权限后重试。'],
+    ['permission rejection', {requestError: new DOMException('permission raw','SecurityError')}, 'VR 权限被拒绝：请在头显浏览器使用 HTTPS 地址，允许沉浸式 VR 后再次点击进入。'],
+    ['device unavailable', {requestError: new DOMException('device raw','NotSupportedError')}, '当前设备或浏览器不支持沉浸式 VR，请在头显浏览器打开此页面。'],
+    ['session busy', {requestError: new DOMException('session raw','InvalidStateError')}, '已有 VR 会话正在运行或启动，请先退出其它 VR 页面再试。'],
     ['reference-space failure', {referenceError: new DOMException('space raw')}, 'VR 空间初始化失败，请退出后重试。'],
   ])('contains raw browser errors after %s', async (_name, options, expected) => {
     const {controller, statuses} = setup(options);

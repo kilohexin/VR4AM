@@ -35,7 +35,7 @@ export interface XRPresentationSample {
 
 export type XRSessionStatus =
   | {state: 'idle'}
-  | {state: 'starting'}
+  | {state: 'starting'; message?: string}
   | {state: 'active'}
   | {state: 'error'; message: string};
 
@@ -111,11 +111,23 @@ export class XRSessionController {
     const generation = ++this.generation;
     this.enteringGeneration = generation;
     this.signalSafety();
-    this.options.onStatus({state: 'starting'});
+    let stage='检测设备支持';
+    let pendingSession:XRSession|null=null;
+    const progress=(message:string)=>{stage=message;this.options.onStatus({state:'starting',message});};
+    progress(stage);
+    const startupTimer=setTimeout(()=>{
+      if(!this.entryIsLive(generation))return;
+      this.generation+=1;
+      const context=this.current;
+      if(context){void this.finishSession(context,false);void safeEnd(context.session);}
+      else{this.signalSafety();if(pendingSession)void safeEnd(pendingSession);}
+      this.fail(`VR 启动超时（${stage}），已撤销控制。请确认头显内权限提示；仍无响应请刷新页面。`);
+    },15000);
     try {
       const xr = this.options.xr;
       if (!xr) {
-        this.failIfEntryLive(generation, '此浏览器不支持 WebXR');
+        this.failIfEntryLive(generation, globalThis.isSecureContext===false
+          ?'VR 需要安全连接，请在头显浏览器打开 HTTPS 地址。':'此浏览器不支持 WebXR');
         return;
       }
 
@@ -134,9 +146,19 @@ export class XRSessionController {
 
       let session: XRSession;
       try {
+        progress('等待头显授权');
         session = await xr.requestSession('immersive-vr', {requiredFeatures: ['local-floor']});
-      } catch {
-        this.failIfEntryLive(generation, '无法进入 VR，请确认浏览器权限后重试。');
+        pendingSession=session;
+      } catch (error) {
+        const name=error instanceof DOMException?error.name:'';
+        const message=name==='SecurityError'||name==='NotAllowedError'
+          ?'VR 权限被拒绝：请在头显浏览器使用 HTTPS 地址，允许沉浸式 VR 后再次点击进入。'
+          :name==='NotSupportedError'
+            ?'当前设备或浏览器不支持沉浸式 VR，请在头显浏览器打开此页面。'
+            :name==='InvalidStateError'
+              ?'已有 VR 会话正在运行或启动，请先退出其它 VR 页面再试。'
+              :'无法进入 VR，请确认浏览器权限后重试。';
+        this.failIfEntryLive(generation,message);
         return;
       }
       if (!this.entryIsLive(generation)) {
@@ -146,6 +168,7 @@ export class XRSessionController {
 
       let referenceSpace: XRReferenceSpace;
       try {
+        progress('初始化 VR 空间');
         referenceSpace = await session.requestReferenceSpace('local-floor');
       } catch {
         await safeEnd(session);
@@ -164,6 +187,7 @@ export class XRSessionController {
 
       let startupFailed = false;
       try {
+        progress('初始化 VR 渲染');
         await this.options.host.startXR(session, context.frameListener);
       } catch {
         startupFailed = true;
@@ -187,6 +211,7 @@ export class XRSessionController {
       }
       this.options.onStatus({state: 'active'});
     } finally {
+      clearTimeout(startupTimer);
       this.enteringGeneration = null;
     }
   }
