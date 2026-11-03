@@ -26,6 +26,11 @@ const state = (phase: ArmSafetyPhase): ArmSafetySnapshot => ({
 } as const);
 
 describe('VR safety presentation', () => {
+  it('explains the stopped entry state without presenting it as a fault',()=>{
+    expect(describeVrSafety({...state('stopped'),mode:'DISARMED'},true)).toMatchObject({
+      title:'等待重新解锁',tone:'muted',instruction:expect.stringContaining('右手 A'),
+    });
+  });
   it('shows the distinct second A action after explicit unlock', () => {
     expect(describeVrSafety({...state('locked'), preparationRequired:true,
       preparationUnlocked:true}, true)).toMatchObject({
@@ -62,7 +67,7 @@ describe('VR safety presentation', () => {
     ['pending', '解锁中', '等待仿真确认', 'cyan', 'shield'],
     ['armed', '已解锁', '按住 Grip 移动', 'cyan', 'shield'],
     ['active', '运动中', '松开 Grip 请求停止 · B 请求停止', 'cyan', 'shield'],
-    ['stopped', '控制已锁定', '保持 Grip 松开，确认现场静止后再操作', 'red', 'stop'],
+    ['stopped', '等待重新解锁', '松开 Grip，等待连接就绪后按右手 A 解锁', 'muted', 'shield'],
     ['fault', '无法在线复位', '保持安全距离，检查 L Master/急停', 'red', 'warning'],
     ['disconnected', '连接已中断', '保持 Grip 松开', 'red', 'warning'],
   ] as const)('maps %s to readable text and a shape', (phase, title, instruction, tone, shape) => {
@@ -387,7 +392,7 @@ describe('VR safety sprite resources', () => {
       'A解锁 B停止/Home · 右Grip末端 Trigger夹爪 · 左摇杆平台/按下归零 · 左Grip+摇杆升降',
     );
     expect(describeVrSafety(state('stopped'), true).instruction).toBe(
-      '保持 Grip 松开，确认现场静止后再操作',
+      '松开 Grip，等待连接就绪后按右手 A 解锁',
     );
     const texture = (panel.sprite.material as THREE.SpriteMaterial).map as THREE.CanvasTexture;
     expect(texture.image).toMatchObject({width: 1024, height: 256});

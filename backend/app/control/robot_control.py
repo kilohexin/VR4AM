@@ -1183,8 +1183,18 @@ class RobotControl:
                 and received.frame.session_id != self._last_frame_id[0]
             ):
                 self._advance_control_generation()
+                if self.machine.mode not in {TeleopMode.FAULT,TeleopMode.STALE}:
+                    self.machine.disarm()
                 if not disconnect_stop_completed:
-                    await self._stop_backend(StopReason.DISCONNECT)
+                    self._disarm_in_progress=True
+                    try:
+                        if not await self._stop_backend(StopReason.DISCONNECT):return
+                    finally:self._disarm_in_progress=False
+                # Remember the completed source handoff before any further
+                # await. A newer frame arriving during stop/recording must not
+                # make every next tick repeat the same disconnect stop.
+                # -1 leaves the first validated new-source frame unconsumed.
+                self._last_frame_id=(received.frame.session_id,-1)
                 self.mapper.clear()
                 self.last_target = None
                 self._clear_constraint()

@@ -160,7 +160,7 @@ function describeSafety(
     return presentation(state.preparationRequired ? '可操纵' : '已解锁', '按住 Grip 移动', 'cyan', 'shield');
   }
   if (state.phase === 'stopped') {
-    return presentation('控制已锁定', '保持 Grip 松开，确认现场静止后再操作', 'red', 'stop');
+    return presentation('等待重新解锁', '松开 Grip，等待连接就绪后按右手 A 解锁', 'muted', 'shield');
   }
   return presentation('未解锁', '松开 Grip 后按 A', 'muted', 'shield');
 }

@@ -1295,6 +1295,31 @@ async def test_reconnect_new_session_does_not_repeat_completed_disconnect_stop()
 
 
 @pytest.mark.asyncio
+async def test_source_switch_with_new_frames_during_stop_does_not_livelock() -> None:
+    control,latest,backend,clock=make_control()
+    await control.connect()
+    latest.publish(frame(1,False,session_id='desktop'),clock.now_ns())
+    await control.tick()
+    original_stop=backend.stop
+    seq=1
+    async def stop_and_receive(reason):
+        nonlocal seq
+        assert control.mode==TeleopMode.DISARMED
+        assert control._disarm_in_progress
+        await original_stop(reason)
+        seq+=1
+        latest.publish(frame(seq,False,session_id='quest'),clock.now_ns())
+    backend.stop=stop_and_receive
+    latest.publish(frame(1,False,session_id='quest'),clock.now_ns())
+    await control.tick()
+    await control.tick()
+    assert backend.stops.count(StopReason.DISCONNECT)==1
+    assert control.mode==TeleopMode.READY
+    assert control._last_frame_id[0]=='quest'
+    assert not backend.targets
+
+
+@pytest.mark.asyncio
 async def test_same_session_reconnect_consumes_disconnect_stop_credit() -> None:
     control, latest, backend, clock = make_control()
     await control.connect()
