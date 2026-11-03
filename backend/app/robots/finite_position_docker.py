@@ -58,6 +58,9 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
         self._position_sources.update((Path(__file__).parents[1]/'digital_twin/docker_kinematics.py',
             Path(__file__).parents[1]/'commissioning/native_jog_mdh.py',
             Path(__file__).parents[1]/'commissioning/finite_position_site.py'))
+        self._position_sources.update((Path(__file__).parents[1]/'control/docker_pvat_input.py',
+            Path(__file__).parents[1]/'control/docker_pvat_session.py',
+            Path(__file__).parents[3]/'scripts/docker_pvat_live.lua'))
         self._position_identity=self._source_identity();self._position_metadata=self._source_metadata()
 
     async def connect(self):
@@ -228,6 +231,22 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             raise
 
     async def get_state(self):
+        if getattr(self,'position_pvat_vr',False) and self.position_busy:
+            # Socket task cancellation must not abandon snapshot RPC ownership
+            # while the independent controller stream is naturally draining.
+            task=asyncio.create_task(self._get_docker_state())
+            try:return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                while not task.done():
+                    try:await asyncio.shield(task)
+                    except asyncio.CancelledError:continue
+                # Retrieve any exception; its native ownership remains recorded.
+                try:task.result()
+                except Exception:pass
+                raise
+        return await self._get_docker_state()
+
+    async def _get_docker_state(self):
         cached=self._docker_display_sample
         if (cached is not None and self.position_busy and not self.position_aborted
                 and not self._disconnecting and not self._latched_fault and not self._pump.fault

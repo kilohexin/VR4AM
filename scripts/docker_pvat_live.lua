@@ -87,7 +87,7 @@ local ok,err=pcall(function()
         local action=input()
         if not action then
             if started then expired=true;print('LIVE_EXPIRED',timestamp()-start,moves);break end
-            assert(timestamp()-start<1500,'input_start_timeout')
+            if timestamp()-start>=1500 then break end
             rt_sleep(10)
         else
             started=started or timestamp()

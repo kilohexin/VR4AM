@@ -2,9 +2,9 @@
 
 当前主线：**官方 Docker 仿真 → 操作者网页/头显体验 → 后续真机验收**。真机当前不可用，仿真成功不代表真实抓取或制动已通过。
 
-执行器分工方向：网页准备位/关节目标用`movej`，网页XYZ直线操作用`movel`；按用户11月3日确认，VR连续输入继续采用控制器侧`move_pvat`候选，显式生成位置、速度和加速度。PVT保留为独立对照实验。PVAT控制器内部参考与断流实验已通过，尚未接入产品VR；当前网页/VR体验入口仍使用下述有限段执行器。后续沿用连续轨迹时间编码、有界缓冲、输入保鲜和退出交接，同一时刻只有一个运动执行器拥有控制权。
+执行器分工：网页准备位/关节目标用`movej`，网页XYZ直线操作用`movel`；按用户11月3日确认，VR采用控制器侧`move_pvat`候选，显式生成位置、速度和加速度，PVT仅保留对照。启动器新增`--pvat-vr`可接入产品XR输入；未指定时仍使用原有限段执行器。当前PVAT为低速六基座方向、单次手势最多约10秒的实验模式，斜输入选主轴，到期需松Grip重握。产品WebSocket三轴、松手、比例夹爪及运动中断连的合成验证通过，尚需真人头显体验，短动作延迟与周期抖动仍保留。
 
-11月3日新增实时输入PVAT独立候选：`scripts/docker_pvat_live.py`默认预览，`--run --output <本地报告路径>`仅允许核验后的官方本机Docker且8773/8774已关闭。六方向、松手和断流已完成一次有界仿真验证；发送周期仍有抖动，尚未连接产品VR，不代表真人体验或真机验收。详见`docs/project-status.md`。本机Windows当前保留5173端口，临时VR HTTPS入口以`--port 8443`启动，旧5173链接不可用。
+独立PVAT工具`scripts/docker_pvat_live.py`仍默认预览，执行需先关闭8773/8774。产品候选启动：`.venv/Scripts/python.exe scripts/run_lmaster_docker.py --run --pvat-vr`；定向合成验证：在`web`运行`node scripts/checkDockerPvat.mjs 8773 --disconnect-active`。详见`docs/project-status.md`。本机Windows当前保留5173端口，临时VR HTTPS入口以`--port 8443`启动，旧5173链接不可用。
 
 ## 推荐启动
 

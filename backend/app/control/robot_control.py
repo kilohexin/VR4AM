@@ -1607,6 +1607,9 @@ class RobotControl:
                 and getattr(self.backend,'position_blended_translation',False) is True):
             from app.control.docker_motion_session import DockerMotionSession
             session_type=DockerMotionSession
+            if getattr(self.backend,'position_pvat_vr',False) is True:
+                from app.control.docker_pvat_session import DockerPvatOrWebSession
+                session_type=DockerPvatOrWebSession
         self.finite_position_session=session_type(self.backend,binding,clock=self.clock.now_ns,
             recorder=self.recorder,authorize=authorized)
 
