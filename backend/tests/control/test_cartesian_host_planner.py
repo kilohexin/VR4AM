@@ -97,6 +97,29 @@ def test_future_resume_ack_does_not_erase_current_native_terminal_hold(host):
     assert not h.closed and h.head==packet.terminal
 
 
+def test_owned_dynamic_braking_state_can_plan_without_waiting_for_terminal(host):
+    h,_,_=host;planned=result(host);packet=h.complete(planned);h.acknowledge(packet.sequence,True)
+    assert packet.braking_ticks>1
+    h.observe_owned_cursor(2,packet.sequence,'active',generation=1)
+    assert h.head==packet.expand_tail()[0].end and any(x!=0 for x in h.head.v)
+    next_job=h.begin(160)
+    assert next_job is not None and next_job.source.state==h.head
+    assert next_job.source._tail==packet.expand_tail()[1:]
+    resumed=h.calculate(next_job)
+    assert resumed.bundle is not None and resumed.bundle.lead.start==h.head
+    assert resumed.bundle.expand_tail()==resumed.checkpoint._tail
+
+
+def test_rejected_first_packet_cannot_pin_the_controller_reference_epoch(host):
+    h,_,_=host;first=h.complete(result(host))
+    h.acknowledge(first.sequence,False)
+    assert h.reference_epoch is None
+    next_result=h.calculate(h.begin(240));next_packet=h.complete(next_result)
+    assert next_packet is not None and next_packet.parent_tick==0
+    h.acknowledge(next_packet.sequence,True)
+    assert h.reference_epoch==240
+
+
 def test_unowned_or_wrong_generation_head_closes_session(host):
     h,_,_=host
     with pytest.raises(ValueError,match='unowned_head'):

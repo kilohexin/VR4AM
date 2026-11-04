@@ -55,7 +55,9 @@ class CartesianHostPlanner:
         self.job=None;self.pending=None;self.sequence=0;self.jobs=0
         self.closed=False;self.reason=None;self.last_now=self.clock()
         self.publish_unknown=False
+        self.reference_epoch=None
         self.accepted={}
+        self.packet_checkpoints={}
 
     def _now(self):
         value=self.clock()
@@ -95,17 +97,13 @@ class CartesianHostPlanner:
                 or tick<self.head_tick or not isinstance(state,JointReference)
                 or tick==self.head_tick and state!=self.head):
             self.close('cartesian_host_head');raise ValueError(self.reason)
-        # Lua evaluates the owned quintic with a different FP operation order.
-        # It may report an ULP-different intermediate brake state. Recognize it
-        # for monitoring, but NEVER plan from that approximate match: wait for
-        # the exact wire-carried terminal instead.
+        # Compact-tail evaluation uses the canonical binary64 operation order.
+        # No numerical tolerance may manufacture an owned dynamic start.
         candidates=self.allowed_states.get(tick,set())
         if self.terminal_hold is not None and tick>=self.terminal_hold[0]:
             candidates=candidates|{self.terminal_hold[1]}
         if state not in candidates:
-            if not any(max(abs(a-b) for a,b in zip(state.q+state.v+state.a,s.q+s.v+s.a))<=1e-10
-                    for s in candidates):
-                self.close('cartesian_host_unowned_head');raise ValueError(self.reason)
+            self.close('cartesian_host_unowned_head');raise ValueError(self.reason)
         self.head=state;self.head_tick=tick
         if tick>=self.tip_tick:self.tip=state;self.tip_tick=tick
         self.allowed_states={t:states for t,states in self.allowed_states.items() if t>=tick}
@@ -199,8 +197,10 @@ class CartesianHostPlanner:
         self.pending=None;self.sequence=sequence  # A known rejection also consumes the sequence.
         if not accepted or self.closed:return
         branch=result.checkpoint;packet=result.bundle
+        if self.reference_epoch is None:self.reference_epoch=packet.due_ms
         self.accepted[sequence]=packet
-        if len(self.accepted)>4:del self.accepted[min(self.accepted)]
+        if len(self.accepted)>4:
+            old=min(self.accepted);del self.accepted[old];self.packet_checkpoints.pop(old,None)
         self.tip=packet.lead.end;self.tip_tick=packet.parent_tick+1
         self.checkpoints[packet.lead.end]=_branch(branch)
         self.allowed_states.setdefault(packet.parent_tick+1,set()).add(packet.lead.end)
@@ -209,4 +209,12 @@ class CartesianHostPlanner:
         self.terminal_hold=(packet.parent_tick+1+packet.braking_ticks,packet.terminal)
         # A known terminal may resume without moving the preparation box or
         # capturing a new hand zero. Quiet initialization validates it afresh.
-        self.checkpoints={packet.lead.end:_branch(branch),packet.terminal:result.terminal_checkpoint}
+        checkpoints={packet.lead.end:_branch(branch)}
+        for index,segment in enumerate(branch._tail):
+            resumed=_branch(branch);resumed.state=segment.end
+            resumed._tail=branch._tail[index+1:];resumed._tail_checks=branch._tail_checks[index+1:]
+            resumed.phase='following';resumed.reason=None
+            checkpoints[segment.end]=resumed
+        self.packet_checkpoints[sequence]=checkpoints
+        self.checkpoints={state:checkpoint for group in self.packet_checkpoints.values()
+            for state,checkpoint in group.items()}

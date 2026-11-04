@@ -25,7 +25,7 @@ CHECKS={'precise_tail_reconstruction','full_backup_before_output','at_most_two',
     'bad_start_no_commit','caller_mutation_isolated','input_rollback_fault','unknown_validation_fault',
     'concurrent_stage_fault','holding_without_recenter','sdk_void_contract','native_joint_format',
     'bounded_preload_schedule','joints_unchanged','quiet_prefix_no_write','quiet_prefix_release',
-    'moving_prefix_refused','reference_age_rechecked'}
+    'moving_prefix_refused','reference_age_rechecked','binary_tail_identity'}
 
 
 def fixtures():
@@ -51,11 +51,12 @@ def program():
     packets=fixtures()
     words='{'+','.join(numbers(encode(p)) for p in packets)+'}'
     tail='{'+','.join(state(s.end) for s in packets[0].expand_tail())+'}'
+    tails='{'+','.join('{'+','.join(state(s.end) for s in p.expand_tail())+'}' for p in packets)+'}'
     source=(ROOT/'scripts/native_bundle_owner_probe.lua').read_text(encoding='utf-8')
     return source.replace('__MAILBOX__',(ROOT/'scripts/cartesian_bundle_mailbox.lua').read_text(encoding='utf-8'))\
         .replace('__OWNER__',(ROOT/'scripts/cartesian_bundle_owner.lua').read_text(encoding='utf-8'))\
         .replace('__SDK_RESULT__',(ROOT/'scripts/pvat_sdk_result.lua').read_text(encoding='utf-8'))\
-        .replace('__PACKETS__',words).replace('__TAIL__',tail)
+        .replace('__PACKETS__',words).replace('__TAIL__',tail).replace('__ALL_TAILS__',tails)
 
 
 def analyze(raw):

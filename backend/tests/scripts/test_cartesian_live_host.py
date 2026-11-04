@@ -17,6 +17,7 @@ def test_live_dry_executable_has_no_actuator_or_configuration_methods():
         'get_kin_data','set_signal'}
     assert '__BOOT_CLOCK__' not in source and '/proc/uptime' in source
     assert '__OWNER__' not in source and 'timestamp()' not in source
+    assert not re.findall(r'(?<![:.\w])\b(?:move\w+|stop_\w+|start_\w+|set_claw)\s*\(',source)
     assert 'structural guard, not an independent' in source
 
 

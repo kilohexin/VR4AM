@@ -620,11 +620,16 @@ def _fit_braking_curve(model,start,curve,period,validation,segment_budget=None):
     if max(np.max(np.abs(twist)),np.max(np.abs(acc)))>1e-10:
         raise ValueError('cartesian_reference_brake_terminal_rates')
     terminal=JointReference(tuple(model.inverse(pose,np.array(start.q))))
-    whole=PvatSegment(start,terminal,curve.duration)
+    from app.control.canonical_joint_quintic import coefficients,evaluate
+    # The transport and native owner reconstruct exactly this declared grid.
+    # A decimal duration may differ by an ULP from count*period; use the grid
+    # here and continue validating EVERY resulting piece against the curve.
+    fitted_duration=count*period
+    whole=coefficients(start,terminal,fitted_duration)
     previous=start;segments=[];checks=[]
     for i in range(1,count+1):
         if i>1 and segment_budget is not None:segment_budget.consume()
-        end=terminal if i==count else whole.state(i*period)
+        end=terminal if i==count else JointReference(*evaluate(whole,i*period,fitted_duration))
         if np.max(np.abs(np.array(end.q)-previous.q))>=.15:
             raise ValueError('cartesian_reference_ik_branch')
         if np.linalg.svd(model.geometry(end.q)[1],compute_uv=False)[-1]<1e-4:

@@ -13,6 +13,7 @@ __OWNER__
 end)()
 local origin=__ORIGIN__
 local binding=__BINDING__
+-- LIVE_EXTRA_HELPERS
 local epoch=cartesian_now();local clock=function() return cartesian_now()-epoch end
 local function report(tag,...)
     print(tag,...)
@@ -23,10 +24,12 @@ local function state_words(s)
     return table.concat(values,'\t')
 end
 local initial=lebai:get_kin_data()
+-- LIVE_EXTRA_INITIAL
 local ok,err=pcall(function()
     for i=1,6 do assert(initial.actual_joint_pose[i]==origin.q[i]
         and math.abs(initial.actual_joint_speed[i])<1e-9,'dry_origin') end
-    for _,i in ipairs({0,120,240}) do assert(get_signal(i)==0,'dry_occupied') end
+    -- LIVE_EXTRA_PRECHECK
+    for _,i in ipairs({0,120,240,254}) do assert(get_signal(i)==0,'dry_occupied') end
     assert(set_signals(246,{0,0,0,0,0,0,0,0,0,0}),'dry_metadata_initialize')
     epoch=cartesian_now();report('CART_READY',epoch)
     local function certified(packet,tail)
@@ -63,7 +66,12 @@ local ok,err=pcall(function()
     local function worker(fn)
         return async_task(function()
             local good,reason=pcall(fn)
-            if not good then failure=failure or reason;finish=true end
+            if not good then
+                failure=failure or reason;finish=true
+                -- Independent fault signal; never wait for stdout logging to
+                -- revoke further host publications. Preserve it on failure.
+                pcall(set_signal,254,1)
+            end
         end)
     end
     local receiver=worker(function()
@@ -95,9 +103,11 @@ local ok,err=pcall(function()
     local sender=worker(function()
         local previous_tick=-1
         while not finish and owner.phase~='ready' do
+            local emitted_before=emitted
             assert(clock()<15000,'dry_runtime')
             if started then
                 local segment,mode=owner.take_next()
+                -- LIVE_EXTRA_EMIT
                 if segment then emitted=emitted+1;report('CART_SEGMENT',owner.head_tick,mode) end
                 if owner.head_tick~=previous_tick then
                     previous_tick=owner.head_tick
@@ -105,7 +115,7 @@ local ok,err=pcall(function()
                     report('CART_HEAD',clock(),owner.head_tick,owner.phase,state_words(owner.head))
                 end
             end
-            rt_sleep(1)
+            if emitted==emitted_before then rt_sleep(1) end
         end
         finish=true
     end)
@@ -119,14 +129,18 @@ local ok,err=pcall(function()
             rt_sleep(1)
         end
     end)
+    -- LIVE_EXTRA_WORKERS
     wait_all(receiver,sender,clock_service)
     for _,row in ipairs(profiles) do report('CART_PROFILE',table.unpack(row)) end
     assert(not failure,tostring(failure))
+    -- LIVE_EXTRA_QUIET
     local after=lebai:get_kin_data()
     for i=1,6 do assert(after.actual_joint_pose[i]==initial.actual_joint_pose[i]
         and math.abs(after.actual_joint_speed[i])<1e-9,'dry_joint_changed') end
     lebai:set_signal(0,0);lebai:set_signal(120,0);lebai:set_signal(240,0)
     report('CART_QUIET',emitted,owner.phase,owner.reason)
 end)
+-- LIVE_EXTRA_ABORT
 report('CART_DONE',ok,tostring(err))
+-- LIVE_EXTRA_LOG_END
 program_end(0)

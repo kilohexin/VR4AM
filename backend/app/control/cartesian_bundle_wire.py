@@ -70,10 +70,12 @@ class CompactBundle:
             +self.lead.end.q+self.lead.end.v+self.lead.end.a+self.terminal.q)
 
     def expand_tail(self):
-        whole=PvatSegment(self.lead.end,self.terminal,self.braking_ticks*PERIOD)
+        from app.control.canonical_joint_quintic import coefficients,evaluate
+        duration=self.braking_ticks*PERIOD
+        whole=coefficients(self.lead.end,self.terminal,duration)
         result=[];previous=self.lead.end
         for tick in range(1,self.braking_ticks+1):
-            end=self.terminal if tick==self.braking_ticks else whole.state(tick*PERIOD)
+            end=self.terminal if tick==self.braking_ticks else JointReference(*evaluate(whole,tick*PERIOD,duration))
             result.append(PvatSegment(previous,end,PERIOD));previous=end
         return tuple(result)
 

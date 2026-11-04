@@ -43,15 +43,18 @@ def program(origin,session,model_hash):
 def model_fingerprint():
     sha=hashlib.sha256()
     for path in ('backend/app/control/cartesian_pvat_reference.py','backend/app/control/cartesian_reference_bundle.py',
-            'backend/app/control/compiled_reference_geometry.py','backend/app/commissioning/native_jog_mdh.py'):
+            'backend/app/control/compiled_reference_geometry.py','backend/app/commissioning/native_jog_mdh.py',
+            'backend/app/control/canonical_joint_quintic.py','backend/app/control/cartesian_bundle_wire.py',
+            'backend/app/control/cartesian_host_planner.py'):
         sha.update(path.encode());sha.update((ROOT/path).read_bytes())
     sha.update(b'zero-tool;q+-3;reference-defaults;workspace=.35;segment=24;curves=4;joint_fit')
     return sha.hexdigest()
 
 
-async def execute(admission,*,expire=False):
+async def execute(admission,*,expire=False,_source_factory=None):
     capture=transport(admission,"""program_begin(0)
 disable_auto_sync()
+assert(lebai:get_robot_state()=='IDLE','dry_capture_requires_idle')
 local k=lebai:get_kin_data();local q={}
 for i=1,6 do assert(math.abs(k.actual_joint_speed[i])<1e-9,'dry_not_quiet');q[i]=string.format('%.17g',k.actual_joint_pose[i]) end
 print('DRY_ORIGIN',table.concat(q,'\\t'))
@@ -63,7 +66,7 @@ program_end(0)
     origin=JointReference(tuple(float(x) for x in rows[0][1:]))
     model=CompiledReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
     base=model.pose(origin.q);session=__import__('secrets').token_hex(16);fingerprint=model_fingerprint()
-    source=program(origin,session,fingerprint)
+    source=(program if _source_factory is None else _source_factory)(origin,session,fingerprint)
     if native_admission(admission['container_id'])!=admission:raise ValueError('live_dry_identity')
     proc=await asyncio.create_subprocess_exec(*arguments(admission,'CART_DONE'),
         stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
@@ -83,7 +86,7 @@ program_end(0)
                     heads.append((int(row[1]),int(row[2]),row[3]))
                 elif row[0]=='CART_DONE':return
         except BaseException as exc:error=exc;raise
-    reader=asyncio.create_task(read());rpc=CartesianSignalChannel(admission);tasks=[];planner_task=None
+    reader=asyncio.create_task(read());rpc=CartesianSignalChannel(admission);tasks=[];planner_task=None;cleaning=False
     stats=dict(planned=0,committed=0,rejected=0,discarded=0,late_injected=False,resumed_after_stall=False,
         math_ms=[],publications=[],authority_writes=0,expire=expire)
     try:
@@ -118,17 +121,21 @@ program_end(0)
         h=CartesianHostPlanner(model,origin,session=session,model_sha256=fingerprint,generation=1,
             clock=clock,braking_segment_limit=24,braking_curve_limit=4)
         publisher=CartesianSignalPublisher(rpc,h,epoch_ms=epoch,clock_pair=pair,host_clock=perf_counter_ns)
-        latest=[None];active=True;start=perf_counter_ns();first_due=None;stall_finished=False
+        latest=[None];active=True;start=perf_counter_ns();stall_finished=False
         async def monitor():
             last_ack=0;last_frame=0
             phases={0:'waiting',1:'armed',2:'active',3:'holding',4:'finishing',5:'ready',6:'fault'}
-            while active or h.pending is not None:
-                before=await rpc.call('get_signal',253)
+            while not cleaning and (active or h.pending is not None):
+                frame=await rpc.call('get_signals',253,2);before=frame[0]
+                if frame[1]!=0:
+                    h.close('cartesian_controller_fault');raise ValueError('cartesian_controller_fault')
                 if before and before%2==0:
                     values=await rpc.call('get_signals',246,10)
                     after=await rpc.call('get_signal',253)
                     if before==after and values[7]==before and before!=last_frame:
                         last_frame=before;seq=values[2]
+                        if values[8]!=0:
+                            h.close('cartesian_controller_fault');raise ValueError('cartesian_controller_fault')
                         if seq>last_ack:
                             accepted=values[3]==1
                             h.acknowledge(seq,accepted);last_ack=seq
@@ -150,10 +157,11 @@ program_end(0)
                     await publisher.offer_authority(latest[0]);stats['authority_writes']+=1
                 await asyncio.sleep(.02)
         async def planning():
-            nonlocal first_due,stall_finished
+            nonlocal stall_finished
             while active:
                 tip=h.planning_head()
-                due=clock()+400 if first_due is None else first_due+max(0,(tip or (0,))[0]-1)*80
+                due=(clock()+400 if h.reference_epoch is None else
+                    h.reference_epoch+max(0,(tip or (0,))[0]-1)*80)
                 job=h.begin(due) if tip is not None and due>clock() else None
                 if job is None:await asyncio.sleep(.003);continue
                 began=perf_counter_ns();calculated=await asyncio.to_thread(h.calculate,job)
@@ -169,7 +177,6 @@ program_end(0)
                 publication['returned']=clock();stats['publications'].append(publication)
                 if not committed:
                     h.acknowledge(packet.sequence,False);stats['rejected']+=1;continue
-                if first_due is None:first_due=packet.due_ms
                 accepted=await asyncio.wait_for(acks[packet.sequence],.5)
                 stats['committed' if accepted else 'rejected']+=1
                 if stall_finished and accepted:stats['resumed_after_stall']=True
@@ -193,7 +200,8 @@ program_end(0)
             and quiet[0][2]=='ready' and stats['late_injected'] and stats['resumed_after_stall']
             and quiet[0][3] in ({'expired','input_expired'} if expire else {'released'})
             and following>=8 and braking>0 and not rpc.unknown and not h.publish_unknown)
-        return dict(passed=passed,statistics=stats,raw_output=raw,heads=heads,motion_calls=0,
+        entries=[r for r in raw if r[0]=='CART_ACTUAL_ENTER']
+        return dict(passed=passed,statistics=stats,raw_output=raw,heads=heads,motion_calls=len(entries),
             signal_writes=True,unknown=rpc.unknown,program_sha256=hashlib.sha256(source.encode()).hexdigest(),
             model_sha256=fingerprint,product_admission_complete=False,hardware_verified=False)
     except Exception as exc:
@@ -202,17 +210,21 @@ program_end(0)
         # allow the finite native owner to expire; never restart/retry it.
         return dict(passed=False,error=type(exc).__name__+':'+str(exc),raw_output=raw,heads=heads,
             host_reason=None if h is None else h.reason,
-            statistics=stats,motion_calls=0,unknown=rpc.unknown,product_admission_complete=False)
+            unresolved_publication=bool(h is not None and h.pending is not None),
+            statistics=stats,motion_calls=sum(r[0]=='CART_ACTUAL_ENTER' for r in raw),
+            unknown=rpc.unknown,program_sha256=hashlib.sha256(source.encode()).hexdigest(),
+            model_sha256=fingerprint,product_admission_complete=False)
     finally:
-        active=False
-        for task in tasks:
-            if not task.done():task.cancel()
+        active=False;cleaning=True
+        if h is not None:h.close('cleanup')
         if planner_task and not planner_task.done():
             # Retire output, await actual math completion rather than claiming
             # that cancellation stopped a worker thread.
             if h is not None:h.close('cleanup')
-            try:await asyncio.wait_for(planner_task,3)
+            try:await asyncio.wait_for(asyncio.shield(planner_task),3)
             except Exception:pass
+        # Let already-issued SDK signal reads/writes settle. Cancelling them
+        # here would manufacture unknown results during ordinary cleanup.
         await asyncio.gather(*tasks,return_exceptions=True)
         await rpc.close()
         if not reader.done():

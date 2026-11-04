@@ -138,6 +138,8 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
         completed_steps=0,max_downward_goal_error_m=0.,max_interval_position_bound_m=0.,
         max_step_wall_s=0.,model_joint_bounds_rad=[-3.,3.],response_frequency=response_frequency)
     report['reference_sha256']=hashlib.sha256((ROOT/'backend/app/control/cartesian_pvat_reference.py').read_bytes()).hexdigest()
+    report['canonical_sha256']=hashlib.sha256((ROOT/'backend/app/control/canonical_joint_quintic.py').read_bytes()).hexdigest()
+    report['compact_tail_audited_steps']=0
     report['geometry_backend']=geometry_backend;report['geometry_warmup_wall_s']=getattr(model,'warmup_wall_s',0.)
     if geometry_backend=='compiled':
         report['geometry_sha256']=hashlib.sha256((ROOT/'backend/app/control/compiled_reference_geometry.py').read_bytes()).hexdigest()
@@ -175,6 +177,13 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
             target=Pose(p=p,q=tuple(float(x) for x in q))
             if supervised:
                 packet=follower.advance(target);segment=packet.segment
+                if braking_method=='joint_fit' and packet.mode=='following':
+                    from app.control.cartesian_bundle_wire import CompactBundle
+                    compact=CompactBundle('00'*16,'00'*32,1,tick+1,tick,tick*80+1,tick*80,
+                        segment,packet.braking_tail[-1].end,len(packet.braking_tail))
+                    if compact.expand_tail()!=packet.braking_tail:
+                        raise ValueError('cartesian_reference_compact_tail_difference')
+                    report['compact_tail_audited_steps']+=1
                 if braking_segment_limit is not None:
                     report['max_braking_segment_solves_per_step']=max(report['max_braking_segment_solves_per_step'],
                         follower.last_braking_segment_solves)

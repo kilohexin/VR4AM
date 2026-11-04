@@ -20,9 +20,9 @@ end
 function M.coefficients(first,last,duration)
     local c={}
     for axis=1,6 do
-        local p=first.q[axis];local v=first.v[axis]*duration;local a=first.a[axis]*duration^2/2
+        local p=first.q[axis];local v=first.v[axis]*duration;local a=first.a[axis]*duration*duration/2
         local b0=last.q[axis]-p-v-a
-        local b1=last.v[axis]*duration-v-2*a;local b2=last.a[axis]*duration^2-2*a
+        local b1=last.v[axis]*duration-v-2*a;local b2=last.a[axis]*duration*duration-2*a
         c[axis]={p,v,a,10*b0-4*b1+b2/2,-15*b0+7*b1-b2,6*b0-3*b1+b2/2}
     end
     return c
@@ -30,13 +30,11 @@ end
 function M.evaluate(c,time,duration)
     local u=time/duration;local s={q={},v={},a={}}
     for axis=1,6 do
-        local p,v,a=0,0,0
-        for degree=0,5 do
-            p=p+c[axis][degree+1]*u^degree
-            if degree>=1 then v=v+degree*c[axis][degree+1]*u^(degree-1)/duration end
-            if degree>=2 then a=a+degree*(degree-1)*c[axis][degree+1]*u^(degree-2)/duration^2 end
-        end
-        s.q[axis]=p;s.v[axis]=v;s.a[axis]=a
+        local row=c[axis];local p=row[6];local v=5*row[6];local a=20*row[6]
+        for degree=4,0,-1 do p=p*u+row[degree+1] end
+        for degree=4,1,-1 do v=v*u+degree*row[degree+1] end
+        for degree=4,2,-1 do a=a*u+degree*(degree-1)*row[degree+1] end
+        s.q[axis]=p;s.v[axis]=v/duration;s.a[axis]=a/duration/duration
     end
     return s
 end

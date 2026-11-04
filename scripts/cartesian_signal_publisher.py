@@ -19,6 +19,7 @@ class CartesianSignalPublisher(CartesianNativePublisher):
             word=(capture+1)*1024+self.authority_sequence%1024
             if word>2**31-1:raise ValueError('cartesian_publish_clock_range')
             await self.channel.call('set_signals',241,[*self.words,self.planner.generation])
+            if self.closed or self.planner.closed:return False
             await self.channel.call('set_signal',240,word)
 
     async def publish(self,packet):

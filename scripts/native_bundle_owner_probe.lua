@@ -11,6 +11,7 @@ __SDK_RESULT__
 end)()
 local words=__PACKETS__
 local expected_tail=__TAIL__
+local expected_tails=__ALL_TAILS__
 local binding={session=string.rep('01',16),model=string.rep('a9',32),generation=1}
 local function checked(name) print('OWNER_CHECK',name);rt_sleep(1) end
 local function refuse(fn) assert(not pcall(fn),'expected_refusal') end
@@ -47,6 +48,21 @@ end
 local ok,err=pcall(function()
     local before=lebai:get_kin_data()
     for i=1,6 do assert(math.abs(before.actual_joint_speed[i])<1e-9,'not_quiet') end
+    do
+        for index=1,#words do
+            local p=packet(index);local duration=p.braking_ticks*.08
+            local coefficients=owner_module.coefficients(p.next,p.terminal,duration)
+            for tick=1,p.braking_ticks-1 do
+                local state=owner_module.evaluate(coefficients,tick*.08,duration)
+                for _,field in ipairs({'q','v','a'}) do for i=1,6 do
+                    assert(string.pack('<d',state[field][i])==string.pack('<d',expected_tails[index][tick][field][i]),
+                        'binary_tail_difference')
+                end end
+                rt_sleep(1)
+            end
+        end
+        checked('binary_tail_identity')
+    end
     sdk_result.call_void(function() end);sdk_result.call_void(function() return nil end)
     for _,value in ipairs({false,true,1,'unexpected'}) do
         refuse(function() sdk_result.call_void(function() return value end) end)
