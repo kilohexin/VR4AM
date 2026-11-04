@@ -48,7 +48,7 @@ def _workspace_checked(segment,model,lower,upper):
 
 
 class OfflineReferenceSupervisor:
-    def __init__(self,model,start,*,workspace_span=.35,scales=(1.,.5,.25,0.),
+    def __init__(self,model,start,*,workspace_span=.35,workspace_center=None,scales=(1.,.5,.25,0.),
             continue_on_known_rejection=False,braking_segment_limit=None,braking_curve_limit=None,
             braking_method='pointwise',**follower_options):
         if (not np.isfinite(workspace_span) or workspace_span<=0 or not scales
@@ -62,7 +62,11 @@ class OfflineReferenceSupervisor:
         if not isinstance(start,JointReference) or max(abs(x) for x in start.v+start.a)>1e-12:
             raise ValueError('cartesian_reference_bundle_requires_quiet_origin')
         self.model=model;self.state=start;self.options=dict(follower_options);self.scales=tuple(scales)
-        base=np.array(model.pose(start.q).p);self.lower=base-workspace_span;self.upper=base+workspace_span
+        base=np.array(model.pose(start.q).p if workspace_center is None else workspace_center,dtype=float)
+        if base.shape!=(3,) or not np.isfinite(base).all():
+            raise ValueError('cartesian_reference_bundle_configuration')
+        self.workspace_center=tuple(base);self.workspace_span=float(workspace_span)
+        self.lower=base-workspace_span;self.upper=base+workspace_span
         self._binding=(model.tool,tuple(model.lower),tuple(model.upper),tuple(model.position_lipschitz))
         self.continue_on_known_rejection=continue_on_known_rejection
         self.braking_segment_limit=braking_segment_limit;self.last_braking_segment_solves=None

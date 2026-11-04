@@ -24,7 +24,8 @@ CHECKS={'precise_tail_reconstruction','full_backup_before_output','at_most_two',
     'late_validation_no_commit','release_discards_future','authority_expiry_permanent','model_binding_fault',
     'bad_start_no_commit','caller_mutation_isolated','input_rollback_fault','unknown_validation_fault',
     'concurrent_stage_fault','holding_without_recenter','sdk_void_contract','native_joint_format',
-    'bounded_preload_schedule','joints_unchanged'}
+    'bounded_preload_schedule','joints_unchanged','quiet_prefix_no_write','quiet_prefix_release',
+    'moving_prefix_refused','reference_age_rechecked'}
 
 
 def fixtures():

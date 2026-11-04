@@ -60,8 +60,11 @@ function M.decode(words)
         start=state(1,false),next=state(19,false),terminal=state(37,true)}
 end
 
-function M.new(read_many,read_one,clock,binding,ttl)
+function M.new(read_many,read_one,clock,binding,ttl,input_fresh,deliver_late)
     assert(type(ttl)=='number' and ttl==math.floor(ttl) and ttl>=1 and ttl<=500,'bundle_reader_ttl')
+    assert(input_fresh==nil or type(input_fresh)=='function','bundle_reader_authority')
+    assert(deliver_late==nil or type(deliver_late)=='boolean','bundle_reader_authority')
+    assert(not deliver_late or input_fresh,'bundle_reader_authority')
     local self={closed=false,busy=false,last_now=clock(),last_sequence=0,last_capture=nil,last_words=nil}
     local function now()
         local n=clock()
@@ -70,7 +73,11 @@ function M.new(read_many,read_one,clock,binding,ttl)
         return n
     end
     local function empty()
-        if self.last_capture then assert(now()-self.last_capture<ttl,'bundle_reader_expired') end
+        if self.last_capture and now()-self.last_capture>=ttl then
+            -- Only independently polled genuine input may keep a quiet math
+            -- channel open. Duplicate payloads never renew their own age.
+            assert(input_fresh and input_fresh()==true,'bundle_reader_expired')
+        end
         return nil
     end
     local function latest()
@@ -97,7 +104,11 @@ function M.new(read_many,read_one,clock,binding,ttl)
         local time=now()
         assert(not self.last_capture or packet.captured_ms>=self.last_capture,'bundle_reader_capture_rollback')
         assert(packet.captured_ms<=time and time-packet.captured_ms<ttl,'bundle_reader_expired')
-        assert(packet.due_ms>time,'bundle_reader_late')
+        -- An explicitly live caller may pass a known-late, intact packet to
+        -- the owner for a ZERO-install rejection. It cannot execute that lead.
+        -- All other reader contracts remain fail closed, including binding,
+        -- input age, CRC, mutation and clock rollback.
+        assert(packet.due_ms>time or deliver_late and input_fresh()==true,'bundle_reader_late')
         local copy={};for i=1,SIZE do copy[i]=words[i] end
         self.last_sequence=seq;self.last_capture=packet.captured_ms;self.last_words=copy
         return packet

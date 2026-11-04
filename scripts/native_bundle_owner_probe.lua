@@ -28,9 +28,9 @@ end
 local function validator(p,tail)
     return #tail==p.braking_ticks and p.braking_ticks>0
 end
-local function fixture(validate)
+local function fixture(validate,prefix)
     local time=100
-    local owner=owner_module.new(binding,packet(1).start,function() return time end,validate or validator,500)
+    local owner=owner_module.new(binding,packet(1).start,function() return time end,validate or validator,500,nil,prefix)
     owner.offer_authority(100)
     return owner,function(t) time=t end
 end
@@ -159,6 +159,41 @@ local ok,err=pcall(function()
         local segment,mode=owner.take_next();assert(mode=='following');same(segment.start,saved)
         assert(owner.epoch==200) -- No new zero, fixed origin or epoch.
         checked('holding_without_recenter')
+    end
+    for _,release in ipairs({false,true}) do
+        local owner,settime=fixture(nil,true);assert(owner.stage(packet(1)));settime(200);owner.take_next()
+        drain(owner,settime,false);assert(owner.phase=='holding')
+        local tick=owner.head_tick;local saved=owner.describe().head
+        local due=200+math.max(0,tick-1)*80;settime(due-20);owner.offer_authority(due-20)
+        local p=packet(2);p.parent_tick=tick+1;p.due_ms=due+80;p.captured_ms=due-20
+        p.start=saved;p.next=saved;p.terminal=saved;p.braking_ticks=1
+        assert(owner.stage(p))
+        if release then
+            owner.finish('release');assert(owner.phase=='ready' and #owner.queue==0)
+            checked('quiet_prefix_release')
+        else
+            settime(due);assert(owner.take_next()==nil and owner.head_tick==tick+1)
+            same(owner.head,saved);assert(#owner.queue==1 and owner.epoch==200)
+            settime(due+80);owner.offer_authority(due+80)
+            local s,mode=owner.take_next();assert(s and mode=='following');same(s.start,saved)
+            checked('quiet_prefix_no_write')
+        end
+    end
+    do
+        local owner,settime=fixture(nil,true);assert(owner.stage(packet(1)));settime(200);owner.take_next()
+        local p=packet(2);p.parent_tick=owner.head_tick+1;p.start=owner.describe().head
+        local accepted,why=owner.stage(p);assert(not accepted and why=='stale_parent')
+        checked('moving_prefix_refused')
+    end
+    do
+        local time=100
+        local owner=owner_module.new(binding,packet(1).start,function() return time end,
+            function() time=201;return true end,500,100)
+        owner.offer_authority(100)
+        local p=packet(1);p.due_ms=500
+        local accepted,why=owner.stage(p)
+        assert(not accepted and why=='stale_input' and #owner.queue==0 and #owner.tail==0)
+        checked('reference_age_rechecked')
     end
     local after=lebai:get_kin_data()
     for i=1,6 do assert(math.abs(after.actual_joint_pose[i]-before.actual_joint_pose[i])<1e-9
