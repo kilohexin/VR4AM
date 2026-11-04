@@ -35,7 +35,11 @@ function M.new(io, clock, not_before, authorize, read_many)
         local now=clock()
         local valid=type(now)=='number' and now==math.floor(now) and now>=self.last_now
             and now-not_before<MOD/2
-        if not valid then print('POSE_MAILBOX_CLOCK',now,self.last_now,not_before) end
+        if not valid then
+            local reason=type(now)~='number' and 'type' or now~=math.floor(now) and 'format'
+                or now<self.last_now and 'rollback' or 'epoch_span'
+            print('POSE_MAILBOX_CLOCK',reason,now,self.last_now,not_before)
+        end
         assert(valid, 'pose_mailbox_clock')
         self.last_now=now
         return now
