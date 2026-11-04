@@ -118,7 +118,8 @@ def vec(values):
     return '{'+','.join(repr(float(v)) for v in values)+'}'
 
 
-def motion_program(origin,base,segments):
+def motion_program(origin,base,segments,*,cadence_probe=False):
+    if type(cadence_probe) is not bool:raise ValueError('finite_trial_cadence_configuration')
     if not 0<len(segments)<=64:raise ValueError('finite_trial_point_budget')
     points=','.join('{p='+vec(s.end.q)+',v='+vec(s.end.v)+',a='+vec(s.end.a)+'}' for s in segments)
     source='''program_begin(0)
@@ -195,6 +196,21 @@ program_end(0)
     for token,value in {'__ORIGIN__':vec(origin),'__FINAL__':vec(segments[-1].end.q),
         '__X__':repr(base.p[0]),'__Y__':repr(base.p[1]),'__Z__':repr(base.p[2]),'__POINTS__':points,
         '__ROTATION__':','.join(repr(float(x)) for x in Rotation.from_quat(base.q).as_matrix().ravel())}.items():source=source.replace(token,value)
+    if cadence_probe:
+        if source.count('(index-2)*70')!=1 or source.count('now-previous<80')!=1:
+            raise ValueError('finite_trial_cadence_template')
+        source=source.replace('(index-2)*70','(index-2)*80').replace('now-previous<80','now-previous<100')
+        marker=" print('FINITE_SAMPLE',now-start,drift,p.z,last_pitch)"
+        if source.count(marker)!=1:raise ValueError('finite_trial_cadence_template')
+        source=source.replace(marker,marker+'''
+ local values={}
+ for _,field in ipairs({'actual_joint_pose','actual_joint_speed','target_joint_pose'}) do
+  for i=1,6 do
+   local value=k[field][i];assert(type(value)=='number' and value==value and math.abs(value)<1000000,'kinematics_nonfinite')
+   values[#values+1]=string.format('%.17g',value)
+  end
+ end
+ print('FINITE_KIN',now-start,table.concat(values,'\\t'))''')
     return source
 
 
@@ -222,7 +238,7 @@ def finished(result,marker):
         and len(done)==1 and len(done[0])>=3 and done[0][1]=='true')
 
 
-def analyze_motion(result,expected_points):
+def analyze_motion(result,expected_points,*,cadence_probe=False):
     """Require complete, finite sampled evidence; Lua success alone is insufficient."""
     report=dict(passed=False,unknown_motion_write=True,stop_unverified=True)
     rows=[line.strip().split('\t') for line in result['raw_output'].splitlines()]
@@ -253,7 +269,7 @@ def analyze_motion(result,expected_points):
         if (count!=len(samples) or not 0<=drift<=.001 or elapsed<200 or elapsed>10000
             or any(not 0<=r[1]<=.001 or abs(r[3])>.20 for r in data)
             or any(not 0<=b[0]-a[0]<100 for a,b in zip(data,data[1:]))
-            or any(not 0<=b-a<80 for a,b in zip(entry_times,entry_times[1:]))
+            or any(not 0<=b-a<(100 if cadence_probe else 80) for a,b in zip(entry_times,entry_times[1:]))
             or any(not 0<=t<=elapsed for t in entry_times)
             or any(not 0<=r[0]<=elapsed for r in data)
             or abs(drift-max(r[1] for r in data))>1e-8
@@ -264,17 +280,28 @@ def analyze_motion(result,expected_points):
             return report
         report.update(passed=not report['stop_unverified'],max_sampled_tcp_drift_m=drift,
             feedback_samples=len(samples),max_pitch_rad=peak,final_pitch_rad=final,min_pitch_rad=low)
+        if cadence_probe:
+            kin=[r for r in rows if r[0]=='FINITE_KIN']
+            values=[tuple(float(v) for v in r[1:]) for r in kin]
+            leads=[index*80-(stamp-entry_times[0]) for index,stamp in enumerate(entry_times,1)]
+            report.update(max_send_gap_ms=max((b-a for a,b in zip(entry_times,entry_times[1:])),default=0),
+                strict_send_interval_observed=all(b-a<80 for a,b in zip(entry_times,entry_times[1:])),
+                max_modeled_queue_lead_ms=max(leads),min_modeled_queue_lead_ms=min(leads))
+            report['passed']=bool(report['passed'] and len(values)==len(data)
+                and all(len(r)==19 and all(math.isfinite(v) for v in r) for r in values)
+                and [r[0] for r in values]==[r[0] for r in data]
+                and min(leads)>=0 and max(leads)<=160)
     except (ValueError,IndexError,OverflowError):
         report['evidence_invalid']=True
     return report
 
 
-def execute(admitted):
+def execute(admitted,*,cadence_probe=False):
     first=transport(admitted,preparation_program(),'FINITE_PREP_DONE')
-    return complete_prepared_trial(admitted,first)
+    return complete_prepared_trial(admitted,first,cadence_probe=cadence_probe)
 
 
-def complete_prepared_trial(admitted,first):
+def complete_prepared_trial(admitted,first,*,cadence_probe=False):
     """Finish the same finite scope without repeating a returned preparation.
 
     The motion program independently requires the exact quiet captured origin.
@@ -282,7 +309,7 @@ def complete_prepared_trial(admitted,first):
     """
     report=dict(passed=False,hardware_verified=False,product_admission_complete=False,
         native_interpolation_verified=False,realtime_verified=False,
-        simulated_motion_only=True,precomputed_trajectory=True,admission=admitted)
+        simulated_motion_only=True,precomputed_trajectory=True,cadence_probe=cadence_probe,admission=admitted)
     report['preparation']=first
     prep_entered='FINITE_PREP_ENTER' in first['raw_output'];prep_returned='FINITE_PREP_RETURNED' in first['raw_output']
     prep_aborts=[line.split('\t') for line in first['raw_output'].splitlines() if line.startswith('FINITE_ABORT\t')]
@@ -299,19 +326,20 @@ def complete_prepared_trial(admitted,first):
         _,base,segments=build_trajectory(origin)
     except ValueError as error:
         report['error']=str(error);return report
-    second=transport(admitted,motion_program(origin,base,segments),'FINITE_MOTION_DONE');report['motion']=second
-    report.update(planned_points=len(segments),**analyze_motion(second,len(segments)))
+    second=transport(admitted,motion_program(origin,base,segments,cadence_probe=cadence_probe),'FINITE_MOTION_DONE');report['motion']=second
+    report.update(planned_points=len(segments),**analyze_motion(second,len(segments),cadence_probe=cadence_probe))
     return report
 
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--container',required=True)
-    p.add_argument('--output',required=True,type=Path);p.add_argument('--run',action='store_true');args=p.parse_args()
+    p.add_argument('--output',required=True,type=Path);p.add_argument('--run',action='store_true')
+    p.add_argument('--cadence-probe',action='store_true');args=p.parse_args()
     admitted=native_admission(args.container)
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admitted,startup_max=1,velocity_factor_writes_max=1,
-            prepare_movej_max=1,pvat_points_max=64,exception_stops_max=1,real_selector=False)));return 0
-    report=execute(admitted);args.output.parent.mkdir(parents=True,exist_ok=True)
+            prepare_movej_max=1,pvat_points_max=64,exception_stops_max=1,real_selector=False,cadence_probe=args.cadence_probe)));return 0
+    report=execute(admitted,cadence_probe=args.cadence_probe);args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,indent=2),encoding='utf-8')
     print(json.dumps({k:v for k,v in report.items() if k not in ('preparation','motion','admission')}))
     return 0 if report['passed'] else 1

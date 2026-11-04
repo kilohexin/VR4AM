@@ -95,6 +95,7 @@ function M.new(read_many,read_one,clock,binding,ttl)
             return empty() -- Duplicate never refreshes input age.
         end
         local time=now()
+        assert(not self.last_capture or packet.captured_ms>=self.last_capture,'bundle_reader_capture_rollback')
         assert(packet.captured_ms<=time and time-packet.captured_ms<ttl,'bundle_reader_expired')
         assert(packet.due_ms>time,'bundle_reader_late')
         local copy={};for i=1,SIZE do copy[i]=words[i] end

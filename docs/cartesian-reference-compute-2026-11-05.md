@@ -74,3 +74,16 @@
 本机证据位于`.tmp/pitch-reversal-20261105/`：`cartesian-compiled-geometry.json`、`cartesian-compiled-diagnosed.json`、`cartesian-compiled-curve4.json`、`native-capabilities.json`、`native-capabilities-fixed.json`、`native-bundle-mailbox.json`、`native-bundle-mailbox-cooperative.json`。本阶段167项参考/编译核等回归及18项协议/证据回归通过；原始输出不提交。
 
 下一步核对PVAT接收/执行时间与受控前瞻，完成控制器原子安装、完整尾段持有及迟到/断流契约。官方仅说明相邻发送间隔需小于t，并不公布本模型假定的五次Hermite实现：[PVAT说明](https://help.lebai.ltd/api/move.html#伺服运动-pvat)。不把传输成功或同样的最终关节角当作时序/插值已证明。
+
+
+## 控制器尾段所有权与有限运动核对
+
+新增不含I/O的控制器所有权状态机：接纳新参考前先安装完整尾段，最多两段前瞻；释放清空未来参考并消费已批准尾段，新鲜输入与数学包分开续租。迟到、撤权、代次、时钟、并发及固定终态保持由18项原厂零运动契约覆盖；注入的验证器仍是测试白名单，尚非实时产品准入。
+
+新增有限测试经过实际双银行协议和所有权状态机，46段俯仰反向参考加16段已持有减速，共62个SDK PVAT调用完成，143组反馈最大TCP漂移约0.0146mm，无异常停止/未知写入。发送最高间隔91ms，未满足厂家严格小于80ms的要求，不宣称无卡顿或插值已验证。
+
+原报告`native-owned-paced-release.json`因主机分析器把首次调用迟到19ms当成新时钟零点而判失败。独立回归修正为使用包内计划epoch=200ms后，仅重分析冻结输出，得到计划参考前瞻61～152ms。`native-owned-paced-reanalyzed.json`通过且程序指纹与冻结程序一致，没有补发运动；原报告SHA256为`64ff1aaa8847fa830c08073bddc45b0e3bde703034932a9550b452403da51900`，原错误统计保留。
+
+更早的四次试验全部保留失败：误把SDK无返回值当true；额外让出导致预装第二点迟到；原生全局API误用数组JointPose；改成命名JointPose后全局返回契约仍未知。SDK Lua `lebai:move_pvat`按[SDK说明](https://help.lebai.ltd/sdk/motion.html)无返回值；全局API是不同接口，[JointPose使用j1～j6字段](https://help.lebai.ltd/api/types.html)。未经核实的全局发送分支现于准备动作前拒绝。已进入且结果未知的旧失败不清除，不把最终静止当作调用已知成功。
+
+原始本机报告位于`.tmp/pitch-reversal-20261105/`，未提交。56项所有权/运动包装/邮箱/编码定向回归通过。实时主机规划、独立输入续租、实际反馈偏差、断流整链和人机体验仍待实现；旧位姿入口及真机通道继续封锁。

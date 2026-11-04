@@ -80,6 +80,23 @@ def test_native_print_trailing_delimiters_are_supported():
     assert probe.analyze_motion(result(native),2)['passed']
 
 
+def test_cadence_probe_is_explicit_and_cannot_hide_unbounded_preloading(trajectory):
+    _,base,segments=trajectory
+    old=probe.motion_program(segments[0].start.q,base,segments)
+    balanced=probe.motion_program(segments[0].start.q,base,segments,cadence_probe=True)
+    assert '(index-2)*70' in old and 'now-previous<80' in old
+    assert '(index-2)*80' in balanced and 'now-previous<100' in balanced and 'FINITE_KIN' in balanced
+    raw=trace().replace('FINITE_PVAT_ENTER\t2\t0','FINITE_PVAT_ENTER\t2\t80')
+    for line in trace().splitlines():
+        if line.startswith('FINITE_SAMPLE\t'):
+            raw+='\nFINITE_KIN\t'+line.split('\t')[1]+'\t'+'\t'.join(['0']*18)
+    assert not probe.analyze_motion(result(raw),2)['passed']
+    evidence=probe.analyze_motion(result(raw),2,cadence_probe=True)
+    assert evidence['passed'] and evidence['max_modeled_queue_lead_ms']==80
+    assert not evidence['strict_send_interval_observed']
+    assert not probe.analyze_motion(result(raw.replace('FINITE_KIN','MISSING')),2,cadence_probe=True)['passed']
+
+
 def test_prepared_trial_continuation_does_not_repeat_prepare(monkeypatch,trajectory):
     _,base,segments=trajectory
     first=result('FINITE_PREP_ENTER\t\nFINITE_PREP_RETURNED\t\n'
