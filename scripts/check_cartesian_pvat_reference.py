@@ -16,6 +16,8 @@ from scipy.spatial.transform import Rotation
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'backend'))
+sys.path.insert(0,str(ROOT/'scripts'))
+from audit_pose_trace import analyze as audit_trace
 from app.commissioning.native_jog_mdh import MdhTool
 from app.control.cartesian_pvat_reference import JointReference,MdhReferenceModel,OfflineCartesianFollower,plan_cartesian_reference
 from app.control.vr_pose_reference import VRPoseReference
@@ -87,7 +89,7 @@ def run(frozen_log=None,*,large_pitch=False):
     return report
 
 
-def replay(frozen_log,*,response_frequency=4.):
+def replay(frozen_log,*,response_frequency=4.,reference_trace=None):
     """Counterfactual math only: corrected mapping, one new reference/80ms.
 
     This replays one continuous held gesture, not the original native PVAT
@@ -113,7 +115,12 @@ def replay(frozen_log,*,response_frequency=4.):
         motion_safety_verified=False,realtime_verified=False,product_admission_complete=False,
         completed_steps=0,max_downward_goal_error_m=0.,max_interval_position_bound_m=0.,
         max_step_wall_s=0.,model_joint_bounds_rad=[-3.,3.],response_frequency=response_frequency)
+    report['reference_sha256']=hashlib.sha256((ROOT/'backend/app/control/cartesian_pvat_reference.py').read_bytes()).hexdigest()
+    report['lookahead_position_m']=follower.lookahead_position
+    report['lookahead_rotation_rad']=follower.lookahead_rotation
+    report['direct_quadratic_steps']=0
     before=time.perf_counter();period_ns=80_000_000
+    observations=[dict(kind='robot_kinematics',server_mono_ns=stamps[0]-1,actual_tcp=base.model_dump())]
     for tick in range((stamps[-1]-stamps[0])//period_ns):
         now[0]=stamps[0]+tick*period_ns
         sample=held[bisect.bisect_right(stamps,now[0])-1]
@@ -134,11 +141,21 @@ def replay(frozen_log,*,response_frequency=4.):
                     ('optimizer_status','minimum_reserve','minimum_task_margin')}
             break
         report['completed_steps']+=1
+        report['direct_quadratic_steps']+=int(check['optimizer_iterations']==0)
         report['max_step_wall_s']=max(report['max_step_wall_s'],time.perf_counter()-step_before)
         report['max_interval_position_bound_m']=max(report['max_interval_position_bound_m'],check['position_bound_m'])
         position=model.pose(segment.end.q)
+        observations.append(dict(kind='robot_kinematics',server_mono_ns=now[0]+period_ns,actual_tcp=position.model_dump()))
         report['max_downward_goal_error_m']=max(report['max_downward_goal_error_m'],target.p[2]-position.p[2])
     else:report['offline_candidate_passed']=True
+    report['all_reference_steps_admitted']=report['offline_candidate_passed']
+    audited=sorted(held+observations,key=lambda r:r['server_mono_ns'])
+    report['reference_intent_audit']=audit_trace(audited)
+    if report['reference_intent_audit']['stable_height_drop_observed']:
+        report['offline_candidate_passed']=False
+    if reference_trace is not None:
+        reference_trace.parent.mkdir(parents=True,exist_ok=True)
+        reference_trace.write_text(''.join(json.dumps(r)+'\n' for r in audited),encoding='utf-8')
     report['planning_wall_s']=time.perf_counter()-before
     return report
 
@@ -149,12 +166,13 @@ def main():
     p.add_argument('--large-pitch',action='store_true')
     p.add_argument('--replay-frozen',action='store_true')
     p.add_argument('--response-frequency',type=float,choices=(2.,4.),default=4.)
+    p.add_argument('--reference-trace',type=Path)
     args=p.parse_args()
     if args.replay_frozen and (args.frozen_log is None or args.large_pitch):
         p.error('--replay-frozen requires one frozen log and cannot combine --large-pitch')
-    if not args.replay_frozen and args.response_frequency!=4.:
-        p.error('--response-frequency only applies to --replay-frozen')
-    report=replay(args.frozen_log,response_frequency=args.response_frequency) if args.replay_frozen else run(args.frozen_log,large_pitch=args.large_pitch)
+    if not args.replay_frozen and (args.response_frequency!=4. or args.reference_trace is not None):
+        p.error('--response-frequency and --reference-trace only apply to --replay-frozen')
+    report=replay(args.frozen_log,response_frequency=args.response_frequency,reference_trace=args.reference_trace) if args.replay_frozen else run(args.frozen_log,large_pitch=args.large_pitch)
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,indent=2),encoding='utf-8')
     print(json.dumps(report))

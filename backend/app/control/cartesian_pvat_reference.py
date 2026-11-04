@@ -5,7 +5,9 @@ verified description of the native controller. Passing this model cannot
 unquarantine the live pose-follow entry or authorize hardware motion.
 """
 from dataclasses import dataclass
+from functools import lru_cache
 from math import comb, factorial
+from types import SimpleNamespace
 
 import numpy as np
 from scipy.optimize import LinearConstraint,least_squares,minimize
@@ -49,15 +51,27 @@ def _evaluate(c,u,order=0,duration=1.):
         for i in range(order,len(c)))/duration**order
 
 
+@lru_cache(maxsize=4096)
+def _range_matrices(n,lo,hi):
+    # Pure polynomial basis changes only. No poses, time, SDK results or
+    # admission decisions are cached; every new segment is checked afresh.
+    power=np.zeros((n+1,n+1));basis=np.zeros_like(power)
+    for k in range(n+1):
+        for i in range(k,n+1):power[k,i]=comb(i,k)*lo**(i-k)*(hi-lo)**k
+        for j in range(k,n+1):basis[j,k]=comb(j,k)/comb(n,k)
+    bernstein=basis@power
+    power.setflags(write=False);bernstein.setflags(write=False)
+    return power,bernstein
+
+
 def _range(c,lo=0.,hi=1.):
     """Conservative polynomial range using the Bernstein convex hull.
 
     This avoids assuming a dense set of samples covers all extrema. Numerical
     roundoff gets an outward allowance; this is not a formal FP proof.
     """
-    n=len(c)-1
-    power=np.array([sum(comb(i,k)*c[i]*lo**(i-k)*(hi-lo)**k for i in range(k,n+1)) for k in range(n+1)])
-    bernstein=np.array([sum(power[k]*comb(j,k)/comb(n,k) for k in range(j+1)) for j in range(n+1)])
+    p,b=_range_matrices(len(c)-1,float(lo),float(hi))
+    power=p@c;bernstein=b@c
     margin=256*np.finfo(float).eps*(1+np.abs(c).sum(axis=0)+np.abs(power).sum(axis=0))
     return bernstein.min(axis=0)-margin,bernstein.max(axis=0)+margin
 
@@ -86,18 +100,34 @@ class MdhReferenceModel:
         t,_=self.geometry(q)
         return Pose(p=tuple(float(x) for x in t[:3,3]),q=tuple(float(x) for x in Rotation.from_matrix(t[:3,:3]).as_quat()))
 
-    def inverse(self,pose,seed):
+    def inverse_linearization(self,pose,q):
         goal=Rotation.from_quat(pose.q)
-        def residual(q):
-            t,_=self.geometry(q)
-            return np.r_[5*(t[:3,3]-pose.p),(goal.inv()*Rotation.from_matrix(t[:3,:3])).as_rotvec()]
-        solved=least_squares(residual,seed,bounds=(self.lower,self.upper),max_nfev=40,
+        t,j=self.geometry(q)
+        r=(goal.inv()*Rotation.from_matrix(t[:3,:3])).as_rotvec();theta=np.linalg.norm(r)
+        skew=np.array([[0.,-r[2],r[1]],[r[2],0.,-r[0]],[-r[1],r[0],0.]])
+        factor=(1/12+theta**2/720+theta**4/30240 if theta<1e-3
+            else 1/theta**2-1/(2*theta*np.tan(theta/2)))
+        log_inverse=np.eye(3)-skew/2+factor*(skew@skew)
+        return (np.r_[5*(t[:3,3]-pose.p),r],np.vstack((5*j[:3],log_inverse@goal.inv().as_matrix()@j[3:])))
+
+    def inverse(self,pose,seed):
+        goal=Rotation.from_quat(pose.q);cached=[None,None]
+        def linearization(q):
+            if cached[0] is None or not np.array_equal(cached[0],q):
+                cached[:]=[np.array(q,copy=True),self.inverse_linearization(pose,q)]
+            return cached[1]
+        solved=least_squares(lambda q:linearization(q)[0],seed,jac=lambda q:linearization(q)[1],
+            bounds=(self.lower,self.upper),max_nfev=40,
             ftol=1e-11,xtol=1e-11,gtol=1e-11)
         p=self.pose(solved.x)
         if (np.linalg.norm(np.array(p.p)-pose.p)>2e-7
                 or (Rotation.from_quat(p.q).inv()*goal).magnitude()>2e-6):
             raise ValueError('cartesian_reference_ik_unreachable')
         return solved.x
+
+
+def _cross(a,b):
+    return np.array((a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]))
 
 
 def _angular(r,rd,rdd):
@@ -112,9 +142,9 @@ def _angular(r,rd,rdd):
         a=(1-np.cos(theta))/theta**2;b=(theta-np.sin(theta))/theta**3
         ad=(theta*np.sin(theta)-2*(1-np.cos(theta)))/theta**4*dot
         bd=(theta*(1-np.cos(theta))-3*(theta-np.sin(theta)))/theta**5*dot
-    cross=np.cross(r,rd);double=np.cross(r,cross)
+    cross=_cross(r,rd);double=_cross(r,cross)
     return (rd+a*cross+b*double,
-        rdd+a*np.cross(r,rdd)+b*np.cross(r,np.cross(r,rdd))+ad*cross+bd*double+b*np.cross(rd,cross))
+        rdd+a*_cross(r,rdd)+b*_cross(r,_cross(r,rdd))+ad*cross+bd*double+b*_cross(rd,cross))
 
 
 class CartesianCurve:
@@ -283,10 +313,13 @@ class OfflineCartesianFollower:
     its IK/PVA and validate the complete assumed joint interpolation. No IK
     cursor advances beyond this reference. Rejection commits no partial state.
     """
-    def __init__(self,model,start,*,period=.08,frequency=4.,**validation):
+    def __init__(self,model,start,*,period=.08,frequency=4.,lookahead_position=.02,lookahead_rotation=.08,**validation):
         if not np.isfinite(period) or not .01<=period<=.08 or not np.isfinite(frequency) or not 0<frequency<=4:
             raise ValueError('cartesian_reference_duration')
+        if not all(np.isfinite(x) and x>0 for x in (lookahead_position,lookahead_rotation)):
+            raise ValueError('cartesian_reference_lookahead')
         self.model=model;self.state=start;self.period=period;self.frequency=frequency;self.validation=dict(validation)
+        self.lookahead_position=lookahead_position;self.lookahead_rotation=lookahead_rotation
 
     def advance(self,target):
         q=np.array(self.state.q);v=np.array(self.state.v);a=np.array(self.state.a);dt=self.period
@@ -298,7 +331,12 @@ class OfflineCartesianFollower:
         bias=2*jd@a+((plus-minus)/(2*h))@v
         twist=j@v;acc=j@a+jd@v;f=self.frequency
         error=np.r_[np.array(target.p)-p.p,(Rotation.from_quat(target.q)*Rotation.from_quat(p.q).inv()).as_rotvec()]
-        desired=f**3*error-3*f*f*twist-3*f*acc
+        # Govern the demand relative to the LAST VALIDATED reference, not an
+        # independent future IK cursor. Preserve one common fraction for all
+        # task axes. The original hand endpoint and fixed workspace are intact.
+        fraction=1/max(1.,np.linalg.norm(error[:3])/self.lookahead_position,
+            np.linalg.norm(error[3:])/self.lookahead_rotation)
+        desired=f**3*(fraction*error)-3*f*f*twist-3*f*acc
         # Reserve 10% within the unchanged analysis limits for nonlinear IK
         # and interpolation effects. The final validator still checks the
         # original limits and can reject the optimized candidate.
@@ -327,9 +365,22 @@ class OfflineCartesianFollower:
         locked=(np.linalg.norm(error[:3])<1e-8 and np.linalg.norm(twist[:3])<1e-8 and np.linalg.norm(acc[:3])<1e-8)
         if locked:constraints.append(LinearConstraint(j[:3],-bias[:3],-bias[:3]))
         weights=np.array([10.,10.,10.,1.,1.,1.]);matrix=weights[:,None]*j;rhs=weights*(desired-bias)
-        solved=minimize(lambda x:float(np.linalg.norm(matrix@x-rhs)**2+1e-8*x@x),
-            np.minimum(high,np.maximum(low,np.zeros(6))),jac=lambda x:2*matrix.T@(matrix@x-rhs)+2e-8*x,
-            bounds=list(zip(low,high)),constraints=constraints,method='SLSQP',options=dict(maxiter=80,ftol=1e-12))
+        normal=matrix.T@matrix+1e-8*np.eye(6);right=matrix.T@rhs
+        if locked:
+            system=np.block([[normal,j[:3].T],[j[:3],np.zeros((3,3))]])
+            direct=np.linalg.solve(system,np.r_[right,-bias[:3]])[:6]
+        else:direct=np.linalg.solve(normal,right)
+        # A feasible equality-constrained quadratic optimum needs no iterative
+        # optimization. It still passes every constraint and the same complete
+        # nonlinear segment validation below.
+        if (np.isfinite(direct).all() and np.all(direct>=low) and np.all(direct<=high)
+                and min(reserve(direct))>=0 and min(task_rates(direct))>=0
+                and (not locked or np.linalg.norm(j[:3]@direct+bias[:3])<=1e-8)):
+            solved=SimpleNamespace(x=direct,success=True,status=0,nit=0)
+        else:
+            solved=minimize(lambda x:float(np.linalg.norm(matrix@x-rhs)**2+1e-8*x@x),
+                np.minimum(high,np.maximum(low,direct)),jac=lambda x:2*matrix.T@(matrix@x-rhs)+2e-8*x,
+                bounds=list(zip(low,high)),constraints=constraints,method='SLSQP',options=dict(maxiter=80,ftol=1e-12))
         # SLSQP status 8 may contain a feasible point without proving objective
         # convergence. Feasibility is checked independently, then the full
         # nonlinear IK/PVAT segment must still pass. Keep the status in evidence.
@@ -349,7 +400,7 @@ class OfflineCartesianFollower:
         segment,check=_solve_segment(self.model,self.state,curve,0.,dt,self.validation)
         self.state=segment.end
         return segment,dict(check,position_locked=locked,optimizer_iterations=int(solved.nit),
-            optimizer_status=int(solved.status),optimizer_converged=bool(solved.success))
+            optimizer_status=int(solved.status),optimizer_converged=bool(solved.success),demand_fraction=fraction)
 
 
 def plan_cartesian_reference(model,start,target,*,duration=4.,period=.08,**validation):

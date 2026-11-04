@@ -176,3 +176,38 @@ def test_interval_task_rate_bounds_enclose_independently_evaluated_mixed_segment
             assert np.linalg.norm(a[:3])<=check['tcp_acceleration_bound_mps2']+1e-10
             assert np.linalg.norm(v[3:])<=check['angular_speed_bound_radps']+1e-10
             assert np.linalg.norm(a[3:])<=check['angular_acceleration_bound_radps2']+1e-10
+
+
+def test_governed_demand_preserves_the_original_large_hand_endpoint(model):
+    start=ready();target=pitch(model.pose(start.q),.6)
+    original=target.model_dump()
+    follower=OfflineCartesianFollower(model,start)
+    segment,check=follower.advance(target)
+    assert 0<check['demand_fraction']<1
+    assert target.model_dump()==original
+    assert np.linalg.norm(np.array(segment.end.q)-start.q)>0
+    assert check['position_locked']
+
+
+def test_direct_quadratic_path_cannot_skip_segment_validation(model,monkeypatch):
+    import app.control.cartesian_pvat_reference as module
+    start=ready();follower=OfflineCartesianFollower(model,start)
+    monkeypatch.setattr(module,'minimize',lambda *a,**kw:pytest.fail('quiet feasible optimum needs no iterations'))
+    def reject(*a,**kw):raise ValueError('cartesian_reference_corridor')
+    monkeypatch.setattr(module,'validate_segment',reject)
+    with pytest.raises(ValueError,match='cartesian_reference_corridor'):
+        follower.advance(model.pose(start.q))
+    assert follower.state is start
+
+
+@pytest.mark.parametrize('angle',[0.,.4,np.pi-1e-4])
+def test_inverse_log_rotation_jacobian_matches_independent_central_differences(model,angle):
+    q=np.array(ready().q)
+    base=model.pose(q)
+    axis=np.array([1.,2.,-3.]);axis/=np.linalg.norm(axis)
+    target=base.model_copy(update={'q':tuple((Rotation.from_rotvec(axis*angle)*Rotation.from_quat(base.q)).as_quat())})
+    _,jac=model.inverse_linearization(target,q)
+    h=1e-7
+    numeric=np.column_stack([(model.inverse_linearization(target,q+np.eye(6)[i]*h)[0]
+        -model.inverse_linearization(target,q-np.eye(6)[i]*h)[0])/(2*h) for i in range(6)])
+    assert jac==pytest.approx(numeric,abs=1e-7)
