@@ -7,7 +7,7 @@ from app.commissioning.native_jog_mdh import MdhTool
 from app.control.cartesian_pvat_reference import (CartesianCurve,JointReference,
     MdhReferenceModel,OfflineCartesianFollower,PvatSegment,plan_cartesian_reference,validate_segment)
 from app.control.cartesian_pvat_reference import plan_cartesian_braking
-from app.control.cartesian_pvat_reference import SplitCartesianBrakeCurve
+from app.control.cartesian_pvat_reference import SplitCartesianBrakeCurve,SegmentPlanningBudget
 from app.schemas.messages import Pose
 
 
@@ -78,6 +78,40 @@ def test_valid_endpoints_do_not_admit_a_segment_with_an_interior_tcp_drop(model)
         validate_segment(segment,model,curve,0.)
 
 
+def test_coordinated_rotation_error_can_be_enclosed_without_small_displacement_subintervals(model):
+    start=ready();v=np.zeros(6);v[5]=.2;dt=.08
+    initial=JointReference(start.q,tuple(v));end=JointReference(tuple(np.array(start.q)+v*dt),tuple(v))
+    _,j=model.geometry(start.q)
+    curve=CartesianCurve.cubic(model.pose(start.q),j@v,np.zeros(6),np.zeros(6),dt)
+    segment=PvatSegment(initial,end,dt)
+    check=validate_segment(segment,model,curve,0.,max_depth=0)
+    assert check['intervals']==1 and check['angle_bound_rad']<.001
+    for t in np.linspace(0.,dt,31):
+        actual=model.pose(segment.state(float(t)).q);expected=curve.state(float(t))[0]
+        assert (Rotation.from_quat(expected.q).inv()*Rotation.from_quat(actual.q)).magnitude()<1e-10
+
+
+def test_angular_error_enclosure_rejects_interior_wrist_swing_with_matching_endpoints(model):
+    start=ready();v=np.zeros(6);v[5]=.03;dt=2.
+    segment=PvatSegment(JointReference(start.q,tuple(v)),JointReference(start.q,tuple(-v)),dt)
+    base=model.pose(start.q);curve=CartesianCurve.cubic(base,np.zeros(6),np.zeros(6),np.zeros(6),dt)
+    assert (Rotation.from_quat(base.q).inv()*Rotation.from_quat(model.pose(segment.state(1.).q).q)).magnitude()>.01
+    with pytest.raises(ValueError,match='cartesian_reference_corridor'):validate_segment(segment,model,curve,0.)
+
+
+def test_reported_angular_error_bound_encloses_dense_noncommuting_reference(model):
+    start=ready();base=model.pose(start.q)
+    target=base.model_copy(update={'q':tuple((Rotation.from_rotvec([.12,-.08,.05])
+        *Rotation.from_quat(base.q)).as_quat())})
+    plan=plan_cartesian_reference(model,start,target,duration=4.)
+    for index,(segment,check) in enumerate(zip(plan.segments,plan.checks)):
+        for t in np.linspace(0.,segment.duration,7):
+            actual=model.pose(segment.state(float(t)).q)
+            expected=plan.curve.state(min(plan.curve.duration,index*segment.duration+float(t)))[0]
+            error=(Rotation.from_quat(expected.q).inv()*Rotation.from_quat(actual.q)).magnitude()
+            assert error<=check['angle_bound_rad']+1e-12
+
+
 def test_translation_and_rotation_share_one_cartesian_reference(model):
     start=ready();base=model.pose(start.q)
     target=pitch(base,.12).model_copy(update={'p':(base.p[0]+.01,base.p[1]-.01,base.p[2]+.01)})
@@ -104,9 +138,103 @@ def test_singular_and_unreachable_targets_reject_without_a_fallback(model):
         model.inverse(target,np.array(start.q))
 
 
+def test_neighboring_inverse_uses_bounded_local_newton_with_fresh_fk_confirmation(model,monkeypatch):
+    import app.control.cartesian_pvat_reference as module
+    start=np.array(ready().q);expected=start+np.array([.002,-.001,.001,.002,-.001,.003])
+    target=model.pose(expected)
+    monkeypatch.setattr(module,'least_squares',lambda *a,**kw:pytest.fail('unneeded general solver'))
+    actual=model.inverse(target,start)
+    assert actual==pytest.approx(expected,abs=1e-9)
+    assert model.pose(actual).p==pytest.approx(target.p,abs=1e-11)
+
+
+def test_local_inverse_cannot_skip_general_solver_when_seed_is_singular(model,monkeypatch):
+    import app.control.cartesian_pvat_reference as module
+    calls=[];original=module.least_squares
+    def recorded(*a,**kw):
+        calls.append(True);return original(*a,**kw)
+    monkeypatch.setattr(module,'least_squares',recorded)
+    target=model.pose(ready().q).model_copy(update={'p':(10.,10.,10.)})
+    with pytest.raises(ValueError,match='ik_unreachable'):model.inverse(target,np.zeros(6))
+    assert calls==[True]
+
+
+def test_local_inverse_does_not_clip_or_accept_an_out_of_bounds_solution(model):
+    bounded=MdhReferenceModel(model.tool,(-.1,-.9,1.3,-.7,1.4,-.1),(.1,-.7,1.5,-.5,1.7,.1))
+    target=model.pose((.2,-.8,1.4,-.6,1.57,0.))
+    with pytest.raises(ValueError,match='ik_unreachable'):bounded.inverse(target,np.array(ready().q))
+
+
+def test_zero_inverse_residual_cannot_replace_fresh_fk_evidence(model,monkeypatch):
+    import app.control.cartesian_pvat_reference as module
+    from types import SimpleNamespace
+    target=pitch(model.pose(ready().q),.1)
+    monkeypatch.setattr(model,'inverse_linearization',lambda *a:(np.zeros(6),np.eye(6)))
+    monkeypatch.setattr(module,'least_squares',lambda *a,**kw:SimpleNamespace(x=np.array(ready().q)))
+    with pytest.raises(ValueError,match='ik_unreachable'):model.inverse(target,np.array(ready().q))
+
+
 @pytest.mark.parametrize('values',[(float('nan'),)*6,(0.,)*5])
 def test_nonfinite_or_incomplete_boundary_state_is_rejected(values):
     with pytest.raises(ValueError,match='cartesian_reference_nonfinite_or_shape'):JointReference(values)
+
+
+def test_exactly_quiet_braking_is_one_fully_validated_hold(model,monkeypatch):
+    import app.control.cartesian_pvat_reference as module
+    start=ready();budget=SegmentPlanningBudget(1)
+    plan,_=plan_cartesian_braking(model,start,segment_budget=budget)
+    assert len(plan.segments)==1 and budget.used==1
+    assert plan.segments[0].start==plan.segments[0].end==start
+    def reject(*a,**kw):raise ValueError('cartesian_reference_corridor')
+    monkeypatch.setattr(module,'validate_segment',reject)
+    with pytest.raises(ValueError,match='corridor'):plan_cartesian_braking(model,start)
+
+
+def test_budget_exhaustion_never_returns_a_partly_checked_braking_plan(model):
+    start=ready();follower=OfflineCartesianFollower(model,start)
+    moving,_=follower.advance(pitch(model.pose(start.q),.15))
+    budget=SegmentPlanningBudget(1)
+    with pytest.raises(ValueError,match='search_budget_exhausted'):
+        plan_cartesian_braking(model,moving.end,segment_budget=budget)
+    assert budget.used==1
+
+
+def test_joint_fit_braking_uses_one_inverse_but_validates_all_cartesian_intervals(model,monkeypatch):
+    follower=OfflineCartesianFollower(model,ready());base=model.pose(ready().q)
+    for _ in range(4):segment,_=follower.advance(pitch(base,.15))
+    inverse=model.inverse;calls=[]
+    def recorded(*a,**kw):
+        calls.append(True);return inverse(*a,**kw)
+    monkeypatch.setattr(model,'inverse',recorded)
+    plan,_=plan_cartesian_braking(model,segment.end,method='joint_fit',durations=(1.04,),allow_split=False)
+    assert len(calls)==1 and len(plan.segments)>1 and len(plan.checks)==len(plan.segments)
+    assert plan.segments[0].start==segment.end
+    assert all(a.end==b.start for a,b in zip(plan.segments,plan.segments[1:]))
+    assert plan.segments[-1].end.v==plan.segments[-1].end.a==(0.,)*6
+    for index,(piece,check) in enumerate(zip(plan.segments,plan.checks)):
+        assert not check['native_interpolation_verified']
+        for t in np.linspace(0.,piece.duration,7):
+            actual=model.pose(piece.state(float(t)).q)
+            expected=plan.curve.state(min(plan.curve.duration,index*piece.duration+float(t)))[0]
+            assert np.linalg.norm(np.array(actual.p)-expected.p)<=check['position_bound_m']+1e-12
+            assert (Rotation.from_quat(expected.q).inv()*Rotation.from_quat(actual.q)).magnitude()<=check['angle_bound_rad']+1e-12
+
+
+def test_fitted_stop_cannot_return_a_plan_when_an_interior_check_refuses(model,monkeypatch):
+    import app.control.cartesian_pvat_reference as module
+    follower=OfflineCartesianFollower(model,ready());piece,_=follower.advance(pitch(model.pose(ready().q),.15))
+    calls=[]
+    def refusal(*a,**kw):
+        calls.append(True);raise ValueError('cartesian_reference_corridor')
+    monkeypatch.setattr(module,'validate_segment',refusal)
+    with pytest.raises(ValueError,match='search_budget_exhausted'):
+        plan_cartesian_braking(model,piece.end,method='joint_fit',segment_budget=SegmentPlanningBudget(2))
+    assert len(calls)==2
+
+
+@pytest.mark.parametrize('limit',[True,0,-1,1.5,2001])
+def test_invalid_model_work_budget_is_rejected(limit):
+    with pytest.raises(ValueError,match='configuration'):SegmentPlanningBudget(limit)
 
 
 def test_unresolved_interval_cannot_be_accepted_by_exhausting_subdivisions(model):

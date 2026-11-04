@@ -113,3 +113,45 @@ def test_reseed_error_after_a_quiet_deceleration_remains_a_fault(monkeypatch):
     monkeypatch.setattr(module,'plan_cartesian_braking',unknown)
     with pytest.raises(RuntimeError):s.advance(target)
     assert s.phase=='fault'
+
+
+def test_work_exhaustion_consumes_only_a_previously_validated_tail_and_does_not_retry_scales():
+    _,s,target=rig(continue_on_known_rejection=True,braking_segment_limit=1)
+    tail=s._tail
+    packet=s.advance(target)
+    assert packet.mode=='governed_deceleration' and packet.segment==tail[0]
+    assert s.last_braking_segment_solves==1
+    assert len(s.last_rejections)==1 and s.last_rejections[0]['code']=='cartesian_brake_search_budget_exhausted'
+    assert not packet.native_execution_verified
+
+
+def test_work_budget_is_shared_across_demand_scales(monkeypatch):
+    _,s,target=rig(continue_on_known_rejection=True,braking_segment_limit=2)
+    def expensive(*args,segment_budget=None,**kwargs):
+        segment_budget.consume();segment_budget.consume()
+        raise ValueError('cartesian_brake_no_feasible_plan')
+    monkeypatch.setattr(module,'plan_cartesian_braking',expensive)
+    packet=s.advance(target)
+    assert packet.mode=='governed_deceleration' and s.last_braking_segment_solves==2
+    assert len(s.last_rejections)==2
+    assert s.last_rejections[-1]['code']=='cartesian_brake_search_budget_exhausted'
+
+
+def test_unowned_budget_error_does_not_recover_as_a_known_refusal(monkeypatch):
+    _,s,target=rig(continue_on_known_rejection=True)
+    def unknown(*a,**kw):raise ValueError('cartesian_brake_search_budget_exhausted')
+    monkeypatch.setattr(module,'plan_cartesian_braking',unknown)
+    with pytest.raises(ValueError,match='search_budget_exhausted'):s.advance(target)
+    assert s.phase=='fault'
+
+
+def test_fitted_braking_candidate_keeps_paired_chains_and_release_latch():
+    _,s,target=rig(continue_on_known_rejection=True,braking_segment_limit=24,braking_method='joint_fit')
+    for _ in range(24):
+        before=s.state;packet=s.advance(target)
+        assert packet.segment.start==before
+        chain=(packet.segment,)+packet.braking_tail
+        assert all(a.end==b.start for a,b in zip(chain,chain[1:]))
+        assert s.last_braking_segment_solves<=24
+    while s.phase!='ready':assert s.finish().mode=='braking'
+    with pytest.raises(ValueError,match='requires_capture'):s.advance(target)

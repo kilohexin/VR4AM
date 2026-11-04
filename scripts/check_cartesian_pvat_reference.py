@@ -92,7 +92,7 @@ def run(frozen_log=None,*,large_pitch=False):
 
 
 def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking=False,demand_mode='coupled',braking_stride=None,
-        supervised=False,governed_continuation=False):
+        supervised=False,governed_continuation=False,braking_segment_limit=None,braking_method='pointwise'):
     """Counterfactual math only: corrected mapping, one new reference/80ms.
 
     This replays one continuous held gesture, not the original native PVAT
@@ -101,6 +101,8 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
     if braking_stride is not None and (not check_braking or type(braking_stride) is not int or braking_stride<=0):
         raise ValueError('offline_reference_braking_stride')
     if governed_continuation and not supervised:raise ValueError('offline_reference_supervisor_required')
+    if braking_segment_limit is not None and not supervised:raise ValueError('offline_reference_supervisor_required')
+    if braking_method!='pointwise' and not supervised:raise ValueError('offline_reference_supervisor_required')
     model=MdhReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
     start,source=origin(frozen_log,model);base=model.pose(start.q)
     rows=[json.loads(line) for line in frozen_log.read_text(encoding='utf-8').splitlines()]
@@ -117,7 +119,10 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
     mapper.capture(Pose(**held[0]['hand_pose']),base,generation=1,hand_ns=now[0],tcp_ns=now[0])
     factory=OfflineReferenceSupervisor if supervised else OfflineCartesianFollower
     options=dict(frequency=response_frequency,demand_mode=demand_mode)
-    if supervised:options['continue_on_known_rejection']=governed_continuation
+    if supervised:
+        options['continue_on_known_rejection']=governed_continuation
+        options['braking_segment_limit']=braking_segment_limit
+        options['braking_method']=braking_method
     follower=factory(model,start,**options)
     report=dict(offline_candidate_passed=False,sdk_connections=0,motion_writes=0,source=source,
         scenario='frozen_hand_counterfactual_corrected_mapping',native_interpolation_verified=False,
@@ -132,6 +137,9 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
     report['supervised_model_bundles']=supervised
     report['backoff_steps']=0;report['backup_braking_steps']=0
     report['governed_deceleration_steps']=0
+    report['braking_segment_limit']=braking_segment_limit
+    report['braking_method']=braking_method
+    report['max_braking_segment_solves_per_step']=0 if braking_segment_limit is not None else None
     if supervised:report['supervisor_sha256']=hashlib.sha256((ROOT/'backend/app/control/cartesian_reference_bundle.py').read_bytes()).hexdigest()
     before=time.perf_counter();period_ns=80_000_000
     step_times=[];brake_samples=[]
@@ -152,6 +160,9 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
             target=Pose(p=p,q=tuple(float(x) for x in q))
             if supervised:
                 packet=follower.advance(target);segment=packet.segment
+                if braking_segment_limit is not None:
+                    report['max_braking_segment_solves_per_step']=max(report['max_braking_segment_solves_per_step'],
+                        follower.last_braking_segment_solves)
                 check=dict(optimizer_iterations=packet.optimizer_iterations,position_bound_m=packet.position_bound_m)
                 report['backoff_steps']+=int(packet.mode=='following' and packet.demand_scale<1.)
                 report['backup_braking_steps']+=int(packet.mode=='braking')
@@ -159,7 +170,7 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
                 if packet.mode=='braking':report.setdefault('bundle_rejections',follower.last_rejections)
             else:segment,check=follower.advance(target)
         except ValueError as error:
-            if not str(error).startswith(('cartesian_reference_','vr_pose_')):raise
+            if not str(error).startswith(('cartesian_reference_','cartesian_brake_','vr_pose_')):raise
             report['rejection']=str(error);report['rejection_at_s']=tick*.08
             if hasattr(error,'optimizer_status'):
                 report['optimizer_diagnostics']={name:getattr(error,name) for name in
@@ -232,8 +243,13 @@ def main():
     p.add_argument('--braking-stride',type=int)
     p.add_argument('--supervised',action='store_true')
     p.add_argument('--governed-continuation',action='store_true')
+    p.add_argument('--braking-segment-limit',type=int)
+    p.add_argument('--braking-method',choices=('pointwise','joint_fit'),default='pointwise')
     args=p.parse_args()
     if args.governed_continuation and not args.supervised:p.error('--governed-continuation requires --supervised')
+    if args.braking_segment_limit is not None and (not args.supervised or not 1<=args.braking_segment_limit<=2000):
+        p.error('--braking-segment-limit requires --supervised and an integer in 1..2000')
+    if args.braking_method!='pointwise' and not args.supervised:p.error('--braking-method requires --supervised')
     if args.braking_stride is not None and (not args.check_braking or args.braking_stride<=0):
         p.error('--braking-stride requires --check-braking and a positive integer')
     if args.replay_frozen and (args.frozen_log is None or args.large_pitch):
@@ -242,7 +258,8 @@ def main():
         p.error('--response-frequency and --reference-trace only apply to --replay-frozen')
     report=replay(args.frozen_log,response_frequency=args.response_frequency,reference_trace=args.reference_trace,
         check_braking=args.check_braking,demand_mode=args.demand_mode,braking_stride=args.braking_stride,
-        supervised=args.supervised,governed_continuation=args.governed_continuation) if args.replay_frozen else run(args.frozen_log,large_pitch=args.large_pitch)
+        supervised=args.supervised,governed_continuation=args.governed_continuation,
+        braking_segment_limit=args.braking_segment_limit,braking_method=args.braking_method) if args.replay_frozen else run(args.frozen_log,large_pitch=args.large_pitch)
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,indent=2),encoding='utf-8')
     printable={k:v for k,v in report.items() if k!='sampled_braking'}

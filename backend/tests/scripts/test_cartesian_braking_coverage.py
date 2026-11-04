@@ -38,9 +38,27 @@ def test_supervised_short_replay_drains_preapproved_release_tail_without_claimin
 
 def test_following_refusal_is_not_reported_success_even_when_input_ends_before_the_tail(tmp_path,monkeypatch):
     class Refusing(OfflineReferenceSupervisor):
+        def __init__(self,*args,**kwargs):
+            super().__init__(*args,**kwargs)
+            # Deliberately keep the quiet approved tail longer than input.
+            # Production quiet seeding is now just one validated hold.
+            self._tail*=8;self._tail_checks*=8
         def advance(self,target):return self.finish('no_candidate_with_braking_tail')
     monkeypatch.setattr(probe,'OfflineReferenceSupervisor',Refusing)
     result=probe.replay(fixture_log(tmp_path),supervised=True)
     assert not result['offline_candidate_passed'] and not result['all_reference_steps_admitted']
     assert result['backup_braking_steps']>0 and result['final_braking_steps']>0
     assert result['final_reference_speed_radps']<1e-8
+
+
+def test_budgeted_replay_reports_work_limit_and_preserves_no_native_admission(tmp_path):
+    result=probe.replay(fixture_log(tmp_path),supervised=True,governed_continuation=True,braking_segment_limit=24)
+    assert result['offline_candidate_passed']
+    assert result['braking_segment_limit']==24 and 0<result['max_braking_segment_solves_per_step']<=24
+    assert result['sdk_connections']==result['motion_writes']==0
+    assert not result['realtime_verified'] and not result['product_admission_complete']
+
+
+def test_work_limit_cannot_be_enabled_without_supervision():
+    with pytest.raises(ValueError,match='supervisor_required'):
+        probe.replay(Path('does-not-exist'),braking_segment_limit=24)

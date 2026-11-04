@@ -4,7 +4,7 @@ Quintic Hermite interpolation is an explicit analysis assumption, NOT a
 verified description of the native controller. Passing this model cannot
 unquarantine the live pose-follow entry or authorize hardware motion.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from functools import lru_cache
 from math import comb, factorial
 from types import SimpleNamespace
@@ -22,6 +22,21 @@ def _vector(value, count):
     if a.shape!=(count,) or not np.isfinite(a).all():
         raise ValueError('cartesian_reference_nonfinite_or_shape')
     return a
+
+
+@dataclass
+class SegmentPlanningBudget:
+    """Bound model work, not a wall-clock guarantee or motion authorization."""
+    limit: int
+    used: int=field(default=0,init=False)
+
+    def __post_init__(self):
+        if type(self.limit) is not int or not 1<=self.limit<=2000:
+            raise ValueError('cartesian_brake_configuration')
+
+    def consume(self):
+        if self.used>=self.limit:raise ValueError('cartesian_brake_search_budget_exhausted')
+        self.used+=1
 
 
 @dataclass(frozen=True)
@@ -111,6 +126,31 @@ class MdhReferenceModel:
         return (np.r_[5*(t[:3,3]-pose.p),r],np.vstack((5*j[:3],log_inverse@goal.inv().as_matrix()@j[3:])))
 
     def inverse(self,pose,seed):
+        seed=_vector(seed,6)
+        if np.any(seed<self.lower) or np.any(seed>self.upper):
+            raise ValueError('cartesian_reference_joint_bounds')
+        # Neighboring 80ms endpoints usually need only two Newton updates.
+        # Keep this local and bounded; no clipping, stale solution or relaxed
+        # accuracy. General bounded IK remains available for remote targets.
+        q=seed.copy()
+        for _ in range(5):
+            residual,jacobian=self.inverse_linearization(pose,q)
+            if not np.isfinite(residual).all() or not np.isfinite(jacobian).all():
+                raise ValueError('cartesian_reference_nonfinite_or_shape')
+            if np.max(np.abs(residual))<=1e-11:
+                actual=self.pose(q)
+                if (np.linalg.norm(np.array(actual.p)-pose.p)<=1e-11
+                        and (Rotation.from_quat(actual.q).inv()*Rotation.from_quat(pose.q)).magnitude()<=1e-10):
+                    return q
+                break
+            try:step=np.linalg.solve(jacobian,-residual)
+            except np.linalg.LinAlgError:break
+            if not np.isfinite(step).all():raise ValueError('cartesian_reference_nonfinite_or_shape')
+            following=q+step
+            if (np.max(np.abs(step))>.05 or np.max(np.abs(following-seed))>=.15
+                    or np.any(following<self.lower) or np.any(following>self.upper)):
+                break
+            q=following
         goal=Rotation.from_quat(pose.q);cached=[None,None]
         def linearization(q):
             if cached[0] is None or not np.array_equal(cached[0],q):
@@ -276,6 +316,7 @@ def validate_segment(segment,model,curve,offset,*,position_tolerance=.001,angle_
             or np.any(-terminal_v+np.maximum(-terminal_a,0)**2/(2*jerk)>speed+1e-10)):
         raise ValueError('cartesian_reference_rate_reserve')
     derivatives=[_derivative(c,d,segment.duration) for d in (1,2)]
+    curve_velocity=_derivative(curve.coefficients,1,curve.duration)
     curve_acceleration=_derivative(curve.coefficients,2,curve.duration)
     radii=(model.position_lipschitz,np.ones(6))
     coupling=[np.minimum.outer(r,r) for r in radii]
@@ -288,7 +329,7 @@ def validate_segment(segment,model,curve,offset,*,position_tolerance=.001,angle_
         q=_evaluate(c,mid)
         velocity=_evaluate(c,mid,1,segment.duration);acc=_evaluate(c,mid,2,segment.duration)
         actual_matrix,j,jd=model.geometry(q,velocity)
-        expected,_,_=curve.state(offset+mid*segment.duration)
+        expected,reference_twist,_=curve.state(offset+mid*segment.duration)
         error=np.linalg.norm(actual_matrix[:3,3]-expected.p)
         angle=(Rotation.from_matrix(actual_matrix[:3,:3])*Rotation.from_quat(expected.q).inv()).magnitude()
         if error>position_tolerance or angle>angle_tolerance:raise ValueError('cartesian_reference_corridor')
@@ -322,7 +363,7 @@ def validate_segment(segment,model,curve,offset,*,position_tolerance=.001,angle_
         # FK and Cartesian translation. Taylor's integral remainder bounds
         # every time in this interval, not only the sampled midpoint. Both
         # this and the original displacement enclosure must remain valid.
-        reference_v=_evaluate(curve.coefficients,(ca+cb)/2,1,curve.duration)[:3]
+        reference_v=reference_twist[:3]
         ralo,rahi=_range(curve_acceleration,ca,cb)
         reference_acc_bound=np.linalg.norm(np.maximum(-ralo[:3],rahi[:3]))
         half_time=(b-a)*segment.duration/2
@@ -330,6 +371,20 @@ def validate_segment(segment,model,curve,offset,*,position_tolerance=.001,angle_
         error_taylor+=(ba[0]+reference_acc_bound)*half_time**2/2
         position_bound=min(position_bound,error_taylor)
         angle_bound=angle+sum(dq)+np.linalg.norm(dp[3:])
+        # For E=R_reference.T*R_actual, ||omega_E|| equals the norm of
+        # their spatial angular-velocity DIFFERENCE. Integrate that norm
+        # from the midpoint, bounding its derivative by |alpha_a|+|alpha_r|.
+        # Exp(r)'s left Jacobian is an integral of rotations: ||J||<=1 and
+        # ||DJ(r)[rd] rd||<=|rd|^2/2, so the reference alpha is enclosed by
+        # |rdd|+|rd|^2/2. This retains cancellation without dropping samples
+        # or assuming Euler derivatives are angular velocity.
+        rvlo,rvhi=_range(curve_velocity,ca,cb)
+        reference_angular_acc=(np.linalg.norm(np.maximum(-ralo[3:],rahi[3:]))
+            +.5*np.linalg.norm(np.maximum(-rvlo[3:],rvhi[3:]))**2)
+        angle_integral=angle+np.linalg.norm(task_v[3:]-reference_twist[3:])*half_time
+        angle_integral+=(ba[1]+reference_angular_acc)*half_time**2/2
+        angle_integral+=256*np.finfo(float).eps*(1+angle_integral)
+        angle_bound=min(angle_bound,angle_integral)
         if (position_bound<=position_tolerance and angle_bound<=angle_tolerance
                 and np.all(bv<=velocity_limits) and np.all(ba<=acceleration_limits)):
             max_position=max(max_position,float(position_bound));max_angle=max(max_angle,float(angle_bound))
@@ -505,7 +560,7 @@ class OfflineCartesianFollower:
             held_position_axes=tuple(int(x) for x in held_axes))
 
 
-def plan_cartesian_reference(model,start,target,*,duration=4.,period=.08,**validation):
+def plan_cartesian_reference(model,start,target,*,duration=4.,period=.08,segment_budget=None,**validation):
     """Build an offline C2 reference, including a retarget from nonzero P/V/A.
 
     Caller chooses duration; infeasible rates reject instead of adjusting
@@ -517,23 +572,56 @@ def plan_cartesian_reference(model,start,target,*,duration=4.,period=.08,**valid
     count=round(duration/period)
     if count>2000 or abs(count*period-duration)>1e-9:raise ValueError('cartesian_reference_grid')
     curve=_curve_from_reference(model,start,target,duration)
-    return _plan_curve(model,start,curve,period,validation)
+    return _plan_curve(model,start,curve,period,validation,segment_budget)
 
 
-def _plan_curve(model,start,curve,period,validation):
+def _plan_curve(model,start,curve,period,validation,segment_budget=None):
+    if segment_budget is not None and type(segment_budget) is not SegmentPlanningBudget:
+        raise ValueError('cartesian_brake_configuration')
     count=round(curve.duration/period)
     if count<1 or count>2000 or abs(count*period-curve.duration)>1e-9:raise ValueError('cartesian_reference_grid')
     if np.any(np.array(start.q)<model.lower) or np.any(np.array(start.q)>model.upper):
         raise ValueError('cartesian_reference_joint_bounds')
     previous=start;segments=[];checks=[]
     for i in range(1,count+1):
+        if segment_budget is not None:segment_budget.consume()
         segment,check=_solve_segment(model,previous,curve,(i-1)*period,period,validation)
         checks.append(check);segments.append(segment);previous=segment.end
     return CartesianPlan(curve,tuple(segments),tuple(checks))
 
 
+def _fit_braking_curve(model,start,curve,period,validation,segment_budget=None):
+    """Offline alternative: one global joint polynomial, every piece checked.
+
+    This is only a candidate for a coordinated Cartesian stopping curve.
+    It is discarded if any assumed 80ms interpolation leaves that corridor
+    or exceeds the same limits. It is never an unchecked joint-wise stop.
+    """
+    count=round(curve.duration/period)
+    if count<1 or count>2000 or abs(count*period-curve.duration)>1e-9:
+        raise ValueError('cartesian_reference_grid')
+    if segment_budget is not None:segment_budget.consume()
+    pose,twist,acc=curve.state(curve.duration)
+    if max(np.max(np.abs(twist)),np.max(np.abs(acc)))>1e-10:
+        raise ValueError('cartesian_reference_brake_terminal_rates')
+    terminal=JointReference(tuple(model.inverse(pose,np.array(start.q))))
+    whole=PvatSegment(start,terminal,curve.duration)
+    previous=start;segments=[];checks=[]
+    for i in range(1,count+1):
+        if i>1 and segment_budget is not None:segment_budget.consume()
+        end=terminal if i==count else whole.state(i*period)
+        if np.max(np.abs(np.array(end.q)-previous.q))>=.15:
+            raise ValueError('cartesian_reference_ik_branch')
+        if np.linalg.svd(model.geometry(end.q)[1],compute_uv=False)[-1]<1e-4:
+            raise ValueError('cartesian_reference_singular')
+        segment=PvatSegment(previous,end,period)
+        check=validate_segment(segment,model,curve,(i-1)*period,**validation)
+        segments.append(segment);checks.append(check);previous=end
+    return CartesianPlan(curve,tuple(segments),tuple(checks))
+
+
 def plan_cartesian_braking(model,start,*,period=.08,durations=(.8,.96,1.04,1.12,1.2,1.28,1.44,1.6,1.92,2.4,3.2,4.8),
-        position_radius=.02,angle_radius=.15,allow_split=True,**validation):
+        position_radius=.02,angle_radius=.15,allow_split=True,segment_budget=None,method='pointwise',**validation):
     """Offline bounded continuation to zero PVA rates, never a stop command.
 
     Search mathematical durations without any executor access. Every segment
@@ -544,6 +632,9 @@ def plan_cartesian_braking(model,start,*,period=.08,durations=(.8,.96,1.04,1.12,
     pt=validation.get('position_tolerance',.001);at=validation.get('angle_tolerance',.01)
     if not np.isfinite(period) or period<.01 or type(allow_split) is not bool:
         raise ValueError('cartesian_brake_configuration')
+    if segment_budget is not None and type(segment_budget) is not SegmentPlanningBudget:
+        raise ValueError('cartesian_brake_configuration')
+    if method not in ('pointwise','joint_fit'):raise ValueError('cartesian_brake_configuration')
     if not all(np.isfinite(t) and t>0 for t in (pt,at)):
         raise ValueError('cartesian_reference_validation_limits')
     if (not np.isfinite(position_radius) or not np.isfinite(angle_radius)
@@ -554,6 +645,15 @@ def plan_cartesian_braking(model,start,*,period=.08,durations=(.8,.96,1.04,1.12,
     for duration in durations:
         if not np.isfinite(duration) or duration<period:raise ValueError('cartesian_reference_duration')
         if abs(round(duration/period)*period-duration)>1e-9:raise ValueError('cartesian_reference_grid')
+    if all(x==0. for x in start.v+start.a):
+        # An exactly quiet reference needs one validated hold, not ten
+        # separately inverted identical endpoints. Still use the full segment
+        # validator and budget. Nearly quiet motion must keep genuine P/V/A.
+        curve=CartesianCurve.cubic(pose,np.zeros(6),np.zeros(6),np.zeros(6),period)
+        plan=_plan_curve(model,start,curve,period,validation,segment_budget)
+        return plan,dict(duration_s=period,position_radius_bound_m=pt,angle_radius_bound_rad=at,
+            native_stop_verified=False,native_interpolation_verified=False,
+            position_stop_s=period,rotation_stop_s=period)
     known_infeasible={'cartesian_reference_ik_unreachable','cartesian_reference_ik_branch',
         'cartesian_reference_singular','cartesian_reference_joint_bounds','cartesian_reference_rate_1',
         'cartesian_reference_rate_2','cartesian_reference_rate_3','cartesian_reference_rate_reserve',
@@ -578,7 +678,13 @@ def plan_cartesian_braking(model,start,*,period=.08,durations=(.8,.96,1.04,1.12,
             low,_=_range((derivative[:,part]@tangent).reshape(-1,1))
             if low[0]<-1e-9:reversed_chart=True
         if reversed_chart:continue
-        try:plan=plan_cartesian_reference(model,start,target,duration=duration,period=period,**validation)
+        try:
+            if method=='joint_fit':
+                curve=_curve_from_reference(model,start,target,duration)
+                plan=_fit_braking_curve(model,start,curve,period,validation,segment_budget)
+            else:
+                plan=plan_cartesian_reference(model,start,target,duration=duration,period=period,
+                    segment_budget=segment_budget,**validation)
         except ValueError as error:
             if str(error) not in known_infeasible:raise
             continue
@@ -606,7 +712,9 @@ def plan_cartesian_braking(model,start,*,period=.08,durations=(.8,.96,1.04,1.12,
             key=lambda pair:(pair[0],pair[1][0]+pair[2][0]))
         for duration,p,r in pairs:
             curve=SplitCartesianBrakeCurve(pose,velocity,acceleration,p[0],r[0])
-            try:plan=_plan_curve(model,start,curve,period,validation)
+            try:
+                planner=_fit_braking_curve if method=='joint_fit' else _plan_curve
+                plan=planner(model,start,curve,period,validation,segment_budget)
             except ValueError as error:
                 if str(error) not in known_infeasible:raise
                 continue
