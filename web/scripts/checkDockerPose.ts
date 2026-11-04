@@ -66,7 +66,8 @@ try{
   const initial=[...state.actual_tcp.p],handOrigin=[...hand],initialSteps=state.finite_position.entered_steps;
   grip=true;await wait(()=>state.finite_position.phase==='executing','continuation_start');
   const since=performance.now();let peak=0,maxJointSpan=0;const joints=[...state.actual_q];
-  while(performance.now()-since<40000){
+  const holdMs=process.argv.includes('--hold-90')?90000:40000;
+  while(performance.now()-since<holdMs){
    const t=(performance.now()-since)/1000;
    const u=t<10?t/10:t<22?1:t<32?(32-t)/10:0;
    hand=[handOrigin[0]+.015*u,handOrigin[1],handOrigin[2]];
@@ -76,9 +77,9 @@ try{
       ||state.finite_position.phase==='ready')throw Error('continuation_interrupted:'+JSON.stringify(state.finite_position));
    await sleep(25);
   }
-  if(peak<.022||state.finite_position.entered_steps-initialSteps<400||lastPoseSeq<1024)throw Error('continuation_insufficient');
+  if(peak<.022||state.finite_position.entered_steps-initialSteps<Math.floor(holdMs/80*.8)||lastPoseSeq<1024)throw Error('continuation_insufficient');
   grip=false;input.release();await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','continuation_release');
-  console.log('PASS single Grip >40s, >400 points, beyond 20mm, sequence wrap',JSON.stringify({peak,maxJointSpan,lastPoseSeq}));
+  console.log(`PASS single Grip >${holdMs/1000}s, beyond 20mm, sequence wrap`,JSON.stringify({peak,maxJointSpan,lastPoseSeq}));
   const stationary=[...state.actual_tcp.p];grip=true;
   await wait(()=>state.finite_position.phase==='executing','boundary_start');
   hand=[hand[0]+.06,hand[1],hand[2]]; // +120mm target outside fixed 100mm Grip box.

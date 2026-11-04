@@ -166,6 +166,7 @@ local ok,err=pcall(function()
             end
             if boundary then finish=true;return end
             if timestamp()-current.captured_ms+1>=100 then
+                print('POSE_MOTION_EXPIRED',timestamp(),current.captured_ms,current.sequence_mod,reader.last_capture,reader.max_read_ms,reader.max_age_ms)
                 finish=true;print('LIVE_EXPIRED',timestamp()-start,moves);return
             end
             if equivalent_pose(goal.solved_pose,current.pose) then
@@ -200,6 +201,7 @@ local ok,err=pcall(function()
         finish=true
     end)
     wait_all(receive,plan,motion)
+    print('POSE_INPUT_METRICS',reader.max_read_ms,reader.max_age_ms)
     assert(not failure,tostring(failure))
     if boundary then print('LIVE_BOUNDARY',timestamp()-start,boundary) end
     print('LIVE_RELEASE',timestamp()-start,moves)

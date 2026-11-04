@@ -21,9 +21,11 @@ local function fake()
         if f.hook then f.hook(ch) end
         return value
     end
-    function f.reader(epoch)
+    function f.reader(epoch,bulk)
         return mailbox.new(f.read,function() return f.now end,epoch or f.now,
-            function() assert(f.allowed,'revoked') end)
+            function() assert(f.allowed,'revoked') end,bulk and function(ch,n)
+                local result={};for i=1,n do result[i]=f.read(ch+i-1) end;return result
+            end or nil)
     end
     function f.publish(bank,stamp,seq,x)
         local offset=240+bank*8
@@ -55,6 +57,34 @@ end
 
 local ok,err=pcall(function()
     test('empty',function() local f=fake();assert(f.reader().read_latest()==nil) end)
+    test('clock_diagnostic_preserves_rejection',function()
+        for _,invalid in ipairs({false,1000.5,999}) do
+            local f=fake();local r=f.reader();f.now=invalid
+            expect_error(r.read_latest,'pose_mailbox_clock')
+            assert(r.closed and not r.busy,'clock_diagnostic_masked_rejection')
+        end
+    end)
+    test('batched_header_sandwich',function()
+        for bank=0,1 do
+            for field=1,7 do
+                local f=fake();f.publish(bank,1000,1,1000);local r=f.reader(1000,true)
+                local reads=0
+                f.hook=function(ch)
+                    reads=reads+1
+                    if reads>9 and ch==240+bank*8+field then
+                        f.hook=nil;f.now=1001;f.publish(bank,1001,2,2000)
+                    end
+                end
+                assert(r.read_latest()==nil,'torn_batch_accepted')
+                assert(r.read_latest().sequence_mod==2,'new_batch_missing')
+            end
+        end
+        local f=fake();f.publish(0,1000,1,1000)
+        local original=f.read;local calls=0
+        f.read=function(ch) calls=calls+1;return original(ch) end
+        assert(f.reader(1000,true).read_latest().sequence_mod==1)
+        assert(calls==17,'batch_layout') -- 9 header-batch fields, 7 payload, 1 recheck.
+    end)
     test('fresh_ik_following',function()
         local g={sample={captured_ms=1000},solved_pose={x=0}}
         local c={captured_ms=1020,pose={x=.006}}

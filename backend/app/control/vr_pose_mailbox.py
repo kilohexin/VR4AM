@@ -79,6 +79,7 @@ class PoseMailboxWriter:
         self.latest = None
         self.last_seq = self.written_seq = 0
         self.last_stamp_ns = self.last_controller_ms = -1
+        self.last_written_capture_ns = None
         self.active = 1
         self.opened = self.closed = self.unknown = self.busy = False
         self.read_unknown = False
@@ -180,6 +181,7 @@ class PoseMailboxWriter:
             await self._write(offset, word, captured_ns)
             self._fresh(captured_ns)
             self.active, self.written_seq = bank, seq
+            self.last_written_capture_ns = captured_ns
             return True
         finally:
             self.busy = False

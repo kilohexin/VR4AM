@@ -21,6 +21,8 @@ CONTRACT_CHECKS = {
     'clock_wrap', 'quaternion_rejected', 'rotation_conventions',
     'absolute_joint_reference',
     'fresh_ik_following',
+    'batched_header_sandwich',
+    'clock_diagnostic_preserves_rejection',
 }
 
 

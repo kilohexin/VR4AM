@@ -28,7 +28,8 @@ end
 
 function M.new(io, clock, not_before, authorize, read_many)
     assert(type(not_before)=='number' and not_before>=0 and not_before==math.floor(not_before), 'pose_mailbox_epoch')
-    local self={closed=false,busy=false,last_now=not_before,last_capture=nil,last_word=nil,last_values=nil}
+    local self={closed=false,busy=false,last_now=not_before,last_capture=nil,last_word=nil,last_values=nil,
+        max_read_ms=0,max_age_ms=0,last_headers={0,0}}
     local function check()
         assert(not self.closed, 'pose_mailbox_reader_retired')
         authorize()
@@ -46,7 +47,10 @@ function M.new(io, clock, not_before, authorize, read_many)
     end
     local function no_fresh_sample()
         local now=check()
-        assert(not self.last_capture or now-self.last_capture+1<TTL,'pose_mailbox_input_expired')
+        if self.last_capture and now-self.last_capture+1>=TTL then
+            print('POSE_MAILBOX_EXPIRED',now,self.last_capture,self.last_headers[1],self.last_headers[2],self.max_read_ms,self.max_age_ms)
+            error('pose_mailbox_input_expired')
+        end
         return nil
     end
     local function read(channel)
@@ -57,8 +61,18 @@ function M.new(io, clock, not_before, authorize, read_many)
         return value
     end
     local function latest()
-        check()
-        local heads={read(BASE),read(BASE+SIZE)}
+        self.read_started=check()
+        local raw,heads
+        if read_many then
+            -- Only the two headers are used from this first batch. Payload
+            -- must be read AFTER it returns, then its chosen header rechecked.
+            -- Never assume that fields inside a batch are read in order.
+            check();raw=read_many(BASE,SIZE+1);check()
+            assert(type(raw)=='table' and #raw==SIZE+1,'pose_mailbox_payload')
+            assert(integer(raw[1]) and integer(raw[SIZE+1]),'pose_mailbox_signal')
+            heads={raw[1],raw[SIZE+1]}
+        else heads={read(BASE),read(BASE+SIZE)} end
+        self.last_headers=heads
         local now=check()
         local selected,capture=nil,nil
         for bank=1,2 do
@@ -84,6 +98,7 @@ function M.new(io, clock, not_before, authorize, read_many)
         end
         if read(offset)~=word then return no_fresh_sample() end
         now=check()
+        self.max_age_ms=math.max(self.max_age_ms,now-capture+1)
         assert(now-capture+1<TTL, 'pose_mailbox_input_expired')
         if capture==self.last_capture then
             assert(word==self.last_word, 'pose_mailbox_target_mutated')
@@ -96,7 +111,11 @@ function M.new(io, clock, not_before, authorize, read_many)
     function self.read_latest()
         assert(not self.busy, 'pose_mailbox_read_inflight')
         self.busy=true
+        self.read_started=nil
         local ok,result=pcall(latest)
+        if self.read_started then
+            self.max_read_ms=math.max(self.max_read_ms,self.last_now-self.read_started)
+        end
         self.busy=false
         if not ok then self.closed=true;error(result) end
         return result

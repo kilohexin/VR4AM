@@ -82,6 +82,22 @@ async def test_complete_xr_pose_through_mapping_bulk_transport_and_known_cleanup
     assert lease.owner is None and s.completed and io.values[240]==io.values[248]==0
 
 
+async def test_diagnostics_bound_history_and_keep_original_capture_times():
+    ns,io,lease,s,hand,_=await rig()
+    s.offer(intent(ns[0],1,hand));s.start()
+    await spin_until(lambda:s.writer.written_seq==1)
+    for seq in range(2,25):
+        ns[0]+=20_000_000
+        s.offer(intent(ns[0],seq,hand))
+        await spin_until(lambda:s.writer.written_seq==seq)
+    await s.withdraw()
+    assert len(s.publish_tail)==16 and s.publish_tail[0]['seq']==9
+    assert s.publish_tail[-1]['capture_ns']==ns[0] and s.publish_tail[-1]['age_ms']==0
+    assert s.max_offer_gap_ns==20_000_000 and s.max_publish_gap_ns==20_000_000
+    # Diagnostic completion never releases a controller lease or clears signals.
+    assert lease.owner is s.writer.token and not s.completed
+
+
 async def test_normal_release_waits_for_known_inflight_write_without_cancelling_it():
     ns,io,lease,s,hand,_=await rig()
     entered,finish=asyncio.Event(),asyncio.Event()

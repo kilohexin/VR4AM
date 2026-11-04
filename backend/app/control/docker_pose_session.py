@@ -140,12 +140,17 @@ class DockerPoseSession(DockerPvatSession):
             expired = False
             async with asyncio.timeout(POSE_PROFILE.duration_ms/1000+8):
                 while line := await proc.stdout.readline():
+                    observed_ns=self.clock()
                     fields = line.decode('utf-8', errors='replace').strip().split('\t')
-                    await self.recorder.write_event(dict(kind='docker_pose_controller', fields=fields), self.clock())
+                    await self.recorder.write_event(dict(kind='docker_pose_controller', fields=fields), observed_ns)
                     if fields[0] == 'LIVE_READY':
                         if anchor[0] is not None:
                             raise ValueError('pose_duplicate_ready')
-                        anchor[0] = (self.clock(), int(fields[1]))
+                        # Bind to observation, before awaiting the recorder. Its
+                        # latency must not age every future input timestamp.
+                        anchor[0] = (observed_ns, int(fields[1]))
+                        await self.recorder.write_event(dict(kind='docker_pose_anchor',
+                            recording_delay_ms=(self.clock()-observed_ns)/1e6),self.clock())
                         snapshot = await a._read_snapshot(read_purpose='position_progress')
                         self.check()
                         intent = self.gate.latest
@@ -203,4 +208,6 @@ class DockerPoseSession(DockerPvatSession):
                 await self.pump.withdraw()
                 await self.recorder.write_event(dict(kind='docker_pose_input_end',reason=self.pump.reason,
                     written_seq=self.pump.writer.written_seq,max_publish_ms=self.pump.max_publish_ns/1e6,
+                    max_offer_gap_ms=self.pump.max_offer_gap_ns/1e6,max_offer_age_ms=self.pump.max_offer_age_ns/1e6,
+                    max_publish_gap_ms=self.pump.max_publish_gap_ns/1e6,publish_tail=self.pump.publish_tail,
                     unknown_write=self.pump.writer.unknown,unknown_read=self.pump.writer.read_unknown),self.clock())

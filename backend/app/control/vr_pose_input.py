@@ -29,6 +29,9 @@ class VRPoseInput:
         self.last_ns = None
         self.session = None
         self.max_publish_ns = 0
+        self.max_offer_gap_ns = self.max_offer_age_ns = self.max_publish_gap_ns = 0
+        self.last_published_ns = None
+        self.publish_tail = []
         self.wake = asyncio.Event()
 
     def _check(self):
@@ -76,6 +79,9 @@ class VRPoseInput:
                 or (self.last_ns is not None and intent.received_ns < self.last_ns)):
             self._retire('vr_pose_input_identity')
             raise ValueError('vr_pose_input_identity')
+        if self.last_ns is not None:
+            self.max_offer_gap_ns=max(self.max_offer_gap_ns,intent.received_ns-self.last_ns)
+        self.max_offer_age_ns=max(self.max_offer_age_ns,self.clock()-intent.received_ns)
         if (not 0 <= self.clock() - intent.received_ns < TTL_NS
                 or self.last_ns is None or not 0 <= self.clock() - self.last_ns < TTL_NS):
             self._retire('vr_pose_input_expired')
@@ -123,7 +129,16 @@ class VRPoseInput:
                 self.wake.clear()
                 started=self.clock()
                 if await self.writer.publish_latest():
-                    self.max_publish_ns=max(self.max_publish_ns,self.clock()-started)
+                    now=self.clock()
+                    gap=now-self.last_published_ns if self.last_published_ns is not None else 0
+                    self.max_publish_gap_ns=max(self.max_publish_gap_ns,gap)
+                    self.last_published_ns=now
+                    self.max_publish_ns=max(self.max_publish_ns,now-started)
+                    self.publish_tail.append(dict(seq=self.writer.written_seq,host_ns=now,
+                        capture_ns=self.writer.last_written_capture_ns,
+                        age_ms=(now-self.writer.last_written_capture_ns)/1e6,
+                        duration_ms=(now-started)/1e6,gap_ms=gap/1e6))
+                    self.publish_tail=self.publish_tail[-16:]
                 try:
                     await asyncio.wait_for(self.wake.wait(), .02)
                 except TimeoutError:

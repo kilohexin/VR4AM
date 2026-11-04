@@ -64,7 +64,8 @@ def test_extended_profile_keeps_fixed_grip_and_absolute_joint_limits():
 
 
 @pytest.mark.parametrize('expired',[False,True])
-async def test_delayed_start_keeps_grip_anchor_and_known_release_cleans_up(monkeypatch,expired):
+@pytest.mark.parametrize('record_delay',[0,20_000_000])
+async def test_delayed_start_keeps_grip_anchor_and_known_release_cleans_up(monkeypatch,expired,record_delay):
     from app.digital_twin import docker_runtime
     import app.control.docker_pose_session as module
     now,a,s=rig()
@@ -75,6 +76,13 @@ async def test_delayed_start_keeps_grip_anchor_and_known_release_cleans_up(monke
     s.offer(hand(now[0],2,.001))
     a._snapshot.captured_ns=now[0]
     captured=[]
+    stamps=[]
+    async def record(event,stamp):
+        if event.get('kind')=='docker_pose_controller' and event['fields'][0]=='LIVE_READY' and record_delay:
+            now[0]+=record_delay
+            a._snapshot.captured_ns=now[0]
+            s.offer(hand(now[0],3,.001))
+    s.recorder.write_event=AsyncMock(side_effect=record)
     class Input:
         def write(self,data):assert b'product_bounds' in data
         async def drain(self):pass
@@ -88,10 +96,11 @@ async def test_delayed_start_keeps_grip_anchor_and_known_release_cleans_up(monke
                 async with asyncio.timeout(1):
                     while client.values[240]==0:await asyncio.sleep(.001)
                 captured.append(client.values[241])
+                stamps.append(client.values[240]//1024)
                 return b'LIVE_POINT\t20\t2\t.3\t0\t.4\t0\n'
             if self.n==3:
                 if expired:return b'LIVE_EXPIRED\t300\t1\n'
-                s.offer(PositionIntent('xr-finite-pose',2,3,now[0],'release',(0,0,0)))
+                s.offer(PositionIntent('xr-finite-pose',2,4,now[0],'release',(0,0,0)))
                 return b'LIVE_QUIET\t500\n'
             if expired and self.n==4:return b'LIVE_QUIET\t500\n'
             return b'LIVE_DONE\ttrue\tnil\t1\n'
@@ -100,6 +109,7 @@ async def test_delayed_start_keeps_grip_anchor_and_known_release_cleans_up(monke
     monkeypatch.setattr(module.asyncio,'create_subprocess_exec',AsyncMock(return_value=proc))
     await s._run()
     assert captured==[302000]  # +2mm from the ORIGINAL Grip zero, not startup hand.
+    assert stamps==[1000+record_delay//1_000_000]  # Logging does not backdate future input.
     assert s.phase==('hold' if expired else 'ready') and not a.position_busy and a._latched_fault is None
     if expired:assert s.reason=='position_input_expired'
     assert s.pump.completed and s.pump.lease.owner is None
