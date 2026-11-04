@@ -261,3 +261,36 @@ def test_remote_wrist_goal_does_not_suppress_a_small_lift_in_separate_demand_mod
     separate_lift=model.pose(separate.state.q).p[2]-base.p[2]
     assert common_lift>=-1e-9 and separate_lift>2*max(0.,common_lift)
     assert model.pose(separate.state.q).p[:2]==pytest.approx(base.p[:2],abs=1e-8)
+
+
+def test_optimizer_constraint_jacobians_match_independent_central_differences(model,monkeypatch):
+    import app.control.cartesian_pvat_reference as module
+    original=module.minimize;checked=[]
+    def verified_minimize(*args,**kwargs):
+        x=np.arange(1.,7.)*.02;h=1e-5
+        for item in kwargs['constraints']:
+            if not isinstance(item,dict):continue
+            numeric=np.column_stack([(item['fun'](x+np.eye(6)[i]*h)-item['fun'](x-np.eye(6)[i]*h))/(2*h)
+                for i in range(6)])
+            assert item['jac'](x)==pytest.approx(numeric,abs=1e-7)
+            checked.append(True)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(module,'minimize',verified_minimize)
+    initial=ready();base=model.pose(initial.q);follower=OfflineCartesianFollower(model,initial)
+    target=pitch(base,.6).model_copy(update={'p':(base.p[0],base.p[1],base.p[2]+.004)})
+    for _ in range(5):follower.advance(target)
+    assert len(checked)>=2
+
+
+@pytest.mark.parametrize('omega',[(0.,0.,0.),(.2,-.15,.1)])
+def test_angular_endpoint_complex_step_matches_real_differences_for_both_formula_branches(omega):
+    from app.control.cartesian_pvat_reference import _angular_endpoint
+    omega=np.array(omega);alpha=np.array([.1,.05,-.1]);gamma=np.array([.2,-.1,.3])
+    complex_jac=[];numeric=[]
+    for axis in range(3):
+        c=gamma.astype(complex);c[axis]+=1e-24j
+        complex_jac.append(np.concatenate(_angular_endpoint(c,omega,alpha,.08)).imag/1e-24)
+        h=np.eye(3)[axis]*1e-5
+        numeric.append((np.concatenate(_angular_endpoint(gamma+h,omega,alpha,.08))
+            -np.concatenate(_angular_endpoint(gamma-h,omega,alpha,.08)))/(2e-5))
+    assert np.array(complex_jac)==pytest.approx(np.array(numeric),abs=1e-7)

@@ -1,0 +1,77 @@
+import numpy as np
+import pytest
+from scipy.spatial.transform import Rotation
+
+import app.control.cartesian_reference_bundle as module
+from app.control.cartesian_pvat_reference import JointReference,MdhReferenceModel
+from app.commissioning.native_jog_mdh import MdhTool
+
+
+def rig():
+    model=MdhReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
+    start=JointReference((0.,-.8,1.4,-.6,1.57,0.))
+    supervisor=module.OfflineReferenceSupervisor(model,start)
+    base=model.pose(start.q)
+    target=base.model_copy(update={'q':tuple((Rotation.from_quat(base.q)*Rotation.from_euler('x',.15)).as_quat())})
+    return model,supervisor,target
+
+
+def test_each_admitted_reference_carries_an_immutable_contiguous_zero_rate_tail():
+    _,s,target=rig()
+    for _ in range(12):
+        before=s.state;packet=s.advance(target)
+        assert packet.segment.start==before and packet.segment.end==s.state
+        assert packet.braking_tail[0].start==packet.segment.end
+        chain=(packet.segment,)+packet.braking_tail
+        assert all(a.end==b.start for a,b in zip(chain,chain[1:]))
+        assert np.linalg.norm(chain[-1].end.v)<1e-8 and np.linalg.norm(chain[-1].end.a)<1e-8
+        assert not packet.native_execution_verified
+
+
+def test_rejected_new_candidate_consumes_the_previous_approved_tail_and_requires_capture(monkeypatch):
+    _,s,target=rig();accepted=s.advance(target);tail=accepted.braking_tail
+    def unavailable(*a,**kw):raise ValueError('cartesian_brake_no_feasible_plan')
+    monkeypatch.setattr(module,'plan_cartesian_braking',unavailable)
+    packets=[s.advance(target)]
+    while s.phase!='ready':packets.append(s.advance(target))
+    assert tuple(p.segment for p in packets)==tail
+    assert all(p.mode=='braking' and p.reason=='no_candidate_with_braking_tail' for p in packets)
+    with pytest.raises(ValueError,match='requires_capture'):s.advance(target)
+
+
+def test_release_needs_no_new_planning_and_never_retargets_to_the_release_pose(monkeypatch):
+    _,s,target=rig();packet=s.advance(target)
+    monkeypatch.setattr(module,'plan_cartesian_braking',lambda *a,**kw:pytest.fail('tail already approved'))
+    released=s.finish()
+    assert released.segment==packet.braking_tail[0] and released.reason=='release'
+
+
+def test_model_change_refuses_to_reuse_a_previously_approved_packet():
+    model,s,target=rig();s.advance(target);model.upper[0]-=.01
+    with pytest.raises(ValueError,match='model_changed'):s.finish()
+    assert s.phase=='fault'
+
+
+def test_unknown_planning_error_is_not_treated_as_a_known_mathematical_backoff(monkeypatch):
+    _,s,target=rig();before=s.state
+    def unknown(*a,**kw):raise RuntimeError('unknown')
+    monkeypatch.setattr(module,'plan_cartesian_braking',unknown)
+    with pytest.raises(RuntimeError):s.advance(target)
+    assert s.state==before and s.phase=='fault'
+
+
+@pytest.mark.parametrize('code',['cartesian_reference_nonfinite_or_shape','stop_unverified',
+    'cartesian_reference_bundle_chain'])
+def test_bad_data_unknown_stop_and_internal_chain_errors_do_not_use_mathematical_backoff(monkeypatch,code):
+    _,s,target=rig();before=s.state
+    def failure(*a,**kw):raise ValueError(code)
+    monkeypatch.setattr(module,'plan_cartesian_braking',failure)
+    with pytest.raises(ValueError,match=code):s.advance(target)
+    assert s.state==before and s.phase=='fault'
+
+
+def test_execution_head_mismatch_faults_instead_of_splicing_an_old_braking_tail():
+    _,s,target=rig();s.advance(target)
+    s.state=JointReference(tuple(np.array(s.state.q)+.001))
+    with pytest.raises(ValueError,match='bundle_chain'):s.finish()
+    assert s.phase=='fault'

@@ -129,3 +129,27 @@
 ```powershell
 .venv/Scripts/python.exe scripts/check_cartesian_pvat_reference.py --replay-frozen --check-braking --frozen-log logs/commissioning/20261104T095439Z-e8ee1b59/session.jsonl --output .tmp/pitch-reversal-20261104/brake-audit.json
 ```
+
+## 原厂零运动核对与全量减速准入
+
+新增`scripts/check_native_cartesian_reference.py`：默认只预览，仅接受固定官方镜像SHA256的本机Docker，实际执行前再次核对实例身份、network=none且只有none网络、无端口/挂载/设备/特权；允许按官方镜像标签或同一不可变镜像ID创建。初次预览因旧识别仅接受标签而拒绝按镜像ID创建的实例，未进入计算传输；新增识别仍严格核对实际镜像摘要。没有修改原有通用准入。
+
+新Lua程序只可调用`get_tcp`、`get_kin_data`和`kinematics_forward`，无运动、启动机器人、停止、夹爪、信号或设置写入；测试检查API白名单。程序要求零工具、前后关节状态未变且报告零速度，超时保留部分输出不重试。普通运动参考32段及4条有限减速曲线共170个端点/中点通过原厂FK对照：最大位置数值差约2.2e-16m、矩阵分量差约6.9e-16、单查询最高21ms。这是虚拟控制器的数值一致性，不是物理精度或实际插值证据。
+
+本机报告`.tmp/pitch-reversal-20261104/native-reference-fk.json`，SHA256 `710689c74d6d95e628a910ebce826b7ddb902510f265b6c50b9d1a8ea312046f`，程序SHA256 `1b999feda71ad5ddd8e6390c096bc3249f10c6309a8e68d6bb581507a6c13da5`。计算已返回完成、传输进程码0后，专用容器`vr4arm-native-reference-20261104`停止并保留（容器退出码137、OOM标志false，不称优雅退出），不开放网页/头显入口。
+
+### 扩大收尾检查后发现的阻断
+
+`--check-braking --braking-stride 1`对旧e93版全部1626个参考末状态核对，51处未找到预算内曲线，最早第37步。报告`cartesian-all-state-braking-audited.json`保留全部结果。此前6点抽查的成功不能覆盖这些状态；此结论针对已记录指纹版本，不把后续未执行全量核对的版本自动改判成功。
+
+新增`cartesian_reference_bundle.py`纯数学监控：先验证候选与其完整减速尾段的连续P/V/A和固定工作区，再提交虚拟参考。数学拒绝可降低前瞻需求计算；不能组成配对则消费上一条已验证尾段，不接收旧尾段与错误执行头的拼接，结束后要求重新捕获。只有固定允许的数学拒绝码可退让；非有限数据、未知错误/停止、模型变化、内部断链均进入故障，不清除锁存。未使用SDK，没有自动运动重试。
+
+最终监控回放`cartesian-supervised-final-audited.json`：首个新候选无法配对，消费12段已有尾段，在3.92秒共49个模型参考后结束，参考速度约6e-17rad/s、加速度约8e-17rad/s²，**整体操作失败而非通过**。输入即使在尾段结束前停止，也不能将已拒绝的跟随算为成功。监督模块SHA256 `dd31aa6321e059178f3f431254ceab59b5f2f90e54d44b7fc9c2e798ecbda215`。
+
+此数据包不是实际控制器，也没有传输原子安装、时钟/租约、回执、连接/工具/代次/序号绑定；不允许直接接入网页或真机。未来执行器必须在开始候选之前拥有完整已验证尾段，并以实际执行头为准切换，不能把虚拟参考推进当作硬件接受或到位。
+
+### 导数优化与当前验证
+
+补充了预留制动约束的解析梯度和旋转端点约束的复步梯度，减少SLSQP六维数值差分。复步仅用于纯数学导数，实际参考仍是实数；零角度与一般角度分支均经独立实数中心差分核对。新普通参考模块SHA256 `fdef40024a463235838383497289baea70a168984f24a62e7c2c17f7433bbfbc`，单轮完整1626点最高约47.4ms，P95约25.7ms、P99约31.2ms，无计算超80ms；报告`cartesian-constraint-jacobian-audited.json`。最大高度滞后仍约168mm。
+
+配对监控前段最高约138ms，尚不满足80ms；普通参考的计算结果不能替代含收尾/传输/反馈的执行预算。65项相关回归通过。所有报告的`native_interpolation_verified`、`motion_safety_verified`、`realtime_verified`、`product_admission_complete`仍为false，产品封锁与历史停止未确认保持。

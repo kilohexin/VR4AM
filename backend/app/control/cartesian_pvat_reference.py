@@ -133,8 +133,10 @@ def _cross(a,b):
 def _angular(r,rd,rdd):
     # Spatial omega/alpha for R(t)=Exp(r(t))*R0, including the noncommuting
     # rotation-vector Jacobian terms. Euler component derivatives are invalid.
-    theta=np.linalg.norm(r);dot=float(r@rd)
-    if theta<1e-3:
+    # Analytic extension also permits complex-step differentiation of this
+    # pure formula; actual reference inputs and outputs remain real.
+    theta=np.sqrt(r@r);dot=r@rd
+    if abs(theta)<1e-3:
         a=.5-theta**2/24+theta**4/720
         b=1/6-theta**2/120+theta**4/5040
         ad=(-1/12+theta**2/180)*dot;bd=(-1/60+theta**2/1260)*dot
@@ -145,6 +147,13 @@ def _angular(r,rd,rdd):
     cross=_cross(r,rd);double=_cross(r,cross)
     return (rd+a*cross+b*double,
         rdd+a*_cross(r,rdd)+b*_cross(r,_cross(r,rdd))+ad*cross+bd*double+b*_cross(rd,cross))
+
+
+def _angular_endpoint(gamma,omega,alpha,dt):
+    local_jerk=gamma-.5*_cross(omega,alpha)
+    r=omega*dt+alpha*dt*dt/2+local_jerk*dt**3/6
+    rd=omega+alpha*dt+local_jerk*dt*dt/2
+    return _angular(r,rd,alpha+local_jerk*dt)
 
 
 class CartesianCurve:
@@ -370,19 +379,34 @@ class OfflineCartesianFollower:
         def reserve(x):
             vn=v+a*dt+x*dt*dt/2;an=a+x*dt
             return np.r_[speed-vn-np.maximum(an,0)**2/(2*braking_jerk),speed+vn-np.maximum(-an,0)**2/(2*braking_jerk)]
+        def reserve_jacobian(x):
+            an=a+x*dt
+            return np.vstack((np.diag(-dt*dt/2-np.maximum(an,0)*dt/braking_jerk),
+                np.diag(dt*dt/2+np.maximum(-an,0)*dt/braking_jerk)))
         task_speed=.8*np.array([self.validation.get('tcp_speed',.15),self.validation.get('angular_speed',.3)])
         task_acceleration=.8*np.array([self.validation.get('tcp_acceleration',.15),self.validation.get('angular_acceleration',.3)])
         def task_rates(x):
             gamma=j@x+bias;vn=twist+acc*dt+gamma*dt*dt/2;an=acc+gamma*dt
             # Integrate the same rotation-vector cubic used by the candidate;
             # spatial angular jerk is not an independent scalar polynomial.
-            local_jerk=gamma[3:]-.5*np.cross(twist[3:],acc[3:])
-            r=twist[3:]*dt+acc[3:]*dt*dt/2+local_jerk*dt**3/6
-            rd=twist[3:]+acc[3:]*dt+local_jerk*dt*dt/2
-            vn[3:],an[3:]=_angular(r,rd,acc[3:]+local_jerk*dt)
+            vn[3:],an[3:]=_angular_endpoint(gamma[3:],twist[3:],acc[3:],dt)
             return np.r_[1-np.array([np.linalg.norm(vn[:3]),np.linalg.norm(vn[3:])])/task_speed,
                 1-np.array([np.linalg.norm(an[:3]),np.linalg.norm(an[3:])])/task_acceleration]
-        constraints=[dict(type='ineq',fun=reserve),dict(type='ineq',fun=task_rates)]
+        def task_jacobian(x):
+            gamma=j@x+bias
+            vn=twist+acc*dt+gamma*dt*dt/2;an=acc+gamma*dt
+            vn[3:],an[3:]=_angular_endpoint(gamma[3:],twist[3:],acc[3:],dt)
+            angular_v=np.empty((3,3));angular_a=np.empty((3,3));h=1e-24
+            for axis in range(3):
+                perturbation=np.array(gamma[3:],dtype=complex);perturbation[axis]+=h*1j
+                w,alpha=_angular_endpoint(perturbation,twist[3:],acc[3:],dt)
+                angular_v[:,axis]=w.imag/h;angular_a[:,axis]=alpha.imag/h
+            derivatives=(dt*dt/2*j[:3],angular_v@j[3:],dt*j[:3],angular_a@j[3:])
+            values=(vn[:3],vn[3:],an[:3],an[3:]);limits=(*task_speed,*task_acceleration)
+            return np.array([-value@derivative/(np.linalg.norm(value)*limit) if np.linalg.norm(value)>1e-15
+                else np.zeros(6) for value,derivative,limit in zip(values,derivatives,limits)])
+        constraints=[dict(type='ineq',fun=reserve,jac=reserve_jacobian),
+            dict(type='ineq',fun=task_rates,jac=task_jacobian)]
         stationary=(np.abs(twist[:3])<1e-8)&(np.abs(acc[:3])<1e-8)
         held_axes=np.flatnonzero(stationary&(np.abs(error[:3])<1e-8))
         directed_axes=np.flatnonzero(stationary&(np.abs(error[:3])>=1e-8))
