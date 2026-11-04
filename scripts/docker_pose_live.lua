@@ -125,7 +125,9 @@ local ok,err=pcall(function()
                 assert(joints and #joints==6,'pose_ik_unreachable')
                 for i=1,6 do
                     assert(joints[i]==joints[i] and math.abs(joints[i])<1000000,'pose_ik_nonfinite')
-                    assert(math.abs(joints[i]-seed[i])<.15,'pose_ik_branch')
+                    if math.abs(joints[i]-seed[i])>=.15 then
+                        boundary='ik_branch';finish=true;return
+                    end
                     assert(math.abs(f.actual_joint_pose[i]-tracker.q[i])<.03,'pose_tracking_error')
                 end
                 boundary=boundary or product_bounds(sample.pose,joints)
@@ -159,12 +161,19 @@ local ok,err=pcall(function()
             local goal=planned
             local current=latest
             boundary=product_bounds(current.pose,nil)
+            for _,axis in ipairs({'x','y','z'}) do
+                if math.abs(current.pose[axis]-base[axis])>pose_profile.target_tcp_span then boundary=boundary or 'reference_boundary' end
+            end
             if boundary then finish=true;return end
             if timestamp()-current.captured_ms+1>=100 then
                 finish=true;print('LIVE_EXPIRED',timestamp()-start,moves);return
             end
             if equivalent_pose(goal.solved_pose,current.pose) then
                 goal={sample=current,joints=goal.joints,feedback=goal.feedback};waiting=0
+            elseif tracker_module.fresh_solution(goal,current,timestamp(),equivalent_pose) then
+                -- Keep the original solved sample's deadline. This is bounded
+                -- tracking lag (10mm/.05rad), not an IK cache-centre update.
+                waiting=0
             else
                 waiting=waiting+1
                 if waiting>5 then boundary='planning_lag';finish=true;return end

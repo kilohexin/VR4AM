@@ -48,10 +48,11 @@ try{
  await wait(()=>state.finite_position.phase==='executing','pose_started');
  const base=[...state.actual_tcp.p],steps=state.finite_position.entered_steps;
  const start=performance.now();
- while(performance.now()-start<2000){hand=[.0015*Math.min(1,(performance.now()-start)/1000),0,0];await sleep(20);}
+ const humanSpeed=process.argv.includes('--human-speed');
+ while(performance.now()-start<2000){hand=[(humanSpeed?.015:.0015)*Math.min(1,(performance.now()-start)/(humanSpeed?400:1000)),0,0];await sleep(20);}
  await wait(()=>state.finite_position.entered_steps>=steps+25&&state.actual_tcp.p[0]-base[0]>.001,'full_pose_progress');
  const fixed=state.actual_tcp.p[0];await sleep(500);
- if(state.actual_tcp.p[0]-base[0]>.005)throw Error('stationary_hand_kept_integrating');
+ if(state.actual_tcp.p[0]-base[0]>(humanSpeed?.035:.005))throw Error('stationary_hand_kept_integrating');
  grip=false;input.release();await wait(()=>state.finite_position.phase==='ready'&&state.robot_state==='IDLE','release');
  console.log('PASS actual XR module -> full hand pose -> controller IK/PVAT, fixed hand, release',state.finite_position.entered_steps);
  // Re-grip at a different hand origin must capture a new zero, not replay.

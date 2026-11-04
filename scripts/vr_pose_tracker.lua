@@ -3,21 +3,34 @@
 local M={}
 local function finite(x) return type(x)=='number' and x==x and math.abs(x)<1000000 end
 local function clamp(x,lo,hi) return math.max(lo,math.min(hi,x)) end
+function M.fresh_solution(goal,current,now,similar)
+    -- A moving hand need not coincide with the last completed IK. Its genuine
+    -- sample age still governs use; never relabel it with the latest timestamp.
+    return now>=goal.sample.captured_ms and now-goal.sample.captured_ms+1<100
+        and now>=current.captured_ms and now-current.captured_ms+1<100
+        and similar(goal.solved_pose,current.pose,.010,.05)
+end
 local function velocity_jerk_ceiling(v,a,dt)
     -- Keep enough velocity headroom to cancel positive acceleration with the
     -- available jerk. Checking only next tick's velocity can enter a state
     -- from which no bounded jerk can avoid exceeding the following tick.
-    local reserve=.06-v
-    if a>1e-10 and .5*a*dt>reserve then
-        assert(reserve>0,'pose_tracker_infeasible_rate')
-        -- Acceleration crosses zero inside this interval; bound its interior
-        -- velocity peak as well as the endpoint.
-        return -a*a/(2*reserve)
+    local function safe(j)
+        local nv=v+a*dt+j*dt*dt/2
+        local na=a+j*dt
+        local peak=math.max(v,nv)
+        if a>0 and j<0 and na<0 then peak=math.max(peak,v-a*a/(2*j)) end
+        -- Only POSITIVE final acceleration needs upper braking reserve.
+        -- Squaring negative acceleration incorrectly constrains reversals.
+        return peak<=.06+1e-13 and nv+math.max(na,0)^2<=.06+1e-13
     end
-    local A=dt*dt -- dt^2 / (2*maximum_jerk), maximum_jerk=.5
-    local B=.5*dt*dt+2*a*dt
-    local C=v+a*dt+a*a-.06
-    return (-B+math.sqrt(math.max(0,B*B-4*A*C)))/(2*A)
+    if safe(.5) then return .5 end
+    assert(safe(-.5),'pose_tracker_infeasible_rate')
+    local lo,hi=-.5,.5
+    for i=1,44 do
+        local middle=(lo+hi)/2
+        if safe(middle) then lo=middle else hi=middle end
+    end
+    return lo
 end
 
 function M.new(origin,bounds)

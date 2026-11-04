@@ -33,8 +33,10 @@ function M.new(io, clock, not_before, authorize, read_many)
         assert(not self.closed, 'pose_mailbox_reader_retired')
         authorize()
         local now=clock()
-        assert(type(now)=='number' and now==math.floor(now) and now>=self.last_now
-            and now-not_before<MOD/2, 'pose_mailbox_clock')
+        local valid=type(now)=='number' and now==math.floor(now) and now>=self.last_now
+            and now-not_before<MOD/2
+        if not valid then print('POSE_MAILBOX_CLOCK',now,self.last_now,not_before) end
+        assert(valid, 'pose_mailbox_clock')
         self.last_now=now
         return now
     end

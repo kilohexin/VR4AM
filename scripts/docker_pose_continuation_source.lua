@@ -6,8 +6,10 @@
             if not __BOUNDARY__ and t>=44 then break end
             assert(not previous or now-previous<100,'continuation_source_gap')
             local u=t<10 and t/10 or t<22 and 1 or t<32 and (32-t)/10 or 0
+            if __HUMAN__ then u=t<.4 and t/.4 or t<6 and 1 or t<6.4 and (6.4-t)/.4 or 0 end
             local p={};for key,value in pairs(base) do p[key]=value end
-            p.x=p.x+(__BOUNDARY__ and (t>=2 and .12 or 0) or .03*u)
+            p.x=p.x+(__BOUNDARY__ and (t>=2 and not __BRANCH__ and .12 or 0) or .03*u)
+            if __BRANCH__ and t>=2 then p.rx=p.rx+.3 end
             local sx,cx=math.sin(p.rx/2),math.cos(p.rx/2)
             local sy,cy=math.sin(p.ry/2),math.cos(p.ry/2)
             local sz,cz=math.sin(p.rz/2),math.cos(p.rz/2)

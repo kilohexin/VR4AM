@@ -22,13 +22,15 @@ from app.commissioning.finite_position_site import MdhPositionModel
 
 
 def program(scenario):
-    if scenario not in ('continuation','boundary'):
+    if scenario not in ('continuation','boundary','branch','human'):
         raise ValueError('invalid_continuation_scenario')
     settings=docker_settings().lebai
     _,q=MdhPositionModel.from_settings(settings).forward(settings.teleop_ready_q)
     source=build_pose_program(SimpleNamespace(settings=settings,_position_pitch_reference=q))
     feed=(ROOT/'scripts/docker_pose_continuation_source.lua').read_text(encoding='utf-8')
-    feed=feed.replace('__BOUNDARY__','true' if scenario=='boundary' else 'false')
+    feed=feed.replace('__BOUNDARY__','true' if scenario in ('boundary','branch') else 'false')
+    feed=feed.replace('__BRANCH__','true' if scenario=='branch' else 'false')
+    feed=feed.replace('__HUMAN__','true' if scenario=='human' else 'false')
     marker='    wait_all(receive,plan,motion)'
     if source.count(marker)!=1:
         raise ValueError('continuation_source_marker')
@@ -76,14 +78,14 @@ def analyze(raw,scenario):
         result['x_peak_progress_m']=max(r[2]-origin[0] for r in numeric)
         result['max_tcp_displacement_m']=max(math.dist(r[2:5],origin) for r in numeric)
         result['boundary']=boundary[-1][2] if boundary else None
-        if scenario=='continuation':
+        if scenario in ('continuation','human'):
             result['passed']=bool(len(points)>400 and result['last_point_ms']>43000
                 and result['source_samples']>1024 and result['x_peak_progress_m']>.022
                 and result['sequence_wrap_observed']
                 and result['reference_joint_span_rad']>.08 and not boundary
                 and any(r[0]=='LIVE_EXPIRED' for r in rows))
-        elif scenario=='boundary':
-            result['passed']=bool(result['boundary']=='reference_boundary'
+        elif scenario in ('boundary','branch'):
+            result['passed']=bool(result['boundary']==('ik_branch' if scenario=='branch' else 'reference_boundary')
                                   and result['max_tcp_displacement_m']<.002)
         result['passed']=result['passed'] and result['max_send_gap_ms']<160
     except (ValueError,IndexError):
@@ -111,13 +113,13 @@ def execute(admitted,scenario):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--container',required=True)
-    parser.add_argument('--scenario',choices=('continuation','boundary'),default='continuation')
+    parser.add_argument('--scenario',choices=('continuation','boundary','branch','human'),default='continuation')
     parser.add_argument('--run',action='store_true')
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args();admitted=admission(args.container)
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admitted,scenario=args.scenario,
-            prepare_movej=1,duration_s=44 if args.scenario=='continuation' else 2,
+            prepare_movej=1,duration_s=44 if args.scenario in ('continuation','human') else 2,
             product_grip_span_mm=100,product_window_s=300)))
         return 0
     result=execute(admitted,args.scenario)

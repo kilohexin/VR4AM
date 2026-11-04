@@ -51,6 +51,15 @@ def test_oversized_goal_must_hold_with_no_meaningful_motion():
     assert not m.analyze(trace(True).replace('\t.3\t','\t.31\t'),'boundary')['passed']
 
 
+def test_branch_hold_and_fast_hand_keep_known_completion_contract():
+    raw=trace(True).replace('reference_boundary','ik_branch')
+    assert m.analyze(raw,'branch')['passed']
+    assert not m.analyze(raw.replace('LIVE_QUIET','MISSING_QUIET'),'branch')['passed']
+    assert m.analyze(trace(),'human')['passed']
+    code=m.program('human')
+    assert '__HUMAN__' not in code and '__BRANCH__' not in code
+
+
 def test_uses_exact_product_program_with_injected_synthetic_producer_only():
     code=m.program('continuation')
     assert '__PRODUCT_BODY__' not in code and '__BOUNDARY__' not in code

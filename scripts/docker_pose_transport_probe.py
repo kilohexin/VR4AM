@@ -20,6 +20,7 @@ CONTRACT_CHECKS = {
     'expiry_permanent', 'rollback', 'immutable_duplicate', 'revocation_permanent',
     'clock_wrap', 'quaternion_rejected', 'rotation_conventions',
     'absolute_joint_reference',
+    'fresh_ik_following',
 }
 
 

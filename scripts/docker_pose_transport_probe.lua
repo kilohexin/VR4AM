@@ -55,6 +55,19 @@ end
 
 local ok,err=pcall(function()
     test('empty',function() local f=fake();assert(f.reader().read_latest()==nil) end)
+    test('fresh_ik_following',function()
+        local g={sample={captured_ms=1000},solved_pose={x=0}}
+        local c={captured_ms=1020,pose={x=.006}}
+        local function similar(a,b,p,r)
+            assert(p==.010 and r==.05,'following_envelope')
+            return math.abs(a.x-b.x)<=p
+        end
+        assert(tracker_module.fresh_solution(g,c,1021,similar),'moving_hand_should_follow')
+        assert(g.sample.captured_ms==1000,'old_solution_timestamp_changed')
+        assert(not tracker_module.fresh_solution(g,c,1099,similar),'expired_ik_accepted')
+        assert(not tracker_module.fresh_solution(g,c,999,similar),'rollback_accepted')
+        c.pose.x=.011;assert(not tracker_module.fresh_solution(g,c,1021,similar),'far_target_accepted')
+    end)
     test('absolute_joint_reference',function()
         local lo={-1,-1,-1,-1,-1,-1};local hi={1,1,1,1,1,1}
         local t=tracker_module.new({0,0,0,0,0,0},{joint_min=lo,joint_max=hi})
@@ -77,6 +90,21 @@ local ok,err=pcall(function()
         advance(-.3,300);near(t.q[1],-.3,1e-5)
         advance(.3,300)
         near(t.q[1],.3,1e-5)
+        -- All six axes reverse under moving IK goals, not only one large step.
+        for tick=1,400 do
+            if tick%3==0 then rt_sleep(1) end
+            local goal={};for i=1,6 do goal[i]=.3*math.sin(tick*.13+i) end
+            local ov,oa={},{};for i=1,6 do ov[i]=t.v[i];oa[i]=t.a[i] end
+            local p,v,a=t.advance(goal)
+            for i=1,6 do
+                local j=(a[i]-oa[i])/.08
+                assert(math.abs(j)<=.500000000001,'moving_jerk')
+                for sub=0,10 do
+                    local dt=sub*.008
+                    assert(math.abs(ov[i]+oa[i]*dt+j*dt*dt/2)<=.060000000001,'moving_interior_velocity')
+                end
+            end
+        end
         local steps=t.steps;local previous=t.q[1]
         expect_error(function() t.advance({0,0,0,0,0,1.01}) end,'target_region')
         assert(t.steps==steps and t.q[1]==previous,'reference_rejection_changed_state')
