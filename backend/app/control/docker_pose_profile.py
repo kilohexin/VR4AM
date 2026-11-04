@@ -6,8 +6,8 @@ from dataclasses import dataclass
 class DockerPoseProfile:
     duration_ms: int = 300_000
     maximum_points: int = 3750
-    target_tcp_span_m: float = .100
-    feedback_tcp_span_m: float = .120
+    target_tcp_span_m: float = .300
+    feedback_tcp_span_m: float = .350
     mailbox_ttl_ms: int = 250
     reference_speed_radps: float = .2
     reference_acceleration_radps2: float = .2

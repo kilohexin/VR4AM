@@ -2,6 +2,8 @@
 
 当前主线：**官方 Docker 仿真 → 操作者网页/头显体验 → 后续真机验收**。真机当前不可用，仿真成功不代表真实抓取或制动已通过。
 
+最新修复针对真人抬手：Docker位姿目标固定框扩大至本次零位各轴±300mm，反馈范围±350mm；原全局TCP/关节/朝向保护保留。已知IK不可达或分支/关节边界不追加新数学目标，提示边界并保持最后有效投影，手柄退回可继续；未知调用和实际保护失败仍中止。区域拒绝仅在原停止返回、静止尾段、进程退出及邮箱清理全部已知完成时显示“区域超限，停止已确认”，不再统称停止未确认。旧故障不清除。真人轨迹的仿真回放及退回/活动断连459点通过，最大上升约304mm；启动仍约0.8秒，跟手延迟尚未达标。详见项目状态顶部。
+
 11月4日旋转体验日志确认：4次退出均为手柄目标超出准备位朝向90°，并非Grip超时。最新候选把**朝向目标越界改为限幅提示，可转回继续跟随**，不扩大实际朝向/工作区/关节边界。Docker位姿参考速度由0.06升至0.2rad/s，加速度0.15→0.2rad/s²、jerk 0.5→1rad/s³，保留原阻尼，周期仍为80ms；真机与旧方向模式不改。跟踪误差改为同一反馈包实际/目标关节位置差小于0.03rad，并额外检查目标属于最近8段生成参考的包络，避免把未来排队端点直接当成当前反馈目标。完整链0.3rad朝向目标达到90%实测约2.9秒，尚不是低延迟1:1；长运行仍出现过输入过期，记录与故障保护保留。
 
 最新开发分支为`codex/vr-toggle-follow`。Docker位姿模式改为**右Grip按一次：以当前手柄和机器人姿态对齐零位并跟随；再次按下：取消跟随并自然收尾**。物理按钮松开不再结束跟随，左X/Y仍可并行渐进开合虚拟夹爪。跟踪丢失、断连、故障或重新准备会清除跟随状态，不会自动恢复，必须松开按钮后重新按下。不采用10秒持按限制；当前每段仍有300秒/3750点的开发上限，服务体验期另计。
@@ -22,13 +24,13 @@
 
 `codex/vr-toggle-follow`提供独立头显入口8444→测试后端8774→独立仿真SDK13030。网页“控制方式”和头显应显示“单按Grip跟随/再按结束”；右Grip首次按下对齐零位，平移目标2:1、朝向目标1:1，手停时目标固定，左X/Y长按渐进夹爪。
 
-本机当前专用实例为`vr4arm-rotation-servo-20261104`；通过启动预览核验固定回环映射后再运行。按以下顺序启动（每条在相应目录/终端执行，勿与已有体验服务同时启动）：
+本机当前专用实例为`vr4arm-human-range-20261104`；通过启动预览核验固定回环映射后再运行。按以下顺序启动（每条在相应目录/终端执行，勿与已有体验服务同时启动）：
 
 ```powershell
-docker start vr4arm-rotation-servo-20261104
-.venv/Scripts/python.exe scripts/run_lmaster_docker.py --isolated-test-container vr4arm-rotation-servo-20261104 --port 8774 --pose-follow-vr
+docker start vr4arm-human-range-20261104
+.venv/Scripts/python.exe scripts/run_lmaster_docker.py --isolated-test-container vr4arm-human-range-20261104 --port 8774 --pose-follow-vr
 # 核对预览后启动；此终端保持运行，十分钟后正常退出。
-.venv/Scripts/python.exe scripts/run_lmaster_docker.py --run --isolated-test-container vr4arm-rotation-servo-20261104 --port 8774 --pose-follow-vr --test-seconds 600
+.venv/Scripts/python.exe scripts/run_lmaster_docker.py --run --isolated-test-container vr4arm-human-range-20261104 --port 8774 --pose-follow-vr --test-seconds 600
 # 另开终端，在web目录：
 npm run docker:pose-test
 ```

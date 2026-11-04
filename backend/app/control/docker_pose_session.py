@@ -143,7 +143,8 @@ class DockerPoseSession(DockerPvatSession):
             proc.stdin.write(source.encode())
             await proc.stdin.drain()
             proc.stdin.close()
-            done = okay = quiet = False
+            done = okay = quiet = abort_confirmed = False
+            known_failure=None
             boundary = None
             expired = False
             async with asyncio.timeout(POSE_PROFILE.duration_ms/1000+8):
@@ -201,23 +202,33 @@ class DockerPoseSession(DockerPvatSession):
                         quiet = True
                     elif fields[0] == 'LIVE_EXPIRED':
                         expired = True
+                    elif fields[0] == 'LIVE_ABORT':
+                        abort_confirmed=fields[1:3]==['true','true']
                     elif fields[0] == 'LIVE_BOUNDARY':
                         boundary = fields[2]
                     elif fields[0] == 'LIVE_SATURATED':
-                        self.reason=('pvat_rotation_saturated' if len(fields)>2 and fields[2]=='true'
+                        self.reason=('pvat_kinematic_saturated' if len(fields)>3 and fields[3] in ('ik','joint')
+                            else 'pvat_rotation_saturated' if len(fields)>2 and fields[2]=='true'
                             else 'pvat_target_saturated' if fields[1]=='true' else None)
                     elif fields[0] == 'LIVE_DONE':
                         done, okay = True, fields[1] == 'true'
+                        if not okay and fields[2].endswith(': pose_tcp_region'):
+                            known_failure='tcp_region'
                         break
                 exited = await proc.wait() == 0
-            await self.pump.complete(controller_ok=done and okay, quiet_observed=quiet, program_exited=exited)
+            known_rejection=done and known_failure is not None and abort_confirmed and quiet and exited
+            await self.pump.complete(controller_ok=done and (okay or known_rejection), quiet_observed=quiet, program_exited=exited)
             a.position_busy = False
             a._motion_accepted = a._motion_write_stop_required = False
-            self.hold = not self.gate.released
-            self.phase = 'hold' if self.hold else 'ready'
-            self.reason = ('pvat_' + boundary if boundary else
-                'position_input_expired' if expired else 'pvat_gesture_complete') if self.hold else None
+            if known_rejection:
+                self.hold=True;self.phase='fault';self.reason='pvat_'+known_failure
+            else:
+                self.hold = not self.gate.released
+                self.phase = 'hold' if self.hold else 'ready'
+                self.reason = ('pvat_' + boundary if boundary else
+                    'position_input_expired' if expired else 'pvat_gesture_complete') if self.hold else None
             await self.recorder.write_event(dict(kind='docker_pose_outcome', controller_passed=okay,
+                known_rejection=known_rejection,failure_code=known_failure,
                 input_exit_reason=self.pump.reason, boundary=boundary), self.clock())
         except BaseException:
             self.phase = 'fault'
@@ -231,6 +242,7 @@ class DockerPoseSession(DockerPvatSession):
             if self.pump:
                 await self.pump.withdraw()
                 await self.recorder.write_event(dict(kind='docker_pose_input_end',reason=self.pump.reason,
+                    failure_code=self.pump.failure_code,failed_publish_ms=self.pump.failed_publish_ms,
                     written_seq=self.pump.writer.written_seq,max_publish_ms=self.pump.max_publish_ns/1e6,
                     max_offer_gap_ms=self.pump.max_offer_gap_ns/1e6,max_offer_age_ms=self.pump.max_offer_age_ns/1e6,
                     max_publish_gap_ms=self.pump.max_publish_gap_ns/1e6,publish_tail=self.pump.publish_tail,

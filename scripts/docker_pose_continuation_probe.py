@@ -87,7 +87,7 @@ def analyze(raw,scenario):
                 and any(r[0]=='LIVE_EXPIRED' for r in rows))
         elif scenario=='boundary':
             result['passed']=bool(result['saturated'] and not boundary and len(points)>60
-                                  and result['max_tcp_displacement_m']<=.102)
+                                  and result['max_tcp_displacement_m']<=.302)
         elif scenario=='branch':  # Offline analysis of archived pre-stepper evidence only.
             result['passed']=bool(result['boundary']=='ik_branch' and result['max_tcp_displacement_m']<.002)
         result['passed']=result['passed'] and result['max_send_gap_ms']<160
@@ -123,7 +123,7 @@ def main():
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admitted,scenario=args.scenario,
             prepare_movej=1,duration_s=44 if args.scenario in ('continuation','human') else 8,
-            product_grip_span_mm=100,product_window_s=300)))
+            product_grip_span_mm=300,product_window_s=300)))
         return 0
     result=execute(admitted,args.scenario)
     args.output.parent.mkdir(parents=True,exist_ok=True)

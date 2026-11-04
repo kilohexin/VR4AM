@@ -53,7 +53,7 @@ def test_extended_profile_keeps_fixed_grip_and_absolute_joint_limits():
     from app.control.docker_pose_profile import POSE_PROFILE
     _,a,_=rig();source=build_pose_program(a)
     assert POSE_PROFILE.duration_ms==300000 and POSE_PROFILE.maximum_points==3750
-    assert POSE_PROFILE.target_tcp_span_m==.1 and POSE_PROFILE.feedback_tcp_span_m==.12
+    assert POSE_PROFILE.target_tcp_span_m==.3 and POSE_PROFILE.feedback_tcp_span_m==.35
     assert POSE_PROFILE.mailbox_ttl_ms==250 and 'mailbox_ttl_ms=250' in source
     assert POSE_PROFILE.reference_speed_radps==.2 and POSE_PROFILE.reference_acceleration_radps2==.2
     assert 'not target_only and angle' in source and 'local pose_rotation_reference=' in source
@@ -152,3 +152,44 @@ async def test_regrip_while_previous_worker_records_its_completed_tail(completed
         assert goal.p[0]==pytest.approx(.302)
     else:assert s._reference is old and old.generation is None
     s.worker.cancel()
+
+
+@pytest.mark.parametrize('confirmed,known,unknown,quiet,exited',[
+    (True,True,False,True,True),(False,True,False,True,True),(True,False,False,True,True),
+    (True,True,True,True,True),(True,True,False,False,True),(True,True,False,True,False)])
+async def test_known_region_rejection_requires_confirmed_abort_quiet_exit_and_known_mailbox(monkeypatch,confirmed,known,unknown,quiet,exited):
+    from app.digital_twin import docker_runtime
+    import app.control.docker_pose_session as module
+    from tests.control.test_vr_pose_input import Signals
+    now,a,s=rig();client=Signals();a._docker_ready_client=client;s.offer(hand(now[0],1))
+    class Input:
+        def write(self,data):pass
+        async def drain(self):pass
+        def close(self):pass
+    class Output:
+        n=0
+        async def readline(self):
+            self.n+=1
+            if self.n==1:return b'LIVE_READY\t1000\n'
+            if self.n==2:
+                async with asyncio.timeout(1):
+                    while client.values[240]==0:await asyncio.sleep(.001)
+                return b'LIVE_POINT\t20\t1\t.3\t0\t.4\t0\n'
+            if self.n==3:
+                if unknown:s.pump.writer.unknown=True
+                return b'LIVE_QUIET\t500\n' if quiet else b'NO_QUIET\n'
+            if self.n==4:return b'LIVE_ABORT\ttrue\t'+(b'true' if confirmed else b'false')+b'\n'
+            code=b'pose_tcp_region' if known else b'unrecognized_error'
+            return b'LIVE_DONE\tfalse\t[string main]: '+code+b'\t1\n'
+    monkeypatch.setattr(docker_runtime,'verify_local_docker',lambda:a._docker_admission)
+    monkeypatch.setattr(module.asyncio,'create_subprocess_exec',AsyncMock(return_value=NS(stdin=Input(),stdout=Output(),wait=AsyncMock(return_value=0 if exited else 1))))
+    await s._run()
+    assert s.phase=='fault'  # A rejected motion never becomes successful or auto-resumes.
+    if confirmed and known and not unknown and quiet and exited:
+        assert s.reason=='pvat_tcp_region' and a._latched_fault is None and not a.position_busy
+        assert s.pump.completed and s.pump.lease.owner is None
+        outcome=[c.args[0] for c in s.recorder.write_event.call_args_list if c.args[0]['kind']=='docker_pose_outcome'][0]
+        assert outcome['controller_passed'] is False and outcome['known_rejection'] is True
+    else:
+        assert s.reason==a._latched_fault=='stop_unverified'
+        assert not s.pump.completed and s.pump.lease.owner is not None

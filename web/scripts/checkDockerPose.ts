@@ -2,6 +2,8 @@
 import {FinitePositionInput} from '../src/ui/finitePositionInput';
 import {FiniteXRInput,finiteXRTransportFrame} from '../src/xr/finiteInput';
 import {Quaternion} from 'three';
+import {readFile} from 'node:fs/promises';
+import {resolve,sep} from 'node:path';
 const port=process.argv[2]??'8774';
 if(!/^\d{4,5}$/.test(port))throw Error('invalid_port');
 const origin=`http://127.0.0.1:${port}`;
@@ -37,8 +39,10 @@ async function wait(p:()=>boolean,label:string,ms=12000){const end=performance.n
 async function command(type:string,id:string){send({v:1,type,request_id:id});await wait(()=>replies.has(id),id);
  if(String(replies.get(id).type).endsWith('rejected')||replies.get(id).accepted===false)throw Error(id+':rejected:'+JSON.stringify(replies.get(id)));}
 async function startFollow(label:string){
+ const started=performance.now();
  grip=false;await sleep(60);grip=true;await wait(()=>state.finite_position.phase==='executing',label);
  grip=false;await sleep(60);
+ return performance.now()-started;
 }
 async function stopFollow(label:string){
  grip=false;await sleep(60);grip=true;await sleep(60);grip=false;
@@ -57,6 +61,31 @@ try{
  await wait(()=>state?.mode==='READY'&&state.ack_seq>0,'ready');
  await command('arm_request','arm');await command('prepare_request','prepare');
  await wait(()=>state.manual_input_ready&&state.finite_position.phase==='ready','prepared',30000);
+ const replayAt=process.argv.indexOf('--replay-hand');
+ if(replayAt>=0){
+  const file=resolve(process.argv[replayAt+1]??'');
+  if(!file.startsWith(resolve('../logs/commissioning')+sep)||!file.endsWith('session.jsonl'))throw Error('invalid_replay_path');
+  const records=(await readFile(file,'utf-8')).trim().split(/\r?\n/).map(l=>JSON.parse(l))
+   .filter(r=>r.kind==='finite_position_input'&&r.hand_pose);
+  if(records.length<100)throw Error('insufficient_replay');
+  hand=[...records[0].hand_pose.p];handQ=[...records[0].hand_pose.q] as typeof handQ;
+  const initialZ=state.actual_tcp.p[2],steps=state.finite_position.entered_steps;
+  const startupMs=await startFollow('replay_start'),since=performance.now();let i=0,peakZ=0;
+  const duration=(records.at(-1).server_mono_ns-records[0].server_mono_ns)/1e6;
+  while(performance.now()-since<duration){
+   const elapsed=performance.now()-since;
+   while(i+1<records.length&&(records[i+1].server_mono_ns-records[0].server_mono_ns)/1e6<=elapsed)i++;
+   hand=[...records[i].hand_pose.p];handQ=[...records[i].hand_pose.q] as typeof handQ;
+   peakZ=Math.max(peakZ,state.actual_tcp.p[2]-initialZ);
+   if(state.fault||['hold','fault','ready'].includes(state.finite_position.phase))throw Error('replay_interrupted:'+JSON.stringify(state.finite_position));
+   await sleep(20);
+  }
+  if(peakZ<.15||state.finite_position.entered_steps-steps<duration/80*.8)throw Error('replay_insufficient_height_or_duration');
+  hand=[...records[0].hand_pose.p];handQ=[...records[0].hand_pose.q] as typeof handQ;
+  await wait(()=>state.finite_position.reason!=='pvat_kinematic_saturated'&&state.actual_tcp.p[2]<initialZ+.05,'replay_inward_retreat',12000);
+  await stopFollow('replay_toggle_off');
+  console.log('PASS frozen human hand trajectory (synthetic replay)',JSON.stringify({startupMs,duration,peakZ,points:state.finite_position.entered_steps-steps}));
+ }else{
  await sleep(100);await startFollow('pose_started');
  const base=[...state.actual_tcp.p],steps=state.finite_position.entered_steps;
  const start=performance.now();
@@ -101,7 +130,7 @@ try{
   console.log('PASS oversized orientation clips within original range, stays following and turns back');
  }
  if(process.argv.includes('--continuation')){
-  if(before.pose_follow_window_s!==300||before.pose_follow_grip_span_mm!==100)throw Error('wrong_pose_profile');
+  if(before.pose_follow_window_s!==300||before.pose_follow_grip_span_mm!==300)throw Error('wrong_pose_profile');
   const initial=[...state.actual_tcp.p],handOrigin=[...hand],initialSteps=state.finite_position.entered_steps;
   await startFollow('continuation_start');
   const since=performance.now();let peak=0,maxJointSpan=0;const joints=[...state.actual_q];
@@ -121,12 +150,12 @@ try{
   await stopFollow('continuation_toggle_off');
   console.log(`PASS single Grip >${holdMs/1000}s, beyond 20mm, sequence wrap`,JSON.stringify({peak,maxJointSpan,lastPoseSeq}));
   const stationary=[...state.actual_tcp.p];await startFollow('boundary_start');
-  hand=[hand[0]+.06,hand[1],hand[2]]; // +120mm target outside fixed 100mm Grip box.
+  hand=[hand[0]+.18,hand[1],hand[2]]; // +360mm target outside fixed 300mm Grip box.
   await wait(()=>state.finite_position.reason==='pvat_target_saturated','fixed_grip_saturation');
   const limitedSteps=state.finite_position.entered_steps;await sleep(400);
   if(state.finite_position.phase!=='executing'||state.finite_position.entered_steps<=limitedSteps
-    ||Math.hypot(...state.actual_tcp.p.map((v:number,i:number)=>v-stationary[i]))>.102)throw Error('saturation_did_not_continue_inside_fixed_box');
-  hand[0]-=.06;
+    ||Math.hypot(...state.actual_tcp.p.map((v:number,i:number)=>v-stationary[i]))>.302)throw Error('saturation_did_not_continue_inside_fixed_box');
+  hand[0]-=.18;
   await wait(()=>state.finite_position.reason!=='pvat_target_saturated','return_inside_fixed_box');
   await stopFollow('after_saturation_toggle_off');
   await startFollow('after_boundary_regrip');
@@ -154,6 +183,7 @@ try{
   await wait(()=>Math.abs(state.gripper-initial)>.05&&state.finite_position.entered_steps>steps+3,'claw_parallel');
   await stopFollow('claw_parallel_toggle_off');
   console.log('PASS held X/Y analogue claw while Grip tracking continues');
+ }
  }
  if(process.argv.includes('--disconnect-active')){
   await startFollow('disconnect_grip');

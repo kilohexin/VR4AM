@@ -384,6 +384,10 @@ it('distinguishes Docker pose following from the direction-mode centre instructi
  expect(describeVrSafety(state('active'),true,summary)).toMatchObject({title:'已到朝向范围',tone:'amber'});
  expect(describeVrSafety({...state('active'),fault:'stop_unverified'},true,summary).title).toBe('停止状态未确认');
  summary.finitePosition!.reason=null;
+ summary.finitePosition!.reason='pvat_kinematic_saturated';
+ expect(describeVrSafety(state('active'),true,summary)).toMatchObject({title:'已到当前姿态可达边界',tone:'amber'});
+ expect(describeVrSafety({...state('active'),fault:'stop_unverified'},true,summary).tone).toBe('red');
+ summary.finitePosition!.reason=null;
  summary.finitePosition!.phase='ready';
  const ready=describeVrSafety(state('armed'),true,summary);
  expect(ready.title).toContain('位姿跟随');

@@ -25,6 +25,8 @@ class VRPoseInput:
             before_commit=authorize_publish or authorize,ttl_ms=mailbox_ttl_ms)
         self.closed = False
         self.reason = None
+        self.failure_code=None
+        self.failed_publish_ms=None
         self.worker = None
         self.unknown_cleanup = False
         self.completed = False
@@ -123,6 +125,7 @@ class VRPoseInput:
         self.worker = asyncio.create_task(self._run(), name='vr-pose-latest-input')
 
     async def _run(self):
+        started=None
         try:
             while not self.closed:
                 self._check()
@@ -149,7 +152,13 @@ class VRPoseInput:
         except asyncio.CancelledError:
             self._retire('vr_pose_pump_cancelled')
             raise
-        except Exception:
+        except Exception as error:
+            code=str(error) if type(error) is ValueError else ''
+            self.failure_code=code if code in {
+                'pose_mailbox_input_expired','pose_mailbox_closed','position_binding_unavailable',
+                'position_authority_revoked','pose_input_revoked','position_recording_unavailable',
+                'vr_pose_input_closed','vr_pose_authority_revoked'} else 'rpc_timeout' if isinstance(error,TimeoutError) else 'unclassified_error'
+            if started is not None:self.failed_publish_ms=(self.clock()-started)/1e6
             self._retire('vr_pose_write_unknown' if self.writer.unknown else 'vr_pose_pump_rejected')
 
     async def withdraw(self):

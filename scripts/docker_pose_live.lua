@@ -71,9 +71,8 @@ local ok,err=pcall(function()
     -- Full IK supplies each goal. Use the fixed absolute product joint limits,
     -- not the old differential-IK probe's .08rad box around its first point.
     local tracker=tracker_module.new(origin,{joint_min=pose_joint_min,joint_max=pose_joint_max},pose_profile)
-    -- Warm the output channel before any hand target is admitted. Clock
-    -- samples are diagnostics; only the final READY binds the frozen epoch.
-    for i=1,3 do print('POSE_CLOCK',timestamp());rt_sleep(40) end
+    -- Bind once at READY. Diagnostic warm-up sleeps delayed each Grip start
+    -- without granting additional input authority.
     start=timestamp()
     local reader=mailbox.new(function(ch) return lebai:get_signal(ch) end,timestamp,start,function() end,
         function(ch,n) return lebai:get_signals(ch,n) end,pose_profile.mailbox_ttl_ms)
@@ -103,7 +102,7 @@ local ok,err=pcall(function()
     end)
     local plan=worker(function()
         local previous=nil
-        local cached_pose,cached_joints=nil,nil;local was_clipped,was_rotated=false,false
+        local cached_pose,cached_joints=nil,nil;local was_clipped,was_rotated,was_limited=false,false,'none'
         while not finish do
             if latest and latest.captured_ms~=previous then
                 local _,f=feedback(false)
@@ -119,9 +118,6 @@ local ok,err=pcall(function()
                 local target,clipped=path_module.clip(sample.pose,base,pose_profile.target_tcp_span)
                 local rotation_clipped
                 target,rotation_clipped=path_module.limit_rotation(target,pose_rotation_reference,math.pi/2-.02)
-                if clipped~=was_clipped or rotation_clipped~=was_rotated then
-                    print('LIVE_SATURATED',clipped,rotation_clipped);was_clipped=clipped;was_rotated=rotation_clipped
-                end
                 -- Advance the IK branch through bounded Cartesian sections;
                 -- a quick hand change is not itself an IK branch jump.
                 local section=path_module.step(cached_pose or base,target,.004,.02)
@@ -131,10 +127,8 @@ local ok,err=pcall(function()
                 if cached_pose and equivalent_pose(cached_pose,section,.00010,.0008) then joints=cached_joints
                 else
                     joints=lebai:kinematics_inverse(section,seed)
-                    cached_pose=section;cached_joints=joints
                 end
                 if finish then return end
-                assert(joints and #joints==6,'pose_ik_unreachable')
                 local tracked,tracking_reason,tracking_axis=tracker.matches_report(f)
                 if not tracked then
                     print('LIVE_TRACKING_REJECTED',tracking_reason,tracking_axis or 0)
@@ -142,14 +136,31 @@ local ok,err=pcall(function()
                 end
                 boundary=product_bounds(nil,f.target_joint_pose)
                 if boundary then finish=true;return end
-                for i=1,6 do
-                    assert(joints[i]==joints[i] and math.abs(joints[i])<1000000,'pose_ik_nonfinite')
-                    if math.abs(joints[i]-seed[i])>=.15 then
-                        boundary='ik_branch';finish=true;return
+                local limited='none'
+                if not joints then limited='ik'
+                else
+                    assert(#joints==6,'pose_ik_result_shape')
+                    for i=1,6 do
+                        assert(joints[i]==joints[i] and math.abs(joints[i])<1000000,'pose_ik_nonfinite')
+                        if math.abs(joints[i]-seed[i])>=.15 then limited='ik' end
                     end
                 end
-                boundary=boundary or product_bounds(section,joints)
+                boundary=limited=='none' and product_bounds(section,joints) or nil
+                if boundary=='joint_boundary' then limited='joint';boundary=nil end
                 if boundary then finish=true;return end
+                if limited=='none' then
+                    cached_pose=section;cached_joints=joints;seed=joints
+                else
+                    -- A known mathematical rejection admits no new waypoint.
+                    -- Keep the last valid projection and try the next genuinely
+                    -- fresh hand target, allowing an inward retreat. Native
+                    -- exceptions/nonfinite results still fault; no RPC retry.
+                    joints=cached_joints or origin
+                end
+                if clipped~=was_clipped or rotation_clipped~=was_rotated or limited~=was_limited then
+                    print('LIVE_SATURATED',clipped,rotation_clipped,limited)
+                    was_clipped=clipped;was_rotated=rotation_clipped;was_limited=limited
+                end
                 -- Reuse this section only when a fresh full hand target agrees
                 -- with its ORIGINAL source. Do not roll the source centre.
                 local source_pose=sample.pose
@@ -159,7 +170,7 @@ local ok,err=pcall(function()
                 else
                     print('LIVE_PLAN_DROPPED',timestamp()-start,sample.sequence_mod)
                 end
-                previous=sample.captured_ms;seed=joints
+                previous=sample.captured_ms
                 end
             end
             rt_sleep(5)

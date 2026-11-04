@@ -48,7 +48,7 @@ def test_incomplete_short_or_aborted_trace_cannot_pass(change):
 
 def test_oversized_goal_clips_inside_fixed_region_without_pausing():
     assert m.analyze(trace(True),'boundary')['passed']
-    assert not m.analyze(trace(True).replace('\t0.32\t','\t0.42\t'),'boundary')['passed']
+    assert not m.analyze(trace(True).replace('\t0.32\t','\t0.62\t'),'boundary')['passed']
 
 
 def test_branch_hold_and_fast_hand_keep_known_completion_contract():
@@ -65,7 +65,7 @@ def test_uses_exact_product_program_with_injected_synthetic_producer_only():
     assert '__PRODUCT_BODY__' not in code and '__BOUNDARY__' not in code
     assert 'wait_all(producer,receive,plan,motion)' in code
     assert code.count('lebai:movej(')==1
-    assert 'maximum_points=3750' in code and 'target_tcp_span=0.1' in code
+    assert 'maximum_points=3750' in code and 'target_tcp_span=0.3' in code
     with pytest.raises(ValueError):m.program('arbitrary')
 
 

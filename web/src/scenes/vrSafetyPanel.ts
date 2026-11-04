@@ -76,10 +76,13 @@ export function describeVrSafety(
       core.instruction=poseFollow?'手停时目标固定 · 再按 Grip 结束跟随 · B 请求停止'
         :'松开 Grip 后完成当前小步 · B 请求停止';
       if(poseFollow&&finite.reason==='pvat_target_saturated'){
-        core.title='已到本次平移范围';core.instruction='可向内退回，或再按 Grip 结束后重新对齐';core.tone='amber';
+        core.title='已到本次平移范围';core.instruction='平移目标已限幅 · 向内退回或重新对齐';core.tone='amber';
       }
       if(poseFollow&&finite.reason==='pvat_rotation_saturated'){
         core.title='已到朝向范围';core.instruction='朝向目标已限幅，转回范围内可继续跟随';core.tone='amber';
+      }
+      if(poseFollow&&finite.reason==='pvat_kinematic_saturated'){
+        core.title='已到当前姿态可达边界';core.instruction='未追加不可达目标 · 手柄向内退回可继续跟随';core.tone='amber';
       }
     }else if(state.phase==='armed'){
       if(poseFollow)core.title='可操纵 · 位姿跟随';
