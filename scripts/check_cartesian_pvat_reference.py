@@ -19,7 +19,8 @@ sys.path.insert(0,str(ROOT/'backend'))
 sys.path.insert(0,str(ROOT/'scripts'))
 from audit_pose_trace import analyze as audit_trace
 from app.commissioning.native_jog_mdh import MdhTool
-from app.control.cartesian_pvat_reference import JointReference,MdhReferenceModel,OfflineCartesianFollower,plan_cartesian_reference
+from app.control.cartesian_pvat_reference import (JointReference,MdhReferenceModel,OfflineCartesianFollower,
+    plan_cartesian_reference,plan_cartesian_braking)
 from app.control.vr_pose_reference import VRPoseReference
 from app.schemas.messages import Pose
 
@@ -89,7 +90,7 @@ def run(frozen_log=None,*,large_pitch=False):
     return report
 
 
-def replay(frozen_log,*,response_frequency=4.,reference_trace=None):
+def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking=False,demand_mode='coupled'):
     """Counterfactual math only: corrected mapping, one new reference/80ms.
 
     This replays one continuous held gesture, not the original native PVAT
@@ -109,7 +110,7 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None):
     stamps=[h['server_mono_ns'] for h in held]
     now=[stamps[0]];mapper=VRPoseReference(clock=lambda:now[0],translation_scale=1.,orientation_mode='tool')
     mapper.capture(Pose(**held[0]['hand_pose']),base,generation=1,hand_ns=now[0],tcp_ns=now[0])
-    follower=OfflineCartesianFollower(model,start,frequency=response_frequency)
+    follower=OfflineCartesianFollower(model,start,frequency=response_frequency,demand_mode=demand_mode)
     report=dict(offline_candidate_passed=False,sdk_connections=0,motion_writes=0,source=source,
         scenario='frozen_hand_counterfactual_corrected_mapping',native_interpolation_verified=False,
         motion_safety_verified=False,realtime_verified=False,product_admission_complete=False,
@@ -118,8 +119,10 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None):
     report['reference_sha256']=hashlib.sha256((ROOT/'backend/app/control/cartesian_pvat_reference.py').read_bytes()).hexdigest()
     report['lookahead_position_m']=follower.lookahead_position
     report['lookahead_rotation_rad']=follower.lookahead_rotation
+    report['demand_mode']=demand_mode
     report['direct_quadratic_steps']=0
     before=time.perf_counter();period_ns=80_000_000
+    step_times=[];brake_samples=[]
     observations=[dict(kind='robot_kinematics',server_mono_ns=stamps[0]-1,actual_tcp=base.model_dump())]
     for tick in range((stamps[-1]-stamps[0])//period_ns):
         now[0]=stamps[0]+tick*period_ns
@@ -142,12 +145,18 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None):
             break
         report['completed_steps']+=1
         report['direct_quadratic_steps']+=int(check['optimizer_iterations']==0)
-        report['max_step_wall_s']=max(report['max_step_wall_s'],time.perf_counter()-step_before)
+        elapsed=time.perf_counter()-step_before;step_times.append(elapsed)
+        report['max_step_wall_s']=max(report['max_step_wall_s'],elapsed)
+        if check_braking and tick in (10,100,400,800,1200,1600):brake_samples.append((tick,segment.end))
         report['max_interval_position_bound_m']=max(report['max_interval_position_bound_m'],check['position_bound_m'])
         position=model.pose(segment.end.q)
         observations.append(dict(kind='robot_kinematics',server_mono_ns=now[0]+period_ns,actual_tcp=position.model_dump()))
         report['max_downward_goal_error_m']=max(report['max_downward_goal_error_m'],target.p[2]-position.p[2])
     else:report['offline_candidate_passed']=True
+    report['compute_budget_overruns']=sum(t>=.08 for t in step_times)
+    report['reference_compute_budget_observed']=bool(report['offline_candidate_passed'] and not report['compute_budget_overruns'])
+    report['compute_p95_s']=float(np.percentile(step_times,95)) if step_times else None
+    report['compute_p99_s']=float(np.percentile(step_times,99)) if step_times else None
     report['all_reference_steps_admitted']=report['offline_candidate_passed']
     audited=sorted(held+observations,key=lambda r:r['server_mono_ns'])
     report['reference_intent_audit']=audit_trace(audited)
@@ -156,6 +165,19 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None):
     if reference_trace is not None:
         reference_trace.parent.mkdir(parents=True,exist_ok=True)
         reference_trace.write_text(''.join(json.dumps(r)+'\n' for r in audited),encoding='utf-8')
+    if check_braking:
+        brake_before=time.perf_counter();checks=[]
+        for tick,state in brake_samples:
+            try:
+                plan,result=plan_cartesian_braking(model,state)
+                checks.append(dict(step=tick,available=True,segments=len(plan.segments),**result))
+            except ValueError as error:
+                if not str(error).startswith(('cartesian_brake_','cartesian_reference_')):raise
+                checks.append(dict(step=tick,available=False,rejection=str(error)))
+        report['sampled_braking']=checks
+        report['all_sampled_brakes_available']=bool(checks) and all(c['available'] for c in checks)
+        report['brake_check_wall_s']=time.perf_counter()-brake_before
+        if not report['all_sampled_brakes_available']:report['offline_candidate_passed']=False
     report['planning_wall_s']=time.perf_counter()-before
     return report
 
@@ -167,12 +189,15 @@ def main():
     p.add_argument('--replay-frozen',action='store_true')
     p.add_argument('--response-frequency',type=float,choices=(2.,4.),default=4.)
     p.add_argument('--reference-trace',type=Path)
+    p.add_argument('--check-braking',action='store_true')
+    p.add_argument('--demand-mode',choices=('coupled','separate'),default='coupled')
     args=p.parse_args()
     if args.replay_frozen and (args.frozen_log is None or args.large_pitch):
         p.error('--replay-frozen requires one frozen log and cannot combine --large-pitch')
-    if not args.replay_frozen and (args.response_frequency!=4. or args.reference_trace is not None):
+    if not args.replay_frozen and (args.response_frequency!=4. or args.reference_trace is not None or args.check_braking or args.demand_mode!='coupled'):
         p.error('--response-frequency and --reference-trace only apply to --replay-frozen')
-    report=replay(args.frozen_log,response_frequency=args.response_frequency,reference_trace=args.reference_trace) if args.replay_frozen else run(args.frozen_log,large_pitch=args.large_pitch)
+    report=replay(args.frozen_log,response_frequency=args.response_frequency,reference_trace=args.reference_trace,
+        check_braking=args.check_braking,demand_mode=args.demand_mode) if args.replay_frozen else run(args.frozen_log,large_pitch=args.large_pitch)
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,indent=2),encoding='utf-8')
     print(json.dumps(report))

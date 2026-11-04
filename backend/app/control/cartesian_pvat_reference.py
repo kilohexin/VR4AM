@@ -219,6 +219,7 @@ def validate_segment(segment,model,curve,offset,*,position_tolerance=.001,angle_
             or np.any(-terminal_v+np.maximum(-terminal_a,0)**2/(2*jerk)>speed+1e-10)):
         raise ValueError('cartesian_reference_rate_reserve')
     derivatives=[_derivative(c,d,segment.duration) for d in (1,2)]
+    curve_acceleration=_derivative(curve.coefficients,2,curve.duration)
     radii=(model.position_lipschitz,np.ones(6))
     coupling=[np.minimum.outer(r,r) for r in radii]
     third=[np.minimum(h[:,:,None],r[None,None,:]) for h,r in zip(coupling,radii)]
@@ -227,18 +228,18 @@ def validate_segment(segment,model,curve,offset,*,position_tolerance=.001,angle_
     stack=[(0.,1.,0)];visited=0;max_position=0.;max_angle=0.
     while stack:
         a,b,depth=stack.pop();mid=(a+b)/2;visited+=1
-        q=_evaluate(c,mid);actual=model.pose(q)
+        q=_evaluate(c,mid)
+        velocity=_evaluate(c,mid,1,segment.duration);acc=_evaluate(c,mid,2,segment.duration)
+        actual_matrix,j,jd=model.geometry(q,velocity)
         expected,_,_=curve.state(offset+mid*segment.duration)
-        error=np.linalg.norm(np.array(actual.p)-expected.p)
-        angle=(Rotation.from_quat(actual.q)*Rotation.from_quat(expected.q).inv()).magnitude()
+        error=np.linalg.norm(actual_matrix[:3,3]-expected.p)
+        angle=(Rotation.from_matrix(actual_matrix[:3,:3])*Rotation.from_quat(expected.q).inv()).magnitude()
         if error>position_tolerance or angle>angle_tolerance:raise ValueError('cartesian_reference_corridor')
         qlo,qhi=_range(c,a,b);dq=np.maximum(np.abs(qlo-q),np.abs(qhi-q))
-        velocity=_evaluate(c,mid,1,segment.duration);acc=_evaluate(c,mid,2,segment.duration)
         vlo,vhi=_range(derivatives[0],a,b);alo,ahi=_range(derivatives[1],a,b)
         vmax=np.maximum(-vlo,vhi);amax=np.maximum(-alo,ahi)
         dv=np.maximum(np.abs(vlo-velocity),np.abs(vhi-velocity))
         da=np.maximum(np.abs(alo-acc),np.abs(ahi-acc))
-        _,j,jd=model.geometry(q,velocity)
         task_v=j@velocity;task_a=j@acc+jd@velocity
         sv=np.array([np.linalg.norm(task_v[:3]),np.linalg.norm(task_v[3:])])
         sa=np.array([np.linalg.norm(task_a[:3]),np.linalg.norm(task_a[3:])])
@@ -260,6 +261,17 @@ def validate_segment(segment,model,curve,offset,*,position_tolerance=.001,angle_
         plo,phi=_range(curve.coefficients,ca,cb);center=_evaluate(curve.coefficients,(ca+cb)/2)
         dp=np.maximum(np.abs(plo-center),np.abs(phi-center))
         position_bound=error+model.position_lipschitz@dq+np.linalg.norm(dp[:3])
+        # Enclose the ERROR curve, retaining cancellation between coordinated
+        # FK and Cartesian translation. Taylor's integral remainder bounds
+        # every time in this interval, not only the sampled midpoint. Both
+        # this and the original displacement enclosure must remain valid.
+        reference_v=_evaluate(curve.coefficients,(ca+cb)/2,1,curve.duration)[:3]
+        ralo,rahi=_range(curve_acceleration,ca,cb)
+        reference_acc_bound=np.linalg.norm(np.maximum(-ralo[:3],rahi[:3]))
+        half_time=(b-a)*segment.duration/2
+        error_taylor=error+np.linalg.norm(task_v[:3]-reference_v)*half_time
+        error_taylor+=(ba[0]+reference_acc_bound)*half_time**2/2
+        position_bound=min(position_bound,error_taylor)
         angle_bound=angle+sum(dq)+np.linalg.norm(dp[3:])
         if (position_bound<=position_tolerance and angle_bound<=angle_tolerance
                 and np.all(bv<=velocity_limits) and np.all(ba<=acceleration_limits)):
@@ -313,13 +325,16 @@ class OfflineCartesianFollower:
     its IK/PVA and validate the complete assumed joint interpolation. No IK
     cursor advances beyond this reference. Rejection commits no partial state.
     """
-    def __init__(self,model,start,*,period=.08,frequency=4.,lookahead_position=.02,lookahead_rotation=.08,**validation):
+    def __init__(self,model,start,*,period=.08,frequency=4.,lookahead_position=.02,lookahead_rotation=.08,
+            demand_mode='coupled',**validation):
         if not np.isfinite(period) or not .01<=period<=.08 or not np.isfinite(frequency) or not 0<frequency<=4:
             raise ValueError('cartesian_reference_duration')
         if not all(np.isfinite(x) and x>0 for x in (lookahead_position,lookahead_rotation)):
             raise ValueError('cartesian_reference_lookahead')
+        if demand_mode not in ('coupled','separate'):raise ValueError('cartesian_reference_demand_mode')
         self.model=model;self.state=start;self.period=period;self.frequency=frequency;self.validation=dict(validation)
         self.lookahead_position=lookahead_position;self.lookahead_rotation=lookahead_rotation
+        self.demand_mode=demand_mode
 
     def advance(self,target):
         q=np.array(self.state.q);v=np.array(self.state.v);a=np.array(self.state.a);dt=self.period
@@ -332,11 +347,17 @@ class OfflineCartesianFollower:
         twist=j@v;acc=j@a+jd@v;f=self.frequency
         error=np.r_[np.array(target.p)-p.p,(Rotation.from_quat(target.q)*Rotation.from_quat(p.q).inv()).as_rotvec()]
         # Govern the demand relative to the LAST VALIDATED reference, not an
-        # independent future IK cursor. Preserve one common fraction for all
-        # task axes. The original hand endpoint and fixed workspace are intact.
+        # independent future IK cursor. Default to one common fraction; the
+        # separate-demand candidate keeps translation independent of a remote
+        # orientation goal. Both still use ONE coordinated IK/PVA validator.
+        # The original hand endpoint and fixed workspace are intact.
         fraction=1/max(1.,np.linalg.norm(error[:3])/self.lookahead_position,
             np.linalg.norm(error[3:])/self.lookahead_rotation)
-        desired=f**3*(fraction*error)-3*f*f*twist-3*f*acc
+        factors=np.full(6,fraction)
+        if self.demand_mode=='separate':
+            factors[:3]=1/max(1.,np.linalg.norm(error[:3])/self.lookahead_position)
+            factors[3:]=1/max(1.,np.linalg.norm(error[3:])/self.lookahead_rotation)
+        desired=f**3*(factors*error)-3*f*f*twist-3*f*acc
         # Reserve 10% within the unchanged analysis limits for nonlinear IK
         # and interpolation effects. The final validator still checks the
         # original limits and can reject the optimized candidate.
@@ -362,20 +383,30 @@ class OfflineCartesianFollower:
             return np.r_[1-np.array([np.linalg.norm(vn[:3]),np.linalg.norm(vn[3:])])/task_speed,
                 1-np.array([np.linalg.norm(an[:3]),np.linalg.norm(an[3:])])/task_acceleration]
         constraints=[dict(type='ineq',fun=reserve),dict(type='ineq',fun=task_rates)]
-        locked=(np.linalg.norm(error[:3])<1e-8 and np.linalg.norm(twist[:3])<1e-8 and np.linalg.norm(acc[:3])<1e-8)
-        if locked:constraints.append(LinearConstraint(j[:3],-bias[:3],-bias[:3]))
+        stationary=(np.abs(twist[:3])<1e-8)&(np.abs(acc[:3])<1e-8)
+        held_axes=np.flatnonzero(stationary&(np.abs(error[:3])<1e-8))
+        directed_axes=np.flatnonzero(stationary&(np.abs(error[:3])>=1e-8))
+        held=j[held_axes];held_rhs=-bias[held_axes]
+        directions=np.sign(error[directed_axes]);directed=directions[:,None]*j[directed_axes]
+        directed_bias=directions*bias[directed_axes]
+        locked=len(held_axes)==3
+        if len(held_axes):constraints.append(LinearConstraint(held,held_rhs,held_rhs))
+        if len(directed_axes):constraints.append(LinearConstraint(directed,-directed_bias,np.inf))
+        def linear_ok(x):
+            return ((not len(held_axes) or np.max(np.abs(held@x-held_rhs))<=1e-8)
+                and (not len(directed_axes) or np.min(directed@x+directed_bias)>=-1e-10))
         weights=np.array([10.,10.,10.,1.,1.,1.]);matrix=weights[:,None]*j;rhs=weights*(desired-bias)
         normal=matrix.T@matrix+1e-8*np.eye(6);right=matrix.T@rhs
-        if locked:
-            system=np.block([[normal,j[:3].T],[j[:3],np.zeros((3,3))]])
-            direct=np.linalg.solve(system,np.r_[right,-bias[:3]])[:6]
+        if len(held_axes):
+            system=np.block([[normal,held.T],[held,np.zeros((len(held_axes),len(held_axes)))]])
+            direct=np.linalg.solve(system,np.r_[right,held_rhs])[:6]
         else:direct=np.linalg.solve(normal,right)
         # A feasible equality-constrained quadratic optimum needs no iterative
         # optimization. It still passes every constraint and the same complete
         # nonlinear segment validation below.
         if (np.isfinite(direct).all() and np.all(direct>=low) and np.all(direct<=high)
                 and min(reserve(direct))>=0 and min(task_rates(direct))>=0
-                and (not locked or np.linalg.norm(j[:3]@direct+bias[:3])<=1e-8)):
+                and linear_ok(direct)):
             solved=SimpleNamespace(x=direct,success=True,status=0,nit=0)
         else:
             solved=minimize(lambda x:float(np.linalg.norm(matrix@x-rhs)**2+1e-8*x@x),
@@ -386,21 +417,20 @@ class OfflineCartesianFollower:
         # nonlinear IK/PVAT segment must still pass. Keep the status in evidence.
         if (solved.status not in (0,8) or not np.isfinite(solved.x).all()
                 or np.any(solved.x<low-1e-10) or np.any(solved.x>high+1e-10)
-                or min(reserve(solved.x))<-1e-8 or min(task_rates(solved.x))<-1e-8):
+                or min(reserve(solved.x))<-1e-8 or min(task_rates(solved.x))<-1e-8 or not linear_ok(solved.x)):
             rejected=ValueError('cartesian_reference_optimizer_infeasible')
             rejected.optimizer_status=int(solved.status)
             rejected.minimum_reserve=float(min(reserve(solved.x)))
             rejected.minimum_task_margin=float(min(task_rates(solved.x)))
             raise rejected
         task_jerk=j@solved.x+bias
-        if locked:
-            if np.linalg.norm(task_jerk[:3])>1e-8:raise ValueError('cartesian_reference_optimizer_infeasible')
-            task_jerk[:3]=0.
+        if len(held_axes):task_jerk[held_axes]=0.
         curve=CartesianCurve.cubic(p,twist,acc,task_jerk,dt)
         segment,check=_solve_segment(self.model,self.state,curve,0.,dt,self.validation)
         self.state=segment.end
         return segment,dict(check,position_locked=locked,optimizer_iterations=int(solved.nit),
-            optimizer_status=int(solved.status),optimizer_converged=bool(solved.success),demand_fraction=fraction)
+            optimizer_status=int(solved.status),optimizer_converged=bool(solved.success),demand_fraction=fraction,
+            held_position_axes=tuple(int(x) for x in held_axes))
 
 
 def plan_cartesian_reference(model,start,target,*,duration=4.,period=.08,**validation):
@@ -420,3 +450,48 @@ def plan_cartesian_reference(model,start,target,*,duration=4.,period=.08,**valid
         segment,check=_solve_segment(model,previous,curve,(i-1)*period,period,validation)
         checks.append(check);segments.append(segment);previous=segment.end
     return CartesianPlan(curve,tuple(segments),tuple(checks))
+
+
+def plan_cartesian_braking(model,start,*,period=.08,durations=(.8,.96,1.04,1.12,1.2,1.28,1.44,1.6,1.92,2.4,3.2,4.8),
+        position_radius=.02,angle_radius=.15,**validation):
+    """Offline bounded continuation to zero PVA rates, never a stop command.
+
+    Search mathematical durations without any executor access. Every segment
+    must pass the same checks as motion, with an extra fixed radius about the
+    braking origin. Exhaustion yields NO plan; do not substitute a zero-speed
+    point, independent joint braking, or a physical stop guarantee.
+    """
+    pt=validation.get('position_tolerance',.001);at=validation.get('angle_tolerance',.01)
+    if (not np.isfinite(position_radius) or not np.isfinite(angle_radius)
+            or position_radius<=pt or angle_radius<=at or not durations):
+        raise ValueError('cartesian_brake_budget')
+    pose=model.pose(start.q);_,j,jd=model.geometry(start.q,start.v)
+    velocity=j@start.v;acceleration=j@start.a+jd@start.v
+    for duration in durations:
+        if not np.isfinite(duration) or duration<period:raise ValueError('cartesian_reference_duration')
+        # A quartic stopping chart has v(T)=a(T)=0, retaining the genuine
+        # initial v/a. Its endpoint is forward of the origin rather than a
+        # demand to return to the release position after decelerating.
+        displacement=velocity*duration/2+acceleration*duration**2/12
+        target=Pose(p=tuple(np.array(pose.p)+displacement[:3]),
+            q=tuple((Rotation.from_rotvec(displacement[3:])*Rotation.from_quat(pose.q)).as_quat()))
+        curve=_curve_from_reference(model,start,target,duration)
+        lo,hi=_range(curve.coefficients)
+        position_bound=np.linalg.norm(np.maximum(np.abs(lo[:3]-pose.p),np.abs(hi[:3]-pose.p)))+pt
+        angle_bound=np.linalg.norm(np.maximum(-lo[3:],hi[3:]))+at
+        if position_bound>position_radius or angle_bound>angle_radius:continue
+        derivative=_derivative(curve.coefficients,1,duration)
+        reversed_chart=False
+        for part in (slice(0,3),slice(3,6)):
+            tangent=velocity[part] if np.linalg.norm(velocity[part])>1e-8 else acceleration[part]
+            low,_=_range((derivative[:,part]@tangent).reshape(-1,1))
+            if low[0]<-1e-9:reversed_chart=True
+        if reversed_chart:continue
+        try:plan=plan_cartesian_reference(model,start,target,duration=duration,period=period,**validation)
+        except ValueError as error:
+            if not str(error).startswith('cartesian_reference_'):raise
+            continue
+        return plan,dict(duration_s=duration,position_radius_bound_m=float(position_bound),
+            angle_radius_bound_rad=float(angle_bound),native_stop_verified=False,
+            native_interpolation_verified=False)
+    raise ValueError('cartesian_brake_no_feasible_plan')

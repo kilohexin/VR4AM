@@ -98,3 +98,34 @@
 最新`.tmp/pitch-reversal-20261104/cartesian-analytic-cached-audited.json`完成1626步，原高度意图审计仍未检出该下坠模式，最大段内位置包络仍约0.999825mm。模块SHA256 `e9d1907625a71fa335a996a2d5ad92d4dd29922c67813ff45c4140e5bab5e441`，23项参考/封锁相关回归通过。最高单步约165.4ms、总离线计算约70.6秒；测试前段与定向回归有并行，报告实测值而非严格加速百分比。不能以平均耗时替代最坏80ms门槛。
 
 高度目标最大滞后仍约168mm，原厂插值/运动、减速收尾及真机通道均未通过；`realtime_verified`、`motion_safety_verified`、`native_interpolation_verified`、`product_admission_complete`均保持false。明日状态见[11月5日上机准备状态](real-control-readiness-2026-11-05.md)。
+
+## 完整误差上界与有限减速（后续实现）
+
+位置包络新增另一条严格的实数模型推导：在区间中点，令误差为`e`、误差导数为`e'`、半区间物理时长为`h`，则全区间误差范数不超过`|e|+|e'|h+(A_FK+A_reference)h²/2`。两项加速度均有同区间上界；该式来自积分余项，不是新增的离散采样近似。取它与原有FK位移包络的较小值，浮点仍非形式化证明。复用同一点几何计算。新增反例确保端点/中点相同而四分点越界的曲线仍被拒绝；最初反例被更早的加速度保守包络拒绝，调整合成曲线幅度后确认路径检查本身也拒绝，未放宽任何保护条件。
+
+新增`plan_cartesian_braking`纯数学助手：以真实参考P/V/A推导前向终点，使最终速度/加速度为零；不把目标设成松手位置、不突变置零。按有限时长网格求解，全部段经过同样IK/PVA/FK检查；以固定起点球约束参考最大偏移20mm/0.15rad（含原1mm/0.01rad误差余量），并拒绝与初始切向相反的停止图表路径。所有候选失败返回无计划，不能回退为独立关节刹车或视为硬件停止已获确认。预算是模型位置半径，不是路径总长或物理刹停距离。
+
+未请求的静止平移轴现分别保持；对静止起步且有位置需求的轴，约束起步任务jerk不得与请求相反。测试曾捕获“向上4mm＋转腕0.6rad”的旧软目标在第一步产生约4µm反向位移，现不允许此反向起步，且保留XY位置。关节与原有速度上限未改变。
+
+### 最新完整对照及未通过项
+
+本机模块SHA256 `e93ee929bf6cfbda4d00056a0ba9e34cbbade635ecbee3fcf6a9c791b34c3822`；28项参考/封锁定向回归通过。两种模式均使用同一原130.11秒输入、同一配置与段内检查，分开顺序运行：
+
+| 离线候选 | 默认共同前瞻 | 独立位置/朝向前瞻 |
+| --- | --- | --- |
+| 完整参考规划 | 1626步通过 | 1626步通过 |
+| 固定高度大幅下降意图审计 | 未检出 | 未检出 |
+| 最大目标高度滞后 | 167.4mm | 129.7mm |
+| 计算最高耗时/超80ms次数 | 98.3ms/1次 | 93.5ms/3次 |
+| 抽查减速 | 6/6可规划 | 第400步无预算内计划，其余5点可规划 |
+| 是否启用 | 仍只在离线原型，产品封锁 | 仅显式`--demand-mode separate`离线候选，不替换默认 |
+
+默认报告`.tmp/pitch-reversal-20261104/cartesian-axis-hold-coupled-audited.json`，独立前瞻失败报告`cartesian-axis-hold-separate-audited.json`。默认抽查停止时长0.8～0.96秒、模型位置半径包络最大约13.8mm；六点抽查不是每帧都能安全收尾的证明。独立前瞻经细化数学时长网格后，第100步可规划、第400步仍未通过，失败保留，不放大20mm预算或取消方向检查。
+
+此前单独一次默认回放最高约66.9ms、1626步无计算超时（`cartesian-envelope-braking-audited.json`），但重复轮出现超时，不能据单轮达标将`realtime_verified`改为true。原厂插值、实际反馈路径、减速计划的实际执行、每次发送前备份收尾与真机通道仍未完成。
+
+额外复现减速检查（零控制连接）：
+
+```powershell
+.venv/Scripts/python.exe scripts/check_cartesian_pvat_reference.py --replay-frozen --check-braking --frozen-log logs/commissioning/20261104T095439Z-e8ee1b59/session.jsonl --output .tmp/pitch-reversal-20261104/brake-audit.json
+```

@@ -6,6 +6,7 @@ from scipy.spatial.transform import Rotation
 from app.commissioning.native_jog_mdh import MdhTool
 from app.control.cartesian_pvat_reference import (CartesianCurve,JointReference,
     MdhReferenceModel,OfflineCartesianFollower,PvatSegment,plan_cartesian_reference,validate_segment)
+from app.control.cartesian_pvat_reference import plan_cartesian_braking
 from app.schemas.messages import Pose
 
 
@@ -123,8 +124,9 @@ def test_tcp_speed_is_checked_independently_from_joint_rates(model):
         plan_cartesian_reference(model,start,target,duration=4.,tcp_speed=.001)
 
 
-def test_continuous_follower_reverses_before_the_first_goal_without_a_height_drop(model):
-    initial=ready();base=model.pose(initial.q);follower=OfflineCartesianFollower(model,initial)
+@pytest.mark.parametrize('demand_mode',['coupled','separate'])
+def test_continuous_follower_reverses_before_the_first_goal_without_a_height_drop(model,demand_mode):
+    initial=ready();base=model.pose(initial.q);follower=OfflineCartesianFollower(model,initial,demand_mode=demand_mode)
     peak_error=0.;peak_speed=0.;moving_at_reversal=None
     for tick in range(180):
         if tick==15:moving_at_reversal=np.linalg.norm(follower.state.v)
@@ -211,3 +213,51 @@ def test_inverse_log_rotation_jacobian_matches_independent_central_differences(m
     numeric=np.column_stack([(model.inverse_linearization(target,q+np.eye(6)[i]*h)[0]
         -model.inverse_linearization(target,q-np.eye(6)[i]*h)[0])/(2*h) for i in range(6)])
     assert jac==pytest.approx(numeric,abs=1e-7)
+
+
+def test_error_enclosure_rejects_an_excursion_hidden_between_matching_midpoint_and_endpoints(model):
+    initial=ready();base=model.pose(initial.q)
+    a=(0.,.02,0.,0.,0.,0.)
+    segment=PvatSegment(JointReference(initial.q,a=a),JointReference(initial.q,a=tuple(-x for x in a)),4.)
+    assert model.pose(segment.state(2.).q).p==pytest.approx(base.p,abs=1e-12)
+    assert np.linalg.norm(np.array(model.pose(segment.state(1.).q).p)-base.p)>.001
+    curve=CartesianCurve(base,np.zeros(6),np.zeros(6),base,4.)
+    with pytest.raises(ValueError,match='cartesian_reference_corridor'):
+        validate_segment(segment,model,curve,0.)
+
+
+def test_bounded_cartesian_brake_preserves_pitch_height_and_ends_with_zero_rates(model):
+    initial=ready();base=model.pose(initial.q);follower=OfflineCartesianFollower(model,initial)
+    for _ in range(12):follower.advance(pitch(base,.15))
+    moving=follower.state
+    assert np.linalg.norm(moving.v)>.01
+    plan,report=plan_cartesian_braking(model,moving)
+    assert plan.segments[0].start==moving
+    assert np.linalg.norm(plan.segments[-1].end.v)<1e-8
+    assert np.linalg.norm(plan.segments[-1].end.a)<1e-8
+    assert report['position_radius_bound_m']<=.02 and report['angle_radius_bound_rad']<=.15
+    assert not report['native_stop_verified']
+    for t in np.linspace(0.,plan.curve.duration,41):
+        pose=model.pose(plan.state(float(t)).q)
+        assert pose.p==pytest.approx(base.p,abs=1e-6)
+
+
+def test_too_small_braking_budget_rejects_without_mutating_the_moving_reference(model):
+    initial=ready();base=model.pose(initial.q);follower=OfflineCartesianFollower(model,initial)
+    for _ in range(12):follower.advance(pitch(base,.15))
+    moving=follower.state
+    with pytest.raises(ValueError,match='cartesian_brake_no_feasible_plan'):
+        plan_cartesian_braking(model,moving,angle_radius=.010001)
+    assert follower.state is moving
+
+
+def test_remote_wrist_goal_does_not_suppress_a_small_lift_in_separate_demand_mode(model):
+    initial=ready();base=model.pose(initial.q)
+    target=pitch(base,.6).model_copy(update={'p':(base.p[0],base.p[1],base.p[2]+.004)})
+    common=OfflineCartesianFollower(model,initial)
+    separate=OfflineCartesianFollower(model,initial,demand_mode='separate')
+    common.advance(target);separate.advance(target)
+    common_lift=model.pose(common.state.q).p[2]-base.p[2]
+    separate_lift=model.pose(separate.state.q).p[2]-base.p[2]
+    assert common_lift>=-1e-9 and separate_lift>2*max(0.,common_lift)
+    assert model.pose(separate.state.q).p[:2]==pytest.approx(base.p[:2],abs=1e-8)
