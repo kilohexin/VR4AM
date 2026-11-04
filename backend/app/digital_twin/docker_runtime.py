@@ -96,6 +96,8 @@ async def ensure_docker_speed(client,*,check=lambda:None):
 
 
 def create_docker_app(web_directory,*,blended_translation=False,blended_rotation=False,pvat_vr=False,pose_follow_vr=False,docker_test_container=None):
+    if pose_follow_vr and POSE_PROFILE.quarantined:
+        raise ValueError('pose_follow_quarantined_cartesian_path')
     if pose_follow_vr:pvat_vr=True
     if pvat_vr:blended_rotation=True
     if blended_rotation is True:blended_translation=True

@@ -24,6 +24,8 @@ def main(argv=None):
     parser.add_argument('--host',choices=('127.0.0.1','0.0.0.0'),default='127.0.0.1')
     parser.add_argument('--cert');parser.add_argument('--key')
     args=parser.parse_args(argv)
+    if args.run and args.pose_follow_vr and runtime.POSE_PROFILE.quarantined:
+        parser.error('pose_follow_quarantined_cartesian_path: pitch reversal path is not verified')
     if args.isolated_test_container is not None:
         if not args.isolated_test_container:parser.error('test container must be explicit and nonempty')
         if args.test_seconds is None:args.test_seconds=120
@@ -43,6 +45,7 @@ def main(argv=None):
         isolated_test=bool(args.isolated_test_container),test_seconds=args.test_seconds if args.isolated_test_container else None,
         simulator=True,web_host=args.host,web_port=args.port,admission=admission,pvat_vr=args.pvat_vr,
         pose_follow_vr=args.pose_follow_vr,
+        pose_follow_quarantined=bool(args.pose_follow_vr and runtime.POSE_PROFILE.quarantined),
         pose_follow_window_s=runtime.POSE_PROFILE.duration_ms/1000 if args.pose_follow_vr else None,
         pose_follow_grip_span_mm=runtime.POSE_PROFILE.target_tcp_span_m*1000 if args.pose_follow_vr else None,
         pose_mailbox_ttl_ms=runtime.POSE_PROFILE.mailbox_ttl_ms if args.pose_follow_vr else None,

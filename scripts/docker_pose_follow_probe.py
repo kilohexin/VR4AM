@@ -90,6 +90,10 @@ def main():
     parser.add_argument('--run', action='store_true')
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
+    sys.path.insert(0, str(ROOT / 'backend'))
+    from app.control.docker_pose_profile import POSE_PROFILE
+    if args.run and POSE_PROFILE.quarantined:
+        parser.error('pose_follow_quarantined_cartesian_path: use no-motion analysis only')
     admitted = admission(args.container)
     if not args.run:
         print(json.dumps(dict(execute=False, admission=admitted, prepare_movej=1,

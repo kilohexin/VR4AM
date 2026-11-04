@@ -7,6 +7,10 @@ from app.control.coordinate_mapper import CoordinateMapper
 class VRPoseReference:
     # XR right/up/back -> controller right/forward/up, a proper rotation.
     axes=Rotation.from_matrix(((1.,0.,0.),(0.,0.,-1.),(0.,1.,0.)))
+    # WebXR held-rod forward is -Z; the gripper tool points along +Z.
+    # A proper basis rotation preserves Y and reverses X/Z, without Euler
+    # component sign edits or a discontinuity when pitch crosses zero.
+    grip_to_tool=Rotation.from_euler('y',180.,degrees=True)
 
     def __init__(self,*,clock,translation_scale=2.,orientation_mode='world'):
         if type(translation_scale) not in (int,float) or not 0<translation_scale<=5:
@@ -49,6 +53,7 @@ class VRPoseReference:
         self.seq=seq;self.stamp=captured_ns
         goal=self.mapper.target(self._mapped(hand))
         if self.orientation_mode=='tool':
-            rotation=self._tool_rotation*self._hand_rotation.inv()*Rotation.from_quat(hand.q)
+            delta=self._hand_rotation.inv()*Rotation.from_quat(hand.q)
+            rotation=self._tool_rotation*self.grip_to_tool*delta*self.grip_to_tool.inv()
             goal=goal.model_copy(update={'q':tuple(float(v) for v in rotation.as_quat())})
         return goal

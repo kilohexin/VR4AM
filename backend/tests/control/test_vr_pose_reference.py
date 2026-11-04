@@ -50,7 +50,7 @@ def test_release_and_new_capture_do_not_replay_the_old_endpoint():
 
 
 @pytest.mark.parametrize('axis',['x','y','z'])
-def test_calibrated_tool_mode_maps_local_hand_rotation_to_same_tool_axis(axis):
+def test_calibrated_tool_mode_accounts_for_opposite_grip_and_tool_forward_axes(axis):
     now=[1_000_000_000]
     m=VRPoseReference(clock=lambda:now[0],translation_scale=1.,orientation_mode='tool')
     h0=Rotation.from_euler('xyz',(.7,-.4,.9));t0=Rotation.from_euler('xyz',(-.3,.8,-.6))
@@ -59,7 +59,42 @@ def test_calibrated_tool_mode_maps_local_hand_rotation_to_same_tool_axis(axis):
     turn=Rotation.from_euler(axis,.4)
     moved=hand.model_copy(update={'p':(.11,.22,.27),'q':tuple((h0*turn).as_quat())})
     goal=m.target(moved,generation=1,seq=1,captured_ns=now[0])
-    assert ((t0.inv()*Rotation.from_quat(goal.q)).inv()*turn).magnitude()<1e-10
+    expected=Rotation.from_euler(axis,.4 if axis=='y' else -.4)
+    assert ((t0.inv()*Rotation.from_quat(goal.q)).inv()*expected).magnitude()<1e-10
     assert goal.p==pytest.approx((.31,.03,.42))
     from app.control.vr_pose_mailbox import pack
     assert len(pack(goal))==7  # Production transport accepts only plain finite numeric fields.
+
+
+def test_pitch_forward_convention_and_crossing_zero_keep_position_and_orientation_continuous():
+    now=1_000_000_000;m=VRPoseReference(clock=lambda:now,translation_scale=1.,orientation_mode='tool')
+    hand=Pose(p=(0.,0.,0.),q=(0.,0.,0.,1.))
+    tcp=Pose(p=(.3,0.,.4),q=(.5,-.5,-.5,.5))
+    m.capture(hand,tcp,generation=1,hand_ns=now,tcp_ns=now)
+    previous=None
+    for seq in range(101):
+        theta=-.3+.006*seq
+        turned=hand.model_copy(update={'q':tuple(Rotation.from_euler('x',theta).as_quat())})
+        goal=m.target(turned,generation=1,seq=seq,captured_ns=now)
+        direction=Rotation.from_quat(goal.q).apply((0.,0.,1.))
+        assert direction[2]==pytest.approx(math.sin(theta))
+        assert goal.p==tcp.p
+        if previous is not None:assert (previous.inv()*Rotation.from_quat(goal.q)).magnitude()==pytest.approx(.006)
+        previous=Rotation.from_quat(goal.q)
+
+
+def test_tool_mapping_does_not_jump_across_quaternion_sign_or_euler_wrap():
+    now=1_000_000_000
+    mapper=VRPoseReference(clock=lambda:now,orientation_mode='tool')
+    hand=Pose(p=(0.,0.,0.),q=(0.,0.,0.,1.))
+    tcp=Pose(p=(.3,0.,.4),q=(.5,-.5,-.5,.5))
+    mapper.capture(hand,tcp,generation=1,hand_ns=now,tcp_ns=now)
+    previous=None
+    for seq,theta in enumerate((179.,180.,181.,179.)):
+        q=Rotation.from_euler('x',theta,degrees=True).as_quat()
+        if seq%2:q=-q  # Same physical rotation, opposite quaternion encoding.
+        goal=mapper.target(hand.model_copy(update={'q':tuple(q)}),generation=1,seq=seq,captured_ns=now)
+        rotation=Rotation.from_quat(goal.q)
+        if previous is not None:assert (previous.inv()*rotation).magnitude()<=math.radians(2.000001)
+        assert goal.p==tcp.p
+        previous=rotation

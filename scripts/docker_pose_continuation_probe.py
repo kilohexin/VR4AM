@@ -119,7 +119,11 @@ def main():
     parser.add_argument('--scenario',choices=('continuation','boundary','human'),default='continuation')
     parser.add_argument('--run',action='store_true')
     parser.add_argument('--output',type=Path,required=True)
-    args=parser.parse_args();admitted=admission(args.container)
+    args=parser.parse_args()
+    from app.control.docker_pose_profile import POSE_PROFILE
+    if args.run and POSE_PROFILE.quarantined:
+        parser.error('pose_follow_quarantined_cartesian_path: use no-motion analysis only')
+    admitted=admission(args.container)
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admitted,scenario=args.scenario,
             prepare_movej=1,duration_s=44 if args.scenario in ('continuation','human') else 8,

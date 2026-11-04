@@ -121,7 +121,8 @@ try{
   await wait(()=>new Quaternion(...state.actual_tcp.q).angleTo(initial)>.27,'response_90_percent',5000);
   const responseMs=performance.now()-since;
   const local=initial.clone().invert().multiply(new Quaternion(...state.actual_tcp.q));
-  if(local.z<.12||Math.abs(local.x)+Math.abs(local.y)>.03)throw Error('wrist_did_not_rotate_about_tool_z');
+  // Grip -Z forward and tool +Z forward have opposite local Z conventions.
+  if(local.z>-.12||Math.abs(local.x)+Math.abs(local.y)>.03)throw Error('wrist_did_not_rotate_about_tool_z');
   if(responseMs>=3500)throw Error('response_still_too_slow:'+responseMs);
   handQ=zero.toArray() as typeof handQ;
   await wait(()=>new Quaternion(...state.actual_tcp.q).angleTo(initial)<.03,'response_return',6000);

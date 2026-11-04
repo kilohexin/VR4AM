@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class DockerPoseProfile:
+    quarantined: bool = True  # Cartesian path deviation observed during pitch reversal.
     duration_ms: int = 300_000
     maximum_points: int = 3750
     target_tcp_span_m: float = .300

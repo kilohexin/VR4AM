@@ -112,6 +112,7 @@ def test_launcher_preview_never_loads_or_connects_sdk(monkeypatch,capsys,pose):
     report=json.loads(capsys.readouterr().out)
     assert report['execute'] is False and report['sdk_target']=='127.0.0.1:3030'
     assert report['pose_follow_vr'] is pose
+    assert report['pose_follow_quarantined'] is pose
     assert report['pose_follow_window_s']==(300 if pose else None)
     assert report['pose_follow_grip_span_mm']==(300 if pose else None)
     assert ('lebai_sdk' in sys.modules)==before
