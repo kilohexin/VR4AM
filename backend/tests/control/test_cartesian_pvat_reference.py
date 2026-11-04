@@ -11,9 +11,14 @@ from app.control.cartesian_pvat_reference import SplitCartesianBrakeCurve,Segmen
 from app.schemas.messages import Pose
 
 
-@pytest.fixture
-def model():
-    return MdhReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
+@pytest.fixture(params=['python','compiled'])
+def model(request):
+    factory=MdhReferenceModel
+    if request.param=='compiled':
+        pytest.importorskip('numba')
+        from app.control.compiled_reference_geometry import CompiledReferenceModel
+        factory=CompiledReferenceModel
+    return factory(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
 
 
 def ready():return JointReference((0.,-.8,1.4,-.6,1.57,0.))
@@ -235,6 +240,19 @@ def test_fitted_stop_cannot_return_a_plan_when_an_interior_check_refuses(model,m
 @pytest.mark.parametrize('limit',[True,0,-1,1.5,2001])
 def test_invalid_model_work_budget_is_rejected(limit):
     with pytest.raises(ValueError,match='configuration'):SegmentPlanningBudget(limit)
+
+
+def test_curve_budget_stops_expensive_repeated_inverse_attempts_before_segment_budget(model,monkeypatch):
+    import app.control.cartesian_pvat_reference as module
+    follower=OfflineCartesianFollower(model,ready());piece,_=follower.advance(pitch(model.pose(ready().q),.15))
+    calls=[]
+    def reject(*a,**kw):
+        calls.append(True);raise ValueError('cartesian_reference_corridor')
+    monkeypatch.setattr(module,'validate_segment',reject)
+    budget=SegmentPlanningBudget(24,2)
+    with pytest.raises(ValueError,match='search_budget_exhausted'):
+        plan_cartesian_braking(model,piece.end,method='joint_fit',segment_budget=budget)
+    assert budget.curves==2 and budget.used==2 and budget.exhausted and len(calls)==2
 
 
 def test_unresolved_interval_cannot_be_accepted_by_exhausting_subdivisions(model):

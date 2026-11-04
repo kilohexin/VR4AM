@@ -92,7 +92,8 @@ def run(frozen_log=None,*,large_pitch=False):
 
 
 def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking=False,demand_mode='coupled',braking_stride=None,
-        supervised=False,governed_continuation=False,braking_segment_limit=None,braking_method='pointwise'):
+        supervised=False,governed_continuation=False,braking_segment_limit=None,braking_curve_limit=None,
+        braking_method='pointwise',geometry_backend='python'):
     """Counterfactual math only: corrected mapping, one new reference/80ms.
 
     This replays one continuous held gesture, not the original native PVAT
@@ -102,8 +103,14 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
         raise ValueError('offline_reference_braking_stride')
     if governed_continuation and not supervised:raise ValueError('offline_reference_supervisor_required')
     if braking_segment_limit is not None and not supervised:raise ValueError('offline_reference_supervisor_required')
+    if braking_curve_limit is not None and braking_segment_limit is None:raise ValueError('offline_reference_segment_budget_required')
     if braking_method!='pointwise' and not supervised:raise ValueError('offline_reference_supervisor_required')
-    model=MdhReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
+    if geometry_backend not in ('python','compiled'):raise ValueError('offline_reference_geometry_backend')
+    model_factory=MdhReferenceModel
+    if geometry_backend=='compiled':
+        from app.control.compiled_reference_geometry import CompiledReferenceModel
+        model_factory=CompiledReferenceModel
+    model=model_factory(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
     start,source=origin(frozen_log,model);base=model.pose(start.q)
     rows=[json.loads(line) for line in frozen_log.read_text(encoding='utf-8').splitlines()]
     held=[];ended=False
@@ -122,6 +129,7 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
     if supervised:
         options['continue_on_known_rejection']=governed_continuation
         options['braking_segment_limit']=braking_segment_limit
+        options['braking_curve_limit']=braking_curve_limit
         options['braking_method']=braking_method
     follower=factory(model,start,**options)
     report=dict(offline_candidate_passed=False,sdk_connections=0,motion_writes=0,source=source,
@@ -130,6 +138,9 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
         completed_steps=0,max_downward_goal_error_m=0.,max_interval_position_bound_m=0.,
         max_step_wall_s=0.,model_joint_bounds_rad=[-3.,3.],response_frequency=response_frequency)
     report['reference_sha256']=hashlib.sha256((ROOT/'backend/app/control/cartesian_pvat_reference.py').read_bytes()).hexdigest()
+    report['geometry_backend']=geometry_backend;report['geometry_warmup_wall_s']=getattr(model,'warmup_wall_s',0.)
+    if geometry_backend=='compiled':
+        report['geometry_sha256']=hashlib.sha256((ROOT/'backend/app/control/compiled_reference_geometry.py').read_bytes()).hexdigest()
     report['lookahead_position_m']=getattr(follower,'lookahead_position',.02)
     report['lookahead_rotation_rad']=getattr(follower,'lookahead_rotation',.08)
     report['demand_mode']=demand_mode
@@ -138,11 +149,14 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
     report['backoff_steps']=0;report['backup_braking_steps']=0
     report['governed_deceleration_steps']=0
     report['braking_segment_limit']=braking_segment_limit
+    report['braking_curve_limit']=braking_curve_limit
     report['braking_method']=braking_method
     report['max_braking_segment_solves_per_step']=0 if braking_segment_limit is not None else None
+    report['max_braking_curve_attempts_per_step']=0 if braking_segment_limit is not None else None
     if supervised:report['supervisor_sha256']=hashlib.sha256((ROOT/'backend/app/control/cartesian_reference_bundle.py').read_bytes()).hexdigest()
     before=time.perf_counter();period_ns=80_000_000
     step_times=[];brake_samples=[]
+    slow_steps=[]
     observations=[dict(kind='robot_kinematics',server_mono_ns=stamps[0]-1,actual_tcp=base.model_dump())]
     total_steps=(stamps[-1]-stamps[0])//period_ns
     for tick in range(total_steps):
@@ -151,6 +165,7 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
         now[0]=stamps[0]+tick*period_ns
         sample=held[bisect.bisect_right(stamps,now[0])-1]
         step_before=time.perf_counter()
+        before_state=follower.state
         try:
             target=mapper.target(Pose(**sample['hand_pose']),generation=1,seq=tick,captured_ns=sample['server_mono_ns'])
             p=tuple(float(x) for x in np.clip(np.array(target.p),np.array(base.p)-.3,np.array(base.p)+.3))
@@ -163,6 +178,8 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
                 if braking_segment_limit is not None:
                     report['max_braking_segment_solves_per_step']=max(report['max_braking_segment_solves_per_step'],
                         follower.last_braking_segment_solves)
+                    report['max_braking_curve_attempts_per_step']=max(report['max_braking_curve_attempts_per_step'],
+                        follower.last_braking_curve_attempts)
                 check=dict(optimizer_iterations=packet.optimizer_iterations,position_bound_m=packet.position_bound_m)
                 report['backoff_steps']+=int(packet.mode=='following' and packet.demand_scale<1.)
                 report['backup_braking_steps']+=int(packet.mode=='braking')
@@ -179,6 +196,12 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
         report['completed_steps']+=1
         report['direct_quadratic_steps']+=int(check['optimizer_iterations']==0)
         elapsed=time.perf_counter()-step_before;step_times.append(elapsed)
+        if supervised:
+            slow_steps.append(dict(step=tick,wall_s=elapsed,mode=packet.mode,
+                q=before_state.q,v=before_state.v,a=before_state.a,target=target.model_dump(),
+                work=follower.last_work,rejections=follower.last_rejections))
+            slow_steps.sort(key=lambda item:item['wall_s'],reverse=True)
+            del slow_steps[12:]
         report['max_step_wall_s']=max(report['max_step_wall_s'],elapsed)
         selected=(tick in (10,100,400,800,1200,1600) if braking_stride is None
             else tick%braking_stride==0 or tick==total_steps-1)
@@ -192,6 +215,7 @@ def replay(frozen_log,*,response_frequency=4.,reference_trace=None,check_braking
         report['offline_candidate_passed']=False
         report.setdefault('rejection','cartesian_reference_bundle_rejected_during_follow')
     report['compute_budget_overruns']=sum(t>=.08 for t in step_times)
+    report['slow_steps']=slow_steps
     report['reference_compute_budget_observed']=bool(report['offline_candidate_passed'] and not report['compute_budget_overruns'])
     report['compute_p95_s']=float(np.percentile(step_times,95)) if step_times else None
     report['compute_p99_s']=float(np.percentile(step_times,99)) if step_times else None
@@ -244,25 +268,30 @@ def main():
     p.add_argument('--supervised',action='store_true')
     p.add_argument('--governed-continuation',action='store_true')
     p.add_argument('--braking-segment-limit',type=int)
+    p.add_argument('--braking-curve-limit',type=int)
     p.add_argument('--braking-method',choices=('pointwise','joint_fit'),default='pointwise')
+    p.add_argument('--geometry-backend',choices=('python','compiled'),default='python')
     args=p.parse_args()
     if args.governed_continuation and not args.supervised:p.error('--governed-continuation requires --supervised')
     if args.braking_segment_limit is not None and (not args.supervised or not 1<=args.braking_segment_limit<=2000):
         p.error('--braking-segment-limit requires --supervised and an integer in 1..2000')
+    if args.braking_curve_limit is not None and (args.braking_segment_limit is None or not 1<=args.braking_curve_limit<=2000):
+        p.error('--braking-curve-limit requires --braking-segment-limit and an integer in 1..2000')
     if args.braking_method!='pointwise' and not args.supervised:p.error('--braking-method requires --supervised')
     if args.braking_stride is not None and (not args.check_braking or args.braking_stride<=0):
         p.error('--braking-stride requires --check-braking and a positive integer')
     if args.replay_frozen and (args.frozen_log is None or args.large_pitch):
         p.error('--replay-frozen requires one frozen log and cannot combine --large-pitch')
-    if not args.replay_frozen and (args.response_frequency!=4. or args.reference_trace is not None or args.check_braking or args.demand_mode!='coupled' or args.supervised):
+    if not args.replay_frozen and (args.response_frequency!=4. or args.reference_trace is not None or args.check_braking or args.demand_mode!='coupled' or args.supervised or args.geometry_backend!='python'):
         p.error('--response-frequency and --reference-trace only apply to --replay-frozen')
     report=replay(args.frozen_log,response_frequency=args.response_frequency,reference_trace=args.reference_trace,
         check_braking=args.check_braking,demand_mode=args.demand_mode,braking_stride=args.braking_stride,
         supervised=args.supervised,governed_continuation=args.governed_continuation,
-        braking_segment_limit=args.braking_segment_limit,braking_method=args.braking_method) if args.replay_frozen else run(args.frozen_log,large_pitch=args.large_pitch)
+        braking_segment_limit=args.braking_segment_limit,braking_curve_limit=args.braking_curve_limit,braking_method=args.braking_method,
+        geometry_backend=args.geometry_backend) if args.replay_frozen else run(args.frozen_log,large_pitch=args.large_pitch)
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,indent=2),encoding='utf-8')
-    printable={k:v for k,v in report.items() if k!='sampled_braking'}
+    printable={k:v for k,v in report.items() if k not in ('sampled_braking','slow_steps')}
     if 'sampled_braking' in report:
         printable['braking_failures']=[c for c in report['sampled_braking'] if not c['available']][:5]
         printable['braking_failure_count']=sum(not c['available'] for c in report['sampled_braking'])

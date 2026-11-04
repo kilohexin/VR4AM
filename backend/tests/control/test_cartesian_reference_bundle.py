@@ -137,6 +137,15 @@ def test_work_budget_is_shared_across_demand_scales(monkeypatch):
     assert s.last_rejections[-1]['code']=='cartesian_brake_search_budget_exhausted'
 
 
+def test_curve_exhaustion_keeps_original_tail_without_claiming_segment_limit_was_reached():
+    _,s,target=rig(continue_on_known_rejection=True,braking_segment_limit=24,
+        braking_curve_limit=1,braking_method='joint_fit')
+    for _ in range(4):
+        before=s.state;packet=s.advance(target)
+        assert packet.segment.start==before and s.last_braking_curve_attempts<=1
+        assert s.last_braking_segment_solves<=24
+
+
 def test_unowned_budget_error_does_not_recover_as_a_known_refusal(monkeypatch):
     _,s,target=rig(continue_on_known_rejection=True)
     def unknown(*a,**kw):raise ValueError('cartesian_brake_search_budget_exhausted')

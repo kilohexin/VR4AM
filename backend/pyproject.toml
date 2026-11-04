@@ -12,6 +12,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+reference-speed = [
+  "numba==0.68.1",
+  "llvmlite==0.50.0"
+]
 dev = [
   "pytest>=8.2,<9",
   "pytest-asyncio>=0.24,<1",

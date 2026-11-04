@@ -5,6 +5,7 @@ reference segment. This synchronous mathematical supervisor is not that
 controller, a deadline guarantee, or proof of physical stopping.
 """
 from dataclasses import dataclass,field
+from time import perf_counter
 
 import numpy as np
 
@@ -48,12 +49,15 @@ def _workspace_checked(segment,model,lower,upper):
 
 class OfflineReferenceSupervisor:
     def __init__(self,model,start,*,workspace_span=.35,scales=(1.,.5,.25,0.),
-            continue_on_known_rejection=False,braking_segment_limit=None,braking_method='pointwise',**follower_options):
+            continue_on_known_rejection=False,braking_segment_limit=None,braking_curve_limit=None,
+            braking_method='pointwise',**follower_options):
         if (not np.isfinite(workspace_span) or workspace_span<=0 or not scales
                 or any(not np.isfinite(s) or not 0<=s<=1 for s in scales)):
             raise ValueError('cartesian_reference_bundle_configuration')
         if type(continue_on_known_rejection) is not bool:raise ValueError('cartesian_reference_bundle_configuration')
-        if braking_segment_limit is not None:SegmentPlanningBudget(braking_segment_limit)
+        if braking_curve_limit is not None and braking_segment_limit is None:
+            raise ValueError('cartesian_brake_configuration')
+        if braking_segment_limit is not None:SegmentPlanningBudget(braking_segment_limit,braking_curve_limit)
         if braking_method not in ('pointwise','joint_fit'):raise ValueError('cartesian_brake_configuration')
         if not isinstance(start,JointReference) or max(abs(x) for x in start.v+start.a)>1e-12:
             raise ValueError('cartesian_reference_bundle_requires_quiet_origin')
@@ -62,12 +66,14 @@ class OfflineReferenceSupervisor:
         self._binding=(model.tool,tuple(model.lower),tuple(model.upper),tuple(model.position_lipschitz))
         self.continue_on_known_rejection=continue_on_known_rejection
         self.braking_segment_limit=braking_segment_limit;self.last_braking_segment_solves=None
+        self.braking_curve_limit=braking_curve_limit;self.last_braking_curve_attempts=None
         self.braking_method=braking_method
         seed=OfflineCartesianFollower(model,start,**self.options)
         self._period=seed.period;self._validation=dict(seed.validation)
         initial,_=plan_cartesian_braking(model,start,period=self._period,method=self.braking_method,**self._validation)
         self._tail=initial.segments;self._tail_checks=initial.checks;self.phase='following';self.reason=None
         self.last_rejections=()
+        self.last_work=()
         for segment in self._tail:_workspace_checked(segment,model,self.lower,self.upper)
 
     def _check(self):
@@ -94,8 +100,9 @@ class OfflineReferenceSupervisor:
     def advance(self,target):
         self._check()
         if self.phase=='finishing':return self._consume_tail()
-        budget=SegmentPlanningBudget(self.braking_segment_limit) if self.braking_segment_limit is not None else None
+        budget=SegmentPlanningBudget(self.braking_segment_limit,self.braking_curve_limit) if self.braking_segment_limit is not None else None
         self.last_braking_segment_solves=0 if budget is not None else None
+        self.last_braking_curve_attempts=0 if budget is not None else None
         if not self._tail:
             if max(abs(x) for x in self.state.v+self.state.a)>1e-8:
                 self.phase='fault';raise ValueError('cartesian_reference_bundle_missing_tail')
@@ -105,9 +112,11 @@ class OfflineReferenceSupervisor:
                 for item in quiet.segments:_workspace_checked(item,self.model,self.lower,self.upper)
             except Exception:
                 if budget is not None:self.last_braking_segment_solves=budget.used
+                if budget is not None:self.last_braking_curve_attempts=budget.curves
                 self.phase='fault';raise
             self._tail=quiet.segments;self._tail_checks=quiet.checks
         rejections=[]
+        work=[];self.last_work=()
         for scale in self.scales:
             options=dict(self.options)
             if scale:
@@ -117,20 +126,29 @@ class OfflineReferenceSupervisor:
             else:requested=self.model.pose(self.state.q)
             candidate=OfflineCartesianFollower(self.model,self.state,**options)
             stage='reference'
+            began=perf_counter()
             try:
                 segment,check=candidate.advance(requested)
+                work.append(dict(scale=float(scale),stage=stage,wall_s=perf_counter()-began))
                 stage='braking'
+                began=perf_counter()
                 brake,_=plan_cartesian_braking(self.model,segment.end,period=self._period,
                     segment_budget=budget,method=self.braking_method,**self._validation)
+                work.append(dict(scale=float(scale),stage=stage,wall_s=perf_counter()-began))
                 chain=(segment,)+brake.segments
                 if any(a.end!=b.start for a,b in zip(chain,chain[1:])):
                     raise ValueError('cartesian_reference_bundle_chain')
                 stage='workspace'
+                began=perf_counter()
                 for item in chain:_workspace_checked(item,self.model,self.lower,self.upper)
+                work.append(dict(scale=float(scale),stage=stage,wall_s=perf_counter()-began))
             except ValueError as error:
+                work.append(dict(scale=float(scale),stage=stage,wall_s=perf_counter()-began,code=str(error)))
+                self.last_work=tuple(work)
                 if budget is not None:self.last_braking_segment_solves=budget.used
+                if budget is not None:self.last_braking_curve_attempts=budget.curves
                 if (str(error)=='cartesian_brake_search_budget_exhausted' and budget is not None
-                        and budget.used==budget.limit and stage=='braking'):
+                        and budget.exhausted and stage=='braking'):
                     rejections.append(dict(scale=float(scale),stage=stage,code=str(error)))
                     break  # Never install an incomplete tail or reset the budget at a smaller demand.
                 if str(error) not in KNOWN_REJECTIONS:
@@ -140,7 +158,9 @@ class OfflineReferenceSupervisor:
             except Exception:
                 self.phase='fault';raise
             self.last_rejections=tuple(rejections)
+            self.last_work=tuple(work)
             if budget is not None:self.last_braking_segment_solves=budget.used
+            if budget is not None:self.last_braking_curve_attempts=budget.curves
             self.state=segment.end;self._tail=brake.segments;self._tail_checks=brake.checks
             return ReferenceBundle(segment,self._tail,'following',float(scale),
                 position_bound_m=check['position_bound_m'],optimizer_iterations=check['optimizer_iterations'])

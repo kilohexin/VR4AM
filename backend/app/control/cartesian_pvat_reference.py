@@ -28,11 +28,24 @@ def _vector(value, count):
 class SegmentPlanningBudget:
     """Bound model work, not a wall-clock guarantee or motion authorization."""
     limit: int
+    curve_limit: int|None=None
     used: int=field(default=0,init=False)
+    curves: int=field(default=0,init=False)
 
     def __post_init__(self):
         if type(self.limit) is not int or not 1<=self.limit<=2000:
             raise ValueError('cartesian_brake_configuration')
+        if self.curve_limit is not None and (type(self.curve_limit) is not int or not 1<=self.curve_limit<=2000):
+            raise ValueError('cartesian_brake_configuration')
+
+    @property
+    def exhausted(self):
+        return self.used>=self.limit or self.curve_limit is not None and self.curves>=self.curve_limit
+
+    def begin_curve(self):
+        if self.curve_limit is not None and self.curves>=self.curve_limit:
+            raise ValueError('cartesian_brake_search_budget_exhausted')
+        self.curves+=1
 
     def consume(self):
         if self.used>=self.limit:raise ValueError('cartesian_brake_search_budget_exhausted')
@@ -583,6 +596,7 @@ def _plan_curve(model,start,curve,period,validation,segment_budget=None):
     if np.any(np.array(start.q)<model.lower) or np.any(np.array(start.q)>model.upper):
         raise ValueError('cartesian_reference_joint_bounds')
     previous=start;segments=[];checks=[]
+    if segment_budget is not None:segment_budget.begin_curve()
     for i in range(1,count+1):
         if segment_budget is not None:segment_budget.consume()
         segment,check=_solve_segment(model,previous,curve,(i-1)*period,period,validation)
@@ -600,7 +614,8 @@ def _fit_braking_curve(model,start,curve,period,validation,segment_budget=None):
     count=round(curve.duration/period)
     if count<1 or count>2000 or abs(count*period-curve.duration)>1e-9:
         raise ValueError('cartesian_reference_grid')
-    if segment_budget is not None:segment_budget.consume()
+    if segment_budget is not None:
+        segment_budget.begin_curve();segment_budget.consume()
     pose,twist,acc=curve.state(curve.duration)
     if max(np.max(np.abs(twist)),np.max(np.abs(acc)))>1e-10:
         raise ValueError('cartesian_reference_brake_terminal_rates')
