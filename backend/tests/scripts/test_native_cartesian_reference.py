@@ -12,7 +12,7 @@ def trace():
 
 def test_native_source_can_only_read_tool_joint_state_and_calculate_fk():
     cases,brakes=probe.build_cases();source=probe.program(cases)
-    assert 0<len(cases)<=256 and brakes==4
+    assert 0<len(cases)<=256 and brakes==5
     assert set(re.findall(r'lebai:(\w+)\(',source))=={'get_tcp','get_kin_data','kinematics_forward'}
     assert 'changed_joint_state' in source and 'nonzero_tool' in source
 

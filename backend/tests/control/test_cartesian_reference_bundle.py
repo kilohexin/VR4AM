@@ -7,10 +7,10 @@ from app.control.cartesian_pvat_reference import JointReference,MdhReferenceMode
 from app.commissioning.native_jog_mdh import MdhTool
 
 
-def rig():
+def rig(**options):
     model=MdhReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
     start=JointReference((0.,-.8,1.4,-.6,1.57,0.))
-    supervisor=module.OfflineReferenceSupervisor(model,start)
+    supervisor=module.OfflineReferenceSupervisor(model,start,**options)
     base=model.pose(start.q)
     target=base.model_copy(update={'q':tuple((Rotation.from_quat(base.q)*Rotation.from_euler('x',.15)).as_quat())})
     return model,supervisor,target
@@ -74,4 +74,42 @@ def test_execution_head_mismatch_faults_instead_of_splicing_an_old_braking_tail(
     _,s,target=rig();s.advance(target)
     s.state=JointReference(tuple(np.array(s.state.q)+.001))
     with pytest.raises(ValueError,match='bundle_chain'):s.finish()
+    assert s.phase=='fault'
+
+
+def test_known_refusal_can_take_an_approved_deceleration_step_without_installing_the_bad_candidate(monkeypatch):
+    _,s,target=rig(continue_on_known_rejection=True)
+    accepted=s.advance(target);planner=module.plan_cartesian_braking
+    def refuse(*a,**kw):raise ValueError('cartesian_brake_no_feasible_plan')
+    monkeypatch.setattr(module,'plan_cartesian_braking',refuse)
+    delayed=s.advance(target)
+    assert delayed.segment==accepted.braking_tail[0]
+    assert delayed.mode=='governed_deceleration' and s.phase=='following'
+    monkeypatch.setattr(module,'plan_cartesian_braking',planner)
+    resumed=s.advance(target)
+    assert resumed.segment.start==delayed.segment.end and resumed.mode=='following'
+
+
+def test_release_stays_latched_even_when_known_refusal_continuation_is_selected():
+    _,s,target=rig(continue_on_known_rejection=True);s.advance(target)
+    packet=s.finish()
+    assert packet.mode=='braking'
+    while s.phase!='ready':assert s.advance(target).mode=='braking'
+    with pytest.raises(ValueError,match='requires_capture'):s.advance(target)
+
+
+def test_continuation_option_never_recovers_unknown_stop_or_bad_data(monkeypatch):
+    _,s,target=rig(continue_on_known_rejection=True)
+    def refuse(*a,**kw):raise ValueError('stop_unverified')
+    monkeypatch.setattr(module,'plan_cartesian_braking',refuse)
+    with pytest.raises(ValueError,match='stop_unverified'):s.advance(target)
+    assert s.phase=='fault'
+
+
+def test_reseed_error_after_a_quiet_deceleration_remains_a_fault(monkeypatch):
+    _,s,target=rig(continue_on_known_rejection=True)
+    s._tail=();s._tail_checks=()
+    def unknown(*a,**kw):raise RuntimeError('unknown')
+    monkeypatch.setattr(module,'plan_cartesian_braking',unknown)
+    with pytest.raises(RuntimeError):s.advance(target)
     assert s.phase=='fault'

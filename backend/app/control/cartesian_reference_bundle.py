@@ -47,19 +47,23 @@ def _workspace_checked(segment,model,lower,upper):
 
 
 class OfflineReferenceSupervisor:
-    def __init__(self,model,start,*,workspace_span=.35,scales=(1.,.5,.25,0.),**follower_options):
+    def __init__(self,model,start,*,workspace_span=.35,scales=(1.,.5,.25,0.),
+            continue_on_known_rejection=False,**follower_options):
         if (not np.isfinite(workspace_span) or workspace_span<=0 or not scales
                 or any(not np.isfinite(s) or not 0<=s<=1 for s in scales)):
             raise ValueError('cartesian_reference_bundle_configuration')
+        if type(continue_on_known_rejection) is not bool:raise ValueError('cartesian_reference_bundle_configuration')
         if not isinstance(start,JointReference) or max(abs(x) for x in start.v+start.a)>1e-12:
             raise ValueError('cartesian_reference_bundle_requires_quiet_origin')
         self.model=model;self.state=start;self.options=dict(follower_options);self.scales=tuple(scales)
         base=np.array(model.pose(start.q).p);self.lower=base-workspace_span;self.upper=base+workspace_span
         self._binding=(model.tool,tuple(model.lower),tuple(model.upper),tuple(model.position_lipschitz))
+        self.continue_on_known_rejection=continue_on_known_rejection
         seed=OfflineCartesianFollower(model,start,**self.options)
         self._period=seed.period;self._validation=dict(seed.validation)
         initial,_=plan_cartesian_braking(model,start,period=self._period,**self._validation)
         self._tail=initial.segments;self._tail_checks=initial.checks;self.phase='following';self.reason=None
+        self.last_rejections=()
         for segment in self._tail:_workspace_checked(segment,model,self.lower,self.upper)
 
     def _check(self):
@@ -86,6 +90,16 @@ class OfflineReferenceSupervisor:
     def advance(self,target):
         self._check()
         if self.phase=='finishing':return self._consume_tail()
+        if not self._tail:
+            if max(abs(x) for x in self.state.v+self.state.a)>1e-8:
+                self.phase='fault';raise ValueError('cartesian_reference_bundle_missing_tail')
+            try:
+                quiet,_=plan_cartesian_braking(self.model,self.state,period=self._period,**self._validation)
+                for item in quiet.segments:_workspace_checked(item,self.model,self.lower,self.upper)
+            except Exception:
+                self.phase='fault';raise
+            self._tail=quiet.segments;self._tail_checks=quiet.checks
+        rejections=[]
         for scale in self.scales:
             options=dict(self.options)
             if scale:
@@ -94,20 +108,33 @@ class OfflineReferenceSupervisor:
                 requested=target
             else:requested=self.model.pose(self.state.q)
             candidate=OfflineCartesianFollower(self.model,self.state,**options)
+            stage='reference'
             try:
                 segment,check=candidate.advance(requested)
+                stage='braking'
                 brake,_=plan_cartesian_braking(self.model,segment.end,period=self._period,**self._validation)
                 chain=(segment,)+brake.segments
                 if any(a.end!=b.start for a,b in zip(chain,chain[1:])):
                     raise ValueError('cartesian_reference_bundle_chain')
+                stage='workspace'
                 for item in chain:_workspace_checked(item,self.model,self.lower,self.upper)
             except ValueError as error:
                 if str(error) not in KNOWN_REJECTIONS:
                     self.phase='fault';raise
+                rejections.append(dict(scale=float(scale),stage=stage,code=str(error)))
                 continue  # Pure mathematical backoff, no SDK or command retry.
             except Exception:
                 self.phase='fault';raise
+            self.last_rejections=tuple(rejections)
             self.state=segment.end;self._tail=brake.segments;self._tail_checks=brake.checks
             return ReferenceBundle(segment,self._tail,'following',float(scale),
                 position_bound_m=check['position_bound_m'],optimizer_iterations=check['optimizer_iterations'])
+        self.last_rejections=tuple(rejections)
+        if self.continue_on_known_rejection:
+            # This is still the SAME mathematical capture with fresh input
+            # supplied by the caller. Consume already approved motion, never
+            # issue the rejected reference or recover a fault/release.
+            packet=self._consume_tail();self.phase='following'
+            return ReferenceBundle(packet.segment,packet.braking_tail,'governed_deceleration',0.,
+                'known_reference_rejected',packet.position_bound_m)
         return self.finish('no_candidate_with_braking_tail')

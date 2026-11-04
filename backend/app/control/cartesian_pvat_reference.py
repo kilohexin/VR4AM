@@ -183,6 +183,52 @@ class CartesianCurve:
         return Pose(p=tuple(x[:3]),q=tuple(q)),np.r_[v[:3],w],np.r_[a[:3],wd]
 
 
+def _stopping_quartic(origin,velocity,acceleration,duration):
+    c=np.zeros((6,3));c[0]=origin;c[1]=velocity*duration;c[2]=acceleration*duration**2/2
+    c[3]=-velocity*duration-2*acceleration*duration**2/3
+    c[4]=velocity*duration/2+acceleration*duration**2/4
+    return c
+
+
+class SplitCartesianBrakeCurve:
+    """Different stopping horizons in task space, one coordinated IK path.
+
+    A short angular stop need not wait for translation. After either horizon,
+    that component holds its endpoint with zero v/a. Knots must align with
+    the PVAT grid; validators see an exact local polynomial on each segment.
+    """
+    def __init__(self,pose,velocity,acceleration,position_duration,rotation_duration):
+        if not all(np.isfinite(t) and t>0 for t in (position_duration,rotation_duration)):
+            raise ValueError('cartesian_reference_duration')
+        self.position_duration=position_duration;self.rotation_duration=rotation_duration
+        self.duration=max(position_duration,rotation_duration);self.rotation=Rotation.from_quat(pose.q)
+        self.position_coefficients=_stopping_quartic(np.array(pose.p),velocity[:3],acceleration[:3],position_duration)
+        self.rotation_coefficients=_stopping_quartic(np.zeros(3),velocity[3:],acceleration[3:],rotation_duration)
+
+    def state(self,t):
+        if not 0<=t<=self.duration:raise ValueError('cartesian_reference_time')
+        values=[]
+        for c,duration in ((self.position_coefficients,self.position_duration),(self.rotation_coefficients,self.rotation_duration)):
+            u=min(t/duration,1.)
+            values.append((_evaluate(c,u),_evaluate(c,u,1,duration) if t<duration else np.zeros(3),
+                _evaluate(c,u,2,duration) if t<duration else np.zeros(3)))
+        (p,v,a),(r,rd,rdd)=values;omega,alpha=_angular(r,rd,rdd)
+        q=(Rotation.from_rotvec(r)*self.rotation).as_quat()
+        return Pose(p=tuple(p),q=tuple(q)),np.r_[v,omega],np.r_[a,alpha]
+
+    def local_segment(self,start,end):
+        local=CartesianCurve.__new__(CartesianCurve);local.duration=end-start;local.rotation=self.rotation
+        local.coefficients=np.zeros((6,6))
+        for part,c,duration in ((slice(0,3),self.position_coefficients,self.position_duration),
+                (slice(3,6),self.rotation_coefficients,self.rotation_duration)):
+            if start>=duration-1e-10:local.coefficients[0,part]=_evaluate(c,1.)
+            elif end<=duration+1e-10:
+                power,_=_range_matrices(5,start/duration,min(end/duration,1.))
+                local.coefficients[:,part]=power@c
+            else:raise ValueError('cartesian_reference_brake_knot_alignment')
+        return local
+
+
 @dataclass(frozen=True)
 class PvatSegment:
     start: JointReference
@@ -213,6 +259,8 @@ def validate_segment(segment,model,curve,offset,*,position_tolerance=.001,angle_
         raise ValueError('cartesian_reference_validation_limits')
     if (not np.isfinite(offset) or offset<0 or offset+segment.duration>curve.duration+1e-9):
         raise ValueError('cartesian_reference_interval')
+    if isinstance(curve,SplitCartesianBrakeCurve):
+        curve=curve.local_segment(offset,offset+segment.duration);offset=0.
     c=segment.coefficients();lo,hi=_range(c)
     if np.any(lo<model.lower) or np.any(hi>model.upper):raise ValueError('cartesian_reference_joint_bounds')
     peaks=[]
@@ -298,7 +346,7 @@ def validate_segment(segment,model,curve,offset,*,position_tolerance=.001,angle_
 
 @dataclass(frozen=True)
 class CartesianPlan:
-    curve: CartesianCurve
+    curve: CartesianCurve|SplitCartesianBrakeCurve
     segments: tuple[PvatSegment,...]
     checks: tuple[dict,...]
 
@@ -469,6 +517,14 @@ def plan_cartesian_reference(model,start,target,*,duration=4.,period=.08,**valid
     count=round(duration/period)
     if count>2000 or abs(count*period-duration)>1e-9:raise ValueError('cartesian_reference_grid')
     curve=_curve_from_reference(model,start,target,duration)
+    return _plan_curve(model,start,curve,period,validation)
+
+
+def _plan_curve(model,start,curve,period,validation):
+    count=round(curve.duration/period)
+    if count<1 or count>2000 or abs(count*period-curve.duration)>1e-9:raise ValueError('cartesian_reference_grid')
+    if np.any(np.array(start.q)<model.lower) or np.any(np.array(start.q)>model.upper):
+        raise ValueError('cartesian_reference_joint_bounds')
     previous=start;segments=[];checks=[]
     for i in range(1,count+1):
         segment,check=_solve_segment(model,previous,curve,(i-1)*period,period,validation)
@@ -477,7 +533,7 @@ def plan_cartesian_reference(model,start,target,*,duration=4.,period=.08,**valid
 
 
 def plan_cartesian_braking(model,start,*,period=.08,durations=(.8,.96,1.04,1.12,1.2,1.28,1.44,1.6,1.92,2.4,3.2,4.8),
-        position_radius=.02,angle_radius=.15,**validation):
+        position_radius=.02,angle_radius=.15,allow_split=True,**validation):
     """Offline bounded continuation to zero PVA rates, never a stop command.
 
     Search mathematical durations without any executor access. Every segment
@@ -486,11 +542,22 @@ def plan_cartesian_braking(model,start,*,period=.08,durations=(.8,.96,1.04,1.12,
     point, independent joint braking, or a physical stop guarantee.
     """
     pt=validation.get('position_tolerance',.001);at=validation.get('angle_tolerance',.01)
+    if not np.isfinite(period) or period<.01 or type(allow_split) is not bool:
+        raise ValueError('cartesian_brake_configuration')
+    if not all(np.isfinite(t) and t>0 for t in (pt,at)):
+        raise ValueError('cartesian_reference_validation_limits')
     if (not np.isfinite(position_radius) or not np.isfinite(angle_radius)
             or position_radius<=pt or angle_radius<=at or not durations):
         raise ValueError('cartesian_brake_budget')
     pose=model.pose(start.q);_,j,jd=model.geometry(start.q,start.v)
     velocity=j@start.v;acceleration=j@start.a+jd@start.v
+    for duration in durations:
+        if not np.isfinite(duration) or duration<period:raise ValueError('cartesian_reference_duration')
+        if abs(round(duration/period)*period-duration)>1e-9:raise ValueError('cartesian_reference_grid')
+    known_infeasible={'cartesian_reference_ik_unreachable','cartesian_reference_ik_branch',
+        'cartesian_reference_singular','cartesian_reference_joint_bounds','cartesian_reference_rate_1',
+        'cartesian_reference_rate_2','cartesian_reference_rate_3','cartesian_reference_rate_reserve',
+        'cartesian_reference_task_rate','cartesian_reference_corridor','cartesian_reference_unresolved_interval'}
     for duration in durations:
         if not np.isfinite(duration) or duration<period:raise ValueError('cartesian_reference_duration')
         # A quartic stopping chart has v(T)=a(T)=0, retaining the genuine
@@ -513,9 +580,37 @@ def plan_cartesian_braking(model,start,*,period=.08,durations=(.8,.96,1.04,1.12,
         if reversed_chart:continue
         try:plan=plan_cartesian_reference(model,start,target,duration=duration,period=period,**validation)
         except ValueError as error:
-            if not str(error).startswith('cartesian_reference_'):raise
+            if str(error) not in known_infeasible:raise
             continue
         return plan,dict(duration_s=duration,position_radius_bound_m=float(position_bound),
             angle_radius_bound_rad=float(angle_bound),native_stop_verified=False,
-            native_interpolation_verified=False)
+            native_interpolation_verified=False,position_stop_s=duration,rotation_stop_s=duration)
+    if allow_split:
+        candidates=sorted(set(durations)|{k*period for k in range(2,10)})
+        permitted=[]
+        for part,radius,tolerance,origin in ((slice(0,3),position_radius,pt,np.array(pose.p)),
+                (slice(3,6),angle_radius,at,np.zeros(3))):
+            choices=[];v=velocity[part];a=acceleration[part]
+            tangent=v if np.linalg.norm(v)>1e-8 else a
+            for duration in candidates:
+                if abs(round(duration/period)*period-duration)>1e-9:continue
+                # v(u)=(1-u)^2*[v0*(1+2u)+a0*T*u]. Its projection
+                # has a linear inner factor; checking its endpoints proves
+                # non-reversal over the entire chart, without coarse rejection.
+                if min(v@tangent,(3*v+a*duration)@tangent)<-1e-9:continue
+                c=_stopping_quartic(origin,v,a,duration);lo,hi=_range(c)
+                bound=np.linalg.norm(np.maximum(abs(lo-origin),abs(hi-origin)))+tolerance
+                if bound<=radius:choices.append((duration,float(bound)))
+            permitted.append(choices)
+        pairs=sorted(((max(p[0],r[0]),p,r) for p in permitted[0] for r in permitted[1] if p[0]!=r[0]),
+            key=lambda pair:(pair[0],pair[1][0]+pair[2][0]))
+        for duration,p,r in pairs:
+            curve=SplitCartesianBrakeCurve(pose,velocity,acceleration,p[0],r[0])
+            try:plan=_plan_curve(model,start,curve,period,validation)
+            except ValueError as error:
+                if str(error) not in known_infeasible:raise
+                continue
+            return plan,dict(duration_s=duration,position_stop_s=p[0],rotation_stop_s=r[0],
+                position_radius_bound_m=p[1],angle_radius_bound_rad=r[1],
+                native_stop_verified=False,native_interpolation_verified=False)
     raise ValueError('cartesian_brake_no_feasible_plan')

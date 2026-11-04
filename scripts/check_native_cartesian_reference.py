@@ -61,6 +61,17 @@ def build_cases():
             plan,_=plan_cartesian_braking(model,segment.end);brakes+=1
             for item in plan.segments:
                 add(item.state(item.duration/2));add(item.end)
+    # A synthetic mixed state needs a fast angular stop and slower translation.
+    # Audit both sides of its split-horizon knots against native FK as well.
+    import numpy as np
+    _,j=model.geometry(start.q)
+    task_v=np.array([0.,.015,.006,-.004,.002,-.003]);task_a=np.array([-.003,.03,.001,.028,.002,.018])
+    qv=np.linalg.solve(j,task_v);_,_,jd=model.geometry(start.q,qv)
+    qa=np.linalg.solve(j,task_a-jd@qv)
+    mixed=JointReference(start.q,tuple(qv),tuple(qa))
+    plan,_=plan_cartesian_braking(model,mixed);brakes+=1
+    for item in plan.segments:
+        add(item.state(item.duration/2));add(item.end)
     if not cases or len(cases)>256:raise ValueError('native_reference_case_budget')
     return cases,brakes
 

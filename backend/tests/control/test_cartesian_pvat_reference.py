@@ -7,6 +7,7 @@ from app.commissioning.native_jog_mdh import MdhTool
 from app.control.cartesian_pvat_reference import (CartesianCurve,JointReference,
     MdhReferenceModel,OfflineCartesianFollower,PvatSegment,plan_cartesian_reference,validate_segment)
 from app.control.cartesian_pvat_reference import plan_cartesian_braking
+from app.control.cartesian_pvat_reference import SplitCartesianBrakeCurve
 from app.schemas.messages import Pose
 
 
@@ -294,3 +295,56 @@ def test_angular_endpoint_complex_step_matches_real_differences_for_both_formula
         numeric.append((np.concatenate(_angular_endpoint(gamma+h,omega,alpha,.08))
             -np.concatenate(_angular_endpoint(gamma-h,omega,alpha,.08)))/(2e-5))
     assert np.array(complex_jac)==pytest.approx(np.array(numeric),abs=1e-7)
+
+
+def mixed_braking_state(model):
+    # Synthetic task derivatives, not a field pose or recorded hardware state.
+    q=np.array(ready().q);_,j=model.geometry(q)
+    velocity=np.array([0.,.015,.006,-.004,.002,-.003])
+    acceleration=np.array([-.003,.03,.001,.028,.002,.018])
+    v=np.linalg.solve(j,velocity);_,_,jd=model.geometry(q,v)
+    a=np.linalg.solve(j,acceleration-jd@v)
+    return JointReference(tuple(q),tuple(v),tuple(a))
+
+
+def test_independent_task_stop_horizons_solve_a_shared_horizon_refusal_without_larger_limits(model):
+    start=mixed_braking_state(model)
+    with pytest.raises(ValueError,match='cartesian_brake_no_feasible_plan'):
+        plan_cartesian_braking(model,start,allow_split=False)
+    plan,report=plan_cartesian_braking(model,start)
+    assert isinstance(plan.curve,SplitCartesianBrakeCurve)
+    assert report['rotation_stop_s']<report['position_stop_s']
+    assert report['position_radius_bound_m']<=.02 and report['angle_radius_bound_rad']<=.15
+    assert plan.segments[0].start==start
+    assert all(a.end==b.start for a,b in zip(plan.segments,plan.segments[1:]))
+    knot=report['rotation_stop_s']
+    state=plan.state(knot);_,j,jd=model.geometry(state.q,state.v)
+    assert np.linalg.norm((j@state.v)[3:])<1e-8
+    assert np.linalg.norm((j@state.v)[:3])>.001
+    assert np.linalg.norm(plan.segments[-1].end.v)<1e-8
+    assert np.linalg.norm(plan.segments[-1].end.a)<1e-8
+    fixed_rotation=Rotation.from_quat(model.pose(state.q).q)
+    for t in np.linspace(knot,plan.curve.duration,13):
+        p=model.pose(plan.state(float(t)).q)
+        assert (Rotation.from_quat(p.q)*fixed_rotation.inv()).magnitude()<1e-5
+
+
+def test_split_braking_curve_is_c2_at_the_shorter_stop_knot(model):
+    start=mixed_braking_state(model);plan,report=plan_cartesian_braking(model,start)
+    knot=report['rotation_stop_s'];before=plan.curve.state(knot-1e-7);at=plan.curve.state(knot);after=plan.curve.state(knot+1e-7)
+    assert before[0].p==pytest.approx(after[0].p,abs=1e-8)
+    assert before[1]==pytest.approx(after[1],abs=1e-7)
+    assert before[2]==pytest.approx(after[2],abs=1e-6)
+    assert np.linalg.norm(at[1][3:])==0 and np.linalg.norm(at[2][3:])==0
+
+
+def test_validator_rejects_a_stop_knot_inside_a_pvat_interval(model):
+    start=ready();base=model.pose(start.q)
+    curve=SplitCartesianBrakeCurve(base,np.zeros(6),np.zeros(6),.8,.3)
+    with pytest.raises(ValueError,match='brake_knot_alignment'):
+        validate_segment(PvatSegment(start,start,.08),model,curve,.24)
+
+
+def test_bad_limits_are_not_reinterpreted_as_a_known_braking_infeasibility(model):
+    with pytest.raises(ValueError,match='validation_limits'):
+        plan_cartesian_braking(model,ready(),speed=float('nan'))
