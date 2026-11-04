@@ -59,6 +59,65 @@ local function encode(p)
 end
 
 local ok,err=pcall(function()
+    test('orientation_target_projection',function()
+        local reference={rx=.3,ry=.4,rz=-.2}
+        local p={x=.1,y=.2,z=.3,rx=.3,ry=.4,rz=-.2+2.1}
+        local projected,clipped=path_module.limit_rotation(p,reference,math.pi/2-.02)
+        assert(clipped and projected.x==p.x and projected.y==p.y and projected.z==p.z,'orientation_projection_changed_position')
+        local a,b=matrix(reference),matrix(projected);local dot=0;for i=1,9 do dot=dot+a[i]*b[i] end
+        near(math.acos(math.max(-1,math.min(1,(dot-1)/2))),math.pi/2-.02,1e-9)
+        local inward,again=path_module.limit_rotation({x=.1,y=.2,z=.3,rx=.3,ry=.4,rz=.1},reference,math.pi/2-.02)
+        assert(not again and inward.rz==.1,'orientation_projection_drift');near(p.rz,1.9,1e-12)
+    end)
+    test('responsive_reference',function()
+        local bounds={joint_min={-2,-2,-2,-2,-2,-2},joint_max={2,2,2,2,2,2}}
+        local legacy=tracker_module.new({0,0,0,0,0,0},bounds)
+        local rapid=tracker_module.new({0,0,0,0,0,0},bounds,{speed=.2,acceleration=.2,jerk=1,frequency=4})
+        local old90,new90=nil,nil
+        for tick=1,130 do
+            if tick%5==0 then rt_sleep(1) end
+            legacy.advance({.3,0,0,0,0,0});rapid.advance({.3,0,0,0,0,0})
+            if not old90 and legacy.q[1]>=.27 then old90=tick*.08 end
+            if not new90 and rapid.q[1]>=.27 then new90=tick*.08 end
+        end
+        assert(old90 and new90 and new90<old90*.65,'responsive_profile_not_faster')
+        print('POSE_RESPONSE_METRICS',old90,new90)
+        local moving=tracker_module.new({0,0,0,0,0,0},bounds,{speed=.2,acceleration=.2,jerk=1,frequency=4})
+        for tick=1,25 do if tick%5==0 then rt_sleep(1) end;moving.advance({1,0,0,0,0,0}) end
+        local measured={};for i=1,6 do measured[i]=moving.history[6].q[i] end
+        assert(moving.q[1]-measured[1]>.03,'future_endpoint_must_differ')
+        assert(moving.matches_report({actual_joint_pose=measured,target_joint_pose=measured}),'aligned_feedback_rejected')
+        local actual={};for i=1,6 do actual[i]=measured[i] end;actual[1]=actual[1]+.031
+        assert(not moving.matches_report({actual_joint_pose=actual,target_joint_pose=measured}),'servo_error_accepted')
+        local stalled={0,0,0,0,0,0}
+        assert(not moving.matches_report({actual_joint_pose=stalled,target_joint_pose=stalled}),'old_reference_accepted')
+        assert(not moving.matches_report({actual_joint_pose=measured}),'missing_target_accepted')
+        assert(#moving.history==8,'reference_history_unbounded')
+        for _,goal in ipairs({.01,.03,.08,.15,.3}) do
+            local stepper=tracker_module.new({0,0,0,0,0,0},bounds,{speed=.2,acceleration=.2,jerk=1,frequency=4})
+            for tick=1,130 do
+                if tick%5==0 then rt_sleep(1) end
+                stepper.advance({goal,0,0,0,0,0})
+                assert(stepper.q[1]<=goal+.0001,'responsive_static_overshoot')
+            end
+            near(stepper.q[1],goal,.0001)
+        end
+        for tick=1,350 do
+            if tick%5==0 then rt_sleep(1) end
+            local goal={};for i=1,6 do goal[i]=.4*math.sin(tick*.09+i) end
+            local ov,oa={},{};for i=1,6 do ov[i]=rapid.v[i];oa[i]=rapid.a[i] end
+            local p,v,a=rapid.advance(goal)
+            for i=1,6 do
+                local j=(a[i]-oa[i])/.08
+                assert(math.abs(j)<=1+1e-10 and math.abs(a[i])<=.2+1e-10,'responsive_derivative_limit')
+                for sub=0,10 do
+                    local dt=sub*.008
+                    assert(math.abs(ov[i]+oa[i]*dt+j*dt*dt/2)<=.2+1e-10,'responsive_interior_velocity')
+                end
+            end
+        end
+        expect_error(function() tracker_module.new({0,0,0,0,0,0},bounds,{speed=.21}) end,'profile')
+    end)
     test('bounded_pose_path',function()
         local base={x=0,y=0,z=0,rx=0,ry=0,rz=math.pi-.01}
         local target={x=.3,y=-.3,z=0,rx=0,ry=0,rz=-math.pi+.01}

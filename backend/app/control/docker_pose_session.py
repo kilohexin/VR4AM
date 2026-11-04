@@ -23,14 +23,15 @@ def build_pose_program(adapter):
     upper = tuple(q - s.joint_limit_margin_rad for q in s.soft_joint_max_rad)
     bounds = ['local pose_joint_min={' + ','.join(repr(v) for v in lower) + '}',
               'local pose_joint_max={' + ','.join(repr(v) for v in upper) + '}',
-              'local function product_bounds(p,q)']
+              'local function product_bounds(p,q,target_only)']
     for i, axis in enumerate(('x', 'y', 'z')):
         bounds.append(f"if p and (p.{axis}<{s.startup_tcp_min_m[i]!r} or p.{axis}>{s.startup_tcp_max_m[i]!r}) then return 'workspace_boundary' end")
     for i in range(6):
         bounds.append(f"if q and (q[{i+1}]<{lower[i]!r} or q[{i+1}]>{upper[i]!r}) then return 'joint_boundary' end")
     r = Rotation.from_quat(adapter._position_pitch_reference).as_euler('xyz')
     fixed = '{rx=' + repr(float(r[0])) + ',ry=' + repr(float(r[1])) + ',rz=' + repr(float(r[2])) + '}'
-    bounds.extend(["if p and angle(p," + fixed + ")>math.pi/2 then return 'rotation_boundary' end", 'return nil end'])
+    bounds.extend(["if p and not target_only and angle(p," + fixed + ")>math.pi/2 then return 'rotation_boundary' end", 'return nil end',
+                   'local pose_rotation_reference='+fixed])
     if source.count('-- PRODUCT_POSE_BOUNDS') != 1:
         raise ValueError('pose_program_marker')
     if source.count('-- PRODUCT_POSE_PROFILE') != 1:
@@ -39,7 +40,11 @@ def build_pose_program(adapter):
         + ',maximum_points=' + str(POSE_PROFILE.maximum_points)
         + ',target_tcp_span=' + repr(POSE_PROFILE.target_tcp_span_m)
         + ',feedback_tcp_span=' + repr(POSE_PROFILE.feedback_tcp_span_m)
-        + ',mailbox_ttl_ms=' + str(POSE_PROFILE.mailbox_ttl_ms) + '}')
+        + ',mailbox_ttl_ms=' + str(POSE_PROFILE.mailbox_ttl_ms)
+        + ',speed=' + repr(POSE_PROFILE.reference_speed_radps)
+        + ',acceleration=' + repr(POSE_PROFILE.reference_acceleration_radps2)
+        + ',jerk=' + repr(POSE_PROFILE.reference_jerk_radps3)
+        + ',frequency=' + repr(POSE_PROFILE.response_frequency) + '}')
     return source.replace('-- PRODUCT_POSE_BOUNDS', '\n'.join(bounds)).replace('-- PRODUCT_POSE_PROFILE',profile)
 
 
@@ -199,7 +204,8 @@ class DockerPoseSession(DockerPvatSession):
                     elif fields[0] == 'LIVE_BOUNDARY':
                         boundary = fields[2]
                     elif fields[0] == 'LIVE_SATURATED':
-                        self.reason='pvat_target_saturated' if fields[1]=='true' else None
+                        self.reason=('pvat_rotation_saturated' if len(fields)>2 and fields[2]=='true'
+                            else 'pvat_target_saturated' if fields[1]=='true' else None)
                     elif fields[0] == 'LIVE_DONE':
                         done, okay = True, fields[1] == 'true'
                         break

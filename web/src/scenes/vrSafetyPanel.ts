@@ -78,6 +78,9 @@ export function describeVrSafety(
       if(poseFollow&&finite.reason==='pvat_target_saturated'){
         core.title='已到本次平移范围';core.instruction='可向内退回，或再按 Grip 结束后重新对齐';core.tone='amber';
       }
+      if(poseFollow&&finite.reason==='pvat_rotation_saturated'){
+        core.title='已到朝向范围';core.instruction='朝向目标已限幅，转回范围内可继续跟随';core.tone='amber';
+      }
     }else if(state.phase==='armed'){
       if(poseFollow)core.title='可操纵 · 位姿跟随';
       core.instruction=poseFollow?'按 Grip 对齐并跟随：平移2倍、朝向1倍目标 · 左X/Y夹爪'

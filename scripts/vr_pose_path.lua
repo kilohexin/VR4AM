@@ -41,4 +41,12 @@ function M.step(from,to,position_step,angle_step)
     end
     return out
 end
+function M.limit_rotation(p,reference,limit)
+    local a,b=quaternion(reference),quaternion(p);local dot=0
+    for i=1,4 do dot=dot+a[i]*b[i] end
+    local distance=2*math.acos(math.max(-1,math.min(1,math.abs(dot))))
+    if distance<=limit then return p,false end
+    local origin={x=p.x,y=p.y,z=p.z,rx=reference.rx,ry=reference.ry,rz=reference.rz}
+    return M.step(origin,p,1,limit),true
+end
 return M

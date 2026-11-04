@@ -73,6 +73,33 @@ try{
  if(Math.hypot(...state.actual_tcp.p.map((v:number,i:number)=>v-second[i]))>.001)throw Error('regrip_jump');
  await stopFollow('second_toggle_off');
  console.log('PASS re-grip captures a fresh zero');
+ if(process.argv.includes('--rotation-response')){
+  if(before.pose_reference_speed_radps!==.2)throw Error('wrong_response_profile');
+  const initial=new Quaternion(...state.actual_tcp.q),zero=new Quaternion(...handQ);
+  await startFollow('response_start');
+  const target=new Quaternion(0,Math.sin(.15),0,Math.cos(.15));
+  handQ=zero.clone().multiply(target).toArray() as typeof handQ;
+  const since=performance.now();
+  await wait(()=>new Quaternion(...state.actual_tcp.q).angleTo(initial)>.27,'response_90_percent',5000);
+  const responseMs=performance.now()-since;
+  if(responseMs>=3500)throw Error('response_still_too_slow:'+responseMs);
+  handQ=zero.toArray() as typeof handQ;
+  await wait(()=>new Quaternion(...state.actual_tcp.q).angleTo(initial)<.03,'response_return',6000);
+  await stopFollow('response_toggle_off');
+  console.log('PASS measured 0.3rad orientation step to 90%',JSON.stringify({responseMs}));
+  await startFollow('rotation_limit_start');
+  handQ=zero.clone().multiply(new Quaternion(0,Math.sin(.975),0,Math.cos(.975))).toArray() as typeof handQ;
+  await wait(()=>state.finite_position.reason==='pvat_rotation_saturated','orientation_saturation');
+  const initialSteps=state.finite_position.entered_steps;
+  await sleep(2500);
+  if(state.finite_position.phase!=='executing'||state.finite_position.entered_steps<initialSteps+20)throw Error('rotation_limit_exited_follow');
+  const edge=new Quaternion(...state.actual_tcp.q).angleTo(initial);
+  handQ=zero.toArray() as typeof handQ;
+  await wait(()=>state.finite_position.reason!=='pvat_rotation_saturated'
+   &&new Quaternion(...state.actual_tcp.q).angleTo(initial)<edge-.03,'rotation_turn_back',8000);
+  await stopFollow('rotation_limit_toggle_off');
+  console.log('PASS oversized orientation clips within original range, stays following and turns back');
+ }
  if(process.argv.includes('--continuation')){
   if(before.pose_follow_window_s!==300||before.pose_follow_grip_span_mm!==100)throw Error('wrong_pose_profile');
   const initial=[...state.actual_tcp.p],handOrigin=[...hand],initialSteps=state.finite_position.entered_steps;

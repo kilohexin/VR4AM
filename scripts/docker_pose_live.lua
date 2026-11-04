@@ -70,7 +70,7 @@ local ok,err=pcall(function()
     origin=k.actual_joint_pose;base=k.actual_tcp_pose
     -- Full IK supplies each goal. Use the fixed absolute product joint limits,
     -- not the old differential-IK probe's .08rad box around its first point.
-    local tracker=tracker_module.new(origin,{joint_min=pose_joint_min,joint_max=pose_joint_max})
+    local tracker=tracker_module.new(origin,{joint_min=pose_joint_min,joint_max=pose_joint_max},pose_profile)
     -- Warm the output channel before any hand target is admitted. Clock
     -- samples are diagnostics; only the final READY binds the frozen epoch.
     for i=1,3 do print('POSE_CLOCK',timestamp());rt_sleep(40) end
@@ -103,7 +103,7 @@ local ok,err=pcall(function()
     end)
     local plan=worker(function()
         local previous=nil
-        local cached_pose,cached_joints=nil,nil;local was_clipped=false
+        local cached_pose,cached_joints=nil,nil;local was_clipped,was_rotated=false,false
         while not finish do
             if latest and latest.captured_ms~=previous then
                 local _,f=feedback(false)
@@ -114,10 +114,14 @@ local ok,err=pcall(function()
                     -- computation; only receiver expiry retires the input stream.
                     previous=sample.captured_ms
                 else
-                boundary=product_bounds(sample.pose,nil)
+                boundary=product_bounds(sample.pose,nil,true)
                 if boundary then finish=true;return end
                 local target,clipped=path_module.clip(sample.pose,base,pose_profile.target_tcp_span)
-                if clipped~=was_clipped then print('LIVE_SATURATED',clipped);was_clipped=clipped end
+                local rotation_clipped
+                target,rotation_clipped=path_module.limit_rotation(target,pose_rotation_reference,math.pi/2-.02)
+                if clipped~=was_clipped or rotation_clipped~=was_rotated then
+                    print('LIVE_SATURATED',clipped,rotation_clipped);was_clipped=clipped;was_rotated=rotation_clipped
+                end
                 -- Advance the IK branch through bounded Cartesian sections;
                 -- a quick hand change is not itself an IK branch jump.
                 local section=path_module.step(cached_pose or base,target,.004,.02)
@@ -131,12 +135,18 @@ local ok,err=pcall(function()
                 end
                 if finish then return end
                 assert(joints and #joints==6,'pose_ik_unreachable')
+                local tracked,tracking_reason,tracking_axis=tracker.matches_report(f)
+                if not tracked then
+                    print('LIVE_TRACKING_REJECTED',tracking_reason,tracking_axis or 0)
+                    error(tracking_reason)
+                end
+                boundary=product_bounds(nil,f.target_joint_pose)
+                if boundary then finish=true;return end
                 for i=1,6 do
                     assert(joints[i]==joints[i] and math.abs(joints[i])<1000000,'pose_ik_nonfinite')
                     if math.abs(joints[i]-seed[i])>=.15 then
                         boundary='ik_branch';finish=true;return
                     end
-                    assert(math.abs(f.actual_joint_pose[i]-tracker.q[i])<.03,'pose_tracking_error')
                 end
                 boundary=boundary or product_bounds(section,joints)
                 if boundary then finish=true;return end
@@ -169,7 +179,7 @@ local ok,err=pcall(function()
             if finish then return end
             local goal=planned
             local current=latest
-            boundary=product_bounds(current.pose,nil)
+            boundary=product_bounds(current.pose,nil,true)
             if boundary then finish=true;return end
             if timestamp()-current.captured_ms+1>=pose_profile.mailbox_ttl_ms then
                 print('POSE_MOTION_EXPIRED',timestamp(),current.captured_ms,current.sequence_mod,reader.last_capture,reader.max_read_ms,reader.max_age_ms)

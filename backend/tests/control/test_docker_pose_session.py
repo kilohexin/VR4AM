@@ -55,6 +55,9 @@ def test_extended_profile_keeps_fixed_grip_and_absolute_joint_limits():
     assert POSE_PROFILE.duration_ms==300000 and POSE_PROFILE.maximum_points==3750
     assert POSE_PROFILE.target_tcp_span_m==.1 and POSE_PROFILE.feedback_tcp_span_m==.12
     assert POSE_PROFILE.mailbox_ttl_ms==250 and 'mailbox_ttl_ms=250' in source
+    assert POSE_PROFILE.reference_speed_radps==.2 and POSE_PROFILE.reference_acceleration_radps2==.2
+    assert 'not target_only and angle' in source and 'local pose_rotation_reference=' in source
+    assert 'path_module.limit_rotation(target,pose_rotation_reference,math.pi/2-.02)' in source
     assert '-- PRODUCT_POSE_PROFILE' not in source
     assert 'joint_min=pose_joint_min,joint_max=pose_joint_max' in source
     assert 'joints[i]-origin[i]' not in source
