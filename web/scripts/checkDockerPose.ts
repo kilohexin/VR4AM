@@ -100,6 +100,11 @@ try{
  if(state.actual_tcp.p[0]-base[0]>(humanSpeed?.020:.003))throw Error('stationary_hand_kept_integrating');
  await stopFollow('toggle_off');
  console.log('PASS actual XR module -> full hand pose -> controller IK/PVAT, fixed hand, toggle off',state.finite_position.entered_steps);
+ if(process.argv.includes('--idle-soak')){
+  await sleep(3000);
+  if(state.fault||state.finite_position.phase!=='ready'||state.robot_state!=='IDLE')throw Error('idle_display_interrupted');
+  console.log('PASS continued idle telemetry after natural pose completion');
+ }
  // Re-grip at a different hand origin must capture a new zero, not replay.
  hand=[.1,.1,.1];await sleep(100);const second=[...state.actual_tcp.p];
  await startFollow('regrip');await sleep(500);

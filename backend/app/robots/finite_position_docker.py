@@ -168,9 +168,12 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
             and all(x==0 for v in (s.actual_qd,s.target_qd,s.actual_qdd,s.target_qdd) for x in v))
 
     def _snapshot_read_timeout_ns(self,read_purpose):
-        # Presentation before any owned actuation tolerates host scheduling
-        # pauses. Captured time stays unchanged: this cannot freshen a command.
-        if read_purpose=='state' and self.docker_idle_input_safe():return 1_000_000_000
+        # Presentation has its own read budget. Captured time is unchanged and
+        # pose admission/native feedback retain their independent freshness.
+        # Motion/preflight/stop reads never inherit this display allowance.
+        pose_display=(type(self) is DockerFinitePositionAdapter and self._docker_native
+            and getattr(self,'position_pose_follow_vr',False) is True)
+        if read_purpose=='state' and (pose_display or self.docker_idle_input_safe()):return 1_000_000_000
         return super()._snapshot_read_timeout_ns(read_purpose)
 
     async def _read_snapshot_fields(self,client,latencies,deadline_ns,**kwargs):
@@ -224,15 +227,30 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
     def _docker_task_key(self,motion_id):
         return (self._client,self._snapshot_calls,self._pump.generation,self.position_binding,motion_id)
 
+    @staticmethod
+    def _docker_same_task(left,right):
+        return bool(left is not None and all(left[i] is right[i] for i in (0,1,3))
+            and left[2]==right[2] and left[4]==right[4])
+
     async def _read_retained_task_state(self,client,motion_id,latencies,deadline_ns,read_purpose):
         # A FINISHED task is terminal, not evidence of physical settling. Only
-        # reuse its identity while the same finite step owns this connection.
-        # All pose/rate/fault samples remain newly read, with unchanged limits.
-        if (client is self._client and self.position_busy and not self.position_aborted
-                and self._docker_finished_task==self._docker_task_key(motion_id)
+        # reuse its identity for display or the same finite step. A stopped
+        # display does not need to poll an immutable FINISHED task every frame.
+        # All pose/rate/fault samples remain newly read with original timestamps.
+        key=self._docker_task_key(motion_id)
+        pose_display=(type(self) is DockerFinitePositionAdapter and self._docker_native
+            and getattr(self,'position_pose_follow_vr',False) is True)
+        if (client is self._client and (read_purpose=='state' and pose_display or self.position_busy) and not self.position_aborted
+                and not self._snapshot_calls.closed
+                and self._docker_same_task(self._docker_finished_task,key)
                 and not self._snapshot_calls.unknown_methods):
             return 'FINISHED'
-        return await super()._read_retained_task_state(client,motion_id,latencies,deadline_ns,read_purpose)
+        state=await super()._read_retained_task_state(client,motion_id,latencies,deadline_ns,read_purpose)
+        if (client is self._client and not self.position_aborted and not self._snapshot_calls.closed
+                and not self._snapshot_calls.unknown_methods and str(state).upper()=='FINISHED'
+                and self._docker_same_task(key,self._docker_task_key(motion_id))):
+            self._docker_finished_task=key
+        return state
 
     def _release_page_reads(self,owner):
         if owner is self._docker_entry_owner:

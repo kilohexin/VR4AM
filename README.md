@@ -2,6 +2,8 @@
 
 当前主线：**官方 Docker 仿真 → 操作者网页/头显体验 → 后续真机验收**。真机当前不可用，仿真成功不代表真实抓取或制动已通过。
 
+最新修复为Docker位姿页面读取：显示状态读取预算单独为1秒，任务已明确FINISHED时按连接/读取所有者/代次/绑定/任务ID复用终态，关节/速度/故障数据仍新读，时间戳不刷新；运动准入、停止验证及未知隔离不改。针对“连接已断开”的382点整链及运动后持续显示通过，历史未知读取仍锁存，不自动重连旧故障会话。
+
 当前体验参数：**平移1:1、转腕按Grip对齐后的工具局部轴1:1**，用于降低旧2倍位移叠加滞后造成的过大动作。右Grip仍按一次跟随、再按结束。原厂明确的IK无解异常与空结果都限幅到最后有效候选；改变目标向内退回时从新鲜反馈建立候选，避免卡住旧数学求解点。Docker位姿通信租约及邮箱RPC预算为500ms，新到达输入仍须小于100ms，其他入口默认100ms；断流后可能较旧250ms租约多约250ms才停止追加，未知结果仍锁存。工具轴定向链345点、最新67秒动作回放/退回/断连961点通过，尚需新版真人手感验证，连续运动滞后未消除。
 
 最新修复针对真人抬手：Docker位姿目标固定框扩大至本次零位各轴±300mm，反馈范围±350mm；原全局TCP/关节/朝向保护保留。已知IK不可达或分支/关节边界不追加新数学目标，提示边界并保持最后有效投影，手柄退回可继续；未知调用和实际保护失败仍中止。区域拒绝仅在原停止返回、静止尾段、进程退出及邮箱清理全部已知完成时显示“区域超限，停止已确认”，不再统称停止未确认。旧故障不清除。真人轨迹的仿真回放及退回/活动断连459点通过，最大上升约304mm；启动仍约0.8秒，跟手延迟尚未达标。详见项目状态顶部。
@@ -26,13 +28,13 @@
 
 `codex/vr-toggle-follow`提供独立头显入口8444→测试后端8774→独立仿真SDK13030。网页“控制方式”和头显应显示“单按Grip跟随/再按结束”；右Grip首次按下对齐零位，平移目标1:1、工具局部朝向目标1:1，手停时目标固定，左X/Y长按渐进夹爪。
 
-本机当前专用体验实例为`vr4arm-wrist-experience-20261104`；通过启动预览核验固定回环映射后再运行。按以下顺序启动（每条在相应目录/终端执行，勿与已有体验服务同时启动）：
+本机当前专用体验实例为`vr4arm-display-experience-20261104`；通过启动预览核验固定回环映射后再运行。按以下顺序启动（每条在相应目录/终端执行，勿与已有体验服务同时启动）：
 
 ```powershell
-docker start vr4arm-wrist-experience-20261104
-.venv/Scripts/python.exe scripts/run_lmaster_docker.py --isolated-test-container vr4arm-wrist-experience-20261104 --port 8774 --pose-follow-vr
+docker start vr4arm-display-experience-20261104
+.venv/Scripts/python.exe scripts/run_lmaster_docker.py --isolated-test-container vr4arm-display-experience-20261104 --port 8774 --pose-follow-vr
 # 核对预览后启动；此终端保持运行，十分钟后正常退出。
-.venv/Scripts/python.exe scripts/run_lmaster_docker.py --run --isolated-test-container vr4arm-wrist-experience-20261104 --port 8774 --pose-follow-vr --test-seconds 600
+.venv/Scripts/python.exe scripts/run_lmaster_docker.py --run --isolated-test-container vr4arm-display-experience-20261104 --port 8774 --pose-follow-vr --test-seconds 600
 # 另开终端，在web目录：
 npm run docker:pose-test
 ```
