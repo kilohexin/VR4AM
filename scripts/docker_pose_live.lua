@@ -6,6 +6,9 @@ end)()
 local tracker_module=(function()
 __POSE_TRACKER_MODULE__
 end)()
+local path_module=(function()
+__POSE_PATH_MODULE__
+end)()
 local function matrix(p)
     local sx,cx=math.sin(p.rx),math.cos(p.rx)
     local sy,cy=math.sin(p.ry),math.cos(p.ry)
@@ -68,9 +71,12 @@ local ok,err=pcall(function()
     -- Full IK supplies each goal. Use the fixed absolute product joint limits,
     -- not the old differential-IK probe's .08rad box around its first point.
     local tracker=tracker_module.new(origin,{joint_min=pose_joint_min,joint_max=pose_joint_max})
+    -- Warm the output channel before any hand target is admitted. Clock
+    -- samples are diagnostics; only the final READY binds the frozen epoch.
+    for i=1,3 do print('POSE_CLOCK',timestamp());rt_sleep(40) end
     start=timestamp()
     local reader=mailbox.new(function(ch) return lebai:get_signal(ch) end,timestamp,start,function() end,
-        function(ch,n) return lebai:get_signals(ch,n) end)
+        function(ch,n) return lebai:get_signals(ch,n) end,pose_profile.mailbox_ttl_ms)
     local latest,planned=nil,nil;local finish=false;local failure=nil;local boundary=nil
     local seed=origin;local phase_start,last_send=nil,nil
     local function worker(fn)
@@ -97,29 +103,31 @@ local ok,err=pcall(function()
     end)
     local plan=worker(function()
         local previous=nil
-        local cached_pose,cached_joints=nil,nil
+        local cached_pose,cached_joints=nil,nil;local was_clipped=false
         while not finish do
             if latest and latest.captured_ms~=previous then
                 local _,f=feedback(false)
                 if finish then return end
                 local sample=latest
-                if timestamp()-sample.captured_ms+1>=100 then
+                if timestamp()-sample.captured_ms+1>=pose_profile.mailbox_ttl_ms then
                     -- A read yielded while input advanced/expired. Discard this
                     -- computation; only receiver expiry retires the input stream.
                     previous=sample.captured_ms
                 else
                 boundary=product_bounds(sample.pose,nil)
-                for _,axis in ipairs({'x','y','z'}) do
-                    if math.abs(sample.pose[axis]-base[axis])>pose_profile.target_tcp_span then boundary=boundary or 'reference_boundary' end
-                end
                 if boundary then finish=true;return end
+                local target,clipped=path_module.clip(sample.pose,base,pose_profile.target_tcp_span)
+                if clipped~=was_clipped then print('LIVE_SATURATED',clipped);was_clipped=clipped end
+                -- Advance the IK branch through bounded Cartesian sections;
+                -- a quick hand change is not itself an IK branch jump.
+                local section=path_module.step(cached_pose or base,target,.004,.02)
                 local joints
                 -- Refresh the math cache BEFORE the outer reuse allowance is
                 -- exhausted; otherwise every moving target waits at its edge.
-                if cached_pose and equivalent_pose(cached_pose,sample.pose,.00010,.0008) then joints=cached_joints
+                if cached_pose and equivalent_pose(cached_pose,section,.00010,.0008) then joints=cached_joints
                 else
-                    joints=lebai:kinematics_inverse(sample.pose,seed)
-                    cached_pose=sample.pose;cached_joints=joints
+                    joints=lebai:kinematics_inverse(section,seed)
+                    cached_pose=section;cached_joints=joints
                 end
                 if finish then return end
                 assert(joints and #joints==6,'pose_ik_unreachable')
@@ -130,13 +138,14 @@ local ok,err=pcall(function()
                     end
                     assert(math.abs(f.actual_joint_pose[i]-tracker.q[i])<.03,'pose_tracking_error')
                 end
-                boundary=boundary or product_bounds(sample.pose,joints)
+                boundary=boundary or product_bounds(section,joints)
                 if boundary then finish=true;return end
-                -- Reuse a known IK solution only within 0.25mm/0.002rad of its
-                -- ORIGINAL solved pose. Never walk the cache centre with input.
-                if latest.captured_ms>=sample.captured_ms and equivalent_pose(cached_pose,latest.pose) then sample=latest end
-                if timestamp()-sample.captured_ms+1<100 then
-                    planned={sample=sample,solved_pose=cached_pose,joints=joints,feedback=f}
+                -- Reuse this section only when a fresh full hand target agrees
+                -- with its ORIGINAL source. Do not roll the source centre.
+                local source_pose=sample.pose
+                if latest.captured_ms>=sample.captured_ms and equivalent_pose(source_pose,latest.pose) then sample=latest end
+                if timestamp()-sample.captured_ms+1<pose_profile.mailbox_ttl_ms then
+                    planned={sample=sample,source_pose=source_pose,solved_pose=cached_pose,joints=joints,feedback=f}
                 else
                     print('LIVE_PLAN_DROPPED',timestamp()-start,sample.sequence_mod)
                 end
@@ -161,19 +170,16 @@ local ok,err=pcall(function()
             local goal=planned
             local current=latest
             boundary=product_bounds(current.pose,nil)
-            for _,axis in ipairs({'x','y','z'}) do
-                if math.abs(current.pose[axis]-base[axis])>pose_profile.target_tcp_span then boundary=boundary or 'reference_boundary' end
-            end
             if boundary then finish=true;return end
-            if timestamp()-current.captured_ms+1>=100 then
+            if timestamp()-current.captured_ms+1>=pose_profile.mailbox_ttl_ms then
                 print('POSE_MOTION_EXPIRED',timestamp(),current.captured_ms,current.sequence_mod,reader.last_capture,reader.max_read_ms,reader.max_age_ms)
                 finish=true;print('LIVE_EXPIRED',timestamp()-start,moves);return
             end
-            if equivalent_pose(goal.solved_pose,current.pose) then
+            if equivalent_pose(goal.source_pose,current.pose) then
                 goal={sample=current,joints=goal.joints,feedback=goal.feedback};waiting=0
-            elseif tracker_module.fresh_solution(goal,current,timestamp(),equivalent_pose) then
-                -- Keep the original solved sample's deadline. This is bounded
-                -- tracking lag (10mm/.05rad), not an IK cache-centre update.
+            elseif tracker_module.fresh_solution(goal,current,timestamp(),equivalent_pose,pose_profile.mailbox_ttl_ms) then
+                -- Keep the section's original source deadline, without
+                -- relabeling it as a solution of the newer hand target.
                 waiting=0
             else
                 waiting=waiting+1
@@ -187,7 +193,7 @@ local ok,err=pcall(function()
             end
             local p,v,a,dt=tracker.advance(goal.joints)
             assert(not product_bounds(nil,p),'pose_reference_bounds')
-            if timestamp()-goal.sample.captured_ms+1>=100 then
+            if timestamp()-goal.sample.captured_ms+1>=pose_profile.mailbox_ttl_ms then
                 finish=true;print('LIVE_EXPIRED',timestamp()-start,moves);return
             end
             assert(not last_send or timestamp()-last_send<160,'pose_cadence_lost')

@@ -13,6 +13,7 @@ def build_pose_program(adapter):
     root = Path(__file__).resolve().parents[3] / 'scripts'
     source = (root / 'docker_pose_live.lua').read_text(encoding='utf-8')
     for marker, name in (('__POSE_MAILBOX_MODULE__', 'vr_pose_mailbox.lua'),
+                         ('__POSE_PATH_MODULE__', 'vr_pose_path.lua'),
                          ('__POSE_TRACKER_MODULE__', 'vr_pose_tracker.lua')):
         if source.count(marker) != 1:
             raise ValueError('pose_program_marker')
@@ -37,7 +38,8 @@ def build_pose_program(adapter):
     profile = ('local pose_profile={duration_ms=' + str(POSE_PROFILE.duration_ms)
         + ',maximum_points=' + str(POSE_PROFILE.maximum_points)
         + ',target_tcp_span=' + repr(POSE_PROFILE.target_tcp_span_m)
-        + ',feedback_tcp_span=' + repr(POSE_PROFILE.feedback_tcp_span_m) + '}')
+        + ',feedback_tcp_span=' + repr(POSE_PROFILE.feedback_tcp_span_m)
+        + ',mailbox_ttl_ms=' + str(POSE_PROFILE.mailbox_ttl_ms) + '}')
     return source.replace('-- PRODUCT_POSE_BOUNDS', '\n'.join(bounds)).replace('-- PRODUCT_POSE_PROFILE',profile)
 
 
@@ -100,6 +102,7 @@ class DockerPoseSession(DockerPvatSession):
                 raise ValueError('pose_admission_changed_or_busy')
             client = a._docker_ready_client
             anchor = [None]
+            clock_samples=[]
 
             def stamp(ns):
                 if anchor[0] is None or ns < anchor[0][0]:
@@ -108,7 +111,7 @@ class DockerPoseSession(DockerPvatSession):
 
             self.pump = VRPoseInput(client, ExecutorLease(), self.binding, clock=self.clock,
                 stamp_for_capture=stamp, authorize=self._input_authority, authorize_publish=self.check,
-                authorize_cleanup=lambda: a._position_health(self.binding))
+                authorize_cleanup=lambda: a._position_health(self.binding),mailbox_ttl_ms=POSE_PROFILE.mailbox_ttl_ms)
             try:
                 await self.pump.open()
             except Exception:
@@ -143,20 +146,33 @@ class DockerPoseSession(DockerPvatSession):
                     observed_ns=self.clock()
                     fields = line.decode('utf-8', errors='replace').strip().split('\t')
                     await self.recorder.write_event(dict(kind='docker_pose_controller', fields=fields), observed_ns)
-                    if fields[0] == 'LIVE_READY':
+                    if fields[0] == 'POSE_CLOCK':
+                        self.check()
+                        if anchor[0] is not None or len(clock_samples)>=3:
+                            raise ValueError('pose_clock_calibration_closed')
+                        value=int(fields[1])
+                        if clock_samples and value<clock_samples[-1][1]:
+                            raise ValueError('pose_clock_calibration_rollback')
+                        clock_samples.append((observed_ns,value))
+                    elif fields[0] == 'LIVE_READY':
                         if anchor[0] is not None:
                             raise ValueError('pose_duplicate_ready')
                         # Bind to observation, before awaiting the recorder. Its
                         # latency must not age every future input timestamp.
-                        anchor[0] = (observed_ns, int(fields[1]))
+                        ready_stamp=int(fields[1])
+                        if clock_samples and ready_stamp<clock_samples[-1][1]:
+                            raise ValueError('pose_clock_calibration_rollback')
+                        anchor[0] = (observed_ns,ready_stamp)
                         await self.recorder.write_event(dict(kind='docker_pose_anchor',
-                            recording_delay_ms=(self.clock()-observed_ns)/1e6),self.clock())
+                            recording_delay_ms=(self.clock()-observed_ns)/1e6,
+                            calibration_samples=len(clock_samples)+1,
+                            mailbox_ttl_ms=POSE_PROFILE.mailbox_ttl_ms),self.clock())
                         snapshot = await a._read_snapshot(read_purpose='position_progress')
                         self.check()
                         intent = self.gate.latest
                         deadline = self.clock() + 100_000_000
                         while (not self._withdraw.is_set() and intent is not None and intent.kind == 'held'
-                                and intent.received_ns < anchor[0][0] and self.clock() < deadline):
+                                and intent.received_ns < observed_ns and self.clock() < deadline):
                             await asyncio.sleep(.005)
                             self.check()
                             intent = self.gate.latest
@@ -182,6 +198,8 @@ class DockerPoseSession(DockerPvatSession):
                         expired = True
                     elif fields[0] == 'LIVE_BOUNDARY':
                         boundary = fields[2]
+                    elif fields[0] == 'LIVE_SATURATED':
+                        self.reason='pvat_target_saturated' if fields[1]=='true' else None
                     elif fields[0] == 'LIVE_DONE':
                         done, okay = True, fields[1] == 'true'
                         break

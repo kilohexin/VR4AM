@@ -378,7 +378,8 @@ it('distinguishes Docker pose following from the direction-mode centre instructi
  expect(active.title).toBe('位姿跟随中');
  expect(active.instruction).toContain('手停时目标固定');
  expect(active.instruction).not.toContain('小步');
- expect(active.footer).toContain('右Grip位姿对齐');
+ expect(active.footer).toContain('右Grip按一次跟随/再按结束');
+ expect(active.instruction).toContain('再按 Grip 结束');
  summary.finitePosition!.phase='ready';
  const ready=describeVrSafety(state('armed'),true,summary);
  expect(ready.title).toContain('位姿跟随');

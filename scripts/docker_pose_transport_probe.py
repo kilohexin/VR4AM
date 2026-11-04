@@ -23,6 +23,8 @@ CONTRACT_CHECKS = {
     'fresh_ik_following',
     'batched_header_sandwich',
     'clock_diagnostic_preserves_rejection',
+    'bounded_pose_path',
+    'explicit_virtual_mailbox_budget',
 }
 
 
@@ -55,6 +57,7 @@ def program():
     from app.schemas.messages import Pose
     module = (ROOT / 'scripts/vr_pose_mailbox.lua').read_text(encoding='utf-8')
     tracker = (ROOT / 'scripts/vr_pose_tracker.lua').read_text(encoding='utf-8')
+    path_module = (ROOT / 'scripts/vr_pose_path.lua').read_text(encoding='utf-8')
     harness = (ROOT / 'scripts/docker_pose_transport_probe.lua').read_text(encoding='utf-8')
     cases = []
     for angles in ((0, 0, 0), (0, 70, 0), (30, 90, 40), (10, -90, -30),
@@ -64,7 +67,7 @@ def program():
         values = ','.join(str(v) for v in pack(pose))
         matrix = ','.join(repr(float(v)) for v in rotation.as_matrix().ravel())
         cases.append('{values={' + values + '},rotation={' + matrix + '}}')
-    return harness.replace('__POSE_MAILBOX_MODULE__', module).replace('__POSE_TRACKER_MODULE__',tracker).replace(
+    return harness.replace('__POSE_PATH_MODULE__',path_module).replace('__POSE_MAILBOX_MODULE__', module).replace('__POSE_TRACKER_MODULE__',tracker).replace(
         '__ROTATION_CASES__', '{' + ','.join(cases) + '}')
 
 

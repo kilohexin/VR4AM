@@ -31,13 +31,14 @@ export class FiniteXRInput {
  private buttonClaw=false;private clawDirection=0;private clawInputAt=-Infinity;
  private clawButtonsReleased=false;
  private clawTime:number|null=null;private clawTarget:number|null=null;
+ private poseFollowing=false;private poseGripDown=true;
  constructor(private position:FinitePositionInput,private sendClaw:(m:GripperRequestMessage)=>void,
   private cancelClaw:(id:string)=>void,private now:()=>number=()=>performance.now()){}
  update(state:RobotStateMessage|null,receivedAt:number):void {
   const enteredHold=enteredFiniteHold(this.state?.finite_position,state?.finite_position);
   if(this.state?.finite_position?.generation!==state?.finite_position?.generation)this.reset('xr_generation_changed');
   this.state=state;this.receivedAt=receivedAt;
-  if(enteredHold){this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=true;}
+  if(enteredHold){this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=true;this.poseFollowing=false;this.poseGripDown=true;}
  }
  reset(reason='xr_reset'):void {
   this.position.abort(reason);
@@ -45,6 +46,7 @@ export class FiniteXRInput {
   this.pending=null;this.anchor=null;this.gesture.reset();this.mustRelease=true;this.lastTime=null;this.trigger=null;this.clawPause=false;
   this.clawDirection=0;this.clawTarget=null;this.clawTime=null;
   this.clawButtonsReleased=false;
+  this.poseFollowing=false;this.poseGripDown=true;
  }
  holdClaw(direction:-1|0|1,stamp:number):void {
   this.buttonClaw=true;
@@ -76,7 +78,8 @@ export class FiniteXRInput {
   if(!feedbackFresh){
    // Display latency cannot authorize another target. Release the finite
    // gesture; its owned step still runs the backend's fresh-feedback checks.
-   this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=true;this.trigger=null;return;
+   this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=true;this.trigger=null;
+   this.poseFollowing=false;this.poseGripDown=true;return;
   }
   if(this.buttonClaw){
    const direction=t>=this.clawInputAt&&t-this.clawInputAt<100?this.clawDirection:0;
@@ -104,6 +107,7 @@ export class FiniteXRInput {
    if(this.trigger===null)this.trigger=value;
    if(Math.abs(value-this.trigger)>=.025)this.clawPause=true;
    if(this.clawPause||this.pending){
+    this.poseFollowing=false;this.poseGripDown=true;
     // Trigger owns a pause, not a competing motion. Only current live input
     // may be sent after the existing arm segment naturally drains.
     this.position.release();this.anchor=null;this.gesture.reset();
@@ -117,6 +121,24 @@ export class FiniteXRInput {
     }
     return;
    }
+  }
+  if(docker&&s.finite_position?.pose_follow_enabled===true){
+   const pressed=frame.right.grip&&!this.poseGripDown;
+   this.poseGripDown=frame.right.grip;
+   if(!frame.right.grip)this.mustRelease=false;
+   if(pressed){
+    if(this.poseFollowing){
+     this.poseFollowing=false;this.position.release();this.anchor=null;this.mustRelease=true;return;
+    }
+    if(!this.mustRelease){
+     if(['planning','executing','draining'].includes(s.finite_position!.phase)){this.mustRelease=true;return;}
+     this.poseFollowing=true;
+    }
+   }
+   if(!this.poseFollowing)return;
+   // The transport heartbeat still carries physical Grip=false. Only this
+   // finite-input latch supplies fresh pose samples until the next press.
+   frame={...frame,right:{...frame.right,grip:true}};
   }
   if(!frame.right.grip){this.position.release();this.anchor=null;this.gesture.reset();this.mustRelease=false;}
   else if(!this.mustRelease){

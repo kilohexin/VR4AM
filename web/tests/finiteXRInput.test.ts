@@ -21,14 +21,45 @@ it('full-pose capability sends stationary and rotated hand poses, with normal re
  const q:[number,number,number,number]=[0,Math.sin(35*Math.PI/180),0,Math.cos(35*Math.PI/180)];
  apply(40,true,[.01,.02,.03],q,-1);apply(60,true,[.01,.02,.03],q,-1);
  expect(r.inputs.at(-1).hand_pose).toEqual({p:[.01,.02,.03],q});expect(r.claws.length).toBeGreaterThan(0);
- apply(80,false,[.01,.02,.03],q);expect(r.inputs.at(-1)).toMatchObject({kind:'release',vector:[0,0,0]});
+ apply(80,false,[.01,.02,.03],q);expect(r.inputs.at(-1).kind).toBe('held');
+ apply(100,true,[.01,.02,.03],q);expect(r.inputs.at(-1)).toMatchObject({kind:'release',vector:[0,0,0]});
  expect(r.inputs.at(-1).hand_pose).toBeUndefined();expect(r.stops).toEqual([]);
+});
+it('pose toggle streams past ten seconds after button release and resets after tracking loss',()=>{
+ const r=rig();const s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{...state.finite_position!,
+  policy:'finite_position_docker',pose_follow_enabled:true,parallel_virtual_claw:true}};
+ const apply=(t:number,grip:boolean,tracked=true)=>{
+  r.setNow(t);r.xr.update(s,t);r.xr.apply({v:1,type:'vr_frame',session_id:'toggle',seq:t,client_mono_ms:t,
+   tracking_valid:tracked,visibility:'visible',right:{p:[.01,0,0],q:[0,0,0,1],grip,trigger:.5}});
+ };
+ apply(0,true);expect(r.inputs).toHaveLength(0); // No press replay on entry.
+ apply(20,false);apply(40,true);apply(60,true);
+ for(let t=80;t<=15000;t+=20)apply(t,false);
+ expect(r.inputs.at(-1)).toMatchObject({kind:'held',hand_pose:{p:[.01,0,0]}});
+ apply(15020,true);expect(r.inputs.at(-1).kind).toBe('release');
+ const stopped=r.inputs.length;apply(15040,true);expect(r.inputs).toHaveLength(stopped);
+ apply(15060,false);apply(15080,true);expect(r.inputs.at(-1).kind).toBe('held');
+ apply(15100,false,false);expect(r.stops).toContain('xr_input_unavailable');
+ const revoked=r.inputs.length;apply(15120,true);expect(r.inputs).toHaveLength(revoked);
+ apply(15140,false);apply(15160,true);expect(r.inputs.at(-1).kind).toBe('held');
 });
 it('keeps XR Grip and Trigger out of legacy transport without mutating controller input',()=>{
  const f:VRFrame={v:1,type:'vr_frame',session_id:'quest-test',seq:1,client_mono_ms:1,tracking_valid:true,
   visibility:'visible',right:{p:[0,0,0],q:[0,0,0,1],grip:true,trigger:.8}};
  expect(finiteXRTransportFrame(f).right).toMatchObject({grip:false,trigger:0});
  expect(f.right).toMatchObject({grip:true,trigger:.8});
+});
+it.each(['hold','generation'] as const)('pose toggle is cleared by %s and cannot resume with an already down button',change=>{
+ const r=rig();let s:RobotStateMessage={...state,backend:'LEBAI_DOCKER',finite_position:{...state.finite_position!,
+  policy:'finite_position_docker',pose_follow_enabled:true,parallel_virtual_claw:true}};
+ const apply=(t:number,grip:boolean)=>{
+  r.setNow(t);r.xr.update(s,t);r.xr.apply({v:1,type:'vr_frame',session_id:'toggle',seq:t,client_mono_ms:t,
+   tracking_valid:true,visibility:'visible',right:{p:[0,0,0],q:[0,0,0,1],grip,trigger:.5}});
+ };
+ apply(0,false);apply(20,true);apply(40,false);
+ s={...s,finite_position:{...s.finite_position!,...(change==='hold'?{phase:'hold',reason:'position_input_expired'}:{generation:2})}};
+ apply(60,true);const n=r.inputs.length;apply(80,true);expect(r.inputs).toHaveLength(n);
+ apply(100,false);apply(120,true);expect(r.inputs.at(-1).kind).toBe('held');
 });
 
 it('held left buttons progress the virtual claw while Grip keeps streaming and Trigger is ignored',()=>{

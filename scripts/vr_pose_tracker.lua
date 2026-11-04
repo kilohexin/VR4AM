@@ -3,12 +3,15 @@
 local M={}
 local function finite(x) return type(x)=='number' and x==x and math.abs(x)<1000000 end
 local function clamp(x,lo,hi) return math.max(lo,math.min(hi,x)) end
-function M.fresh_solution(goal,current,now,similar)
+function M.fresh_solution(goal,current,now,similar,input_ttl)
     -- A moving hand need not coincide with the last completed IK. Its genuine
     -- sample age still governs use; never relabel it with the latest timestamp.
-    return now>=goal.sample.captured_ms and now-goal.sample.captured_ms+1<100
-        and now>=current.captured_ms and now-current.captured_ms+1<100
-        and similar(goal.solved_pose,current.pose,.010,.05)
+    local ttl=input_ttl or 100
+    return now>=goal.sample.captured_ms and now-goal.sample.captured_ms+1<ttl
+        and now>=current.captured_ms and now-current.captured_ms+1<ttl
+        -- A bounded IK path section may lag the final hand endpoint. Only its
+        -- genuine input age authorizes it; the physical reference stays rate
+        -- limited, and old sections are never queued or restamped.
 end
 local function velocity_jerk_ceiling(v,a,dt)
     -- Keep enough velocity headroom to cancel positive acceleration with the

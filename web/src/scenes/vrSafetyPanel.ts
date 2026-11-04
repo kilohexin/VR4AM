@@ -64,20 +64,23 @@ export function describeVrSafety(
   const finite=summary.finitePosition;
   const poseFollow=summary.backend==='LEBAI_DOCKER'&&finite?.policy==='finite_position_docker'
     &&finite.pose_follow_enabled===true;
-  if(poseFollow)core.footer=core.footer.replace('右Grip末端','右Grip位姿对齐');
+  if(poseFollow)core.footer=core.footer.replace('右Grip末端','右Grip按一次跟随/再按结束');
   if(finite&&core.tone==='cyan'&&!state.stopPending){
     const boundary=finiteHoldTitle(finite);
     if(boundary){
-      core.title=boundary;core.instruction='松开 Grip 后重新握持，反向或更换方向调整';core.tone='amber';core.shape='warning';
+      core.title=boundary;core.instruction=poseFollow?'松开按钮后，再按 Grip 重新对齐或换方向':'松开 Grip 后重新握持，反向或更换方向调整';core.tone='amber';core.shape='warning';
     }else if(['planning','executing','draining'].includes(finite.phase)){
       core.title=poseFollow
         ?finite.phase==='planning'?'正在对齐位姿':finite.phase==='draining'?'正在结束位姿跟随':'位姿跟随中'
         :finite.phase==='planning'?'正在规划小步':finite.phase==='draining'?'正在完成当前小步':'小步执行中';
-      core.instruction=poseFollow?'手停时目标固定 · 松开 Grip 结束跟随 · B 请求停止'
+      core.instruction=poseFollow?'手停时目标固定 · 再按 Grip 结束跟随 · B 请求停止'
         :'松开 Grip 后完成当前小步 · B 请求停止';
+      if(poseFollow&&finite.reason==='pvat_target_saturated'){
+        core.title='已到本次平移范围';core.instruction='可向内退回，或再按 Grip 结束后重新对齐';core.tone='amber';
+      }
     }else if(state.phase==='armed'){
       if(poseFollow)core.title='可操纵 · 位姿跟随';
-      core.instruction=poseFollow?'Grip 对齐：平移2倍、朝向1倍目标 · 左X打开/Y闭合'
+      core.instruction=poseFollow?'按 Grip 对齐并跟随：平移2倍、朝向1倍目标 · 左X/Y夹爪'
       :finite.policy==='finite_position_docker'
       ?'Grip：前后左右上下，手腕抬低/扭转 · 回中心停止 · 左X打开/Y闭合'
       :finite.pitch_enabled?'Grip 控制平移和手腕俯仰 · 左X打开/Y闭合':'Grip 控制平移 · 左X打开/Y闭合';

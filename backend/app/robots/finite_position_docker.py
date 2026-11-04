@@ -69,7 +69,7 @@ class DockerFinitePositionAdapter(RealFinitePositionAdapter):
         self._position_sources.update(Path(__file__).parents[1]/'control'/name for name in (
             'docker_pose_session.py','docker_pose_profile.py','vr_pose_reference.py','vr_pose_input.py','vr_pose_mailbox.py'))
         self._position_sources.update(Path(__file__).parents[3]/'scripts'/name for name in (
-            'docker_pose_live.lua','vr_pose_mailbox.lua','vr_pose_tracker.lua'))
+            'docker_pose_live.lua','vr_pose_mailbox.lua','vr_pose_tracker.lua','vr_pose_path.lua'))
         self._position_identity=self._source_identity();self._position_metadata=self._source_metadata()
 
     async def connect(self):

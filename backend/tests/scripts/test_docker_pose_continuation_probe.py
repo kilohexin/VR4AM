@@ -11,11 +11,11 @@ m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 
 def trace(boundary=False):
     lines=['CONT_REFERENCE\t.3\t0\t.4']
-    n=20 if boundary else 551
+    n=101 if boundary else 551
     for i in range(n):
-        x=.3 if boundary else .325
+        x=.32 if boundary else .325
         lines.append(f'LIVE_POINT\t{i*80}\t{(i*2)%1024}\t{x}\t0\t.4\t0')
-    if boundary:lines+=['LIVE_BOUNDARY\t2000\treference_boundary']
+    if boundary:lines+=['LIVE_SATURATED\ttrue']
     else:lines+=['LIVE_EXPIRED\t44100\t551']
     lines+=['CONT_SOURCE_END\t44000\t1500\t.15','LIVE_QUIET\t44700',
             f'LIVE_DONE\ttrue\tnil\t{n}',f'CONT_DONE\ttrue\tnil\t{n}']
@@ -46,13 +46,13 @@ def test_incomplete_short_or_aborted_trace_cannot_pass(change):
     assert not m.analyze(change(trace()),'continuation')['passed']
 
 
-def test_oversized_goal_must_hold_with_no_meaningful_motion():
+def test_oversized_goal_clips_inside_fixed_region_without_pausing():
     assert m.analyze(trace(True),'boundary')['passed']
-    assert not m.analyze(trace(True).replace('\t.3\t','\t.31\t'),'boundary')['passed']
+    assert not m.analyze(trace(True).replace('\t0.32\t','\t0.42\t'),'boundary')['passed']
 
 
 def test_branch_hold_and_fast_hand_keep_known_completion_contract():
-    raw=trace(True).replace('reference_boundary','ik_branch')
+    raw=trace(True).replace('LIVE_SATURATED\ttrue','LIVE_BOUNDARY\t2000\tik_branch').replace('\t0.32\t','\t0.3\t')
     assert m.analyze(raw,'branch')['passed']
     assert not m.analyze(raw.replace('LIVE_QUIET','MISSING_QUIET'),'branch')['passed']
     assert m.analyze(trace(),'human')['passed']

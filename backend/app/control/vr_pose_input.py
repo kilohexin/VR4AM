@@ -13,13 +13,16 @@ from app.control.vr_pose_reference import VRPoseReference
 
 class VRPoseInput:
     def __init__(self, client, lease, binding, *, clock, stamp_for_capture,
-                 authorize, authorize_cleanup, translation_scale=2., authorize_publish=None):
+                 authorize, authorize_cleanup, translation_scale=2., authorize_publish=None, mailbox_ttl_ms=100):
+        if type(mailbox_ttl_ms) is not int or not 1<=mailbox_ttl_ms<=1000:
+            raise ValueError('vr_pose_input_ttl')
+        self.mailbox_ttl_ns=mailbox_ttl_ms*1_000_000
         self.client, self.lease, self.binding = client, lease, binding
         self.clock, self.authorize, self.authorize_cleanup = clock, authorize, authorize_cleanup
         self.reference = VRPoseReference(clock=clock, translation_scale=translation_scale)
         self.writer = PoseMailboxWriter(client, lease, clock=clock,
             stamp_for_capture=stamp_for_capture, authorize=authorize, bulk=True,
-            before_commit=authorize_publish or authorize)
+            before_commit=authorize_publish or authorize,ttl_ms=mailbox_ttl_ms)
         self.closed = False
         self.reason = None
         self.worker = None
@@ -83,7 +86,7 @@ class VRPoseInput:
             self.max_offer_gap_ns=max(self.max_offer_gap_ns,intent.received_ns-self.last_ns)
         self.max_offer_age_ns=max(self.max_offer_age_ns,self.clock()-intent.received_ns)
         if (not 0 <= self.clock() - intent.received_ns < TTL_NS
-                or self.last_ns is None or not 0 <= self.clock() - self.last_ns < TTL_NS):
+                or self.last_ns is None or not 0 <= self.clock() - self.last_ns < self.mailbox_ttl_ns):
             self._retire('vr_pose_input_expired')
             raise ValueError('vr_pose_input_expired')
         self.session, self.last_seq, self.last_ns = intent.session_id, intent.seq, intent.received_ns
@@ -123,7 +126,7 @@ class VRPoseInput:
         try:
             while not self.closed:
                 self._check()
-                if self.last_ns is None or not 0 <= self.clock() - self.last_ns < TTL_NS:
+                if self.last_ns is None or not 0 <= self.clock() - self.last_ns < self.mailbox_ttl_ns:
                     self._retire('vr_pose_input_expired')
                     return
                 self.wake.clear()
@@ -179,10 +182,10 @@ class VRPoseInput:
         try:
             for channel in (BASE, BASE + BANK_SIZE):
                 self.authorize_cleanup()
-                await asyncio.wait_for(self.client.set_signal(channel, 0), .1)
+                await asyncio.wait_for(self.client.set_signal(channel, 0), self.writer.rpc_timeout_s)
             for channel in (BASE, BASE + BANK_SIZE):
                 self.authorize_cleanup()
-                value = await asyncio.wait_for(self.client.get_signal(channel), .1)
+                value = await asyncio.wait_for(self.client.get_signal(channel), self.writer.rpc_timeout_s)
                 self.authorize_cleanup()
                 if type(value) is not int or value != 0:
                     raise ValueError('vr_pose_cleanup_unverified')

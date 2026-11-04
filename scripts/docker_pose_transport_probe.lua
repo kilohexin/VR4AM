@@ -6,6 +6,9 @@ end)()
 local tracker_module=(function()
 __POSE_TRACKER_MODULE__
 end)()
+local path_module=(function()
+__POSE_PATH_MODULE__
+end)()
 
 local function near(a,b,tol) assert(math.abs(a-b)<=tol, 'probe_numeric_mismatch') end
 local function expect_error(fn,code)
@@ -21,11 +24,11 @@ local function fake()
         if f.hook then f.hook(ch) end
         return value
     end
-    function f.reader(epoch,bulk)
+    function f.reader(epoch,bulk,ttl)
         return mailbox.new(f.read,function() return f.now end,epoch or f.now,
             function() assert(f.allowed,'revoked') end,bulk and function(ch,n)
                 local result={};for i=1,n do result[i]=f.read(ch+i-1) end;return result
-            end or nil)
+            end or nil,ttl)
     end
     function f.publish(bank,stamp,seq,x)
         local offset=240+bank*8
@@ -56,7 +59,29 @@ local function encode(p)
 end
 
 local ok,err=pcall(function()
+    test('bounded_pose_path',function()
+        local base={x=0,y=0,z=0,rx=0,ry=0,rz=math.pi-.01}
+        local target={x=.3,y=-.3,z=0,rx=0,ry=0,rz=-math.pi+.01}
+        local clipped,saturated=path_module.clip(target,base,.1)
+        assert(saturated and clipped.x==.1 and clipped.y==-.1 and target.x==.3,'fixed_box_clamp')
+        local p=path_module.step(base,clipped,.004,.005)
+        near(math.sqrt(p.x*p.x+p.y*p.y),.004,1e-10)
+        assert(p.rz>3.12 or p.rz< -3.12,'rotation_took_long_path')
+        local a,b=matrix(base),matrix(p);local dot=0;for i=1,9 do dot=dot+a[i]*b[i] end
+        near(math.acos(math.max(-1,math.min(1,(dot-1)/2))),.005,1e-9)
+        for tick=1,100 do if tick%10==0 then rt_sleep(1) end;p=path_module.step(p,clipped,.004,.005) end
+        near(p.x,.1,1e-9);near(p.y,-.1,1e-9)
+        local returned,again=path_module.clip(base,base,.1);assert(not again and returned.x==0,'cannot_return_from_edge')
+    end)
     test('empty',function() local f=fake();assert(f.reader().read_latest()==nil) end)
+    test('explicit_virtual_mailbox_budget',function()
+        local f=fake();f.publish(0,1000,1);local r=f.reader(1000,false,250)
+        r.read_latest();f.now=1150;assert(r.read_latest().sequence_mod==1)
+        f.now=1249;expect_error(r.read_latest,'input_expired')
+        f.now=1250;f.publish(1,1250,2);expect_error(r.read_latest,'retired')
+        local strict=fake();strict.publish(0,1000,1);local old=strict.reader();old.read_latest()
+        strict.now=1100;expect_error(old.read_latest,'input_expired')
+    end)
     test('clock_diagnostic_preserves_rejection',function()
         for _,invalid in ipairs({false,1000.5,999}) do
             local f=fake();local r=f.reader();f.now=invalid
@@ -96,7 +121,7 @@ local ok,err=pcall(function()
         assert(g.sample.captured_ms==1000,'old_solution_timestamp_changed')
         assert(not tracker_module.fresh_solution(g,c,1099,similar),'expired_ik_accepted')
         assert(not tracker_module.fresh_solution(g,c,999,similar),'rollback_accepted')
-        c.pose.x=.011;assert(not tracker_module.fresh_solution(g,c,1021,similar),'far_target_accepted')
+        c.pose.x=.011;assert(tracker_module.fresh_solution(g,c,1021,similar),'fresh_path_section_rejected')
     end)
     test('absolute_joint_reference',function()
         local lo={-1,-1,-1,-1,-1,-1};local hi={1,1,1,1,1,1}

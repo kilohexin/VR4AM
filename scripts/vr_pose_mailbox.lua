@@ -26,7 +26,9 @@ function M.decode(values)
     return {x=values[1]/1e6,y=values[2]/1e6,z=values[3]/1e6,rx=rx,ry=ry,rz=rz}, {x,y,z,w}
 end
 
-function M.new(io, clock, not_before, authorize, read_many)
+function M.new(io, clock, not_before, authorize, read_many, input_ttl)
+    local TTL=input_ttl or TTL
+    assert(type(TTL)=='number' and TTL==math.floor(TTL) and TTL>=1 and TTL<=1000,'pose_mailbox_ttl')
     assert(type(not_before)=='number' and not_before>=0 and not_before==math.floor(not_before), 'pose_mailbox_epoch')
     local self={closed=false,busy=false,last_now=not_before,last_capture=nil,last_word=nil,last_values=nil,
         max_read_ms=0,max_age_ms=0,last_headers={0,0}}

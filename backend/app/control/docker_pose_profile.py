@@ -8,6 +8,7 @@ class DockerPoseProfile:
     maximum_points: int = 3750
     target_tcp_span_m: float = .100
     feedback_tcp_span_m: float = .120
+    mailbox_ttl_ms: int = 250
 
 
 POSE_PROFILE = DockerPoseProfile()

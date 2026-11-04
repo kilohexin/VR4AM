@@ -7,6 +7,16 @@ export function enteredFiniteHold(previous:FinitePositionStatus|null|undefined,n
 
 /** Display known local boundary reasons, never arbitrary native exception text. */
 export function finiteHoldTitle(status:FinitePositionStatus|null|undefined):string|null {
+ const title=holdTitle(status);
+ if(!title||status?.policy!=='finite_position_docker'||status.pose_follow_enabled!==true)return title;
+ return title.replace('请松开 Grip 后重新握持','请重新按 Grip 对齐')
+  .replace('请松开 Grip 后反向调整','请重新按 Grip 并反向调整')
+  .replace('请松开 Grip 后换方向调整','请重新按 Grip 并换方向')
+  .replace('请松开 Grip 后缩小动作重握','请重新按 Grip 并缩小动作')
+  .replace('请松开后重新按住','请重新按 Grip 对齐')
+  .replace('本次长按已暂停续发','位姿跟随已暂停');
+}
+function holdTitle(status:FinitePositionStatus|null|undefined):string|null {
  if(status?.phase!=='hold')return null;
  switch(status.reason){
   case 'pvat_gesture_complete':return '本次连续控制已结束，请松开 Grip 后重新握持';

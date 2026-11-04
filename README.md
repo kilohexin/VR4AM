@@ -2,13 +2,15 @@
 
 当前主线：**官方 Docker 仿真 → 操作者网页/头显体验 → 后续真机验收**。真机当前不可用，仿真成功不代表真实抓取或制动已通过。
 
-11月4日真人体验未通过：快速手部动作触发规划滞后及IK分支拒绝。`codex/vr-pose-human-follow`后续候选已缩短邮箱读取链并修正锚点计时，最新快动作＋40秒/90秒持Grip两轮完整整链分别631/1256点通过，无故障/未知；107项定向回归及原厂15项契约通过。此前85点输入暂停和时钟异常记录均保留，时钟异常尚未复现定位，不能将合成通过当作真人通过。当前体验服务保持待启动，等待操作者确认头显可用后复测；详见项目状态顶部。
+最新开发分支为`codex/vr-toggle-follow`。Docker位姿模式改为**右Grip按一次：以当前手柄和机器人姿态对齐零位并跟随；再次按下：取消跟随并自然收尾**。物理按钮松开不再结束跟随，左X/Y仍可并行渐进开合虚拟夹爪。跟踪丢失、断连、故障或重新准备会清除跟随状态，不会自动恢复，必须松开按钮后重新按下。不采用10秒持按限制；当前每段仍有300秒/3750点的开发上限，服务体验期另计。
+
+新候选将大幅目标分成有界IK计算段；相对本次零位的固定±100mm目标框改为限幅并提示，可向内退回。全局工作区、关节与参考速率上限保留。Docker位姿邮箱及其RPC预算单独设为250ms，新到达输入仍须小于100ms；其他模式默认100ms不变。通信中断后可能比旧租约多延迟约150ms才停止续发，随后自然收尾；这不是物理制动时间保证。旧真人暂停、未知结果及两轮失败记录保留，详见项目状态顶部。
 
 最新操纵目标是[相对位姿跟随](docs/vr-pose-follow-direction-2026-11-03.md)：Grip对齐后，手柄朝向目标1:1、平移2:1，手停则目标固定。完整手柄位姿→邮箱→原厂IK/PVAT已接入可选`--pose-follow-vr`模式；独立实例上的产品WebSocket合成输入通过超过40秒持Grip、三轴、两种朝向、并行X/Y渐进夹爪、松手/重握、固定边界及运动中直接断连，共631点。它仍是有界候选，尚无真人头显舒适度、大幅70°运动或真机验收。默认启动器继续使用下面的速度杆模式，不自动切换。
 
 位姿候选已扩展为每次最多300秒/3750点、相对最初Grip零点各轴±100mm的固定目标框，关节使用固定绝对软限位，不再被旧20mm/0.07rad诊断范围截断。参考速度仍为0.06rad/s、加速度0.15rad/s²、jerk 0.5rad/s³。原厂Docker内合成44秒/551点与主机WebSocket长运行均覆盖约30mm实际往返及序号回绕；最大发送间隔仍有91ms，未满足严格小于80ms，不能宣称已无卡顿。修复了旧段完成但结束记录尚未写完时，新Grip误用已撤销零点的问题；只在原运动和清理已知完成后交接，不清除未知锁存。尚需真人头显体验；当前8773/8443保留旧方向模式，扩展在`codex/vr-pose-continuation`分支。
 
-到界或输入过期需松Grip重握。IK缓存只允许相对原求解位姿最多0.25mm/0.002rad误差，不滚动缓存中心；新解尚未完成时最多400ms保持当前P/V/A参考，不能追赶旧手柄端点。过期/未知不会靠迟到输入恢复。这些是计算与控制限制，不是机械精度或物理停止保证。开发预览：`.venv/Scripts/python.exe scripts/run_lmaster_docker.py --pose-follow-vr`；执行需另带`--run`，并先正常关闭已有开发后端，保持单一控制入口。详细证据及未通过轮次见上述记录。
+位姿模式到本次平移框边缘会限幅，真正输入过期或故障则退出跟随，需松开按钮后重新按下Grip。新鲜手柄目标逐段求IK，每段最多4mm/0.02rad；计算段仍使用原始输入时间戳，不冒充最终手柄端点的解。新解未就绪时最多400ms保持当前P/V/A参考，过期/未知不会靠迟到输入恢复。这些是计算与控制限制，不是机械精度或物理停止保证。开发预览：`.venv/Scripts/python.exe scripts/run_lmaster_docker.py --pose-follow-vr`；执行需另带`--run`，并先正常关闭已有开发后端，保持单一控制入口。
 
 执行器分工：网页准备位/关节目标用`movej`，网页XYZ直线操作用`movel`；VR使用`--pvat-vr`开启控制器侧PVAT候选，支持三轴组合、名义参考速度10mm/s，手势灵敏度2倍（约4mm偏移启动）。它是持续方向速度杆，不追赶手柄终点。十秒窗口及局部参考段结束后，只有已知完成且Grip输入仍新鲜有效才续接；真实工作区/关节边界、输入过期或故障仍暂停，交接可能短暂停顿。左手X长按打开夹爪、Y长按闭合，松开保持、同时按下保持；右Trigger不再控制夹爪。Docker网页/VR夹爪目标速率1.2行程/秒（约0.83秒目标全行程，非端到端延迟保证），PVAT模式的本地虚拟夹爪可与机械臂并行；真机并行未开放。仍需真人头显确认长期稳定性。
 
@@ -16,15 +18,15 @@
 
 ## 新版位姿跟随体验入口
 
-`codex/vr-pose-continuation`提供独立头显入口8444→测试后端8774→独立仿真SDK13030，不替换现有8773/8443。网页“控制方式”和头显应显示“位姿跟随”；新模式不再提示“回中心停止”。右Grip重新对齐，平移目标2:1、朝向目标1:1，手停时目标固定，左X/Y长按渐进夹爪。
+`codex/vr-toggle-follow`提供独立头显入口8444→测试后端8774→独立仿真SDK13030。网页“控制方式”和头显应显示“单按Grip跟随/再按结束”；右Grip首次按下对齐零位，平移目标2:1、朝向目标1:1，手停时目标固定，左X/Y长按渐进夹爪。
 
-本机已创建的`vr4arm-pose-webfix-20261103`目前停止；需先运行该独立官方实例，并通过启动预览核验固定回环映射。按以下顺序启动（每条在相应目录/终端执行）：
+本机当前专用实例为`vr4arm-toggle-budget-20261104`；通过启动预览核验固定回环映射后再运行。按以下顺序启动（每条在相应目录/终端执行，勿与已有体验服务同时启动）：
 
 ```powershell
-docker start vr4arm-pose-webfix-20261103
-.venv/Scripts/python.exe scripts/run_lmaster_docker.py --isolated-test-container vr4arm-pose-webfix-20261103 --port 8774 --pose-follow-vr
+docker start vr4arm-toggle-budget-20261104
+.venv/Scripts/python.exe scripts/run_lmaster_docker.py --isolated-test-container vr4arm-toggle-budget-20261104 --port 8774 --pose-follow-vr
 # 核对预览后启动；此终端保持运行，十分钟后正常退出。
-.venv/Scripts/python.exe scripts/run_lmaster_docker.py --run --isolated-test-container vr4arm-pose-webfix-20261103 --port 8774 --pose-follow-vr --test-seconds 600
+.venv/Scripts/python.exe scripts/run_lmaster_docker.py --run --isolated-test-container vr4arm-toggle-budget-20261104 --port 8774 --pose-follow-vr --test-seconds 600
 # 另开终端，在web目录：
 npm run docker:pose-test
 ```

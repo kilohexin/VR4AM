@@ -4,6 +4,7 @@
         while not finish do
             local now=timestamp();local t=(now-start)/1000
             if not __BOUNDARY__ and t>=44 then break end
+            if __BOUNDARY__ and t>=8 then break end
             assert(not previous or now-previous<100,'continuation_source_gap')
             local u=t<10 and t/10 or t<22 and 1 or t<32 and (32-t)/10 or 0
             if __HUMAN__ then u=t<.4 and t/.4 or t<6 and 1 or t<6.4 and (6.4-t)/.4 or 0 end

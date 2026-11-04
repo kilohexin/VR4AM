@@ -33,14 +33,14 @@ class Signals:
 
 
 class Rig:
-    def __init__(self, ms=1000):
+    def __init__(self, ms=1000,ttl_ms=100):
         self.ns = ms * 1_000_000
         self.authorized = True
         self.io = Signals()
         self.lease = ExecutorLease()
         self.writer = PoseMailboxWriter(
             self.io, self.lease, clock=lambda: self.ns,
-            stamp_for_capture=lambda ns: ns // 1_000_000, authorize=self.authorize,
+            stamp_for_capture=lambda ns: ns // 1_000_000, authorize=self.authorize,ttl_ms=ttl_ms,
         )
         self.reader = PoseMailboxReader(
             self.io, controller_ms=lambda: self.ns // 1_000_000,
@@ -58,6 +58,60 @@ class Rig:
     async def publish(self, seq):
         self.offer(seq)
         assert await self.writer.publish_latest()
+
+
+async def test_latest_input_is_selected_after_inactive_header_invalidation():
+    r=Rig();await r.writer.open();r.offer(1)
+    async def replace(channel,value):
+        if channel==BASE and value==0:
+            r.ns+=20_000_000;r.offer(2)
+    r.io.after_write=replace
+    assert await r.writer.publish_latest()
+    result=await r.reader.read_latest()
+    assert result.pose.p[0]==.002 and result.captured_ms==1020
+    assert r.writer.written_seq==2 and r.writer.last_written_capture_ns==r.ns
+
+
+@pytest.mark.parametrize('same',[False,True])
+async def test_commit_uses_new_capture_only_for_bit_identical_payload(same):
+    r=Rig();await r.writer.open();p=Pose(p=(.001,.2,.3),q=(0.,0.,0.,1.));r.offer(1,p)
+    async def replace(channel,value):
+        if channel==BASE+7:
+            r.ns+=20_000_000;r.offer(2,p if same else None)
+    r.io.after_write=replace
+    assert await r.writer.publish_latest()
+    result=await r.reader.read_latest()
+    assert result.pose.p[0]==.001  # Never label a different pose as the new sample.
+    assert result.captured_ms==(1020 if same else 1000)
+    assert r.writer.written_seq==(2 if same else 1)
+
+
+@pytest.mark.parametrize('ttl,age,accepted',[(100,150,False),(250,150,True),(250,250,False)])
+async def test_explicit_mailbox_budget_preserves_capture_and_default_deadline(ttl,age,accepted):
+    r=Rig(ttl_ms=ttl);await r.writer.open();r.offer(1);r.ns+=age*1_000_000
+    if accepted:
+        assert await r.writer.publish_latest()
+        assert r.writer.last_written_capture_ns==1_000_000_000
+        assert r.io.values[BASE]==header(1000,1)
+    else:
+        with pytest.raises(ValueError,match='input_expired'):await r.writer.publish_latest()
+        assert not r.io.writes and not r.writer.unknown
+
+
+@pytest.mark.parametrize('ttl,delay,known',[(100,.12,False),(250,.12,True),(250,.28,False)])
+async def test_simulator_rpc_budget_joins_known_response_and_keeps_unknown_timeout(ttl,delay,known):
+    r=Rig(ttl_ms=ttl);await r.writer.open();r.offer(1)
+    async def slow_once(channel,value):
+        r.io.after_write=None
+        await asyncio.sleep(delay)
+        r.ns+=round(delay*1e9)
+    r.io.after_write=slow_once
+    if known:
+        assert await r.writer.publish_latest()
+        assert not r.writer.unknown and r.writer.written_seq==1
+    else:
+        with pytest.raises(TimeoutError):await r.writer.publish_latest()
+        assert r.writer.unknown and r.lease.owner is r.writer.token
 
 
 @pytest.mark.asyncio

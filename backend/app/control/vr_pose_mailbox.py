@@ -68,7 +68,11 @@ class ReceivedPose:
 
 
 class PoseMailboxWriter:
-    def __init__(self, client, lease, *, clock, stamp_for_capture, authorize, bulk=False, before_commit=None):
+    def __init__(self, client, lease, *, clock, stamp_for_capture, authorize, bulk=False, before_commit=None, ttl_ms=TTL_MS):
+        if type(ttl_ms) is not int or not 1<=ttl_ms<=1000:
+            raise ValueError('pose_mailbox_ttl')
+        self.ttl_ns=ttl_ms*1_000_000
+        self.rpc_timeout_s=ttl_ms/1000
         if type(bulk) is not bool:
             raise ValueError('pose_mailbox_bulk_mode')
         self.bulk = bulk
@@ -102,7 +106,7 @@ class PoseMailboxWriter:
         try:
             for channel in (BASE, BASE + BANK_SIZE):
                 try:
-                    value = await asyncio.wait_for(self.client.get_signal(channel), .1)
+                    value = await asyncio.wait_for(self.client.get_signal(channel), self.rpc_timeout_s)
                 except BaseException:
                     self.read_unknown = True
                     raise
@@ -118,14 +122,14 @@ class PoseMailboxWriter:
 
     def offer(self, sample):
         self._check()
-        if self.last_stamp_ns >= 0 and not 0 <= self.clock() - self.last_stamp_ns < TTL_NS:
+        if self.last_stamp_ns >= 0 and not 0 <= self.clock() - self.last_stamp_ns < self.ttl_ns:
             self.closed = True
             raise ValueError('pose_mailbox_input_expired')
         if (not self.opened or type(sample) is not CapturedPose or type(sample.seq) is not int
                 or sample.seq <= self.last_seq or type(sample.captured_ns) is not int
                 or sample.captured_ns // 1_000_000 <= self.last_stamp_ns // 1_000_000):
             raise ValueError('pose_mailbox_input_order')
-        if not 0 <= self.clock() - sample.captured_ns < TTL_NS:
+        if not 0 <= self.clock() - sample.captured_ns < self.ttl_ns:
             self.closed = True
             raise ValueError('pose_mailbox_input_expired')
         payload = pack(sample.pose)  # Snapshot mutable Pose before any await.
@@ -137,7 +141,7 @@ class PoseMailboxWriter:
         self.last_seq, self.last_stamp_ns, self.last_controller_ms = sample.seq, sample.captured_ns, stamp
 
     def _fresh(self, captured_ns):
-        if not 0 <= self.clock() - captured_ns < TTL_NS:
+        if not 0 <= self.clock() - captured_ns < self.ttl_ns:
             self.closed = True
             raise ValueError('pose_mailbox_input_expired')
 
@@ -146,7 +150,7 @@ class PoseMailboxWriter:
         self._fresh(captured_ns)
         try:
             operation = self.client.set_signals(channel, list(value)) if bulk else self.client.set_signal(channel, value)
-            await asyncio.wait_for(operation, .1)
+            await asyncio.wait_for(operation, self.rpc_timeout_s)
         except BaseException:
             self.unknown = self.closed = True
             raise
@@ -167,11 +171,21 @@ class PoseMailboxWriter:
             bank = 1 - self.active
             offset = BASE + bank * BANK_SIZE
             await self._write(offset, 0, captured_ns)
+            # No payload is visible yet. Coalesce to the freshest complete
+            # capture AFTER invalidation, so that RPC wait does not age it.
+            self._check()
+            seq, captured_ns, word, payload = self.latest
             if self.bulk:
                 await self._write(offset + 1, payload, captured_ns, bulk=True)
             else:
                 for i, value in enumerate(payload, 1):
                     await self._write(offset + i, value, captured_ns)
+            # A newly received sample can confirm the exact encoded pose.
+            # Its ORIGINAL capture/sequence may commit the identical payload;
+            # a different payload must wait for its own publication.
+            self._check()
+            if self.latest is not None and self.latest[3] == payload:
+                seq, captured_ns, word, payload = self.latest
             if self.before_commit is not None:
                 try:
                     self.before_commit()
