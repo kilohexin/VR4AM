@@ -59,6 +59,16 @@ local function encode(p)
 end
 
 local ok,err=pcall(function()
+    test('known_ik_rejection_only',function()
+        local known=[=[runtime error: ErrorObject { code: ServerError(-32001), message: "cmd error: Faild(KdlErr(\"kinematics_inverse\", -1))", data: None }]=]
+        assert(path_module.is_unreachable_ik_error(known),'known_solver_rejection_not_recognized')
+        assert(path_module.is_unreachable_ik_error('ServerError(-32001) Faild(KdlErr("kinematics_inverse", -1))'))
+        for _,other in ipairs({'connection timeout','kinematics_inverse failed',
+            string.gsub(known,'%-1%)','-2)'),string.gsub(known,'kinematics_inverse','move_pvat'),
+            string.gsub(known,'%-32001','-32002')}) do
+            assert(not path_module.is_unreachable_ik_error(other),'unknown_error_misclassified')
+        end
+    end)
     test('orientation_target_projection',function()
         local reference={rx=.3,ry=.4,rz=-.2}
         local p={x=.1,y=.2,z=.3,rx=.3,ry=.4,rz=-.2+2.1}
@@ -134,6 +144,10 @@ local ok,err=pcall(function()
     end)
     test('empty',function() local f=fake();assert(f.reader().read_latest()==nil) end)
     test('explicit_virtual_mailbox_budget',function()
+        local longer=fake();longer.publish(0,1000,1);local lr=longer.reader(1000,false,500)
+        lr.read_latest();longer.now=1400;assert(lr.read_latest().sequence_mod==1)
+        longer.now=1499;expect_error(lr.read_latest,'input_expired')
+        longer.now=1500;longer.publish(1,1500,2);expect_error(lr.read_latest,'retired')
         local f=fake();f.publish(0,1000,1);local r=f.reader(1000,false,250)
         r.read_latest();f.now=1150;assert(r.read_latest().sequence_mod==1)
         f.now=1249;expect_error(r.read_latest,'input_expired')

@@ -8,10 +8,13 @@ class VRPoseReference:
     # XR right/up/back -> controller right/forward/up, a proper rotation.
     axes=Rotation.from_matrix(((1.,0.,0.),(0.,0.,-1.),(0.,1.,0.)))
 
-    def __init__(self,*,clock,translation_scale=2.):
+    def __init__(self,*,clock,translation_scale=2.,orientation_mode='world'):
         if type(translation_scale) not in (int,float) or not 0<translation_scale<=5:
             raise ValueError('vr_pose_scale')
         self.clock=clock
+        if orientation_mode not in ('world','tool'):raise ValueError('vr_pose_orientation_mode')
+        self.orientation_mode=orientation_mode
+        self._hand_rotation=self._tool_rotation=None
         self.mapper=CoordinateMapper(translation_scale=translation_scale,rotation_dead_zone_deg=0.)
         self.generation=None;self.seq=-1;self.stamp=-1
 
@@ -27,11 +30,14 @@ class VRPoseReference:
                 or type(tcp_ns) is not int or not 0<=now-hand_ns<100_000_000
                 or not 0<=now-tcp_ns<100_000_000):raise ValueError('vr_pose_capture_expired')
         self.mapper.capture(self._mapped(hand),tcp)
+        self._hand_rotation=Rotation.from_quat(hand.q)
+        self._tool_rotation=Rotation.from_quat(tcp.q)
         self.generation=generation
         self.stamp=hand_ns
 
     def release(self):
         self.mapper.clear();self.generation=None;self.seq=-1;self.stamp=-1
+        self._hand_rotation=self._tool_rotation=None
 
     def target(self,hand,*,generation,seq,captured_ns):
         if not self.mapper.has_anchor:raise ValueError('vr_pose_requires_capture')
@@ -41,4 +47,8 @@ class VRPoseReference:
             self.release();raise ValueError('vr_pose_input_expired')
         if type(seq) is not int or seq<=self.seq or captured_ns<self.stamp:raise ValueError('vr_pose_input_order')
         self.seq=seq;self.stamp=captured_ns
-        return self.mapper.target(self._mapped(hand))
+        goal=self.mapper.target(self._mapped(hand))
+        if self.orientation_mode=='tool':
+            rotation=self._tool_rotation*self._hand_rotation.inv()*Rotation.from_quat(hand.q)
+            goal=goal.model_copy(update={'q':tuple(float(v) for v in rotation.as_quat())})
+        return goal

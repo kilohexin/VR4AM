@@ -26,6 +26,7 @@ CONTRACT_CHECKS = {
     'bounded_pose_path',
     'explicit_virtual_mailbox_budget',
     'orientation_target_projection', 'responsive_reference',
+    'known_ik_rejection_only',
 }
 
 

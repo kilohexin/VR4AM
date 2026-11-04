@@ -86,7 +86,7 @@ export function describeVrSafety(
       }
     }else if(state.phase==='armed'){
       if(poseFollow)core.title='可操纵 · 位姿跟随';
-      core.instruction=poseFollow?'按 Grip 对齐并跟随：平移2倍、朝向1倍目标 · 左X/Y夹爪'
+      core.instruction=poseFollow?'按 Grip 对齐并跟随：平移1倍、工具局部转腕1倍 · 左X/Y夹爪'
       :finite.policy==='finite_position_docker'
       ?'Grip：前后左右上下，手腕抬低/扭转 · 回中心停止 · 左X打开/Y闭合'
       :finite.pitch_enabled?'Grip 控制平移和手腕俯仰 · 左X打开/Y闭合':'Grip 控制平移 · 左X打开/Y闭合';

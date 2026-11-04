@@ -142,6 +142,7 @@ def create_docker_app(web_directory,*,blended_translation=False,blended_rotation
             pose_follow_grip_span_mm=POSE_PROFILE.target_tcp_span_m*1000 if pose_follow_vr else None,
             pose_mailbox_ttl_ms=POSE_PROFILE.mailbox_ttl_ms if pose_follow_vr else None,
             pose_reference_speed_radps=POSE_PROFILE.reference_speed_radps if pose_follow_vr else None,
+            pose_translation_scale=POSE_PROFILE.translation_scale if pose_follow_vr else None,
             pvat_controller_points=getattr(backend,'position_pvat_points',0),
             pvat_reference_rollovers=getattr(backend,'position_pvat_reference_rollovers',0),
             pvat_nominal_speed_mmps=10 if pvat_vr and not pose_follow_vr else None,

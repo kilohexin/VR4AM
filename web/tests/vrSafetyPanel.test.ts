@@ -391,7 +391,7 @@ it('distinguishes Docker pose following from the direction-mode centre instructi
  summary.finitePosition!.phase='ready';
  const ready=describeVrSafety(state('armed'),true,summary);
  expect(ready.title).toContain('位姿跟随');
- expect(ready.instruction).toContain('平移2倍');
+ expect(ready.instruction).toContain('平移1倍');
  expect(ready.instruction).not.toContain('回中心停止');
  expect(describeVrSafety({...state('armed'),fault:'stop_unverified'},true,summary).title).toBe('停止状态未确认');
  summary.finitePosition!.pose_follow_enabled=false;

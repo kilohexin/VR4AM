@@ -103,6 +103,7 @@ local ok,err=pcall(function()
     local plan=worker(function()
         local previous=nil
         local cached_pose,cached_joints=nil,nil;local was_clipped,was_rotated,was_limited=false,false,'none'
+        local rejected_pose,rejected_kind=nil,nil
         while not finish do
             if latest and latest.captured_ms~=previous then
                 local _,f=feedback(false)
@@ -120,13 +121,25 @@ local ok,err=pcall(function()
                 target,rotation_clipped=path_module.limit_rotation(target,pose_rotation_reference,math.pi/2-.02)
                 -- Advance the IK branch through bounded Cartesian sections;
                 -- a quick hand change is not itself an IK branch jump.
-                local section=path_module.step(cached_pose or base,target,.004,.02)
+                local same_rejection=rejected_pose and equivalent_pose(target,rejected_pose,.0005,.002)
+                local planning_base,planning_seed=cached_pose or base,seed
+                if rejected_pose and not same_rejection then
+                    -- A changed live target may retreat from a mathematical
+                    -- boundary. Seed its next candidate from fresh feedback,
+                    -- rather than remaining stuck at an old remote IK cursor.
+                    planning_base=f.actual_tcp_pose;planning_seed=f.actual_joint_pose
+                end
+                local section=path_module.step(planning_base,target,.004,.02)
                 local joints
                 -- Refresh the math cache BEFORE the outer reuse allowance is
                 -- exhausted; otherwise every moving target waits at its edge.
-                if cached_pose and equivalent_pose(cached_pose,section,.00010,.0008) then joints=cached_joints
+                if same_rejection then joints=nil
+                elseif planning_base==cached_pose and cached_pose and equivalent_pose(cached_pose,section,.00010,.0008) then joints=cached_joints
                 else
-                    joints=lebai:kinematics_inverse(section,seed)
+                    local solved,result=pcall(function() return lebai:kinematics_inverse(section,planning_seed) end)
+                    if solved then joints=result
+                    elseif path_module.is_unreachable_ik_error(result) then joints=nil
+                    else error(result) end
                 end
                 if finish then return end
                 local tracked,tracking_reason,tracking_axis=tracker.matches_report(f)
@@ -137,12 +150,12 @@ local ok,err=pcall(function()
                 boundary=product_bounds(nil,f.target_joint_pose)
                 if boundary then finish=true;return end
                 local limited='none'
-                if not joints then limited='ik'
+                if not joints then limited=same_rejection and rejected_kind or 'ik'
                 else
                     assert(#joints==6,'pose_ik_result_shape')
                     for i=1,6 do
                         assert(joints[i]==joints[i] and math.abs(joints[i])<1000000,'pose_ik_nonfinite')
-                        if math.abs(joints[i]-seed[i])>=.15 then limited='ik' end
+                        if math.abs(joints[i]-planning_seed[i])>=.15 then limited='ik' end
                     end
                 end
                 boundary=limited=='none' and product_bounds(section,joints) or nil
@@ -150,12 +163,14 @@ local ok,err=pcall(function()
                 if boundary then finish=true;return end
                 if limited=='none' then
                     cached_pose=section;cached_joints=joints;seed=joints
+                    rejected_pose=nil;rejected_kind=nil
                 else
                     -- A known mathematical rejection admits no new waypoint.
                     -- Keep the last valid projection and try the next genuinely
                     -- fresh hand target, allowing an inward retreat. Native
                     -- exceptions/nonfinite results still fault; no RPC retry.
                     joints=cached_joints or origin
+                    if not same_rejection then rejected_pose=target;rejected_kind=limited end
                 end
                 if clipped~=was_clipped or rotation_clipped~=was_rotated or limited~=was_limited then
                     print('LIVE_SATURATED',clipped,rotation_clipped,limited)

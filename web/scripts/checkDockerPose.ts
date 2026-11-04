@@ -69,7 +69,9 @@ try{
    .filter(r=>r.kind==='finite_position_input'&&r.hand_pose);
   if(records.length<100)throw Error('insufficient_replay');
   hand=[...records[0].hand_pose.p];handQ=[...records[0].hand_pose.q] as typeof handQ;
-  const initialZ=state.actual_tcp.p[2],steps=state.finite_position.entered_steps;
+  const initialTcp=[...state.actual_tcp.p],initialQ=new Quaternion(...state.actual_tcp.q);
+  const initialZ=initialTcp[2],steps=state.finite_position.entered_steps;
+  const requiredPeak=Math.min(.15,Math.max(0,...records.map(r=>r.hand_pose.p[1]-records[0].hand_pose.p[1]))*before.pose_translation_scale*.5);
   const startupMs=await startFollow('replay_start'),since=performance.now();let i=0,peakZ=0;
   const duration=(records.at(-1).server_mono_ns-records[0].server_mono_ns)/1e6;
   while(performance.now()-since<duration){
@@ -80,11 +82,13 @@ try{
    if(state.fault||['hold','fault','ready'].includes(state.finite_position.phase))throw Error('replay_interrupted:'+JSON.stringify(state.finite_position));
    await sleep(20);
   }
-  if(peakZ<.15||state.finite_position.entered_steps-steps<duration/80*.8)throw Error('replay_insufficient_height_or_duration');
+  if(peakZ<requiredPeak||state.finite_position.entered_steps-steps<duration/80*.8)throw Error('replay_insufficient_height_or_duration');
   hand=[...records[0].hand_pose.p];handQ=[...records[0].hand_pose.q] as typeof handQ;
-  await wait(()=>state.finite_position.reason!=='pvat_kinematic_saturated'&&state.actual_tcp.p[2]<initialZ+.05,'replay_inward_retreat',12000);
+  await wait(()=>state.finite_position.reason!=='pvat_kinematic_saturated'
+   &&Math.hypot(...state.actual_tcp.p.map((v:number,i:number)=>v-initialTcp[i]))<.05
+   &&new Quaternion(...state.actual_tcp.q).angleTo(initialQ)<.1,'replay_inward_retreat',12000);
   await stopFollow('replay_toggle_off');
-  console.log('PASS frozen human hand trajectory (synthetic replay)',JSON.stringify({startupMs,duration,peakZ,points:state.finite_position.entered_steps-steps}));
+  console.log('PASS frozen human hand trajectory (synthetic replay)',JSON.stringify({startupMs,duration,peakZ,requiredPeak,points:state.finite_position.entered_steps-steps}));
  }else{
  await sleep(100);await startFollow('pose_started');
  const base=[...state.actual_tcp.p],steps=state.finite_position.entered_steps;
@@ -93,7 +97,7 @@ try{
  while(performance.now()-start<2000){hand=[(humanSpeed?.015:.0015)*Math.min(1,(performance.now()-start)/(humanSpeed?400:1000)),0,0];await sleep(20);}
  await wait(()=>state.finite_position.entered_steps>=steps+25&&state.actual_tcp.p[0]-base[0]>.001,'full_pose_progress');
  const fixed=state.actual_tcp.p[0];await sleep(500);
- if(state.actual_tcp.p[0]-base[0]>(humanSpeed?.035:.005))throw Error('stationary_hand_kept_integrating');
+ if(state.actual_tcp.p[0]-base[0]>(humanSpeed?.020:.003))throw Error('stationary_hand_kept_integrating');
  await stopFollow('toggle_off');
  console.log('PASS actual XR module -> full hand pose -> controller IK/PVAT, fixed hand, toggle off',state.finite_position.entered_steps);
  // Re-grip at a different hand origin must capture a new zero, not replay.
@@ -106,18 +110,20 @@ try{
   if(before.pose_reference_speed_radps!==.2)throw Error('wrong_response_profile');
   const initial=new Quaternion(...state.actual_tcp.q),zero=new Quaternion(...handQ);
   await startFollow('response_start');
-  const target=new Quaternion(0,Math.sin(.15),0,Math.cos(.15));
+  const target=new Quaternion(0,0,Math.sin(.15),Math.cos(.15));
   handQ=zero.clone().multiply(target).toArray() as typeof handQ;
   const since=performance.now();
   await wait(()=>new Quaternion(...state.actual_tcp.q).angleTo(initial)>.27,'response_90_percent',5000);
   const responseMs=performance.now()-since;
+  const local=initial.clone().invert().multiply(new Quaternion(...state.actual_tcp.q));
+  if(local.z<.12||Math.abs(local.x)+Math.abs(local.y)>.03)throw Error('wrist_did_not_rotate_about_tool_z');
   if(responseMs>=3500)throw Error('response_still_too_slow:'+responseMs);
   handQ=zero.toArray() as typeof handQ;
   await wait(()=>new Quaternion(...state.actual_tcp.q).angleTo(initial)<.03,'response_return',6000);
   await stopFollow('response_toggle_off');
-  console.log('PASS measured 0.3rad orientation step to 90%',JSON.stringify({responseMs}));
+  console.log('PASS calibrated local tool-Z wrist, 0.3rad step to 90%',JSON.stringify({responseMs}));
   await startFollow('rotation_limit_start');
-  handQ=zero.clone().multiply(new Quaternion(0,Math.sin(.975),0,Math.cos(.975))).toArray() as typeof handQ;
+  handQ=zero.clone().multiply(new Quaternion(0,0,Math.sin(.975),Math.cos(.975))).toArray() as typeof handQ;
   await wait(()=>state.finite_position.reason==='pvat_rotation_saturated','orientation_saturation');
   const initialSteps=state.finite_position.entered_steps;
   await sleep(2500);
@@ -130,7 +136,7 @@ try{
   console.log('PASS oversized orientation clips within original range, stays following and turns back');
  }
  if(process.argv.includes('--continuation')){
-  if(before.pose_follow_window_s!==300||before.pose_follow_grip_span_mm!==300)throw Error('wrong_pose_profile');
+  if(before.pose_follow_window_s!==300||before.pose_follow_grip_span_mm!==300||before.pose_translation_scale!==1)throw Error('wrong_pose_profile');
   const initial=[...state.actual_tcp.p],handOrigin=[...hand],initialSteps=state.finite_position.entered_steps;
   await startFollow('continuation_start');
   const since=performance.now();let peak=0,maxJointSpan=0;const joints=[...state.actual_q];
@@ -145,17 +151,17 @@ try{
       ||state.finite_position.phase==='ready')throw Error('continuation_interrupted:'+JSON.stringify(state.finite_position));
    await sleep(25);
   }
-  if(peak<.022||state.finite_position.entered_steps-initialSteps<Math.floor(holdMs/80*.8)||lastPoseSeq<1024)throw Error('continuation_insufficient');
+  if(peak<.011||state.finite_position.entered_steps-initialSteps<Math.floor(holdMs/80*.8)||lastPoseSeq<1024)throw Error('continuation_insufficient');
   if(grip)throw Error('button_should_remain_released_during_follow');
   await stopFollow('continuation_toggle_off');
   console.log(`PASS single Grip >${holdMs/1000}s, beyond 20mm, sequence wrap`,JSON.stringify({peak,maxJointSpan,lastPoseSeq}));
   const stationary=[...state.actual_tcp.p];await startFollow('boundary_start');
-  hand=[hand[0]+.18,hand[1],hand[2]]; // +360mm target outside fixed 300mm Grip box.
+  hand=[hand[0]+.36,hand[1],hand[2]]; // +360mm target outside fixed 300mm Grip box.
   await wait(()=>state.finite_position.reason==='pvat_target_saturated','fixed_grip_saturation');
   const limitedSteps=state.finite_position.entered_steps;await sleep(400);
   if(state.finite_position.phase!=='executing'||state.finite_position.entered_steps<=limitedSteps
     ||Math.hypot(...state.actual_tcp.p.map((v:number,i:number)=>v-stationary[i]))>.302)throw Error('saturation_did_not_continue_inside_fixed_box');
-  hand[0]-=.18;
+  hand[0]-=.36;
   await wait(()=>state.finite_position.reason!=='pvat_target_saturated','return_inside_fixed_box');
   await stopFollow('after_saturation_toggle_off');
   await startFollow('after_boundary_regrip');
@@ -170,9 +176,10 @@ try{
    await stopFollow('axis_toggle_off');
    console.log('PASS XR axis mapping',handAxis,robotAxis);
   }
-  for(const axis of [0,1]){
+  for(const axis of [0,1,2]){
    const initial=new Quaternion(...state.actual_tcp.q);await startFollow('rotation_start');
-   handQ=[0,0,0,Math.cos(.005)];handQ[axis]=Math.sin(.005);
+   const turn:[number,number,number,number]=[0,0,0,Math.cos(.005)];turn[axis]=Math.sin(.005);
+   handQ=new Quaternion(...handQ).multiply(new Quaternion(...turn)).toArray() as typeof handQ;
    await wait(()=>new Quaternion(...state.actual_tcp.q).angleTo(initial)>.003,'rotation_progress');
    await stopFollow('rotation_toggle_off');
    console.log('PASS complete quaternion rotation',axis);

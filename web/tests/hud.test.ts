@@ -119,7 +119,7 @@ describe('Chinese simulator HUD', () => {
     hud.setRobotState({mode:'READY',backendState:'IDLE',sampleAgeMs:0,fault:null,
       constraint:null,recoveryPhase:null,poseFollow:true});
     expect(document.querySelector('[data-field="target-control"]')?.textContent).toContain('单按Grip跟随/再按结束');
-    expect(document.querySelector('[data-field="target-control"]')?.textContent).toContain('2:1');
+    expect(document.querySelector('[data-field="target-control"]')?.textContent).toContain('平移1:1');
     hud.setConnectionStatus({state:'disconnected'});
     expect(document.querySelector('[data-field="target-control"]')?.textContent).toBe('未确认');
   });

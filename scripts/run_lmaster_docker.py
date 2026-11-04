@@ -47,6 +47,7 @@ def main(argv=None):
         pose_follow_grip_span_mm=runtime.POSE_PROFILE.target_tcp_span_m*1000 if args.pose_follow_vr else None,
         pose_mailbox_ttl_ms=runtime.POSE_PROFILE.mailbox_ttl_ms if args.pose_follow_vr else None,
         pose_reference_speed_radps=runtime.POSE_PROFILE.reference_speed_radps if args.pose_follow_vr else None,
+        pose_translation_scale=runtime.POSE_PROFILE.translation_scale if args.pose_follow_vr else None,
         startup='STOP/ROBOT_ON -> start_sys -> IDLE; otherwise require IDLE',
         controls='unlock,prepare,translation,pitch/spin,progressive claw',startup_velocity_factor_percent=100,
         blended_translation=args.blended_translation,translation_step_mm=4 if args.blended_translation else 8,

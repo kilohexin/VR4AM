@@ -226,7 +226,7 @@ export class Hud {
 
   setRobotState(state: RobotHudState): void {
     this.targetControlValue.textContent = state.poseFollow
-      ? 'VR 单按Grip跟随/再按结束 · 平移2:1 / 朝向1:1目标'
+      ? 'VR 单按Grip跟随/再按结束 · 平移1:1 / 工具局部朝向1:1'
       : state.targetControl
       ? `分段候选 · 未真机验收 · ${readableTargetControl(state.targetControl)}`
       : '默认控制';

@@ -76,7 +76,7 @@ class DockerPoseSession(DockerPvatSession):
             snapshot = self.adapter._snapshot
             if snapshot is None or snapshot.robot_state.value != 'IDLE':
                 raise ValueError('pose_capture_requires_idle')
-            reference = VRPoseReference(clock=self.clock)
+            reference = VRPoseReference(clock=self.clock,translation_scale=POSE_PROFILE.translation_scale,orientation_mode='tool')
             reference.capture(intent.hand_pose, snapshot.actual_tcp, generation=self.binding.generation,
                 hand_ns=intent.received_ns, tcp_ns=snapshot.captured_ns)
             self._reference, self._anchor_tcp = reference, snapshot.actual_tcp
@@ -116,7 +116,8 @@ class DockerPoseSession(DockerPvatSession):
 
             self.pump = VRPoseInput(client, ExecutorLease(), self.binding, clock=self.clock,
                 stamp_for_capture=stamp, authorize=self._input_authority, authorize_publish=self.check,
-                authorize_cleanup=lambda: a._position_health(self.binding),mailbox_ttl_ms=POSE_PROFILE.mailbox_ttl_ms)
+                authorize_cleanup=lambda: a._position_health(self.binding),mailbox_ttl_ms=POSE_PROFILE.mailbox_ttl_ms,
+                translation_scale=POSE_PROFILE.translation_scale)
             try:
                 await self.pump.open()
             except Exception:

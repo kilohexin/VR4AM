@@ -47,3 +47,19 @@ def test_release_and_new_capture_do_not_replay_the_old_endpoint():
     new_hand=hand.model_copy(update={'p':(.8,.8,.8)})
     m.capture(new_hand,tcp,generation=2,hand_ns=now[0],tcp_ns=now[0])
     assert m.target(new_hand,generation=2,seq=1,captured_ns=now[0]).p==pytest.approx(tcp.p)
+
+
+@pytest.mark.parametrize('axis',['x','y','z'])
+def test_calibrated_tool_mode_maps_local_hand_rotation_to_same_tool_axis(axis):
+    now=[1_000_000_000]
+    m=VRPoseReference(clock=lambda:now[0],translation_scale=1.,orientation_mode='tool')
+    h0=Rotation.from_euler('xyz',(.7,-.4,.9));t0=Rotation.from_euler('xyz',(-.3,.8,-.6))
+    hand=Pose(p=(.1,.2,.3),q=tuple(h0.as_quat()));tcp=Pose(p=(.3,0.,.4),q=tuple(t0.as_quat()))
+    m.capture(hand,tcp,generation=1,hand_ns=now[0],tcp_ns=now[0])
+    turn=Rotation.from_euler(axis,.4)
+    moved=hand.model_copy(update={'p':(.11,.22,.27),'q':tuple((h0*turn).as_quat())})
+    goal=m.target(moved,generation=1,seq=1,captured_ns=now[0])
+    assert ((t0.inv()*Rotation.from_quat(goal.q)).inv()*turn).magnitude()<1e-10
+    assert goal.p==pytest.approx((.31,.03,.42))
+    from app.control.vr_pose_mailbox import pack
+    assert len(pack(goal))==7  # Production transport accepts only plain finite numeric fields.

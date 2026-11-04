@@ -54,7 +54,7 @@ def test_extended_profile_keeps_fixed_grip_and_absolute_joint_limits():
     _,a,_=rig();source=build_pose_program(a)
     assert POSE_PROFILE.duration_ms==300000 and POSE_PROFILE.maximum_points==3750
     assert POSE_PROFILE.target_tcp_span_m==.3 and POSE_PROFILE.feedback_tcp_span_m==.35
-    assert POSE_PROFILE.mailbox_ttl_ms==250 and 'mailbox_ttl_ms=250' in source
+    assert POSE_PROFILE.mailbox_ttl_ms==500 and 'mailbox_ttl_ms=500' in source
     assert POSE_PROFILE.reference_speed_radps==.2 and POSE_PROFILE.reference_acceleration_radps2==.2
     assert 'not target_only and angle' in source and 'local pose_rotation_reference=' in source
     assert 'path_module.limit_rotation(target,pose_rotation_reference,math.pi/2-.02)' in source
@@ -112,7 +112,7 @@ async def test_delayed_start_keeps_grip_anchor_and_known_release_cleans_up(monke
     monkeypatch.setattr(docker_runtime,'verify_local_docker',lambda:a._docker_admission)
     monkeypatch.setattr(module.asyncio,'create_subprocess_exec',AsyncMock(return_value=proc))
     await s._run()
-    assert captured==[302000]  # +2mm from the ORIGINAL Grip zero, not startup hand.
+    assert captured==[301000]  # +1mm from the ORIGINAL Grip zero, not startup hand.
     assert stamps==[1000+record_delay//1_000_000]  # Logging does not backdate future input.
     assert s.phase==('hold' if expired else 'ready') and not a.position_busy and a._latched_fault is None
     if expired:assert s.reason=='position_input_expired'
@@ -149,7 +149,7 @@ async def test_regrip_while_previous_worker_records_its_completed_tail(completed
     if completed and not busy:
         assert s._reference is not old and s._reference.generation==2
         goal=s._reference.target(Pose(p=(.101,0,0),q=(0,0,0,1)),generation=2,seq=4,captured_ns=now[0])
-        assert goal.p[0]==pytest.approx(.302)
+        assert goal.p[0]==pytest.approx(.301)
     else:assert s._reference is old and old.generation is None
     s.worker.cancel()
 

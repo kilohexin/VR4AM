@@ -1,5 +1,11 @@
 -- Pure Cartesian planning helpers; no actuator or clock access.
 local M={}
+function M.is_unreachable_ik_error(err)
+    local s=tostring(err)
+    if not string.find(s,'ServerError(-32001)',1,true) then return false end
+    return string.find(s,'Faild(KdlErr("kinematics_inverse", -1))',1,true)~=nil
+        or string.find(s,'Faild(KdlErr(\\"kinematics_inverse\\", -1))',1,true)~=nil
+end
 local function quaternion(p)
     local sx,cx=math.sin(p.rx/2),math.cos(p.rx/2)
     local sy,cy=math.sin(p.ry/2),math.cos(p.ry/2)
