@@ -15,6 +15,24 @@ def test_missing_acceleration_is_explicitly_rejected(monkeypatch):
         CompiledReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
 
 
+def test_strict_rotation_conversion_matches_oracle_near_all_branches(models):
+    _,compiled=models
+    rng=np.random.default_rng(5511)
+    rotations=[Rotation.from_rotvec(np.zeros(3))]
+    rotations += [Rotation.from_rotvec(np.eye(3)[i]*angle) for i in range(3) for angle in (1e-12,np.pi-1e-12,np.pi)]
+    rotations += list(Rotation.random(100,random_state=rng))
+    for original in rotations:
+        actual=compiled.rotation(original.as_matrix())
+        assert (actual.inv()*original).magnitude()<2e-14
+
+
+@pytest.mark.parametrize('matrix',[np.eye(2),np.diag([1.,1.,-1.]),np.diag([1.,1.,1.001]),
+    np.full((3,3),float('nan')),np.zeros((3,3))])
+def test_strict_rotation_rejects_invalid_geometry_instead_of_repairing_it(models,matrix):
+    _,compiled=models
+    with pytest.raises(ValueError,match='rotation'):compiled.rotation(matrix)
+
+
 @pytest.fixture(scope='module',params=[
     MdhTool((0.,0.,0.),(0.,0.,0.,1.)),
     MdhTool((.03,-.02,.07),tuple(float(x) for x in Rotation.from_euler('xyz',(.2,-.4,.3)).as_quat())),

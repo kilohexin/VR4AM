@@ -70,6 +70,29 @@ def _geometry(q,qd,tool_p,tool_r,rate):
     return transform,j,jd
 
 
+def _rotation_quaternion(r):
+    for i in range(3):
+        for j in range(3):
+            if not math.isfinite(r[i,j]):raise ValueError('cartesian_reference_rotation')
+            dot=0.
+            for k in range(3):dot+=r[k,i]*r[k,j]
+            if abs(dot-(1. if i==j else 0.))>2e-12:raise ValueError('cartesian_reference_rotation')
+    determinant=(r[0,0]*(r[1,1]*r[2,2]-r[1,2]*r[2,1])
+        -r[0,1]*(r[1,0]*r[2,2]-r[1,2]*r[2,0])+r[0,2]*(r[1,0]*r[2,1]-r[1,1]*r[2,0]))
+    if abs(determinant-1.)>2e-12:raise ValueError('cartesian_reference_rotation')
+    q=np.empty(4);trace=r[0,0]+r[1,1]+r[2,2]
+    if trace>0:
+        s=2*math.sqrt(1+trace);q[3]=s/4
+        q[0]=(r[2,1]-r[1,2])/s;q[1]=(r[0,2]-r[2,0])/s;q[2]=(r[1,0]-r[0,1])/s
+    else:
+        i=0
+        if r[1,1]>r[i,i]:i=1
+        if r[2,2]>r[i,i]:i=2
+        j=(i+1)%3;k=(i+2)%3;s=2*math.sqrt(1+r[i,i]-r[j,j]-r[k,k])
+        q[i]=s/4;q[j]=(r[j,i]+r[i,j])/s;q[k]=(r[k,i]+r[i,k])/s;q[3]=(r[k,j]-r[j,k])/s
+    return q
+
+
 class CompiledReferenceModel(MdhReferenceModel):
     """Explicit offline selection; missing acceleration never falls back silently."""
     def __init__(self,tool,lower,upper):
@@ -82,6 +105,7 @@ class CompiledReferenceModel(MdhReferenceModel):
         self._tool_r=Rotation.from_quat(tool.rotation_xyzw).as_matrix()
         self._tool_p.setflags(write=False);self._tool_r.setflags(write=False)
         self._kernel=njit(cache=True,fastmath=False,parallel=False)(_geometry)
+        self._rotation_kernel=njit(cache=True,fastmath=False,parallel=False)(_rotation_quaternion)
         before=time.perf_counter()
         # Compile the actual float64 signatures and compare fresh independent
         # geometry before this model can be passed to a reference supervisor.
@@ -90,7 +114,14 @@ class CompiledReferenceModel(MdhReferenceModel):
                 expected=super().geometry(q,qd);actual=self.geometry(q,qd)
                 if any(not np.allclose(x,y,rtol=2e-12,atol=2e-12) for x,y in zip(expected,actual)):
                     raise ValueError('cartesian_reference_acceleration_mismatch')
+                if (self.rotation(actual[0][:3,:3]).inv()*Rotation.from_matrix(expected[0][:3,:3])).magnitude()>2e-12:
+                    raise ValueError('cartesian_reference_acceleration_mismatch')
         self.warmup_wall_s=time.perf_counter()-before
+
+    def rotation(self,matrix):
+        r=np.asarray(matrix,dtype=float)
+        if r.shape!=(3,3):raise ValueError('cartesian_reference_rotation')
+        return Rotation.from_quat(self._rotation_kernel(r))
 
     def geometry(self,q,qd=None):
         if self.tool!=self._compiled_tool:raise ValueError('cartesian_reference_acceleration_model_changed')

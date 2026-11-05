@@ -126,12 +126,15 @@ class MdhReferenceModel:
 
     def pose(self,q):
         t,_=self.geometry(q)
-        return Pose(p=tuple(float(x) for x in t[:3,3]),q=tuple(float(x) for x in Rotation.from_matrix(t[:3,:3]).as_quat()))
+        return Pose(p=tuple(float(x) for x in t[:3,3]),q=tuple(float(x) for x in self.rotation(t[:3,:3]).as_quat()))
+
+    def rotation(self,matrix):
+        return Rotation.from_matrix(matrix)
 
     def inverse_linearization(self,pose,q):
         goal=Rotation.from_quat(pose.q)
         t,j=self.geometry(q)
-        r=(goal.inv()*Rotation.from_matrix(t[:3,:3])).as_rotvec();theta=np.linalg.norm(r)
+        r=(goal.inv()*self.rotation(t[:3,:3])).as_rotvec();theta=np.linalg.norm(r)
         skew=np.array([[0.,-r[2],r[1]],[r[2],0.,-r[0]],[-r[1],r[0],0.]])
         factor=(1/12+theta**2/720+theta**4/30240 if theta<1e-3
             else 1/theta**2-1/(2*theta*np.tan(theta/2)))
@@ -344,7 +347,7 @@ def validate_segment(segment,model,curve,offset,*,position_tolerance=.001,angle_
         actual_matrix,j,jd=model.geometry(q,velocity)
         expected,reference_twist,_=curve.state(offset+mid*segment.duration)
         error=np.linalg.norm(actual_matrix[:3,3]-expected.p)
-        angle=(Rotation.from_matrix(actual_matrix[:3,:3])*Rotation.from_quat(expected.q).inv()).magnitude()
+        angle=(model.rotation(actual_matrix[:3,:3])*Rotation.from_quat(expected.q).inv()).magnitude()
         if error>position_tolerance or angle>angle_tolerance:raise ValueError('cartesian_reference_corridor')
         qlo,qhi=_range(c,a,b);dq=np.maximum(np.abs(qlo-q),np.abs(qhi-q))
         vlo,vhi=_range(derivatives[0],a,b);alo,ahi=_range(derivatives[1],a,b)
