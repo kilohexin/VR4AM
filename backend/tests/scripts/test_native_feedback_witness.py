@@ -1,0 +1,26 @@
+import numpy as np
+import pytest
+
+from scripts.analyze_cartesian_native_feedback import witness,analyze
+from app.control.cartesian_pvat_reference import JointReference,PvatSegment,_evaluate
+
+
+def test_explicit_witness_is_on_the_assumed_curve_not_an_interpolated_sample_table():
+    a=JointReference((0.,)*6)
+    b=JointReference((.01,.02,-.03,.04,-.02,.005),(.01,-.02,.01,.03,.02,.001),(.1,.02,-.01,.03,.01,-.01))
+    coefficients=PvatSegment(a,b,.08).coefficients();target=_evaluate(coefficients,.371923)
+    u,q=witness(coefficients,target)
+    assert 0<=u<=1
+    np.testing.assert_allclose(q,_evaluate(coefficients,u),atol=0,rtol=0)
+    assert np.linalg.norm(q-target)<1e-10
+
+
+def test_witness_cannot_remove_a_perpendicular_actual_deviation():
+    a=JointReference((0.,)*6);b=JointReference((.01,0.,0.,0.,0.,0.))
+    c=PvatSegment(a,b,.08).coefficients();target=_evaluate(c,.4);target[2]+=.001
+    _,q=witness(c,target)
+    assert np.linalg.norm(q-target)>=.001
+
+
+def test_zero_tool_docker_witness_analysis_rejects_physical_or_unbound_sources():
+    with pytest.raises(ValueError,match='isolated_docker'):analyze({'raw_output':[]})

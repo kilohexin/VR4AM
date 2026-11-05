@@ -25,7 +25,9 @@ CHECKS={'precise_tail_reconstruction','full_backup_before_output','at_most_two',
     'bad_start_no_commit','caller_mutation_isolated','input_rollback_fault','unknown_validation_fault',
     'concurrent_stage_fault','holding_without_recenter','sdk_void_contract','native_joint_format',
     'bounded_preload_schedule','joints_unchanged','quiet_prefix_no_write','quiet_prefix_release',
-    'moving_prefix_refused','reference_age_rechecked','binary_tail_identity'}
+    'moving_prefix_refused','reference_age_rechecked','binary_tail_identity',
+    'curve_witness_exact_point','curve_witness_keeps_deviation','curve_witness_constant',
+    'curve_witness_eight_curves','lua_mdh_matches_sdk'}
 
 
 def fixtures():
@@ -56,6 +58,8 @@ def program():
     return source.replace('__MAILBOX__',(ROOT/'scripts/cartesian_bundle_mailbox.lua').read_text(encoding='utf-8'))\
         .replace('__OWNER__',(ROOT/'scripts/cartesian_bundle_owner.lua').read_text(encoding='utf-8'))\
         .replace('__SDK_RESULT__',(ROOT/'scripts/pvat_sdk_result.lua').read_text(encoding='utf-8'))\
+        .replace('__CURVE_WITNESS__',(ROOT/'scripts/cartesian_curve_witness.lua').read_text(encoding='utf-8'))\
+        .replace('__LUA_MDH__',(ROOT/'scripts/cartesian_lm3_geometry.lua').read_text(encoding='utf-8'))\
         .replace('__PACKETS__',words).replace('__TAIL__',tail).replace('__ALL_TAILS__',tails)
 
 

@@ -11,13 +11,16 @@ def test_motion_source_has_finite_sdk_only_actuation_and_single_exception_stop()
     assert source.count('lebai:move_pvat(')==1 and source.count('lebai:stop_move()')==1
     assert not re.findall(r'(?<![:.\w])\b(?:move_pvat|movej|movel|start_sys|stop_sys|set_claw)\s*\(',source)
     assert 'actual_entries<128' in source and 'live_actual_fixed_region' in source
-    assert 'live_actual_target_not_owned' in source and 'live_actual_terminal' in source
+    assert 'live_actual_cartesian_witness' in source and 'live_actual_terminal' in source
     assert 'dry_joint_changed' not in source and 'LIVE_EXTRA_' not in source
     assert 'sdk_result.call_void' in source and 'wait_all(main_task,journal_worker)' in source
     assert 'local main_task=async_task(function()' in source
     assert 'wait_all(receiver,sender,clock_service,actual_monitor)' in source
     assert "pcall(set_signal,254,1)" in source
     assert 'CART_ACTUAL_REJECT_RANGE' in source and 'CART_ACTUAL_KIN' in source
+    assert 'target_distance<=.001' in source and 'actual_distance<=.002' in source
+    assert 'curve_witness.closest' in source and 'actual_model.pose(found.state.q)' in source
+    assert 'actual_admit_model()' in source and 'live_actual_model_mismatch' in source
 
 
 def evidence(entries=1,returns=1,abort=False):

@@ -23,6 +23,8 @@ import hashlib
 import struct
 import secrets
 
+ACTUAL_TARGET_READOUT_EPSILON=.0001  # Docker diagnostic only; no physical selector.
+
 
 def program(origin,session,model_hash):
     source=live.program(origin,session,model_hash)
@@ -40,6 +42,7 @@ end)'''
     precheck='''tool_check();assert(lebai:get_velocity_factor()==100,'live_actual_velocity_factor')
     assert(lebai:get_robot_state()=='IDLE','live_actual_requires_idle')
     actual_base_rotation=actual_rotation(initial.actual_tcp_pose)
+    actual_admit_model()
     actual_envelope({start=origin,next=origin},0)'''
     emit='''if segment then
                     assert(actual_entries<128,'live_actual_point_budget')
@@ -63,6 +66,9 @@ end)'''
         'local ok,err=pcall(function()':'local main_task=async_task(function()\nlocal ok,err=pcall(function()',
         "local function report(tag,...)\n    print(tag,...)\nend":logger,
         '-- LIVE_EXTRA_INITIAL':initial,
+        '__CURVE_WITNESS__':(ROOT/'scripts/cartesian_curve_witness.lua').read_text(encoding='utf-8'),
+        '__LUA_MDH__':(ROOT/'scripts/cartesian_lm3_geometry.lua').read_text(encoding='utf-8'),
+        '__TARGET_READOUT_EPSILON__':repr(ACTUAL_TARGET_READOUT_EPSILON),
         '-- LIVE_EXTRA_PRECHECK':precheck,
         '-- LIVE_EXTRA_EMIT':emit,
         '-- LIVE_EXTRA_WORKERS':workers,
@@ -163,7 +169,10 @@ def main():
     args=p.parse_args();admission=native_admission(args.container)
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admission,pvat_max=0 if args.preflight else 128,exception_stop_max=1,
-            preparation=0,gripper=0,hardware_verified=False)));return 0
+            preparation=0,gripper=0,readout_guard='cartesian_curve_witness',target_position_tolerance_m=.001,
+            actual_position_tolerance_m=.002,angle_tolerance_rad=.01,
+            joint_box_pruning_padding_rad=ACTUAL_TARGET_READOUT_EPSILON,
+            hardware_verified=False)));return 0
     def frozen_program(origin,session,model_hash):
         source=program(origin,session,model_hash)
         args.output.parent.mkdir(parents=True,exist_ok=True)
@@ -171,7 +180,9 @@ def main():
         return source
     report=(asyncio.run(preflight(admission,source_path=args.output.with_suffix('.lua'))) if args.preflight else
         analyze(asyncio.run(live.execute(admission,expire=args.expire,_source_factory=frozen_program))))
-    report['admission']=admission;args.output.parent.mkdir(parents=True,exist_ok=True)
+    report['admission']=admission;report['readout_guard']='cartesian_curve_witness'
+    report['joint_box_pruning_padding_rad']=ACTUAL_TARGET_READOUT_EPSILON
+    args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,indent=2),encoding='utf-8')
     summary={k:v for k,v in report.items() if k not in ('raw_output','heads','admission','statistics')}
     summary['statistics']={k:v for k,v in report.get('statistics',{}).items() if k not in ('math_ms','publications')}

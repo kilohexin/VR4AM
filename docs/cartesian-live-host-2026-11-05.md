@@ -73,3 +73,20 @@ Lua日志往返曾达到约50～100ms，不能承担80ms反馈调度。静态本
 | `live-motion-scheduled-preflight.json` | `9af4b190063b23c6d6327e55231a8984fc8a272724083fc826d95d804c3c0ffe` |
 | `live-actual-release.json`（启动回执缺失） | `1d6937db47c40a117dcdf7036c421afa813240b0b580280bbce0a0e30e4a5bc5` |
 | `live-actual-accepted-epoch.json`（17点失败） | `38da8d4b30df19685b4196d88c2a88f0aeca2a31fd2f467b13ea4627368e7224` |
+
+## 后续：有界笛卡尔反馈见证及实时有限运动
+
+完整失败反馈表明，规划关节越出单个关节包络可低至数微弧度；增加关节读数余量后仍有失败。因此不继续扩大关节盒作为通过条件。新增只读冻结分析，在最近八条已发送曲线上寻找一个明确的参考点，分别核对该点与规划/实际末端的位置和朝向；它不是原厂内部插值或未采样运动的证明。
+
+执行诊断采用最多三条候选曲线、三个种子、三次迭代的固定搜索。关节盒的0.0001rad仅用于搜索排序/剪枝；接纳要求规划位置距离≤1mm、实际位置距离≤2mm、两者朝向距离≤0.01rad。没有找到满足条件的明确点即失败。反馈中的末端位置来自SDK；参考点的FK使用独立Lua MDH，并在任何目标前与原厂三组FK核对，限定零工具偏移的官方Docker。
+
+每次反馈调用原厂FK曾造成100ms反馈间隔失败；八曲线完整数值搜索还曾触发原厂解释器循环保护。两次失败保留。现使用启动核对后的本地FK和固定工作量搜索，28项控制器零运动契约通过，同一实际程序零目标预检通过。随后两轮实时有限运动分别完成67/78次SDK PVAT及全部返回，显式释放和输入断流均消费已持有尾段并自然达到ready；异常stop_move均为0、unknown为空、stop_unverified=false。输入断流一轮接纳46条新参考、消费32条减速；释放一轮接纳15条、消费52条，仍有显著调度退让，不能称丝滑或产品通过。
+
+释放一轮197组反馈中，规划位置与明确曲线见证点的最大距离约0.061mm、实际约0.226mm；最大整体起点位移6.84mm。断流一轮197组、最大起点位移6.69mm。它们是短时混合目标诊断，不覆盖固定TCP俯仰反转、真人VR或物理制动。早先所有失败、unknown、stop_unverified不被重判。18项相关主机回归通过；产品网页/VR和真机仍封锁。
+
+| 本机报告 | SHA256 |
+| --- | --- |
+| `native-lua-budgeted-witness.json` | `13803a9a3b8df32c6bf6919dc7893357d65dc60201bff29b984c025fdfdb095b` |
+| `live-local-witness-preflight.json` | `c43e9803c32ccba5beabd092de49ec2fe2438b8cce4bab43974cc8bc3bb3f74e` |
+| `live-local-cartesian-release.json` | `2b2ed8e46a967efaaa41c8f0d4e653fb3edcec5956fea5e4245f0ec7451134fd` |
+| `live-local-cartesian-expiry.json` | `c4a3c18e7684ac8683d608098f8dd788d8330e5ec92ccade27fa246dada16096` |

@@ -9,6 +9,12 @@ end)()
 local sdk_result=(function()
 __SDK_RESULT__
 end)()
+local curve_witness=(function()
+__CURVE_WITNESS__
+end)()
+local local_model=(function()
+__LUA_MDH__
+end)()
 local words=__PACKETS__
 local expected_tail=__TAIL__
 local expected_tails=__ALL_TAILS__
@@ -48,6 +54,49 @@ end
 local ok,err=pcall(function()
     local before=lebai:get_kin_data()
     for i=1,6 do assert(math.abs(before.actual_joint_speed[i])<1e-9,'not_quiet') end
+    do
+        local curve={identity=7,coefficients={}}
+        for i=1,6 do curve[i]={-2,2};curve.coefficients[i]={0,i==1 and 1 or 0,0,0,0,0} end
+        local function line(_,t,d)
+            return {q={t/d,0,0,0,0,0},v={1/d,0,0,0,0,0},a={0,0,0,0,0,0}}
+        end
+        local found=curve_witness.closest({curve},{.371923,0,0,0,0,0},line)
+        assert(found.identity==7 and math.abs(found.u-.371923)<1e-12 and found.cost<1e-20)
+        checked('curve_witness_exact_point')
+        found=curve_witness.closest({curve},{.371923,.001,0,0,0,0},line)
+        assert(found.cost>=1e-6-1e-15 and math.abs(found.state.q[2])<1e-15)
+        checked('curve_witness_keeps_deviation')
+        local function constant() return {q={0,0,0,0,0,0},v={0,0,0,0,0,0},a={0,0,0,0,0,0}} end
+        for i=1,6 do curve.coefficients[i]={0,0,0,0,0,0} end
+        found=curve_witness.closest({curve},{0,0,0,0,0,0},constant)
+        assert(found.cost==0);checked('curve_witness_constant')
+    end
+    do
+        local p=packet(1);local pool={}
+        for index=1,8 do
+            local curve={identity=index,coefficients=owner_module.coefficients(p.start,p.next,.08)}
+            for i=1,6 do curve[i]={-3,3} end;pool[index]=curve
+        end
+        local target=owner_module.evaluate(pool[1].coefficients,.371923*.08,.08).q
+        local before=timestamp()
+        local found=curve_witness.closest(pool,target,owner_module.evaluate)
+        print('CURVE_WITNESS_WORK_MS',timestamp()-before)
+        assert(found.cost<1e-12 and found.evaluated_curves<=3);checked('curve_witness_eight_curves')
+    end
+    do
+        local function rotation(p)
+            local sx,cx=math.sin(p.rx),math.cos(p.rx);local sy,cy=math.sin(p.ry),math.cos(p.ry)
+            local sz,cz=math.sin(p.rz),math.cos(p.rz)
+            return {cz*cy,cz*sy*sx-sz*cx,cz*sy*cx+sz*sx,sz*cy,sz*sy*sx+cz*cx,sz*sy*cx-cz*sx,-sy,cy*sx,cy*cx}
+        end
+        for _,q in ipairs({packet(1).start.q,{.2,-.8,1.4,-.6,1.2,.3},{-.3,-.4,.9,.2,-1,.4}}) do
+            local computed=local_model.pose(q);local vendor=lebai:kinematics_forward(q);local r=rotation(vendor)
+            for i=1,9 do assert(math.abs(computed.r[i]-r[i])<1e-9,'lua_mdh_rotation') end
+            assert(math.abs(computed.p[1]-vendor.x)<1e-9 and math.abs(computed.p[2]-vendor.y)<1e-9
+                and math.abs(computed.p[3]-vendor.z)<1e-9,'lua_mdh_position')
+        end
+        checked('lua_mdh_matches_sdk')
+    end
     do
         for index=1,#words do
             local p=packet(index);local duration=p.braking_ticks*.08
