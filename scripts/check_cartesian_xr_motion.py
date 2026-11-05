@@ -31,11 +31,11 @@ from scripts.cartesian_signal_channel import CartesianSignalChannel
 from scripts.check_native_cartesian_reference import native_admission
 
 
-async def execute(admission,output,*,expire=False,tool=ZERO_TOOL):
+async def execute(admission,output,*,expire=False,tool=ZERO_TOOL,single_demand=False):
     checked_tool(tool)
     # Warm pure math before the clutch capture, never by resetting its age.
     await asyncio.to_thread(CompiledReferenceModel,tool,(-3.,)*6,(3.,)*6)
-    binding=PositionBinding(object(),7,live.model_fingerprint(tool),tool_digest(tool))
+    binding=PositionBinding(object(),7,live.model_fingerprint(tool,single_demand=single_demand),tool_digest(tool))
     hand=Pose(p=(.1,.2,.3),q=(0.,0.,0.,1.))
     channel=CartesianSignalChannel(admission)
     try:
@@ -81,7 +81,7 @@ async def execute(admission,output,*,expire=False,tool=ZERO_TOOL):
         # close the read channel and later pretend its old capture is new.
         await channel.close()
         result=motion.analyze(await live.execute(admission,expire=expire,_source_factory=frozen_program,
-            _input_source=inputs,_ready=ready,tool=tool))
+            _input_source=inputs,_ready=ready,tool=tool,single_demand=single_demand))
         output.with_suffix('.host.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
         motion.analyze_pitch(result,tool)
         result.update(input_frames=count,max_input_gap_ms=max_gap/1e6,input_exit=inputs.reason,
@@ -102,15 +102,17 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--container',required=True)
     p.add_argument('--output',required=True,type=Path);p.add_argument('--run',action='store_true')
     p.add_argument('--expire',action='store_true')
+    p.add_argument('--single-demand',action='store_true',help='Experimental one-demand planning; not admitted for product use')
     p.add_argument('--tool-report',type=Path);p.add_argument('--tool-report-sha256')
     args=p.parse_args();tool=tool_arguments(p,args);admitted=native_admission(args.container)
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admitted,pvat_max=128,exception_stop_max=1,
             input='PositionIntent',generation=7,tool_sha256=tool_digest(tool),
+            single_demand=args.single_demand,
             tool_report_sha256=args.tool_report_sha256,real_headset_verified=False,hardware_verified=False)));return 0
     if args.output.exists() or args.output.with_suffix('.lua').exists():
         p.error('evidence output already exists; preserve the previous attempt')
-    try:report=live.run_local(execute(admitted,args.output,expire=args.expire,tool=tool))
+    try:report=live.run_local(execute(admitted,args.output,expire=args.expire,tool=tool,single_demand=args.single_demand))
     except Exception as error:
         built=args.output.with_suffix('.lua').exists()
         report=dict(passed=False,error_type=type(error).__name__,error_code=local_error(error),program_created=built,

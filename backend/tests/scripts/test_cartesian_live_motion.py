@@ -27,7 +27,7 @@ def test_motion_source_has_finite_sdk_only_actuation_and_single_exception_stop()
     assert 'dry_joint_changed' not in source and 'LIVE_EXTRA_' not in source
     assert 'sdk_result.call_void' in source and 'wait_all(main_task,journal_worker)' in source
     assert 'local main_task=async_task(function()' in source
-    assert 'wait_all(receiver,sender,clock_service,actual_monitor)' in source
+    assert 'wait_all(receiver,sender,clock_service,status_worker,actual_monitor)' in source
     assert "pcall(set_signal,254,1)" in source
     assert 'CART_ACTUAL_REJECT_RANGE' in source and 'CART_ACTUAL_KIN' in source
     assert 'target_distance<=.001' in source and 'actual_distance<=.002' in source

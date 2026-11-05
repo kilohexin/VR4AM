@@ -47,6 +47,8 @@ local ok,err=pcall(function()
     local reader=mailbox.new(get_signals,get_signal,clock,binding,500,lease.fresh,true)
     local started=false;local finish=false;local failure=nil;local emitted=0;local profiles={}
     local ack_sequence=0;local ack_status=0;local status_sequence=0;local status_busy=false;local status_dirty=false
+    local status_requested=false
+    local function request_status() status_requested=true end
     local phase_code={waiting=0,armed=1,active=2,holding=3,finishing=4,ready=5,fault=6}
     local function publish_status()
         if status_busy then status_dirty=true;return end
@@ -90,7 +92,7 @@ local ok,err=pcall(function()
                         local decoded=clock()
                         local accepted,why=owner.stage(packet)
                         local staged=clock()
-                        ack_sequence=packet.sequence;ack_status=accepted and 1 or 2;publish_status()
+                        ack_sequence=packet.sequence;ack_status=accepted and 1 or 2;request_status()
                         assert(#profiles<128,'dry_profile_budget')
                         profiles[#profiles+1]={packet.sequence,decoded-began,staged-decoded,clock()-staged}
                         report('CART_ACK',packet.sequence,accepted,tostring(why),clock())
@@ -111,13 +113,19 @@ local ok,err=pcall(function()
                 if segment then emitted=emitted+1;report('CART_SEGMENT',owner.head_tick,mode) end
                 if owner.head_tick~=previous_tick then
                     previous_tick=owner.head_tick
-                    publish_status()
+                    request_status()
                     report('CART_HEAD',clock(),owner.head_tick,owner.phase,state_words(owner.head))
                 end
             end
             if emitted==emitted_before then rt_sleep(1) end
         end
         finish=true
+    end)
+    local status_worker=worker(function()
+        while not finish or status_requested do
+            if status_requested then status_requested=false;publish_status() end
+            rt_sleep(1)
+        end
     end)
     local clock_service=worker(function()
         local nonce=0
@@ -130,7 +138,7 @@ local ok,err=pcall(function()
         end
     end)
     -- LIVE_EXTRA_WORKERS
-    wait_all(receiver,sender,clock_service)
+    wait_all(receiver,sender,clock_service,status_worker)
     for _,row in ipairs(profiles) do report('CART_PROFILE',table.unpack(row)) end
     assert(not failure,tostring(failure))
     -- LIVE_EXTRA_QUIET

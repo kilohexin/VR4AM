@@ -30,6 +30,9 @@ from cartesian_signal_publisher import CartesianSignalPublisher
 from check_native_cartesian_reference import native_admission
 from check_native_cartesian_motion import transport,vec
 
+PLANNING_SCALES=(1.,.5,.25,0.)
+SINGLE_DEMAND_SCALES=(1.,)  # Explicit diagnostic only; actual trial still failed.
+
 
 def program(origin,session,model_hash,*,generation=1,tool=ZERO_TOOL):
     checked_tool(tool)
@@ -43,7 +46,8 @@ def program(origin,session,model_hash,*,generation=1,tool=ZERO_TOOL):
     return source.replace('__ORIGIN__','{q='+vec(origin.q)+',v='+vec(origin.v)+',a='+vec(origin.a)+'}').replace('__BINDING__',binding)
 
 
-def model_fingerprint(tool=ZERO_TOOL):
+def model_fingerprint(tool=ZERO_TOOL,*,single_demand=False):
+    if type(single_demand) is not bool:raise ValueError('cartesian_single_demand_selection')
     sha=hashlib.sha256()
     for path in ('backend/app/control/cartesian_pvat_reference.py','backend/app/control/cartesian_reference_bundle.py',
             'backend/app/control/compiled_reference_geometry.py','backend/app/commissioning/native_jog_mdh.py',
@@ -54,6 +58,7 @@ def model_fingerprint(tool=ZERO_TOOL):
         sha.update(path.encode());sha.update((ROOT/path).read_bytes())
     sha.update(tool_digest(tool).encode())
     sha.update(b'q+-3;reference-defaults;workspace=.35;segment=24;curves=4;joint_fit;owned-braking-prefix=1')
+    sha.update(repr(SINGLE_DEMAND_SCALES if single_demand else PLANNING_SCALES).encode())
     return sha.hexdigest()
 
 
@@ -83,7 +88,9 @@ def synthetic_target(base,time,fixture='mixed'):
         'q':tuple((Rotation.from_quat(base.q)*Rotation.from_euler('xyz',(.04*math.sin(time),.03*math.sin(2*time),.04*math.sin(.7*time)))).as_quat())})
 
 
-async def execute(admission,*,expire=False,_source_factory=None,fixture='mixed',_input_source=None,_ready=None,tool=ZERO_TOOL):
+async def execute(admission,*,expire=False,_source_factory=None,fixture='mixed',_input_source=None,_ready=None,tool=ZERO_TOOL,single_demand=False):
+    if type(single_demand) is not bool:raise ValueError('cartesian_single_demand_selection')
+    scales=SINGLE_DEMAND_SCALES if single_demand else PLANNING_SCALES
     checked_tool(tool)
     if fixture not in ('mixed','pitch-reversal'):raise ValueError('cartesian_diagnostic_fixture')
     from app.control.cartesian_pose_input import CartesianPoseInput
@@ -104,7 +111,7 @@ program_end(0)
     if capture.get('transport_returncode')!=0 or len(rows)!=1:raise ValueError('live_dry_capture')
     origin=JointReference(tuple(float(x) for x in rows[0][1:]))
     model=await asyncio.to_thread(CompiledReferenceModel,tool,(-3.,)*6,(3.,)*6)
-    base=model.pose(origin.q);session=__import__('secrets').token_hex(16);fingerprint=model_fingerprint(tool)
+    base=model.pose(origin.q);session=__import__('secrets').token_hex(16);fingerprint=model_fingerprint(tool,single_demand=single_demand)
     if _input_source is not None:
         if _input_source.closed:raise ValueError('cartesian_live_input_retired')
         anchor=_input_source.anchor_tcp
@@ -166,7 +173,9 @@ program_end(0)
         # count the entire clock uncertainty twice and starve all resumption.
         clock=lambda:pair.capture_lower_ms(perf_counter_ns())-epoch
         h=CartesianHostPlanner(model,origin,session=session,model_sha256=fingerprint,generation=generation,
-            clock=clock,planning_braking_prefix=True,braking_segment_limit=24,braking_curve_limit=4)
+            clock=clock,planning_braking_prefix=True,scales=scales,
+            braking_segment_limit=24,braking_curve_limit=4)
+        stats['planning_scales']=scales
         publisher=CartesianSignalPublisher(rpc,h,epoch_ms=epoch,clock_pair=pair,host_clock=perf_counter_ns)
         latest=[None];active=True;start=perf_counter_ns();stall_finished=False
         async def monitor():

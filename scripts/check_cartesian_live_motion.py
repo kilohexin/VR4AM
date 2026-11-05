@@ -98,7 +98,7 @@ end)'''
         '-- LIVE_EXTRA_PRECHECK':precheck,
         '-- LIVE_EXTRA_EMIT':emit,
         '-- LIVE_EXTRA_WORKERS':workers,
-        'wait_all(receiver,sender,clock_service)':'wait_all(receiver,sender,clock_service,actual_monitor)',
+        'wait_all(receiver,sender,clock_service,status_worker)':'wait_all(receiver,sender,clock_service,status_worker,actual_monitor)',
         '-- LIVE_EXTRA_QUIET':quiet,
         '''local after=lebai:get_kin_data()
     for i=1,6 do assert(after.actual_joint_pose[i]==initial.actual_joint_pose[i]

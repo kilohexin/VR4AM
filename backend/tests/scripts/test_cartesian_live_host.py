@@ -11,6 +11,14 @@ from app.control.cartesian_clock import ControllerClock
 from app.control.cartesian_pvat_reference import JointReference
 
 
+def test_live_diagnostic_uses_one_demand_attempt_without_changing_global_supervisor_default():
+    assert live.PLANNING_SCALES==(1.,.5,.25,0.) and live.SINGLE_DEMAND_SCALES==(1.,)
+    assert live.model_fingerprint()!=live.model_fingerprint(single_demand=True)
+    from app.control.cartesian_reference_bundle import OfflineReferenceSupervisor
+    import inspect
+    assert inspect.signature(OfflineReferenceSupervisor).parameters['scales'].default==(1.,.5,.25,0.)
+
+
 def test_fixed_tcp_pitch_fixture_crosses_zero_without_translation_or_orientation_jump():
     from app.schemas.messages import Pose
     from scipy.spatial.transform import Rotation
@@ -37,6 +45,13 @@ def test_live_dry_executable_has_no_actuator_or_configuration_methods():
     assert '__OWNER__' not in source and 'timestamp()' not in source
     assert not re.findall(r'(?<![:.\w])\b(?:move\w+|stop_\w+|start_\w+|set_claw)\s*\(',source)
     assert 'structural guard, not an independent' in source
+
+
+def test_sender_does_not_await_multi_rpc_status_publication_between_pvat_entries():
+    source=live.program(JointReference((0.,-.8,1.4,-.6,1.57,0.)),'01'*16,'a9'*32)
+    sender=source.split('local sender=worker(function()',1)[1].split('local status_worker=',1)[0]
+    assert 'publish_status()' not in sender and 'request_status()' in sender
+    assert 'wait_all(receiver,sender,clock_service,status_worker)' in source
 
 
 def test_authority_evidence_requires_all_unique_native_contracts():

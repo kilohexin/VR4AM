@@ -164,3 +164,19 @@ def test_fitted_braking_candidate_keeps_paired_chains_and_release_latch():
         assert s.last_braking_segment_solves<=24
     while s.phase!='ready':assert s.finish().mode=='braking'
     with pytest.raises(ValueError,match='requires_capture'):s.advance(target)
+
+
+def test_single_demand_attempt_rejects_once_then_consumes_only_the_owned_backup(monkeypatch):
+    _,s,target=rig(scales=(1.,),continue_on_known_rejection=True,braking_method='joint_fit')
+    accepted=s.advance(target);tail=accepted.braking_tail;calls=[]
+    def reject(*args,**kwargs):
+        calls.append(args[1]);raise ValueError('cartesian_brake_no_feasible_plan')
+    monkeypatch.setattr(module,'plan_cartesian_braking',reject)
+    refused=s.advance(target)
+    assert len(calls)==1 and len(s.last_rejections)==1
+    assert refused.mode=='governed_deceleration' and refused.segment==tail[0]
+    assert refused.braking_tail==tail[1:] and not refused.native_execution_verified
+    # Release consumes the same prior tail without running new planning.
+    if s._tail:
+        assert s.finish().segment==tail[1]
+        assert len(calls)==1
