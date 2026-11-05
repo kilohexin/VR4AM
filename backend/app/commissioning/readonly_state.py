@@ -48,6 +48,11 @@ def validate_config_hash(raw, expected):
         raise ValueError('readonly_config_hash_mismatch_or_invalid')
 
 
+def validate_read_budget(max_reads,initial_count):
+    if max_reads is not None and (type(max_reads) is not int or not initial_count<=max_reads<=256):
+        raise ValueError('invalid_read_budget')
+
+
 class ReadAuthorizationExpired(ValueError):
     pass
 
@@ -84,7 +89,7 @@ def validate_read(name, raw):
 
 
 async def collect_state(config_path, output_path, client_factory=None, *, include_velocity_factor=False,
-                        expected_config_sha256=None, authorization_expires_utc=None):
+                        expected_config_sha256=None, authorization_expires_utc=None,max_reads=None):
     """One SDK connection, fixed query list, no adapter or control cleanup.
 
     Run as a standalone CLI process for live use. Async deadlines bound query
@@ -98,6 +103,7 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
     before, ip = load_readonly(config_path)
     validate_config_hash(before, expected_config_sha256)
     initial_methods = READ_METHODS + (('get_velocity_factor',) if include_velocity_factor else ())
+    validate_read_budget(max_reads,len(initial_methods))
     report = dict(started_utc=utc(), complete=False, mode='readonly', reads=[],
                   connection_attempted=False,
                   authorization_expired=False, authorization_expires_utc=authorization_expires_utc,
@@ -106,6 +112,7 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
                   scope='state queries only; no motion readiness or stopping verdict',
                   config_sha256_before=hashlib.sha256(before).hexdigest(),
                   query_allowlist=list(initial_methods), window_ms=5_000,
+                  max_reads=max_reads,call_budget_exhausted=False,
                   hardware_stop_verified=False,
                   connection_release='process_exit_required_not_verified')
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,8 +142,9 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
             report['window_deadline_ns'] = deadline
             methods = initial_methods
             first_cycle = True
-            while monotonic_ns() < deadline:
+            while monotonic_ns() < deadline and (max_reads is None or len(report['reads'])<max_reads):
                 for name in methods:
+                    if max_reads is not None and len(report['reads'])>=max_reads:break
                     if config_path.read_bytes() != before:
                         raise ValueError('config_changed_during_collection')
                     started = monotonic_ns()
@@ -175,6 +183,7 @@ async def collect_state(config_path, output_path, client_factory=None, *, includ
                 remaining = (deadline - monotonic_ns()) / 1e9
                 if remaining > 0:
                     await sleep(min(.25, remaining))
+            report['call_budget_exhausted']=max_reads is not None and len(report['reads'])>=max_reads
             report['complete'] = True
         except asyncio.CancelledError:
             report['cancelled'] = True
@@ -213,18 +222,21 @@ def main(argv=None):
                         help='Connect only after explicit onsite read-only authorization')
     parser.add_argument('--include-velocity-factor', action='store_true',
                         help='Add exactly one get_velocity_factor query; needs scope approval for live use')
+    parser.add_argument('--max-reads',type=int,help='Optional fixed query cap, initial set size..256; connection is separate')
     args = parser.parse_args(argv)
     if not args.execute_readonly:
         before, _ = load_readonly(args.config)
         validate_config_hash(before, args.expected_config_sha256)
+        validate_read_budget(args.max_reads,len(READ_METHODS)+int(args.include_velocity_factor))
         print(json.dumps(dict(action='offline_config_preview', mode='readonly',
                               config_sha256=hashlib.sha256(before).hexdigest(),
                               query_allowlist=list(READ_METHODS + (('get_velocity_factor',)
-                                                   if args.include_velocity_factor else ())), window_ms=5_000)))
+                                                   if args.include_velocity_factor else ())), window_ms=5_000,
+                              max_reads=args.max_reads)))
         return 0
     if args.output is None:
         parser.error('--execute-readonly requires --output')
     return asyncio.run(collect_state(args.config, args.output,
                                     include_velocity_factor=args.include_velocity_factor,
                                     expected_config_sha256=args.expected_config_sha256,
-                                    authorization_expires_utc=args.authorization_expires_utc))
+                                    authorization_expires_utc=args.authorization_expires_utc,max_reads=args.max_reads))

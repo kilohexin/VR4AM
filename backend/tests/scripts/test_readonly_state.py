@@ -82,6 +82,26 @@ async def test_fixed_read_allowlist_one_connection_bounded_window_and_no_config_
     assert '192.0.2.1' not in output.read_text()
 
 
+async def test_explicit_query_budget_stops_reads_even_if_the_clock_never_advances(setup,monkeypatch):
+    config,output,now=setup;client=Reader(now)
+    monkeypatch.setattr(module,'monotonic_ns',lambda:0)
+    connections=[]
+    async def connect(ip):connections.append(ip);return client
+    code=await module.collect_state(config,output,connect,max_reads=8)
+    report=json.loads(output.read_text())
+    assert code==0 and report['complete'] and report['call_budget_exhausted']
+    assert len(client.calls)==len(report['reads'])==8 and len(connections)==1
+
+
+@pytest.mark.parametrize('limit',[0,6,True,8.5,257])
+async def test_invalid_query_budget_rejects_before_connection(setup,limit):
+    config,output,_=setup
+    async def forbidden(ip):pytest.fail('must not connect')
+    with pytest.raises(ValueError,match='read_budget'):
+        await module.collect_state(config,output,forbidden,max_reads=limit)
+    assert not output.exists()
+
+
 @pytest.mark.parametrize('mode', ['control', 'null', 'wrong'])
 async def test_reject_mode_before_connection(setup, mode):
     config, output, _ = setup
