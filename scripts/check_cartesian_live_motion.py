@@ -26,8 +26,8 @@ import secrets
 ACTUAL_TARGET_READOUT_EPSILON=.0001  # Docker diagnostic only; no physical selector.
 
 
-def program(origin,session,model_hash):
-    source=live.program(origin,session,model_hash)
+def program(origin,session,model_hash,*,generation=1):
+    source=live.program(origin,session,model_hash,generation=generation)
     helpers='local report\n'+COMMON.replace('timestamp()','cartesian_now()').replace("print('FINITE_ABORT'","report('FINITE_ABORT'")
     helpers+='\nlocal sdk_result=(function()\n'+(ROOT/'scripts/pvat_sdk_result.lua').read_text(encoding='utf-8')+'\nend)()\n'
     logger='''local journal={};local journal_index=1;local journal_end=false
@@ -135,14 +135,14 @@ def analyze_pitch(report):
     return report
 
 
-async def preflight(admission,*,source_path=None,early_release=False):
+async def preflight(admission,*,source_path=None,early_release=False,generation=1):
     """Same actual executable, ZERO goal packets, explicit final zero ledger."""
     channel=CartesianSignalChannel(admission);proc=None;reader=None;raw=[]
     try:
         await channel.open()
         if await channel.call('get_robot_state')!='IDLE':raise ValueError('live_preflight_requires_idle')
         data=await channel.call('get_kin_data');origin=JointReference(tuple(data['actual_joint_pose']))
-        session=secrets.token_hex(16);source=program(origin,session,live.model_fingerprint())
+        session=secrets.token_hex(16);source=program(origin,session,live.model_fingerprint(),generation=generation)
         if source_path is not None:
             source_path.parent.mkdir(parents=True,exist_ok=True);source_path.write_text(source,encoding='utf-8')
         proc=await asyncio.create_subprocess_exec(*arguments(admission,'CART_DONE'),
@@ -162,7 +162,7 @@ async def preflight(admission,*,source_path=None,early_release=False):
                 pair=await channel.call('get_signals',251,2)
                 if pair[1]==1:break
                 await asyncio.sleep(.001)
-        words=[*struct.unpack('<4i',bytes.fromhex(session)),1]
+        words=[*struct.unpack('<4i',bytes.fromhex(session)),generation]
         await channel.call('set_signals',241,words)
         if early_release:
             await channel.call('set_signal',240,-1)
@@ -203,8 +203,8 @@ def main():
             actual_position_tolerance_m=.002,angle_tolerance_rad=.01,
             joint_box_pruning_padding_rad=ACTUAL_TARGET_READOUT_EPSILON,
             hardware_verified=False)));return 0
-    def frozen_program(origin,session,model_hash):
-        source=program(origin,session,model_hash)
+    def frozen_program(origin,session,model_hash,*,generation=1):
+        source=program(origin,session,model_hash,generation=generation)
         args.output.parent.mkdir(parents=True,exist_ok=True)
         args.output.with_suffix('.lua').write_text(source,encoding='utf-8')
         return source

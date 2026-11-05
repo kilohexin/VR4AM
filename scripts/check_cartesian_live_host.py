@@ -30,13 +30,14 @@ from check_native_cartesian_reference import native_admission
 from check_native_cartesian_motion import transport,vec
 
 
-def program(origin,session,model_hash):
+def program(origin,session,model_hash,*,generation=1):
+    if type(generation) is not int or not 1<=generation<2**31:raise ValueError('cartesian_program_generation')
     source=(ROOT/'scripts/native_cartesian_live_dry.lua').read_text(encoding='utf-8')
     for key,name in [('__BOOT_CLOCK__','cartesian_boot_clock.lua'),('__MAILBOX__','cartesian_bundle_mailbox.lua'),('__AUTHORITY__','cartesian_authority.lua'),
             ('__OWNER__','cartesian_bundle_owner.lua')]:
         source=source.replace(key,(ROOT/'scripts'/name).read_text(encoding='utf-8'))
     words='{'+','.join(str(v) for v in struct.unpack('<4i',bytes.fromhex(session)))+'}'
-    binding="{session='"+session+"',model='"+model_hash+"',generation=1,words="+words+'}'
+    binding="{session='"+session+"',model='"+model_hash+"',generation="+str(generation)+",words="+words+'}'
     return source.replace('__ORIGIN__','{q='+vec(origin.q)+',v='+vec(origin.v)+',a='+vec(origin.a)+'}').replace('__BINDING__',binding)
 
 
@@ -45,7 +46,8 @@ def model_fingerprint():
     for path in ('backend/app/control/cartesian_pvat_reference.py','backend/app/control/cartesian_reference_bundle.py',
             'backend/app/control/compiled_reference_geometry.py','backend/app/commissioning/native_jog_mdh.py',
             'backend/app/control/canonical_joint_quintic.py','backend/app/control/cartesian_bundle_wire.py',
-            'backend/app/control/cartesian_host_planner.py'):
+            'backend/app/control/cartesian_host_planner.py','backend/app/control/cartesian_pose_input.py',
+            'backend/app/control/vr_pose_reference.py'):
         sha.update(path.encode());sha.update((ROOT/path).read_bytes())
     sha.update(b'zero-tool;q+-3;reference-defaults;workspace=.35;segment=24;curves=4;joint_fit;owned-braking-prefix=1')
     return sha.hexdigest()
@@ -77,9 +79,14 @@ def synthetic_target(base,time,fixture='mixed'):
         'q':tuple((Rotation.from_quat(base.q)*Rotation.from_euler('xyz',(.04*math.sin(time),.03*math.sin(2*time),.04*math.sin(.7*time)))).as_quat())})
 
 
-async def execute(admission,*,expire=False,_source_factory=None,fixture='mixed'):
+async def execute(admission,*,expire=False,_source_factory=None,fixture='mixed',_input_source=None,_ready=None):
     if fixture not in ('mixed','pitch-reversal'):raise ValueError('cartesian_diagnostic_fixture')
-    capture=transport(admission,"""program_begin(0)
+    from app.control.cartesian_pose_input import CartesianPoseInput
+    if _input_source is not None and type(_input_source) is not CartesianPoseInput:
+        raise ValueError('cartesian_live_input_source')
+    generation=1 if _input_source is None else _input_source.binding.generation
+    if type(generation) is not int or not 1<=generation<2**31:raise ValueError('cartesian_live_generation')
+    capture=await asyncio.to_thread(transport,admission,"""program_begin(0)
 disable_auto_sync()
 assert(lebai:get_robot_state()=='IDLE','dry_capture_requires_idle')
 local k=lebai:get_kin_data();local q={}
@@ -91,10 +98,16 @@ program_end(0)
     rows=[r.strip().split('\t') for r in capture['raw_output'].splitlines() if r.startswith('DRY_ORIGIN\t')]
     if capture.get('transport_returncode')!=0 or len(rows)!=1:raise ValueError('live_dry_capture')
     origin=JointReference(tuple(float(x) for x in rows[0][1:]))
-    model=CompiledReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
+    model=await asyncio.to_thread(CompiledReferenceModel,MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
     base=model.pose(origin.q);session=__import__('secrets').token_hex(16);fingerprint=model_fingerprint()
-    source=(program if _source_factory is None else _source_factory)(origin,session,fingerprint)
-    if native_admission(admission['container_id'])!=admission:raise ValueError('live_dry_identity')
+    if _input_source is not None:
+        if _input_source.closed:raise ValueError('cartesian_live_input_retired')
+        anchor=_input_source.anchor_tcp
+        if (math.dist(anchor.p,base.p)>1e-6 or
+                (Rotation.from_quat(anchor.q).inv()*Rotation.from_quat(base.q)).magnitude()>1e-6):
+            raise ValueError('cartesian_live_capture_changed')
+    source=(program if _source_factory is None else _source_factory)(origin,session,fingerprint,generation=generation)
+    if await asyncio.to_thread(native_admission,admission['container_id'])!=admission:raise ValueError('live_dry_identity')
     proc=await asyncio.create_subprocess_exec(*arguments(admission,'CART_DONE'),
         stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
     proc.stdin.write(source.encode());await proc.stdin.drain();proc.stdin.close()
@@ -115,7 +128,8 @@ program_end(0)
         except BaseException as exc:error=exc;raise
     reader=asyncio.create_task(read());rpc=CartesianSignalChannel(admission);tasks=[];planner_task=None;cleaning=False
     stats=dict(planned=0,committed=0,rejected=0,discarded=0,late_injected=False,resumed_after_stall=False,
-        math_ms=[],publications=[],authority_writes=0,expire=expire,fixture=fixture)
+        math_ms=[],publications=[],authority_writes=0,expire=expire,fixture=fixture,
+        input_provider='synthetic' if _input_source is None else 'position_intent_pose',generation=generation)
     try:
         epoch=await asyncio.wait_for(ready,3);await rpc.open()
         # Explicit no-I/O clock calibration, before any input is admitted.
@@ -145,7 +159,7 @@ program_end(0)
         # Using the upper bound here AND an already lowered capture would
         # count the entire clock uncertainty twice and starve all resumption.
         clock=lambda:pair.capture_lower_ms(perf_counter_ns())-epoch
-        h=CartesianHostPlanner(model,origin,session=session,model_sha256=fingerprint,generation=1,
+        h=CartesianHostPlanner(model,origin,session=session,model_sha256=fingerprint,generation=generation,
             clock=clock,planning_braking_prefix=True,braking_segment_limit=24,braking_curve_limit=4)
         publisher=CartesianSignalPublisher(rpc,h,epoch_ms=epoch,clock_pair=pair,host_clock=perf_counter_ns)
         latest=[None];active=True;start=perf_counter_ns();stall_finished=False
@@ -167,24 +181,32 @@ program_end(0)
                             accepted=values[3]==1
                             h.acknowledge(seq,accepted);last_ack=seq
                             if seq in acks and not acks[seq].done():acks[seq].set_result(accepted)
-                        if not h.closed:h.observe_owned_cursor(values[0],values[9],phases[values[1]],generation=1)
+                        if not h.closed:h.observe_owned_cursor(values[0],values[9],phases[values[1]],generation=generation)
                 await asyncio.sleep(.002)
         async def inputs():
             sequence=0
             while active:
                 stamp=perf_counter_ns();time=(stamp-start)/1e9;sequence+=1
-                target=synthetic_target(base,time,fixture)
-                h.offer(target,captured_ms=pair.capture_lower_ms(stamp)-epoch,sequence=sequence,generation=1)
-                latest[0]=stamp
+                if _input_source is None:
+                    target=synthetic_target(base,time,fixture)
+                    h.offer(target,captured_ms=pair.capture_lower_ms(stamp)-epoch,sequence=sequence,generation=generation)
+                    latest[0]=stamp
+                else:
+                    sample=_input_source.sample()
+                    if sample is not None and sample.seq>h.input_sequence and sample.captured_ns>=pair.received_ns:
+                        h.offer(sample.pose,captured_ms=pair.capture_lower_ms(sample.captured_ns)-epoch,
+                            sequence=sample.seq,generation=generation)
+                        latest[0]=sample.captured_ns
                 await asyncio.sleep(.005)
         async def authority():
             while active:
-                if latest[0] is not None:
+                if latest[0] is not None and 0<=perf_counter_ns()-latest[0]<100_000_000:
                     await publisher.offer_authority(latest[0]);stats['authority_writes']+=1
                 await asyncio.sleep(.02)
         async def planning():
             nonlocal stall_finished
             while active:
+                if h.captured_ms is None:await asyncio.sleep(.003);continue
                 tip=h.planning_head()
                 due=(clock()+400 if h.reference_epoch is None else
                     h.reference_epoch+max(0,(tip or (0,))[0]-1)*80)
@@ -207,13 +229,24 @@ program_end(0)
                 stats['committed' if accepted else 'rejected']+=1
                 if stall_finished and accepted:stats['resumed_after_stall']=True
         tasks=[asyncio.create_task(inputs()),asyncio.create_task(authority()),asyncio.create_task(monitor())]
+        if _ready is not None:_ready.set()
         await asyncio.sleep(.025);planner_task=asyncio.create_task(planning())
         async with asyncio.timeout(8):
             while (perf_counter_ns()-start)/1e9<6:
+                if _input_source is not None and _input_source.closed:break
+                if _input_source is not None and reader.done():
+                    reader.result()
+                    quiet=[r for r in raw if r[0]=='CART_QUIET']
+                    done=[r for r in raw if r[0]=='CART_DONE']
+                    if (len(quiet)==1 and quiet[0][2]=='ready' and len(done)==1
+                            and done[0][1:]==['true','nil']):
+                        _input_source.close('input_expired' if quiet[0][3] in ('expired','input_expired') else 'release')
+                        break
                 for task in tasks+[planner_task,reader]:
                     if task.done():task.result();raise ValueError('live_dry_early_exit')
                 await asyncio.sleep(.02)
-        active=False;h.close('tracking_lost' if expire else 'release')
+        active=False;h.close('tracking_lost' if expire else
+            _input_source.reason if _input_source is not None and _input_source.closed else 'release')
         await asyncio.gather(*tasks,planner_task)
         if not expire:await publisher.release()
         await asyncio.wait_for(reader,7);rc=await proc.wait()
