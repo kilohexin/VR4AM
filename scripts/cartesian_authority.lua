@@ -23,12 +23,19 @@ function M.new(read_many,read_one,clock,binding,ttl)
         local words=read_many(240,6);now()
         assert(type(words)=='table' and #words==6,'cartesian_authority_shape')
         local commit=read_one(240);now()
-        assert(integer(commit,0,2147483647),'cartesian_authority_word')
+        assert(integer(commit,-1,2147483647),'cartesian_authority_word')
         if not live() then return nil,'expired' end
         if commit~=words[1] then return nil,'torn' end
-        if commit==0 then self.closed=true;return nil,'released' end
+        if commit==0 then
+            if self.last_capture==nil then return nil,'waiting' end
+            self.closed=true;return nil,'released'
+        end
         for i=1,4 do assert(words[i+1]==binding.words[i],'cartesian_authority_binding') end
         assert(words[6]==binding.generation,'cartesian_authority_binding')
+        -- -1 is a bound withdrawal even before a first live input. Zero is
+        -- startup neutral until activated; an old active zero-release stays
+        -- compatible. Wrong-session withdrawals cannot retire this owner.
+        if commit==-1 then self.closed=true;return nil,'released' end
         local capture=math.floor(commit/1024)-1
         assert(integer(capture,0,2147483647) and capture<=now(),'cartesian_authority_capture')
         assert(not self.last_capture or capture>=self.last_capture,'cartesian_authority_rollback')

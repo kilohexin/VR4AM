@@ -51,7 +51,25 @@ def model_fingerprint():
     return sha.hexdigest()
 
 
-async def execute(admission,*,expire=False,_source_factory=None):
+def synthetic_target(base,time,fixture='mixed'):
+    """Current-time diagnostic inputs, never replaying stale capture times."""
+    if fixture=='pitch-reversal':
+        # Go through the SAME grip/tool basis mapping as a held XR controller.
+        # Keep the endpoint position exactly fixed while crossing pitch zero.
+        from app.control.vr_pose_reference import VRPoseReference
+        from app.schemas.messages import Pose
+        hand=Pose(p=(0.,0.,0.),q=(0.,0.,0.,1.))
+        reference=VRPoseReference(clock=lambda:0,translation_scale=1.,orientation_mode='tool')
+        reference.capture(hand,base,generation=1,hand_ns=0,tcp_ns=0)
+        turned=hand.model_copy(update={'q':tuple(Rotation.from_euler('x',.12*math.sin(2*math.pi*time/4)).as_quat())})
+        return reference.target(turned,generation=1,seq=1,captured_ns=0)
+    if fixture!='mixed':raise ValueError('cartesian_diagnostic_fixture')
+    return base.model_copy(update={'p':tuple(base.p[i]+.006*math.sin(time*(i+1)) for i in range(3)),
+        'q':tuple((Rotation.from_quat(base.q)*Rotation.from_euler('xyz',(.04*math.sin(time),.03*math.sin(2*time),.04*math.sin(.7*time)))).as_quat())})
+
+
+async def execute(admission,*,expire=False,_source_factory=None,fixture='mixed'):
+    if fixture not in ('mixed','pitch-reversal'):raise ValueError('cartesian_diagnostic_fixture')
     capture=transport(admission,"""program_begin(0)
 disable_auto_sync()
 assert(lebai:get_robot_state()=='IDLE','dry_capture_requires_idle')
@@ -88,7 +106,7 @@ program_end(0)
         except BaseException as exc:error=exc;raise
     reader=asyncio.create_task(read());rpc=CartesianSignalChannel(admission);tasks=[];planner_task=None;cleaning=False
     stats=dict(planned=0,committed=0,rejected=0,discarded=0,late_injected=False,resumed_after_stall=False,
-        math_ms=[],publications=[],authority_writes=0,expire=expire)
+        math_ms=[],publications=[],authority_writes=0,expire=expire,fixture=fixture)
     try:
         epoch=await asyncio.wait_for(ready,3);await rpc.open()
         # Explicit no-I/O clock calibration, before any input is admitted.
@@ -146,8 +164,7 @@ program_end(0)
             sequence=0
             while active:
                 stamp=perf_counter_ns();time=(stamp-start)/1e9;sequence+=1
-                target=base.model_copy(update={'p':tuple(base.p[i]+.006*math.sin(time*(i+1)) for i in range(3)),
-                    'q':tuple((Rotation.from_quat(base.q)*Rotation.from_euler('xyz',(.04*math.sin(time),.03*math.sin(2*time),.04*math.sin(.7*time)))).as_quat())})
+                target=synthetic_target(base,time,fixture)
                 h.offer(target,captured_ms=pair.capture_lower_ms(stamp)-epoch,sequence=sequence,generation=1)
                 latest[0]=stamp
                 await asyncio.sleep(.005)

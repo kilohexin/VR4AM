@@ -35,7 +35,7 @@ class CartesianNativePublisher:
         due=self.epoch+packet.due_ms;capture=self.epoch+packet.captured_ms
         result=await self.rpc.request('assert(set_signal('+str(offset)+',0));assert(set_signals('
             +str(offset+1)+','+payload+'));if cartesian_now()>='+str(due)+' or cartesian_now()-'+str(capture)
-            +">=100 or get_signal(240)==0 then return 'late' end;assert(set_signal("+str(offset)+','+str(packet.sequence)
+            +">=100 or get_signal(240)<=0 then return 'late' end;assert(set_signal("+str(offset)+','+str(packet.sequence)
             +"));return 'committed'")
         if result.fields==('late',):return False
         if result.fields!=('committed',):raise ValueError('cartesian_publish_reply')
@@ -45,4 +45,6 @@ class CartesianNativePublisher:
         self.closed=True
         # Do not clear math banks while the native reader may be in flight.
         # A separate genuine-input release makes the owner drop future leads.
-        return await self.rpc.request("assert(set_signal(240,0));return 'released'")
+        payload='{'+','.join(str(x) for x in (*self.words,self.planner.generation))+'}'
+        return await self.rpc.request('assert(set_signals(241,'+payload+'));'
+            +"assert(set_signal(240,-1));return 'released'")

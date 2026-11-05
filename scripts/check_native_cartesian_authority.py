@@ -13,6 +13,7 @@ from app.control.cartesian_bundle_wire import encode
 from app.control.cartesian_clock import ControllerClock
 
 CHECKS={'duplicates_never_renew','release_permanent','torn_not_committed',
+    'early_bound_withdrawal','invalid_negative_word',*(f'withdraw_binding_{i}' for i in range(2,7)),
     *(f'binding_{i}' for i in range(2,7)),'capture_rollback','future_capture','clock_rollback',
     'independent_freshness','math_silence_uses_independent_authority','joints_unchanged'}
 

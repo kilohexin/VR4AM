@@ -32,6 +32,20 @@ local ok,err=pcall(function()
         words[1]=102401;refuse(lease.poll);checked('release_permanent')
     end
     do
+        local lease,words=fixture();words[1]=0
+        local _,why=lease.poll();assert(why=='waiting' and not lease.closed)
+        words[1]=-1;_,why=lease.poll();assert(why=='released' and lease.closed)
+        refuse(lease.poll);checked('early_bound_withdrawal')
+    end
+    for index=2,6 do
+        local lease,words=fixture();words[1]=-1;words[index]=words[index]+1
+        refuse(lease.poll);assert(lease.closed);checked('withdraw_binding_'..index)
+    end
+    do
+        local lease,words=fixture();words[1]=-2
+        refuse(lease.poll);assert(lease.closed);checked('invalid_negative_word')
+    end
+    do
         local lease,words,_,tear=fixture();tear()
         local value,why=lease.poll();assert(value==nil and why=='torn' and lease.last_capture==nil)
         checked('torn_not_committed')

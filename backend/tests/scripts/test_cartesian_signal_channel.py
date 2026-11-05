@@ -54,3 +54,18 @@ def test_only_a_pending_checked_transaction_can_write_sdk_signals():
             clock_pair=ControllerClock(0,0,0),host_clock=lambda:1_000_000)
         with pytest.raises(ValueError,match='uncertified'):await publisher.publish(object())
     asyncio.run(run())
+
+
+def test_release_before_first_input_is_an_explicit_bound_withdrawal():
+    async def run():
+        calls=[]
+        async def call(name,*args):calls.append((name,args))
+        planner=SimpleNamespace(session='01'*16,generation=7,closed=True,pending=None)
+        publisher=CartesianSignalPublisher(SimpleNamespace(call=call),planner,epoch_ms=0,
+            clock_pair=ControllerClock(0,0,0),host_clock=lambda:0)
+        await publisher.release()
+        assert publisher.closed
+        assert calls==[('set_signals',(241,[16843009]*4+[7])),('set_signal',(240,-1))]
+        assert not await publisher.offer_authority(0)
+        assert len(calls)==2
+    asyncio.run(run())

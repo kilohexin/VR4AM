@@ -11,6 +11,24 @@ from app.control.cartesian_clock import ControllerClock
 from app.control.cartesian_pvat_reference import JointReference
 
 
+def test_fixed_tcp_pitch_fixture_crosses_zero_without_translation_or_orientation_jump():
+    from app.schemas.messages import Pose
+    from scipy.spatial.transform import Rotation
+    base=Pose(p=(.3,.1,.4),q=(.5,-.5,-.5,.5))
+    previous=None
+    up=live.synthetic_target(base,1.,'pitch-reversal')
+    down=live.synthetic_target(base,3.,'pitch-reversal')
+    assert Rotation.from_quat(up.q).apply((0.,0.,1.))[2]>0
+    assert Rotation.from_quat(down.q).apply((0.,0.,1.))[2]<0
+    for i in range(601):
+        target=live.synthetic_target(base,i/100,'pitch-reversal')
+        assert target.p==base.p
+        rotation=Rotation.from_quat(target.q)
+        if previous is not None:assert (previous.inv()*rotation).magnitude()<.002
+        previous=rotation
+    with pytest.raises(ValueError,match='fixture'):live.synthetic_target(base,0.,'unbounded')
+
+
 def test_live_dry_executable_has_no_actuator_or_configuration_methods():
     source=live.program(JointReference((0.,-.8,1.4,-.6,1.57,0.)),'01'*16,'a9'*32)
     assert set(re.findall(r'lebai:(\w+)\(',source))=={
@@ -62,7 +80,7 @@ def test_publication_keeps_raw_input_stamp_and_checks_native_age_after_payload()
         body=bodies[0]
         assert body.index('set_signals(')<body.index('if cartesian_now()')<body.rindex('set_signal(')
         assert 'cartesian_now()-1100>=100' in body
-        assert 'get_signal(240)==0' in body
+        assert 'get_signal(240)<=0' in body
     asyncio.run(run())
 
 

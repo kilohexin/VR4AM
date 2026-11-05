@@ -111,7 +111,7 @@ def analyze(report):
     return report
 
 
-async def preflight(admission,*,source_path=None):
+async def preflight(admission,*,source_path=None,early_release=False):
     """Same actual executable, ZERO goal packets, explicit final zero ledger."""
     channel=CartesianSignalChannel(admission);proc=None;reader=None;raw=[]
     try:
@@ -140,15 +140,18 @@ async def preflight(admission,*,source_path=None):
                 await asyncio.sleep(.001)
         words=[*struct.unpack('<4i',bytes.fromhex(session)),1]
         await channel.call('set_signals',241,words)
-        await channel.call('set_signal',240,(pair[0]+1)*1024+1)
-        await asyncio.wait_for(started,1)
-        await channel.call('set_signal',240,0)
+        if early_release:
+            await channel.call('set_signal',240,-1)
+        else:
+            await channel.call('set_signal',240,(pair[0]+1)*1024+1)
+            await asyncio.wait_for(started,1)
+            await channel.call('set_signal',240,0)
         await asyncio.wait_for(reader,7);code=await proc.wait()
         status=[r for r in raw if r[0]=='CART_ACTUAL_STATUS'];done=[r for r in raw if r[0]=='CART_DONE']
         calls=[r for r in raw if r[0] in ('CART_ACTUAL_ENTER','FINITE_ABORT')]
         passed=bool(code==0 and status==[['CART_ACTUAL_STATUS','0','0']]
             and done==[['CART_DONE','true','nil']] and not calls and not channel.unknown)
-        return dict(passed=passed,preflight_only=True,motion_calls=0,goal_packets=0,raw_output=raw,
+        return dict(passed=passed,preflight_only=True,early_release=early_release,motion_calls=0,goal_packets=0,raw_output=raw,
             unknown=channel.unknown,program_sha256=hashlib.sha256(source.encode()).hexdigest(),
             product_admission_complete=False,hardware_verified=False)
     except Exception as error:
@@ -166,7 +169,10 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--container',required=True)
     p.add_argument('--output',type=Path,required=True);p.add_argument('--run',action='store_true')
     p.add_argument('--expire',action='store_true');p.add_argument('--preflight',action='store_true')
+    p.add_argument('--fixture',choices=('mixed','pitch-reversal'),default='mixed')
+    p.add_argument('--early-release',action='store_true',help='Zero-goal preflight: withdraw before first input')
     args=p.parse_args();admission=native_admission(args.container)
+    if args.early_release and not args.preflight:p.error('--early-release requires --preflight')
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admission,pvat_max=0 if args.preflight else 128,exception_stop_max=1,
             preparation=0,gripper=0,readout_guard='cartesian_curve_witness',target_position_tolerance_m=.001,
@@ -178,8 +184,14 @@ def main():
         args.output.parent.mkdir(parents=True,exist_ok=True)
         args.output.with_suffix('.lua').write_text(source,encoding='utf-8')
         return source
-    report=(asyncio.run(preflight(admission,source_path=args.output.with_suffix('.lua'))) if args.preflight else
-        analyze(asyncio.run(live.execute(admission,expire=args.expire,_source_factory=frozen_program))))
+    report=(asyncio.run(preflight(admission,source_path=args.output.with_suffix('.lua'),early_release=args.early_release)) if args.preflight else
+        analyze(asyncio.run(live.execute(admission,expire=args.expire,_source_factory=frozen_program,fixture=args.fixture))))
+    if args.fixture=='pitch-reversal' and not args.preflight:
+        quiet=[r for r in report.get('raw_output',[]) if r[0]=='CART_ACTUAL_QUIET']
+        drift=float(quiet[0][4]) if len(quiet)==1 else None
+        report['fixed_tcp_pitch_drift_m']=drift
+        # An additional fixture acceptance, not a claim of physical accuracy.
+        report['passed']=bool(report['passed'] and drift is not None and drift<=.002)
     report['admission']=admission;report['readout_guard']='cartesian_curve_witness'
     report['joint_box_pruning_padding_rad']=ACTUAL_TARGET_READOUT_EPSILON
     args.output.parent.mkdir(parents=True,exist_ok=True)

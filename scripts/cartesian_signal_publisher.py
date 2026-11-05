@@ -39,4 +39,6 @@ class CartesianSignalPublisher(CartesianNativePublisher):
 
     async def release(self):
         self.closed=True
-        async with self.writes:await self.channel.call('set_signal',240,0)
+        async with self.writes:
+            await self.channel.call('set_signals',241,[*self.words,self.planner.generation])
+            await self.channel.call('set_signal',240,-1)
