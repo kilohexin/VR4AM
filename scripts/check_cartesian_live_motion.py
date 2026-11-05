@@ -19,6 +19,7 @@ from scripts.check_native_cartesian_reference import native_admission
 from scripts.cartesian_signal_channel import CartesianSignalChannel
 from scripts.cartesian_native_pipe import arguments
 from app.control.cartesian_pvat_reference import JointReference
+from app.control.cartesian_tool_binding import ZERO_TOOL,checked_tool,tool_digest,tool_arguments
 import hashlib
 import struct
 import secrets
@@ -26,9 +27,32 @@ import secrets
 ACTUAL_TARGET_READOUT_EPSILON=.0001  # Docker diagnostic only; no physical selector.
 
 
-def program(origin,session,model_hash,*,generation=1):
-    source=live.program(origin,session,model_hash,generation=generation)
-    helpers='local report\n'+COMMON.replace('timestamp()','cartesian_now()').replace("print('FINITE_ABORT'","report('FINITE_ABORT'")
+def tool_common(tool):
+    checked_tool(tool)
+    if tool==ZERO_TOOL:return COMMON
+    from scipy.spatial.transform import Rotation
+    def numbers(values):return '{'+','.join(repr(float(v)) for v in values)+'}'
+    p=numbers(tool.translation_m);r=numbers(Rotation.from_quat(tool.rotation_xyzw).as_matrix().ravel())
+    first=COMMON.index('local function tool_check()');last=COMMON.index('local function read(cap)')
+    guard='''local function tool_check()
+ local t=lebai:get_tcp();local p=__P__;local expected=__R__
+ for _,key in ipairs({'x','y','z','rx','ry','rz'}) do
+  assert(type(t[key])=='number' and t[key]==t[key] and math.abs(t[key])<1000000,'tool_changed')
+ end
+ for i,key in ipairs({'x','y','z'}) do assert(math.abs(t[key]-p[i])<1e-9,'tool_changed') end
+ local sx,cx=math.sin(t.rx),math.cos(t.rx);local sy,cy=math.sin(t.ry),math.cos(t.ry)
+ local sz,cz=math.sin(t.rz),math.cos(t.rz)
+ local actual={cz*cy,cz*sy*sx-sz*cx,cz*sy*cx+sz*sx,sz*cy,sz*sy*sx+cz*cx,sz*sy*cx-cz*sx,-sy,cy*sx,cy*cx}
+ local dot=0;for i=1,9 do dot=dot+actual[i]*expected[i] end
+ assert(dot>3-1e-12,'tool_changed')
+end
+'''.replace('__P__',p).replace('__R__',r)
+    return COMMON[:first]+guard+COMMON[last:]
+
+
+def program(origin,session,model_hash,*,generation=1,tool=ZERO_TOOL):
+    source=live.program(origin,session,model_hash,generation=generation,tool=tool)
+    helpers='local report\n'+tool_common(tool).replace('timestamp()','cartesian_now()').replace("print('FINITE_ABORT'","report('FINITE_ABORT'")
     helpers+='\nlocal sdk_result=(function()\n'+(ROOT/'scripts/pvat_sdk_result.lua').read_text(encoding='utf-8')+'\nend)()\n'
     logger='''local journal={};local journal_index=1;local journal_end=false
 report=function(...) assert(#journal<2048,'live_journal_budget');journal[#journal+1]=table.pack(...) end
@@ -68,6 +92,8 @@ end)'''
         '-- LIVE_EXTRA_INITIAL':initial,
         '__CURVE_WITNESS__':(ROOT/'scripts/cartesian_curve_witness.lua').read_text(encoding='utf-8'),
         '__LUA_MDH__':(ROOT/'scripts/cartesian_lm3_geometry.lua').read_text(encoding='utf-8'),
+        '__BOUND_TOOL_POSITION__':'{'+','.join(repr(v) for v in tool.translation_m)+'}',
+        '__BOUND_TOOL_QUATERNION__':'{'+','.join(repr(v) for v in tool.rotation_xyzw)+'}',
         '__TARGET_READOUT_EPSILON__':repr(ACTUAL_TARGET_READOUT_EPSILON),
         '-- LIVE_EXTRA_PRECHECK':precheck,
         '-- LIVE_EXTRA_EMIT':emit,
@@ -111,7 +137,7 @@ def analyze(report):
     return report
 
 
-def analyze_pitch(report):
+def analyze_pitch(report,tool=ZERO_TOOL):
     """Require observed angular motion in BOTH directions, not just no drift."""
     from scipy.spatial.transform import Rotation
     from app.commissioning.native_jog_mdh import MdhTool
@@ -123,7 +149,7 @@ def analyze_pitch(report):
     drift=float(quiet[0][4]) if len(quiet)==1 else None
     pitch=[]
     if origin and samples:
-        model=MdhReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
+        model=MdhReferenceModel(checked_tool(tool),(-3.,)*6,(3.,)*6)
         base=Rotation.from_quat(model.pose(tuple(map(float,origin[0][4:10]))).q)
         for row in samples:
             q=tuple(map(float,row[2:8]));rotation=Rotation.from_quat(model.pose(q).q)
@@ -135,14 +161,14 @@ def analyze_pitch(report):
     return report
 
 
-async def preflight(admission,*,source_path=None,early_release=False,generation=1):
+async def preflight(admission,*,source_path=None,early_release=False,generation=1,tool=ZERO_TOOL):
     """Same actual executable, ZERO goal packets, explicit final zero ledger."""
     channel=CartesianSignalChannel(admission);proc=None;reader=None;raw=[]
     try:
         await channel.open()
         if await channel.call('get_robot_state')!='IDLE':raise ValueError('live_preflight_requires_idle')
         data=await channel.call('get_kin_data');origin=JointReference(tuple(data['actual_joint_pose']))
-        session=secrets.token_hex(16);source=program(origin,session,live.model_fingerprint(),generation=generation)
+        session=secrets.token_hex(16);source=program(origin,session,live.model_fingerprint(tool),generation=generation,tool=tool)
         if source_path is not None:
             source_path.parent.mkdir(parents=True,exist_ok=True);source_path.write_text(source,encoding='utf-8')
         proc=await asyncio.create_subprocess_exec(*arguments(admission,'CART_DONE'),
@@ -195,24 +221,27 @@ def main():
     p.add_argument('--expire',action='store_true');p.add_argument('--preflight',action='store_true')
     p.add_argument('--fixture',choices=('mixed','pitch-reversal'),default='mixed')
     p.add_argument('--early-release',action='store_true',help='Zero-goal preflight: withdraw before first input')
-    args=p.parse_args();admission=native_admission(args.container)
+    p.add_argument('--tool-report',type=Path);p.add_argument('--tool-report-sha256')
+    args=p.parse_args();tool=tool_arguments(p,args);admission=native_admission(args.container)
     if args.early_release and not args.preflight:p.error('--early-release requires --preflight')
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admission,pvat_max=0 if args.preflight else 128,exception_stop_max=1,
             preparation=0,gripper=0,readout_guard='cartesian_curve_witness',target_position_tolerance_m=.001,
             actual_position_tolerance_m=.002,angle_tolerance_rad=.01,
             joint_box_pruning_padding_rad=ACTUAL_TARGET_READOUT_EPSILON,
+            tool_sha256=tool_digest(tool),tool_report_sha256=args.tool_report_sha256,
             hardware_verified=False)));return 0
-    def frozen_program(origin,session,model_hash,*,generation=1):
-        source=program(origin,session,model_hash,generation=generation)
+    def frozen_program(origin,session,model_hash,*,generation=1,tool=ZERO_TOOL):
+        source=program(origin,session,model_hash,generation=generation,tool=tool)
         args.output.parent.mkdir(parents=True,exist_ok=True)
         args.output.with_suffix('.lua').write_text(source,encoding='utf-8')
         return source
-    report=(live.run_local(preflight(admission,source_path=args.output.with_suffix('.lua'),early_release=args.early_release)) if args.preflight else
-        analyze(live.run_local(live.execute(admission,expire=args.expire,_source_factory=frozen_program,fixture=args.fixture))))
+    report=(live.run_local(preflight(admission,source_path=args.output.with_suffix('.lua'),early_release=args.early_release,tool=tool)) if args.preflight else
+        analyze(live.run_local(live.execute(admission,expire=args.expire,_source_factory=frozen_program,fixture=args.fixture,tool=tool))))
     report['scheduler_clock']='time.perf_counter'
     if args.fixture=='pitch-reversal' and not args.preflight:
-        analyze_pitch(report)
+        analyze_pitch(report,tool)
+    report.update(tool_sha256=tool_digest(tool),tool_report_sha256=args.tool_report_sha256)
     report['admission']=admission;report['readout_guard']='cartesian_curve_witness'
     report['joint_box_pruning_padding_rad']=ACTUAL_TARGET_READOUT_EPSILON
     args.output.parent.mkdir(parents=True,exist_ok=True)

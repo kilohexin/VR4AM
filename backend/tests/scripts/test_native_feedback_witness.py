@@ -24,3 +24,21 @@ def test_witness_cannot_remove_a_perpendicular_actual_deviation():
 
 def test_zero_tool_docker_witness_analysis_rejects_physical_or_unbound_sources():
     with pytest.raises(ValueError,match='isolated_docker'):analyze({'raw_output':[]})
+
+
+def test_a_nonzero_tool_report_cannot_be_analyzed_as_zero_tool():
+    from app.control.cartesian_tool_binding import tool_digest
+    from app.commissioning.native_jog_mdh import MdhTool
+    tool=MdhTool((.03,-.02,.07),(0.,0.,0.,1.))
+    with pytest.raises(ValueError,match='tool_binding_mismatch'):
+        analyze({'tool_sha256':tool_digest(tool)})
+
+
+def test_intermediate_host_report_tool_binding_is_also_enforced():
+    from app.control.cartesian_tool_binding import ZERO_TOOL,tool_digest
+    from app.commissioning.native_jog_mdh import MdhTool
+    tool=MdhTool((.03,-.02,.07),(0.,0.,0.,1.))
+    for report in ({'statistics':{'tool_sha256':tool_digest(tool)}},
+            {'tool_sha256':tool_digest(ZERO_TOOL),'statistics':{'tool_sha256':tool_digest(tool)}}):
+        with pytest.raises(ValueError,match='tool_binding_mismatch'):analyze(report)
+    with pytest.raises(ValueError,match='tool_binding_mismatch'):analyze({},tool)

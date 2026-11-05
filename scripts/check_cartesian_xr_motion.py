@@ -22,6 +22,7 @@ from app.control.cartesian_pose_input import CartesianPoseInput
 from app.control.compiled_reference_geometry import CompiledReferenceModel
 from app.commissioning.native_jog_mdh import MdhTool
 from app.control.finite_position_types import PositionBinding,PositionIntent
+from app.control.cartesian_tool_binding import ZERO_TOOL,checked_tool,tool_digest,tool_arguments
 from app.robots.lebai_codec import pose_from_lebai
 from app.schemas.messages import Pose
 from scripts import check_cartesian_live_host as live
@@ -30,10 +31,11 @@ from scripts.cartesian_signal_channel import CartesianSignalChannel
 from scripts.check_native_cartesian_reference import native_admission
 
 
-async def execute(admission,output,*,expire=False):
+async def execute(admission,output,*,expire=False,tool=ZERO_TOOL):
+    checked_tool(tool)
     # Warm pure math before the clutch capture, never by resetting its age.
-    await asyncio.to_thread(CompiledReferenceModel,MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
-    binding=PositionBinding(object(),7,live.model_fingerprint(),hashlib.sha256(b'zero-tool').hexdigest())
+    await asyncio.to_thread(CompiledReferenceModel,tool,(-3.,)*6,(3.,)*6)
+    binding=PositionBinding(object(),7,live.model_fingerprint(tool),tool_digest(tool))
     hand=Pose(p=(.1,.2,.3),q=(0.,0.,0.,1.))
     channel=CartesianSignalChannel(admission)
     try:
@@ -64,8 +66,8 @@ async def execute(admission,output,*,expire=False):
             turned=hand.model_copy(update={'q':tuple(Rotation.from_euler('x',.12*math.sin(2*math.pi*elapsed/4)).as_quat())})
             inputs.offer(replace(intent,seq=count,received_ns=now,hand_pose=turned))
             await asyncio.sleep(.02)
-    def frozen_program(origin,session,model_hash,*,generation=1):
-        source=motion.program(origin,session,model_hash,generation=generation)
+    def frozen_program(origin,session,model_hash,*,generation=1,tool=ZERO_TOOL):
+        source=motion.program(origin,session,model_hash,generation=generation,tool=tool)
         output.parent.mkdir(parents=True,exist_ok=True);output.with_suffix('.lua').write_text(source,encoding='utf-8')
         return source
     async def guarded_feed():
@@ -79,9 +81,9 @@ async def execute(admission,output,*,expire=False):
         # close the read channel and later pretend its old capture is new.
         await channel.close()
         result=motion.analyze(await live.execute(admission,expire=expire,_source_factory=frozen_program,
-            _input_source=inputs,_ready=ready))
+            _input_source=inputs,_ready=ready,tool=tool))
         output.with_suffix('.host.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
-        motion.analyze_pitch(result)
+        motion.analyze_pitch(result,tool)
         result.update(input_frames=count,max_input_gap_ms=max_gap/1e6,input_exit=inputs.reason,
             driver_error=driver_error,scheduler_clock='time.perf_counter',real_headset_verified=False,admission=admission)
         result['passed']=bool(result['passed'] and driver_error is None)
@@ -99,19 +101,22 @@ def local_error(error):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--container',required=True)
     p.add_argument('--output',required=True,type=Path);p.add_argument('--run',action='store_true')
-    p.add_argument('--expire',action='store_true');args=p.parse_args()
-    admitted=native_admission(args.container)
+    p.add_argument('--expire',action='store_true')
+    p.add_argument('--tool-report',type=Path);p.add_argument('--tool-report-sha256')
+    args=p.parse_args();tool=tool_arguments(p,args);admitted=native_admission(args.container)
     if not args.run:
         print(json.dumps(dict(execute=False,admission=admitted,pvat_max=128,exception_stop_max=1,
-            input='PositionIntent',generation=7,real_headset_verified=False,hardware_verified=False)));return 0
+            input='PositionIntent',generation=7,tool_sha256=tool_digest(tool),
+            tool_report_sha256=args.tool_report_sha256,real_headset_verified=False,hardware_verified=False)));return 0
     if args.output.exists() or args.output.with_suffix('.lua').exists():
         p.error('evidence output already exists; preserve the previous attempt')
-    try:report=live.run_local(execute(admitted,args.output,expire=args.expire))
+    try:report=live.run_local(execute(admitted,args.output,expire=args.expire,tool=tool))
     except Exception as error:
         built=args.output.with_suffix('.lua').exists()
         report=dict(passed=False,error_type=type(error).__name__,error_code=local_error(error),program_created=built,
             unknown_motion_write=built,stop_unverified=built,admission=admitted,
             hardware_verified=False,real_headset_verified=False,product_admission_complete=False)
+    report.update(tool_sha256=tool_digest(tool),tool_report_sha256=args.tool_report_sha256)
     args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(report,indent=2),encoding='utf-8')
     print(json.dumps({k:v for k,v in report.items() if k not in ('raw_output','heads','statistics','admission')}))
     return 0 if report['passed'] else 1

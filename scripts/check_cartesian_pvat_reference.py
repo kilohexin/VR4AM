@@ -23,6 +23,7 @@ from app.control.cartesian_pvat_reference import (JointReference,MdhReferenceMod
     plan_cartesian_reference,plan_cartesian_braking)
 from app.control.vr_pose_reference import VRPoseReference
 from app.control.cartesian_reference_bundle import OfflineReferenceSupervisor
+from app.control.cartesian_tool_binding import ZERO_TOOL,checked_tool,tool_digest,tool_arguments
 from app.schemas.messages import Pose
 
 
@@ -66,15 +67,15 @@ def summary(plan,model):
         angular_acceleration_bound_radps2=max(c['angular_acceleration_bound_radps2'] for c in plan.checks))
 
 
-def run(frozen_log=None,*,large_pitch=False):
-    model=MdhReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
+def run(frozen_log=None,*,large_pitch=False,tool=ZERO_TOOL):
+    model=MdhReferenceModel(checked_tool(tool),(-3.,)*6,(3.,)*6)
     start,source=origin(frozen_log,model);base=model.pose(start.q)
     def pitch(angle):
         return base.model_copy(update={'q':tuple((Rotation.from_quat(base.q)*Rotation.from_euler('x',angle)).as_quat())})
     before=time.perf_counter()
     report=dict(offline_candidate_passed=False,sdk_connections=0,motion_writes=0,
         motion_safety_verified=False,native_interpolation_verified=False,realtime_verified=False,
-        interpolation='quintic_hermite_assumed',model='published_theoretical_mdh_zero_tool',
+        interpolation='quintic_hermite_assumed',model='published_theoretical_mdh_bound_tool',tool_sha256=tool_digest(tool),
         source=source,scenario='large_pitch' if large_pitch else 'modest_pitch')
     angle=1. if large_pitch else .25;duration=18. if large_pitch else 4.
     try:
@@ -280,7 +281,10 @@ def main():
     p.add_argument('--braking-curve-limit',type=int)
     p.add_argument('--braking-method',choices=('pointwise','joint_fit'),default='pointwise')
     p.add_argument('--geometry-backend',choices=('python','compiled'),default='python')
-    args=p.parse_args()
+    p.add_argument('--tool-report',type=Path);p.add_argument('--tool-report-sha256')
+    args=p.parse_args();tool=tool_arguments(p,args)
+    if args.replay_frozen and args.tool_report is not None:
+        p.error('frozen replay retains its recorded zero-tool binding; use independent bound-tool cases')
     if args.governed_continuation and not args.supervised:p.error('--governed-continuation requires --supervised')
     if args.braking_segment_limit is not None and (not args.supervised or not 1<=args.braking_segment_limit<=2000):
         p.error('--braking-segment-limit requires --supervised and an integer in 1..2000')
@@ -297,7 +301,8 @@ def main():
         check_braking=args.check_braking,demand_mode=args.demand_mode,braking_stride=args.braking_stride,
         supervised=args.supervised,governed_continuation=args.governed_continuation,
         braking_segment_limit=args.braking_segment_limit,braking_curve_limit=args.braking_curve_limit,braking_method=args.braking_method,
-        geometry_backend=args.geometry_backend) if args.replay_frozen else run(args.frozen_log,large_pitch=args.large_pitch)
+        geometry_backend=args.geometry_backend) if args.replay_frozen else run(args.frozen_log,large_pitch=args.large_pitch,tool=tool)
+    report['tool_report_sha256']=args.tool_report_sha256
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,indent=2),encoding='utf-8')
     printable={k:v for k,v in report.items() if k not in ('sampled_braking','slow_steps')}

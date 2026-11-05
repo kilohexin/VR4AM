@@ -6,6 +6,18 @@ from scripts import check_cartesian_live_motion as motion
 from app.control.cartesian_pvat_reference import JointReference
 
 
+def test_full_tool_geometry_changes_model_binding_and_is_checked_before_any_emission():
+    from app.commissioning.native_jog_mdh import MdhTool
+    from scipy.spatial.transform import Rotation
+    tool=MdhTool((.03,-.02,.07),tuple(float(v) for v in Rotation.from_euler('xyz',(.2,-.4,.3)).as_quat()))
+    assert motion.live.model_fingerprint(tool)!=motion.live.model_fingerprint()
+    source=motion.program(JointReference((0.,-.8,1.4,-.6,1.57,0.)),'01'*16,'a9'*32,tool=tool)
+    assert '.with_tool({0.03,-0.02,0.07},' in source
+    assert '__BOUND_TOOL_' not in source
+    assert source.index('tool_check();')<source.index('actual_entries<128')
+    assert source.count('lebai:move_pvat(')==1 and 'live_actual_model_mismatch' in source
+
+
 def test_motion_source_has_finite_sdk_only_actuation_and_single_exception_stop():
     source=motion.program(JointReference((0.,-.8,1.4,-.6,1.57,0.)),'01'*16,'a9'*32)
     assert source.count('lebai:move_pvat(')==1 and source.count('lebai:stop_move()')==1

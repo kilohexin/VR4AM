@@ -6,7 +6,7 @@ __CURVE_WITNESS__
 end)()
 local actual_model=(function()
 __LUA_MDH__
-end)()
+end)().with_tool(__BOUND_TOOL_POSITION__,__BOUND_TOOL_QUATERNION__)
 -- Lower-bound search pruning only. Acceptance uses the FK Cartesian witness,
 -- never this joint box, and makes no firmware quantization assumption.
 local actual_target_readout_epsilon=__TARGET_READOUT_EPSILON__

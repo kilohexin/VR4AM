@@ -23,6 +23,7 @@ from app.control.compiled_reference_geometry import CompiledReferenceModel
 from app.control.cartesian_clock import ControllerClock
 from app.control.cartesian_host_planner import CartesianHostPlanner
 from app.control.cartesian_pvat_reference import JointReference
+from app.control.cartesian_tool_binding import ZERO_TOOL,checked_tool,tool_digest
 from cartesian_signal_channel import CartesianSignalChannel
 from cartesian_native_pipe import arguments
 from cartesian_signal_publisher import CartesianSignalPublisher
@@ -30,7 +31,8 @@ from check_native_cartesian_reference import native_admission
 from check_native_cartesian_motion import transport,vec
 
 
-def program(origin,session,model_hash,*,generation=1):
+def program(origin,session,model_hash,*,generation=1,tool=ZERO_TOOL):
+    checked_tool(tool)
     if type(generation) is not int or not 1<=generation<2**31:raise ValueError('cartesian_program_generation')
     source=(ROOT/'scripts/native_cartesian_live_dry.lua').read_text(encoding='utf-8')
     for key,name in [('__BOOT_CLOCK__','cartesian_boot_clock.lua'),('__MAILBOX__','cartesian_bundle_mailbox.lua'),('__AUTHORITY__','cartesian_authority.lua'),
@@ -41,15 +43,17 @@ def program(origin,session,model_hash,*,generation=1):
     return source.replace('__ORIGIN__','{q='+vec(origin.q)+',v='+vec(origin.v)+',a='+vec(origin.a)+'}').replace('__BINDING__',binding)
 
 
-def model_fingerprint():
+def model_fingerprint(tool=ZERO_TOOL):
     sha=hashlib.sha256()
     for path in ('backend/app/control/cartesian_pvat_reference.py','backend/app/control/cartesian_reference_bundle.py',
             'backend/app/control/compiled_reference_geometry.py','backend/app/commissioning/native_jog_mdh.py',
             'backend/app/control/canonical_joint_quintic.py','backend/app/control/cartesian_bundle_wire.py',
             'backend/app/control/cartesian_host_planner.py','backend/app/control/cartesian_pose_input.py',
-            'backend/app/control/vr_pose_reference.py'):
+            'backend/app/control/vr_pose_reference.py','backend/app/control/cartesian_tool_binding.py',
+            'scripts/cartesian_lm3_geometry.lua'):
         sha.update(path.encode());sha.update((ROOT/path).read_bytes())
-    sha.update(b'zero-tool;q+-3;reference-defaults;workspace=.35;segment=24;curves=4;joint_fit;owned-braking-prefix=1')
+    sha.update(tool_digest(tool).encode())
+    sha.update(b'q+-3;reference-defaults;workspace=.35;segment=24;curves=4;joint_fit;owned-braking-prefix=1')
     return sha.hexdigest()
 
 
@@ -79,7 +83,8 @@ def synthetic_target(base,time,fixture='mixed'):
         'q':tuple((Rotation.from_quat(base.q)*Rotation.from_euler('xyz',(.04*math.sin(time),.03*math.sin(2*time),.04*math.sin(.7*time)))).as_quat())})
 
 
-async def execute(admission,*,expire=False,_source_factory=None,fixture='mixed',_input_source=None,_ready=None):
+async def execute(admission,*,expire=False,_source_factory=None,fixture='mixed',_input_source=None,_ready=None,tool=ZERO_TOOL):
+    checked_tool(tool)
     if fixture not in ('mixed','pitch-reversal'):raise ValueError('cartesian_diagnostic_fixture')
     from app.control.cartesian_pose_input import CartesianPoseInput
     if _input_source is not None and type(_input_source) is not CartesianPoseInput:
@@ -98,15 +103,15 @@ program_end(0)
     rows=[r.strip().split('\t') for r in capture['raw_output'].splitlines() if r.startswith('DRY_ORIGIN\t')]
     if capture.get('transport_returncode')!=0 or len(rows)!=1:raise ValueError('live_dry_capture')
     origin=JointReference(tuple(float(x) for x in rows[0][1:]))
-    model=await asyncio.to_thread(CompiledReferenceModel,MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
-    base=model.pose(origin.q);session=__import__('secrets').token_hex(16);fingerprint=model_fingerprint()
+    model=await asyncio.to_thread(CompiledReferenceModel,tool,(-3.,)*6,(3.,)*6)
+    base=model.pose(origin.q);session=__import__('secrets').token_hex(16);fingerprint=model_fingerprint(tool)
     if _input_source is not None:
         if _input_source.closed:raise ValueError('cartesian_live_input_retired')
         anchor=_input_source.anchor_tcp
         if (math.dist(anchor.p,base.p)>1e-6 or
                 (Rotation.from_quat(anchor.q).inv()*Rotation.from_quat(base.q)).magnitude()>1e-6):
             raise ValueError('cartesian_live_capture_changed')
-    source=(program if _source_factory is None else _source_factory)(origin,session,fingerprint,generation=generation)
+    source=(program if _source_factory is None else _source_factory)(origin,session,fingerprint,generation=generation,tool=tool)
     if await asyncio.to_thread(native_admission,admission['container_id'])!=admission:raise ValueError('live_dry_identity')
     proc=await asyncio.create_subprocess_exec(*arguments(admission,'CART_DONE'),
         stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
@@ -129,7 +134,8 @@ program_end(0)
     reader=asyncio.create_task(read());rpc=CartesianSignalChannel(admission);tasks=[];planner_task=None;cleaning=False
     stats=dict(planned=0,committed=0,rejected=0,discarded=0,late_injected=False,resumed_after_stall=False,
         math_ms=[],publications=[],authority_writes=0,expire=expire,fixture=fixture,
-        input_provider='synthetic' if _input_source is None else 'position_intent_pose',generation=generation)
+        input_provider='synthetic' if _input_source is None else 'position_intent_pose',generation=generation,
+        tool_sha256=tool_digest(tool))
     try:
         epoch=await asyncio.wait_for(ready,3);await rpc.open()
         # Explicit no-I/O clock calibration, before any input is admitted.
@@ -261,6 +267,7 @@ program_end(0)
             and following>=8 and braking>0 and not rpc.unknown and not h.publish_unknown)
         entries=[r for r in raw if r[0]=='CART_ACTUAL_ENTER']
         return dict(passed=passed,statistics=stats,raw_output=raw,heads=heads,motion_calls=len(entries),
+            tool_sha256=tool_digest(tool),
             signal_writes=True,unknown=rpc.unknown,program_sha256=hashlib.sha256(source.encode()).hexdigest(),
             model_sha256=fingerprint,product_admission_complete=False,hardware_verified=False)
     except Exception as exc:
@@ -268,6 +275,7 @@ program_end(0)
         # No actuator exists here. Preserve signal/transport uncertainty and
         # allow the finite native owner to expire; never restart/retry it.
         return dict(passed=False,error=type(exc).__name__+':'+str(exc),raw_output=raw,heads=heads,
+            tool_sha256=tool_digest(tool),
             host_reason=None if h is None else h.reason,
             unresolved_publication=bool(h is not None and h.pending is not None),
             statistics=stats,motion_calls=sum(r[0]=='CART_ACTUAL_ENTER' for r in raw),

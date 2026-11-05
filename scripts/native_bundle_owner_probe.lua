@@ -20,6 +20,7 @@ local prefix_words=__PREFIX_PACKET__
 local expected_tail=__TAIL__
 local expected_tails=__ALL_TAILS__
 local binding={session=string.rep('01',16),model=string.rep('a9',32),generation=1}
+local tool_cases=__TOOL_CASES__
 local function checked(name) print('OWNER_CHECK',name);rt_sleep(1) end
 local function refuse(fn) assert(not pcall(fn),'expected_refusal') end
 local function packet(i)
@@ -55,6 +56,26 @@ end
 local ok,err=pcall(function()
     local before=lebai:get_kin_data()
     for i=1,6 do assert(math.abs(before.actual_joint_speed[i])<1e-9,'not_quiet') end
+    do
+        local bound=local_model.with_tool(tool_cases.p,tool_cases.q)
+        local function compare()
+            for _,case in ipairs(tool_cases.poses) do
+                local actual=bound.pose(case.joints)
+                for i=1,3 do assert(math.abs(actual.p[i]-case.p[i])<1e-12,'bound_tool_position') end
+                for i=1,9 do assert(math.abs(actual.r[i]-case.r[i])<1e-12,'bound_tool_rotation') end
+            end
+        end
+        compare();checked('lua_bound_tool_matches_python')
+        tool_cases.p[1]=99;tool_cases.q[1]=99
+        local poisoned=bound.pose(tool_cases.poses[1].joints);poisoned.p[1]=99;poisoned.r[1]=99
+        compare();checked('lua_bound_tool_copies_geometry')
+        for _,bad in ipairs({{0,0,0,0},{0,0,0,2},{0,0,0,0/0}}) do
+            refuse(function() local_model.with_tool({0,0,.1},bad) end)
+        end
+        refuse(function() local_model.with_tool({0,0,1},{0,0,0,1}) end)
+        refuse(function() local_model.with_tool({0,0},{0,0,0,1}) end)
+        checked('lua_bound_tool_invalid_rejected')
+    end
     do
         local curve={identity=7,coefficients={}}
         for i=1,6 do curve[i]={-2,2};curve.coefficients[i]={0,i==1 and 1 or 0,0,0,0,0} end

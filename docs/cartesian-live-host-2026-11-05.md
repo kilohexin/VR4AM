@@ -136,3 +136,27 @@ Lua日志往返曾达到约50～100ms，不能承担80ms反馈调度。静态本
 | `xr-generation-seven-preflight.json` | `3671888126fe29a6dd2ba23142c29a7ddf4fca97db060d6d2025f590a9966b97` |
 | `cartesian-intent-live-feed.json` | `b4442765b2651fa68d3aec8641665adb7e31fe148cf3c583f7d181579464aae7` |
 | `cartesian-intent-input-expiry.json` | `89dc9a469b24d970e9c921a5e779d8a74643c277b7b0144396428653b8be7780` |
+
+## 后续：真实工具的离线绑定与隔离Docker对照
+
+11月5日现场只读发现非零工具，详见[现场记录](real-tool-readonly-2026-11-05.md)。新增不可变工具绑定：读取摘要固定、完整且配置未变的readonly报告，只接受唯一成功get_tcp；平移/旋转必须有限有效，异常不默认为零工具。工具完整七分量进入模型摘要、PositionBinding、主机模型、Lua FK、运动前工具检查及反馈离线分析。原零工具默认保留；冻结历史回放仍按其记录的工具，不允许用新工具偷换原证据。精确现场参数仅在本机材料，不写公开配置。
+
+隔离固定镜像`vr4arm-tool-bound-20261105`（network=none，无端口/挂载/设备）完成36项零运动契约，含非零工具平移/旋转与独立Python对照、输入数组修改隔离、非法工具拒绝。一次虚拟准备后，仅该仿真实例设置一次与保存报告相同的TCP；读回及三组原厂FK对照通过，关节报告不变。没有设置或读取真实机械臂。
+
+错误零工具的完整实际程序预检明确在tool_changed结束，最终运动0/停止0；正确工具完整程序首次输入前取消预检通过，亦为0/0，无新增未知。随后一次产品PositionIntent格式实时反转完成23次PVAT及全部返回，自然结束、零异常停止、新未知为空，但只接纳3条新参考、正向峰值约0.38°且无充分反向，**整轮未通过**。微小位置漂移不能替代反转覆盖。43次规划中22次原厂stale_input拒绝；计算中位约64.9ms、最高160.9ms，100ms输入门槛未放宽。
+
+固定时长模型对照中，同一0.25rad转腕4秒轨迹触发rate_reserve；6秒、8秒的相同限制纯模型轨迹可构造。这只是离线时长敏感性分析，未修改实时速度、响应频率或保护，失败原样保留。20步计算剖析显示完整备份尾段规划占主要耗时，后续优化须保留每条路径及完整尾段核验，不能靠刷新旧输入时间消除拒绝。
+
+85项相关定向回归通过，另一次慢关闭测试因假定550ms内必达20帧失败；该假定依赖Windows调度，已改为验证真实时间年龄及新序号推进，仍保持100ms期限。独立复核发现离线分析遗漏中间主机报告statistics工具摘要、还允许无摘要旧报告用新工具重算。先复现再修复：非零工具必须有匹配原摘要，顶层与statistics同时核验；无摘要仅兼容历史零工具。主机正常/失败报告均写入顶层工具摘要。仿真实例停止保留，本机真机RPC连接0。当前完成工具身份/几何贯通，尚未完成非零工具实时反转/连续跟手或产品网页/VR接线，更不构成真机放行。
+
+本机证据目录`.tmp/tool-binding-20261105/`，原始材料不提交：
+
+| 报告 | SHA256 |
+| --- | --- |
+| `native-bound-tool-contracts.json` | `c6fc27e21ff57141c8731402532afdf408bb3fb5839284678b761b0c85172d69` |
+| `virtual-tool-setup.json` | `9b55536a3e547799389088a6965c7877fa7d1f08ceb68a6609582aacf8b0bc8b` |
+| `wrong-zero-preflight.json` | `3ac5d2fcb5e3b4d83106b8b00a62c46bf0fe588092694d8a4ddffd0604c2d095` |
+| `bound-tool-preflight.json` | `3755c5b90108dff4596dbbdd43c767b0aa14db7ec5829fd672a8edfcaa937143` |
+| `bound-tool-fixed-reversal-model.json`（4秒拒绝） | `74800231e06010a36a0305ad23d47d1c0452bfd384a8f390908095365fafd33e` |
+| `bound-tool-intent-release.json`（反转覆盖不足） | `ed33f9af66aab8aba32b90d190f3f3f737b5bee1196a5f5645d670153e26647f` |
+| `bound-tool-feedback-witnesses.json`（不重判父报告） | `c9217d2bd98f22a38fb84778c3a37fe91599a8e0c0dd1ad1070614692b7d3238` |

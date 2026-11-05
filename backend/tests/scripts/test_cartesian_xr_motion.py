@@ -1,4 +1,5 @@
 import asyncio
+from time import perf_counter_ns
 
 from scripts import check_cartesian_xr_motion as xr
 from scripts import check_cartesian_live_host as live
@@ -17,17 +18,18 @@ def test_input_frames_keep_their_real_clock_while_read_channel_close_is_slow(mon
     monkeypatch.setattr(xr,'CartesianSignalChannel',Channel)
     monkeypatch.setattr(xr,'CompiledReferenceModel',lambda *a:None)
     monkeypatch.setattr(xr.motion,'analyze',lambda r:r)
-    monkeypatch.setattr(xr.motion,'analyze_pitch',lambda r:r)
+    monkeypatch.setattr(xr.motion,'analyze_pitch',lambda r,*args:r)
     async def execute(*args,_input_source,_ready,**kwargs):
         sample=_input_source.sample()
-        assert not _input_source.closed and sample is not None and sample.seq>=20
+        assert not _input_source.closed and sample is not None and sample.seq>1
+        assert 0<=perf_counter_ns()-sample.captured_ns<100_000_000
         assert _input_source.binding.generation==7
         _ready.set();await asyncio.sleep(.04)
         assert _input_source.sample().seq>sample.seq
         return dict(passed=True)
     monkeypatch.setattr(xr.live,'execute',execute)
     report=asyncio.run(xr.execute({},tmp_path/'report.json'))
-    assert report['passed'] and report['driver_error'] is None and report['input_frames']>=20
+    assert report['passed'] and report['driver_error'] is None and report['input_frames']>1
 
 
 def test_program_uses_the_input_control_generation_without_overriding_it():

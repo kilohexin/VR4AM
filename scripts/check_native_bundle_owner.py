@@ -29,7 +29,8 @@ CHECKS={'precise_tail_reconstruction','full_backup_before_output','at_most_two',
     'curve_witness_exact_point','curve_witness_keeps_deviation','curve_witness_constant',
     'curve_witness_eight_curves','lua_mdh_matches_sdk',
     'braking_prefix_opt_in','braking_prefix_owned_then_follow','braking_prefix_release_old_tail',
-    'braking_prefix_bad_start','braking_prefix_yield_recheck'}
+    'braking_prefix_bad_start','braking_prefix_yield_recheck','lua_bound_tool_matches_python',
+    'lua_bound_tool_copies_geometry','lua_bound_tool_invalid_rejected'}
 
 
 def fixtures():
@@ -58,6 +59,14 @@ def program():
     tail='{'+','.join(state(s.end) for s in packets[0].expand_tail())+'}'
     tails='{'+','.join('{'+','.join(state(s.end) for s in p.expand_tail())+'}' for p in packets)+'}'
     source=(ROOT/'scripts/native_bundle_owner_probe.lua').read_text(encoding='utf-8')
+    tool=MdhTool((.03,-.02,.07),tuple(float(v) for v in Rotation.from_euler('xyz',(.2,-.4,.3)).as_quat()))
+    model=MdhReferenceModel(tool,(-3.,)*6,(3.,)*6);cases=[]
+    for joints in (packets[0].lead.start.q,(.2,-.8,1.4,-.6,1.2,.3),(-.3,-.4,.9,.2,-1.,.4)):
+        pose=model.pose(joints)
+        cases.append('{joints='+numbers(joints)+',p='+numbers(pose.p)+',r='+
+            numbers(tuple(float(v) for v in Rotation.from_quat(pose.q).as_matrix().ravel()))+'}')
+    source=source.replace('__TOOL_CASES__','{p='+numbers(tool.translation_m)+',q='+numbers(tool.rotation_xyzw)+
+        ',poses={'+','.join(cases)+'}}')
     return source.replace('__MAILBOX__',(ROOT/'scripts/cartesian_bundle_mailbox.lua').read_text(encoding='utf-8'))\
         .replace('__OWNER__',(ROOT/'scripts/cartesian_bundle_owner.lua').read_text(encoding='utf-8'))\
         .replace('__SDK_RESULT__',(ROOT/'scripts/pvat_sdk_result.lua').read_text(encoding='utf-8'))\
