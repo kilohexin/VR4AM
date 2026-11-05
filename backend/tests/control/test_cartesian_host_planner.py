@@ -110,6 +110,31 @@ def test_owned_dynamic_braking_state_can_plan_without_waiting_for_terminal(host)
     assert resumed.bundle.expand_tail()==resumed.checkpoint._tail
 
 
+def test_explicit_braking_prefix_plans_exact_owned_future_and_survives_one_cursor_step(host):
+    h,_,_=host;h.planning_braking_prefix=True
+    first=h.complete(result(host));h.acknowledge(first.sequence,True)
+    h.observe_owned_cursor(1,first.sequence,'active',generation=1)
+    future=first.expand_tail()[0].end
+    assert h.planning_head()==(2,future)
+    job=h.begin(160)
+    assert job.parent_tick==2 and job.source.state==future
+    planned=h.calculate(job)
+    h.observe_owned_cursor(2,first.sequence,'active',generation=1)
+    next_packet=h.complete(planned)
+    assert next_packet is not None and next_packet.lead.start==future
+    assert next_packet.parent_tick==2
+
+
+def test_braking_prefix_cannot_follow_a_cursor_that_has_passed_its_exact_start(host):
+    h,_,_=host;h.planning_braking_prefix=True
+    first=h.complete(result(host));h.acknowledge(first.sequence,True)
+    assert first.braking_ticks>=2
+    h.observe_owned_cursor(1,first.sequence,'active',generation=1)
+    planned=h.calculate(h.begin(160))
+    h.observe_owned_cursor(3,first.sequence,'active',generation=1)
+    assert h.complete(planned) is None and not h.closed
+
+
 def test_rejected_first_packet_cannot_pin_the_controller_reference_epoch(host):
     h,_,_=host;first=h.complete(result(host))
     h.acknowledge(first.sequence,False)

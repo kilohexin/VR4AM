@@ -47,8 +47,17 @@ def model_fingerprint():
             'backend/app/control/canonical_joint_quintic.py','backend/app/control/cartesian_bundle_wire.py',
             'backend/app/control/cartesian_host_planner.py'):
         sha.update(path.encode());sha.update((ROOT/path).read_bytes())
-    sha.update(b'zero-tool;q+-3;reference-defaults;workspace=.35;segment=24;curves=4;joint_fit')
+    sha.update(b'zero-tool;q+-3;reference-defaults;workspace=.35;segment=24;curves=4;joint_fit;owned-braking-prefix=1')
     return sha.hexdigest()
+
+
+def run_local(coroutine):
+    # Match the product launcher: QPC owns BOTH time readings and timers.
+    # Merely calling perf_counter in callbacks does not fix the default
+    # Windows event loop's GetTickCount64 scheduling resolution.
+    from app.commissioning.qpc_event_loop import new_qpc_loop
+    with asyncio.Runner(loop_factory=new_qpc_loop) as runner:
+        return runner.run(coroutine)
 
 
 def synthetic_target(base,time,fixture='mixed'):
@@ -137,7 +146,7 @@ program_end(0)
         # count the entire clock uncertainty twice and starve all resumption.
         clock=lambda:pair.capture_lower_ms(perf_counter_ns())-epoch
         h=CartesianHostPlanner(model,origin,session=session,model_sha256=fingerprint,generation=1,
-            clock=clock,braking_segment_limit=24,braking_curve_limit=4)
+            clock=clock,planning_braking_prefix=True,braking_segment_limit=24,braking_curve_limit=4)
         publisher=CartesianSignalPublisher(rpc,h,epoch_ms=epoch,clock_pair=pair,host_clock=perf_counter_ns)
         latest=[None];active=True;start=perf_counter_ns();stall_finished=False
         async def monitor():
@@ -255,7 +264,8 @@ def main():
     p.add_argument('--output',type=Path,required=True);p.add_argument('--run',action='store_true')
     p.add_argument('--expire',action='store_true');args=p.parse_args();admitted=native_admission(args.container)
     if not args.run:print(json.dumps(dict(admission=admitted,execute=False,motion_calls=0)));return 0
-    report=asyncio.run(execute(admitted,expire=args.expire));report['admission']=admitted
+    report=run_local(execute(admitted,expire=args.expire));report['admission']=admitted
+    report['scheduler_clock']='time.perf_counter'
     args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(report,indent=2),encoding='utf-8')
     summary={k:v for k,v in report.items() if k not in ('raw_output','heads','admission','statistics')}
     summary['statistics']={k:v for k,v in report.get('statistics',{}).items() if k not in ('math_ms','publications')}

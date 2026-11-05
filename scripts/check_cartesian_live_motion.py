@@ -111,6 +111,30 @@ def analyze(report):
     return report
 
 
+def analyze_pitch(report):
+    """Require observed angular motion in BOTH directions, not just no drift."""
+    from scipy.spatial.transform import Rotation
+    from app.commissioning.native_jog_mdh import MdhTool
+    from app.control.cartesian_pvat_reference import MdhReferenceModel
+    rows=report.get('raw_output',[])
+    quiet=[r for r in rows if r[0]=='CART_ACTUAL_QUIET']
+    origin=[r for r in rows if r[0]=='CART_HEAD' and int(r[2])==0]
+    samples=[r for r in rows if r[0]=='CART_ACTUAL_KIN']
+    drift=float(quiet[0][4]) if len(quiet)==1 else None
+    pitch=[]
+    if origin and samples:
+        model=MdhReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
+        base=Rotation.from_quat(model.pose(tuple(map(float,origin[0][4:10]))).q)
+        for row in samples:
+            q=tuple(map(float,row[2:8]));rotation=Rotation.from_quat(model.pose(q).q)
+            pitch.append(float(-(base.inv()*rotation).as_rotvec()[0]))
+    report.update(fixed_tcp_pitch_drift_m=drift,
+        sampled_pitch_min_rad=min(pitch,default=None),sampled_pitch_max_rad=max(pitch,default=None))
+    report['passed']=bool(report['passed'] and drift is not None and drift<=.002
+        and pitch and min(pitch)<-.02 and max(pitch)>.02)
+    return report
+
+
 async def preflight(admission,*,source_path=None,early_release=False):
     """Same actual executable, ZERO goal packets, explicit final zero ledger."""
     channel=CartesianSignalChannel(admission);proc=None;reader=None;raw=[]
@@ -184,14 +208,11 @@ def main():
         args.output.parent.mkdir(parents=True,exist_ok=True)
         args.output.with_suffix('.lua').write_text(source,encoding='utf-8')
         return source
-    report=(asyncio.run(preflight(admission,source_path=args.output.with_suffix('.lua'),early_release=args.early_release)) if args.preflight else
-        analyze(asyncio.run(live.execute(admission,expire=args.expire,_source_factory=frozen_program,fixture=args.fixture))))
+    report=(live.run_local(preflight(admission,source_path=args.output.with_suffix('.lua'),early_release=args.early_release)) if args.preflight else
+        analyze(live.run_local(live.execute(admission,expire=args.expire,_source_factory=frozen_program,fixture=args.fixture))))
+    report['scheduler_clock']='time.perf_counter'
     if args.fixture=='pitch-reversal' and not args.preflight:
-        quiet=[r for r in report.get('raw_output',[]) if r[0]=='CART_ACTUAL_QUIET']
-        drift=float(quiet[0][4]) if len(quiet)==1 else None
-        report['fixed_tcp_pitch_drift_m']=drift
-        # An additional fixture acceptance, not a claim of physical accuracy.
-        report['passed']=bool(report['passed'] and drift is not None and drift<=.002)
+        analyze_pitch(report)
     report['admission']=admission;report['readout_guard']='cartesian_curve_witness'
     report['joint_box_pruning_padding_rad']=ACTUAL_TARGET_READOUT_EPSILON
     args.output.parent.mkdir(parents=True,exist_ok=True)

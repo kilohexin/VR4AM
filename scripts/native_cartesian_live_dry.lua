@@ -42,7 +42,7 @@ local ok,err=pcall(function()
         end
         return #tail==packet.braking_ticks
     end
-    local owner=owner_module.new(binding,origin,clock,certified,500,100,true)
+    local owner=owner_module.new(binding,origin,clock,certified,500,100,true,true)
     local lease=authority_module.new(get_signals,get_signal,clock,binding,500)
     local reader=mailbox.new(get_signals,get_signal,clock,binding,500,lease.fresh,true)
     local started=false;local finish=false;local failure=nil;local emitted=0;local profiles={}

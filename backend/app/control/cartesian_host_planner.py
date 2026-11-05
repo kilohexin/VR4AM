@@ -40,7 +40,9 @@ def _branch(supervisor):
 
 class CartesianHostPlanner:
     def __init__(self,model,start,*,session,model_sha256,generation,clock,
-            workspace_span=.35,**options):
+            workspace_span=.35,planning_braking_prefix=False,**options):
+        if type(planning_braking_prefix) is not bool:raise ValueError('cartesian_host_configuration')
+        self.planning_braking_prefix=planning_braking_prefix;self.emitted_sequence=0
         self.clock=clock;self.session=session;self.model_sha256=model_sha256;self.generation=generation
         self.supervisor=OfflineReferenceSupervisor(model,start,workspace_span=workspace_span,
             braking_method='joint_fit',continue_on_known_rejection=True,**options)
@@ -113,6 +115,15 @@ class CartesianHostPlanner:
         if self.tip_tick-self.head_tick>=2:return None
         if self.tip_tick==self.head_tick and self.native_phase=='holding':
             return self.head_tick+1,self.head
+        if self.planning_braking_prefix and self.tip_tick==self.head_tick and self.native_phase=='active':
+            packet=self.accepted.get(self.emitted_sequence)
+            if packet is not None:
+                offset=self.head_tick-packet.parent_tick-1
+                if 0<=offset<packet.braking_ticks:
+                    # This is an EXACT already-installed tail point, not an
+                    # extrapolation from measured P/V/A or an unowned goal.
+                    state=packet.expand_tail()[offset].end
+                    if state in self.checkpoints:return self.head_tick+1,state
         return self.tip_tick,self.tip
 
     def observe_owned_cursor(self,tick,sequence,phase,*,generation):
@@ -134,6 +145,7 @@ class CartesianHostPlanner:
             else:
                 self.close('cartesian_host_cursor');raise ValueError(self.reason)
         self.native_phase=phase;self.observe_head(state,tick,generation=generation)
+        self.emitted_sequence=sequence
 
     def begin(self,due_ms):
         now=self._live()
@@ -180,8 +192,13 @@ class CartesianHostPlanner:
         quiet_prefix=(self.native_phase=='holding' and self.tip_tick==self.head_tick
             and result.job.parent_tick in (self.head_tick,self.head_tick+1)
             and result.job.source.state==self.head)
+        braking_prefix=(self.planning_braking_prefix and self.tip_tick==self.head_tick
+            and self.head_tick<=result.job.parent_tick<=self.head_tick+1
+            and result.job.source.state in self.allowed_states.get(result.job.parent_tick,set())
+            and result.job.source.state in self.checkpoints)
         if (now>=result.job.due_ms or now-result.job.captured_ms>=100 or tip is None
-                or not quiet_prefix and (result.job.parent_tick!=tip[0] or result.job.source.state!=tip[1])):
+                or not quiet_prefix and not braking_prefix
+                    and (result.job.parent_tick!=tip[0] or result.job.source.state!=tip[1])):
             return None
         if result.bundle is None:return None
         self.pending=result;return result.bundle

@@ -27,7 +27,9 @@ CHECKS={'precise_tail_reconstruction','full_backup_before_output','at_most_two',
     'bounded_preload_schedule','joints_unchanged','quiet_prefix_no_write','quiet_prefix_release',
     'moving_prefix_refused','reference_age_rechecked','binary_tail_identity',
     'curve_witness_exact_point','curve_witness_keeps_deviation','curve_witness_constant',
-    'curve_witness_eight_curves','lua_mdh_matches_sdk'}
+    'curve_witness_eight_curves','lua_mdh_matches_sdk',
+    'braking_prefix_opt_in','braking_prefix_owned_then_follow','braking_prefix_release_old_tail',
+    'braking_prefix_bad_start','braking_prefix_yield_recheck'}
 
 
 def fixtures():
@@ -51,6 +53,7 @@ def program():
     def numbers(values):return '{'+','.join(repr(v) for v in values)+'}'
     def state(s):return '{q='+numbers(s.q)+',v='+numbers(s.v)+',a='+numbers(s.a)+'}'
     packets=fixtures()
+    prefix=braking_prefix_fixture()
     words='{'+','.join(numbers(encode(p)) for p in packets)+'}'
     tail='{'+','.join(state(s.end) for s in packets[0].expand_tail())+'}'
     tails='{'+','.join('{'+','.join(state(s.end) for s in p.expand_tail())+'}' for p in packets)+'}'
@@ -60,7 +63,25 @@ def program():
         .replace('__SDK_RESULT__',(ROOT/'scripts/pvat_sdk_result.lua').read_text(encoding='utf-8'))\
         .replace('__CURVE_WITNESS__',(ROOT/'scripts/cartesian_curve_witness.lua').read_text(encoding='utf-8'))\
         .replace('__LUA_MDH__',(ROOT/'scripts/cartesian_lm3_geometry.lua').read_text(encoding='utf-8'))\
-        .replace('__PACKETS__',words).replace('__TAIL__',tail).replace('__ALL_TAILS__',tails)
+        .replace('__PACKETS__',words).replace('__TAIL__',tail).replace('__ALL_TAILS__',tails)\
+        .replace('__PREFIX_PACKET__',numbers(encode(prefix)))
+
+
+def braking_prefix_fixture():
+    model=MdhReferenceModel(MdhTool((0.,0.,0.),(0.,0.,0.,1.)),(-3.,)*6,(3.,)*6)
+    first=fixtures()[0];initial=first.lead.start;base=model.pose(initial.q)
+    target=base.model_copy(update={'q':tuple((Rotation.from_quat(base.q)*Rotation.from_euler('x',.15)).as_quat())})
+    supervisor=OfflineReferenceSupervisor(model,initial,continue_on_known_rejection=True,
+        braking_method='joint_fit',braking_segment_limit=24,braking_curve_limit=4)
+    approved=supervisor.advance(target)
+    if approved.segment!=first.lead:raise ValueError('owner_prefix_fixture_origin')
+    supervisor._consume_tail()  # Consume the already-approved first brake.
+    next=supervisor.advance(target)
+    if next.mode!='following':raise ValueError('owner_prefix_fixture_not_approved')
+    packet=CompactBundle(first.session,first.model_sha256,1,first.sequence+1,2,280,100,
+        next.segment,next.braking_tail[-1].end,len(next.braking_tail))
+    if packet.expand_tail()!=next.braking_tail:raise ValueError('owner_prefix_compaction')
+    return packet
 
 
 def analyze(raw):

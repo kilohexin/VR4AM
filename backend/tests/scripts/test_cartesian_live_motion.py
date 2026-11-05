@@ -46,8 +46,27 @@ def test_zero_command_rejection_does_not_invent_a_motion_stop_obligation():
     assert not r['passed'] and not r['unknown_motion_write'] and not r['stop_unverified']
 
 
+def test_no_position_drift_without_angular_coverage_cannot_pass_pitch_reversal():
+    r=dict(passed=True,raw_output=[['CART_ACTUAL_QUIET','1','1','100','0','0']])
+    assert not motion.analyze_pitch(r)['passed']
+    assert r['sampled_pitch_min_rad'] is None
+
+
 def test_preview_has_no_execute_path(monkeypatch,tmp_path,capsys):
     monkeypatch.setattr(motion.sys,'argv',['motion','--container','virtual','--output',str(tmp_path/'unused.json')])
     monkeypatch.setattr(motion,'native_admission',lambda _:dict(container_id='virtual'))
     monkeypatch.setattr(motion.live,'execute',lambda *a,**k:pytest.fail('preview must not execute'))
     assert motion.main()==0 and '"execute": false' in capsys.readouterr().out
+
+
+def test_virtual_entry_uses_the_product_high_resolution_loop(monkeypatch,tmp_path):
+    import asyncio
+    from app.commissioning.qpc_event_loop import QpcEventLoop
+    monkeypatch.setattr(motion.sys,'argv',['motion','--container','virtual','--output',str(tmp_path/'report.json'),
+        '--run','--preflight'])
+    monkeypatch.setattr(motion,'native_admission',lambda _:dict(container_id='virtual'))
+    async def probe(*args,**kwargs):
+        assert isinstance(asyncio.get_running_loop(),QpcEventLoop)
+        return dict(passed=True,preflight_only=True)
+    monkeypatch.setattr(motion,'preflight',probe)
+    assert motion.main()==0

@@ -49,13 +49,14 @@ local function expand(packet)
     return tail
 end
 
-function M.new(binding,origin,clock,validate,ttl,reference_ttl,allow_quiet_prefix)
+function M.new(binding,origin,clock,validate,ttl,reference_ttl,allow_quiet_prefix,allow_braking_prefix)
     assert(type(validate)=='function' and quiet(origin),'bundle_owner_configuration')
     assert(type(ttl)=='number' and ttl>=1 and ttl<=500 and ttl==math.floor(ttl),'bundle_owner_configuration')
     reference_ttl=reference_ttl or ttl
     assert(type(reference_ttl)=='number' and reference_ttl>=1 and reference_ttl<=ttl
         and reference_ttl==math.floor(reference_ttl),'bundle_owner_configuration')
     assert(allow_quiet_prefix==nil or type(allow_quiet_prefix)=='boolean','bundle_owner_configuration')
+    assert(allow_braking_prefix==nil or type(allow_braking_prefix)=='boolean','bundle_owner_configuration')
     local self={phase='waiting',head=clone(origin),head_tick=0,queue={},tail={},epoch=nil,
         released=false,last_sequence=0,last_authority=nil,last_now=clock(),reason=nil,requires_stop=false}
     local function fail(reason)
@@ -90,6 +91,14 @@ function M.new(binding,origin,clock,validate,ttl,reference_ttl,allow_quiet_prefi
         if #self.queue>0 then return packet.parent_tick==self.queue[#self.queue].packet.parent_tick+1 end
         return packet.parent_tick==self.head_tick or allow_quiet_prefix and self.phase=='holding'
             and #self.tail==0 and quiet(self.head) and packet.parent_tick==self.head_tick+1
+            or allow_braking_prefix and #self.tail>0 and packet.parent_tick==self.head_tick+1
+    end
+    local function expected_start(packet)
+        if #self.queue>0 then return self.queue[#self.queue].packet.next end
+        if allow_braking_prefix and packet.parent_tick==self.head_tick+1 and #self.tail>0 then
+            return self.tail[1].next
+        end
+        return self.head
     end
     function self.offer_authority(captured_ms)
         live();local time=now()
@@ -119,7 +128,7 @@ function M.new(binding,origin,clock,validate,ttl,reference_ttl,allow_quiet_prefi
         self.last_sequence=packet.sequence
         if #self.queue>=2 then return false,'queue_full' end
         if not expected_parent(packet) then return false,'stale_parent' end
-        local expected=#self.queue>0 and self.queue[#self.queue].packet.next or self.head
+        local expected=expected_start(packet)
         if not equal(packet.start,expected) then return false,'start_mismatch' end
         local epoch=self.epoch or packet.due_ms
         local deadline=epoch+math.max(0,packet.parent_tick-1)*80
@@ -139,7 +148,7 @@ function M.new(binding,origin,clock,validate,ttl,reference_ttl,allow_quiet_prefi
         if not authority(time) then return false,'authority_expired' end
         if time>=deadline then return false,'late_bundle' end
         if self.released then return false,'released' end
-        local current=#self.queue>0 and self.queue[#self.queue].packet.next or self.head
+        local current=expected_start(packet)
         if not expected_parent(packet) or not equal(packet.start,current) then
             return false,'stale_parent'
         end
@@ -167,11 +176,17 @@ function M.new(binding,origin,clock,validate,ttl,reference_ttl,allow_quiet_prefi
         if time-due(self.head_tick)>=80 then fail('bundle_owner_cadence_lost') end
         local segment,mode
         if #self.queue>0 and self.queue[1].packet.parent_tick==self.head_tick+1 then
-            if not allow_quiet_prefix or #self.tail~=0 or not quiet(self.head) then fail('bundle_owner_chain') end
-            -- One exact zero-rate hold tick, no actuator write, epoch unchanged.
-            self.head_tick=self.head_tick+1;self.phase='holding';return nil
+            if allow_braking_prefix and #self.tail>0 then
+                -- Consume the previously installed backup FIRST. The future
+                -- lead cannot replace it or start from a guessed dynamic PVA.
+                segment=table.remove(self.tail,1);mode='braking'
+            else
+                if not allow_quiet_prefix or #self.tail~=0 or not quiet(self.head) then fail('bundle_owner_chain') end
+                -- One exact zero-rate hold tick, no actuator write, epoch unchanged.
+                self.head_tick=self.head_tick+1;self.phase='holding';return nil
+            end
         end
-        if #self.queue>0 and not self.released then
+        if not segment and #self.queue>0 and not self.released then
             local staged=table.remove(self.queue,1)
             if staged.packet.parent_tick~=self.head_tick or not equal(staged.packet.start,self.head) then
                 fail('bundle_owner_chain')
@@ -179,11 +194,11 @@ function M.new(binding,origin,clock,validate,ttl,reference_ttl,allow_quiet_prefi
             -- Install the FULL backup BEFORE returning an actuator candidate.
             self.tail=staged.tail;segment={start=staged.packet.start,next=staged.packet.next};mode='following'
             self.emitted_sequence=staged.packet.sequence
-        elseif #self.tail>0 then segment=table.remove(self.tail,1);mode='braking'
-        elseif quiet(self.head) then
+        elseif not segment and #self.tail>0 then segment=table.remove(self.tail,1);mode='braking'
+        elseif not segment and quiet(self.head) then
             if self.released then self.phase='ready';return nil end
             self.phase='holding';self.head_tick=self.head_tick+1;return nil
-        else fail('bundle_owner_missing_tail') end
+        elseif not segment then fail('bundle_owner_missing_tail') end
         if not equal(segment.start,self.head) then fail('bundle_owner_chain') end
         self.head=clone(segment.next);self.head_tick=self.head_tick+1
         if self.released then self.phase=#self.tail==0 and 'ready' or 'finishing'

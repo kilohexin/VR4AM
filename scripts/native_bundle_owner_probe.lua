@@ -16,6 +16,7 @@ local local_model=(function()
 __LUA_MDH__
 end)()
 local words=__PACKETS__
+local prefix_words=__PREFIX_PACKET__
 local expected_tail=__TAIL__
 local expected_tails=__ALL_TAILS__
 local binding={session=string.rep('01',16),model=string.rep('a9',32),generation=1}
@@ -35,9 +36,9 @@ end
 local function validator(p,tail)
     return #tail==p.braking_ticks and p.braking_ticks>0
 end
-local function fixture(validate,prefix)
+local function fixture(validate,prefix,braking_prefix)
     local time=100
-    local owner=owner_module.new(binding,packet(1).start,function() return time end,validate or validator,500,nil,prefix)
+    local owner=owner_module.new(binding,packet(1).start,function() return time end,validate or validator,500,nil,prefix,braking_prefix)
     owner.offer_authority(100)
     return owner,function(t) time=t end
 end
@@ -136,6 +137,45 @@ local ok,err=pcall(function()
         same(owner.tail[1].start,lead.next);checked('full_backup_before_output')
         for i=1,#expected_tail do same(owner.tail[i].next,expected_tail[i],1e-10) end
         checked('precise_tail_reconstruction')
+    end
+    do
+        local p=mailbox.decode(prefix_words)
+        local old,oldtime=fixture();assert(old.stage(packet(1)));oldtime(200);old.take_next()
+        local accepted,why=old.stage(p);assert(not accepted and why=='stale_parent')
+        checked('braking_prefix_opt_in')
+        local owner,settime=fixture(nil,nil,true);assert(owner.stage(packet(1)));settime(200)
+        owner.take_next();assert(owner.stage(p))
+        local previous=owner.tail[1];local brake,mode=owner.take_next()
+        assert(mode=='braking' and #owner.queue==1);same(brake.next,previous.next)
+        settime(280);local lead,kind=owner.take_next()
+        assert(kind=='following' and #owner.queue==0 and #owner.tail==p.braking_ticks)
+        same(lead.start,brake.next);same(lead.next,p.next)
+        checked('braking_prefix_owned_then_follow')
+    end
+    do
+        local p=mailbox.decode(prefix_words)
+        local owner,settime=fixture(nil,nil,true);assert(owner.stage(packet(1)));settime(200);owner.take_next()
+        local terminal=owner.tail[#owner.tail].next;assert(owner.stage(p));owner.finish('release')
+        assert(#owner.queue==0);drain(owner,settime,true);same(owner.head,terminal)
+        assert(owner.phase=='ready');checked('braking_prefix_release_old_tail')
+    end
+    do
+        local p=mailbox.decode(prefix_words);p.start.q[1]=p.start.q[1]+1e-12
+        local owner,settime=fixture(nil,nil,true);assert(owner.stage(packet(1)));settime(200);owner.take_next()
+        local accepted,why=owner.stage(p)
+        assert(not accepted and why=='start_mismatch' and #owner.queue==0)
+        checked('braking_prefix_bad_start')
+    end
+    do
+        local owner,settime;local consume=false
+        owner,settime=fixture(function()
+            if consume then owner.take_next() end
+            return true
+        end,nil,true)
+        assert(owner.stage(packet(1)));settime(200);owner.take_next();consume=true
+        assert(owner.stage(mailbox.decode(prefix_words)) and owner.head_tick==2)
+        settime(280);local _,mode=owner.take_next();assert(mode=='following')
+        checked('braking_prefix_yield_recheck')
     end
     do
         local owner,settime=fixture();assert(owner.stage(packet(1)));assert(owner.stage(packet(2)))
