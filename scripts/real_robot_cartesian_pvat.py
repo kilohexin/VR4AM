@@ -24,7 +24,8 @@ def source_identity():
     # Content and relative paths, including this entry, not a git revision
     # that would miss uncommitted edits. Excludes all private field material.
     files=sorted(p for p in (ROOT/'backend/app').rglob('*') if p.suffix in ('.py','.lua'))
-    files.append(Path(__file__).resolve())
+    files.extend(ROOT/'scripts'/name for name in ('real_robot_cartesian_pvat.py',
+        'real_pvat_native.py','real_pvat_finite.lua','cartesian_lm3_geometry.lua'))
     manifest=[(p.relative_to(ROOT).as_posix(),sha256(p.read_bytes()).hexdigest()) for p in files]
     return sha256(json.dumps(manifest,separators=(',',':')).encode()).hexdigest()
 
