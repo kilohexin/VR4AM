@@ -1,4 +1,5 @@
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -98,3 +99,24 @@ def test_initial_feedback_is_validated_before_admission(contract,field,value):
     from scripts.real_pvat_native import analyze
     rows=trace(contract);rows[0][field]=value
     assert not analyze(contract,rows)['sampled_passed']
+
+
+def test_preloaded_first_reply_candidate_is_explicit_and_independently_replayed(contract):
+    from scripts.real_pvat_native import build_program,analyze
+    rows=trace(contract)
+    rows[3][2]='61';rows[4][1:3]=['63','63']
+    candidate=replace(contract,first_reply_deadline_ns=80_000_000)
+    assert 'local first_reply_ms=80' in build_program(candidate)
+    assert 'local first_reply_ms=60' in build_program(contract)
+    assert analyze(candidate,rows)['sampled_passed']
+    assert not analyze(contract,rows)['sampled_passed']
+
+
+def test_direct_api_is_explicit_named_joints_and_true_return_without_fallback(contract):
+    from scripts.real_pvat_native import build_program
+    direct=replace(contract,pvat_api='lua')
+    source=build_program(direct)
+    assert direct.sha256!=contract.sha256
+    assert 'lebai:move_pvat' not in source
+    assert 'move_pvat(joint_pose(item.p),joint_pose(item.v),joint_pose(item.a),.08)==true' in source
+    assert 'q["j"..i]=values[i]' in source

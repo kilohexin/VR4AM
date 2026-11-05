@@ -28,15 +28,20 @@ def build_program(contract):
     pose=Pose(p=contract.model_tool.translation_m,q=contract.model_tool.rotation_xyzw)
     from scipy.spatial.transform import Rotation
     rotation=tuple(float(x) for x in Rotation.from_quat(pose.q).as_matrix().ravel())
+    sender=('local function send_pvat(item)\n lebai:move_pvat(item.p,item.v,item.a,.08)\nend\n')
+    if contract.pvat_api=='lua':
+        sender=('local function joint_pose(values)\n local q={}\n for i=1,6 do q["j"..i]=values[i] end\n return q\nend\n'
+            'local function send_pvat(item)\n assert(move_pvat(joint_pose(item.p),joint_pose(item.v),joint_pose(item.a),.08)==true,"pvat_api_rejected")\nend\n')
     return ('program_begin(0)\ndisable_auto_sync()\n-- contract '+contract.sha256+'\n'
         +'local geometry=(function()\n'+geometry+'\nend)()\n'
         +'local model=geometry.with_tool('+lua(pose.p)+','+lua(pose.q)+')\n'
         +'local tool_pose={p='+lua(pose.p)+',r='+lua(rotation)+'}\n'
         +'local origin='+lua(contract.origin.q)+'\n'
+        +'local first_reply_ms='+str(contract.first_reply_deadline_ns//1_000_000)+'\n'
         +'local lower='+lua(contract.joint_lower)+';local upper='+lua(contract.joint_upper)+'\n'
         +'local box_lower='+lua(contract.workspace_lower)+';local box_upper='+lua(contract.workspace_upper)+'\n'
         +'local points={'+','.join('{p='+lua(s.end.q)+',v='+lua(s.end.v)+',a='+lua(s.end.a)+'}' for s in contract.points)+'}\n'
-        +body+'\nprogram_end(0)\n')
+        +sender+body+'\nprogram_end(0)\n')
 
 
 def analyze(contract,rows):

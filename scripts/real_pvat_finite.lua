@@ -131,11 +131,11 @@ local ok,err=pcall(function()
    assert(not previous or n-previous<80,'pvat_cadence')
    assert(index*80-(n-epoch)<=160,'queue_lead')
    pending=true;entered=index;previous=n;event('RP_ENTER',index,n)
-   local sent,reason=pcall(function() lebai:move_pvat(item.p,item.v,item.a,.08) end)
+   local sent,reason=pcall(function() send_pvat(item) end)
    pending=false -- Call activity ended; this does NOT resolve a failed write.
    if not sent then event('RP_WRITE_ERROR',index,clock());error('pvat_write_unknown') end
    local r=clock();returned=returned+1;event('RP_RETURN',index,r)
-   assert(r-n<60,'pvat_reply_deadline')
+   assert(r-n<(index==1 and first_reply_ms or 60),'pvat_reply_deadline')
   end
  end)
  wait_all(monitor,sender);assert(not failure,tostring(failure));assert(arrival and returned==20,'incomplete')

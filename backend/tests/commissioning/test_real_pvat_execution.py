@@ -215,3 +215,28 @@ def test_replacing_a_contract_cannot_bypass_path_validation(contract):
     stationary=PvatSegment(contract.origin,contract.origin,.08)
     with pytest.raises(ValueError):replace(contract,points=(stationary,)*20)
     with pytest.raises(ValueError):replace(contract,tool_sha256='f'*64)
+
+
+def test_explicit_preloaded_first_reply_policy_keeps_cadence_and_late_isolation(contract):
+    from app.commissioning.real_cartesian_pvat import FinitePvatWindow
+    candidate=replace(contract,first_reply_deadline_ns=80_000_000)
+    assert candidate.sha256!=contract.sha256
+    owner=object();w=FinitePvatWindow(candidate,owner,7)
+    w.admit(owner,7,candidate.sha256,candidate.tool_sha256,candidate.origin,candidate.origin,'IDLE',0,1)
+    w.enter(owner,7,1,1);w.returned(1,60_000_001)
+    assert not w.fault and not w.motion_unknown
+    with pytest.raises(ValueError,match='cadence'):w.enter(owner,7,2,80_000_001)
+    assert w.entered==1
+    with pytest.raises(ValueError):replace(contract,first_reply_deadline_ns=81_000_000)
+
+
+@pytest.mark.parametrize('index',[1,2])
+def test_first_reply_candidate_never_relaxes_later_packets(contract,index):
+    from app.commissioning.real_cartesian_pvat import FinitePvatWindow
+    c=replace(contract,first_reply_deadline_ns=80_000_000);owner=object();w=FinitePvatWindow(c,owner,7)
+    w.admit(owner,7,c.sha256,c.tool_sha256,c.origin,c.origin,'IDLE',0,1)
+    w.enter(owner,7,1,1)
+    if index==1:w.returned(1,80_000_001)
+    else:
+        w.returned(1,60_000_001);w.enter(owner,7,2,79_000_001);w.returned(2,139_000_001)
+    assert w.fault=='pvat_reply_deadline' and w.motion_unknown

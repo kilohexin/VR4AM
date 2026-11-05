@@ -47,9 +47,14 @@ class FinitePvatContract:
     source_sha256: str
     tool_report_sha256: str
     model_tool: object
+    first_reply_deadline_ns: int = 60_000_000
+    pvat_api: str = 'sdk'
     motion_admitted: bool = field(default=False, init=False)
 
     def __post_init__(self):
+        if type(self.first_reply_deadline_ns) is not int or self.first_reply_deadline_ns not in (60_000_000,80_000_000):
+            raise ValueError('pvat_first_reply_policy')
+        if type(self.pvat_api) is not str or self.pvat_api not in ('sdk','lua'):raise ValueError('pvat_api')
         for name in ('tool_sha256', 'config_sha256', 'source_sha256', 'tool_report_sha256'):
             _digest(getattr(self, name))
         for name, size in (('joint_lower',6),('joint_upper',6),('workspace_lower',3),('workspace_upper',3)):
@@ -89,6 +94,8 @@ class FinitePvatContract:
             workspace_lower=self.workspace_lower,workspace_upper=self.workspace_upper,
             tool_sha256=self.tool_sha256,config_sha256=self.config_sha256,source_sha256=self.source_sha256,
             tool_report_sha256=self.tool_report_sha256,motion_admitted=False,
+            first_reply_deadline_ns=self.first_reply_deadline_ns,
+            pvat_api=self.pvat_api,
             native_interpolation_verified=False)
 
     @property
@@ -185,7 +192,8 @@ class FinitePvatWindow:
     def returned(self,index,now_ns):
         self._clock(now_ns)
         if type(index) is not int or self.pending_index!=index:self._reject('pvat_unmatched_return')
-        if now_ns-self.pending_since>=60_000_000:self.revoke('pvat_reply_deadline')
+        deadline=self.contract.first_reply_deadline_ns if index==1 else 60_000_000
+        if now_ns-self.pending_since>=deadline:self.revoke('pvat_reply_deadline')
         self.pending_index=None;self.pending_since=None;self.returned_count+=1
         if not self.fault and self.returned_count==20:self.phase='awaiting_arrival'
 
