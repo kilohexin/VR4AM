@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LM3 8 秒绕箱实验结果</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+<header class="top"><span class="brand"><i></i> VR4Arm</span><span class="mode" id="mode">实验结果 · 2026-11-25</span></header>
+<main>
+  <section class="hero">
+    <div><h1 id="demo-title">LM3 8 秒绕箱实验</h1><p id="demo-subtitle">MoveIt 规划一条路线，MuJoCo 和乐白 Docker 各自执行。</p></div>
+    <button id="play" disabled>▶ 播放完整演示</button>
+  </section>
+  <nav class="run-links" aria-label="实验资源"><a href="./" id="site-detour-eight-full-link">8 秒完整采集</a><a href="https://github.com/kilohexin/VR4AM/tree/master/simulation/lm3-mujoco">MuJoCo 模型与复现资源</a></nav>
+  <div class="capture-bar" id="capture-bar">
+    <span id="capture-status" role="status">正在加载实验结果。</span>
+    <span id="capture-error" role="alert" hidden></span>
+  </div>
+  <section class="summary" id="capture-summary" aria-label="LM3 真机与 MuJoCo 的 TCP 位置误差" hidden>
+    <div><h2>起动对齐峰值</h2><strong id="capture-peak"></strong><p id="capture-peak-time"></p></div>
+    <div><h2>8 秒轨迹 RMSE</h2><strong id="capture-rmse"></strong><p>按起动时刻对齐</p></div>
+    <div><h2>停稳后差值</h2><strong id="capture-settled"></strong><p>LM3 真机与 MuJoCo</p></div>
+  </section>
+  <div class="phases" id="phases" aria-label="演示步骤">
+    <span data-step="0">空桌基准</span><span data-step="1">检测到碰撞</span><span data-step="2" class="active">绕行与同步回放</span>
+  </div>
+  <div class="views">
+    <section class="card"><header><div><h2>MoveIt 规划</h2><p id="plan-note">等待运行数据</p></div><span class="tag" id="planner-kind">RRT-Connect</span></header><canvas id="planner" aria-label="规划路径和场景"></canvas><div class="legend" id="plan-legend"><span class="red">原路径</span><span class="green">绕行路径</span><span class="yellow">障碍箱</span></div></section>
+    <section class="card"><header><div><h2>同步轨迹</h2><p>各路起动对齐 · 紫色轨迹为实测 TCP</p></div><span class="tag" id="view-time">0.00 秒</span></header><canvas id="execution" aria-label="末端反馈轨迹"></canvas><div class="legend"><span class="green">MuJoCo</span><span class="blue">乐白 Docker</span><span class="purple" id="physical-legend" hidden>LM3 真机</span><span class="gray">MoveIt 参考</span><label class="model-source">模型姿态 <select id="feedback-source" disabled><option value="mujoco">MuJoCo</option><option value="docker">乐白 Docker</option></select></label></div></section>
+  </div>
+  <div class="timeline"><label for="clock">回放</label><input id="clock" type="range" min="0" max="1" step=".01" value="0" disabled><output id="time-label">0.00 / 0.00 秒</output></div>
+  <div class="status-line"><p id="status" class="status" role="status">等待运行数据</p><span id="model-status" class="status"></span></div>
+  <section class="summary" id="summary">
+    <div><h2>MuJoCo 末点误差</h2><strong id="mu-goal">—</strong><p>相对 MoveIt 目标</p></div>
+    <div><h2>乐白 Docker 末点误差</h2><strong id="docker-goal">—</strong><p>相对 MoveIt 目标</p></div>
+    <div id="physical-summary"><h2 id="physical-goal-label">LM3 真机末点误差</h2><strong id="physical-goal">—</strong><p>相对 MoveIt 目标</p></div>
+  </section>
+  <section class="card detail" id="short-detail" hidden><header><div><h2>TCP 抬升量</h2><p id="motion-note"></p></div><span class="tag">相对起点 · mm</span></header><canvas id="tcp-progress" aria-label="统一 TCP 的 Z 向位移随时间变化" role="img"></canvas></section>
+  <section class="card detail"><header><div><h2 id="error-title">夹尖位置误差</h2><p id="sample-note">采用同一个模型夹尖作为比较点</p></div><span class="tag" id="sampling"></span></header>
+    <label class="error-options" id="docker-errors" hidden><input type="checkbox" id="show-docker-errors">同时绘制 Docker 误差</label>
+    <canvas id="error" aria-label="末端位置差随时间变化的折线图"></canvas>
+    <p class="note">真机在空场运行，箱体为虚拟障碍。误差使用控制器报告 TCP。终点差值取自双方停稳反馈，8 秒 RMSE 按轨迹时长积分。</p>
+    <div class="table-wrap"><table><thead><tr><th scope="col">比较对象</th><th scope="col">起动对齐峰值</th><th scope="col">按下发时间峰值</th><th scope="col">停稳后差值</th></tr></thead><tbody id="comparisons"></tbody></table></div>
+  </section>
+  <section class="card detail"><header><div><h2>MuJoCo 动力学参数</h2><p>从加载的 LM3 模型读取</p></div><span class="tag" id="engine"></span></header>
+    <div id="model-meta" class="model-meta"></div>
+    <div class="table-wrap"><table><thead><tr><th>连杆</th><th>质量 kg</th><th>质心 XYZ m</th><th>主惯量 kg·m²</th><th>关节阻尼</th><th>执行器最大力矩 N·m</th></tr></thead><tbody id="parameters"></tbody></table></div>
+    <p class="note">连杆质量和惯量取自乐白官方模型。夹爪质量由网格估算，演示期间夹爪开度固定。关节阻尼、转子惯量和位置控制器增益是本次模型配置。</p>
+  </section>
+</main>
+<script src="model-view.bundle.js"></script>
+<script src="demo-data.js"></script>
+<script src="viewer.js"></script>
+</html>
