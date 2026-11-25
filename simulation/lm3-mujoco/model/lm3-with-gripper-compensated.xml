@@ -1,0 +1,157 @@
+<mujoco model="Lebai LM3 with gripper">
+  <compiler angle="radian" meshdir="assets" inertiafromgeom="auto" />
+  <option timestep="0.001" integrator="implicitfast" gravity="0 0 -9.81" />
+  <asset>
+    <mesh name="visual_base_link" file="visual_base_link.stl" scale="1 1 1" />
+    <mesh name="collision_base_link" file="collision_base_link.obj" scale="1 1 1" />
+    <mesh name="visual_link1" file="visual_link1.stl" scale="1 1 1" />
+    <mesh name="collision_link1" file="collision_link1.stl" scale="1 1 1" />
+    <mesh name="visual_link2" file="visual_link2.stl" scale="1 1 1" />
+    <mesh name="collision_link2" file="collision_link2.stl" scale="1 1 1" />
+    <mesh name="visual_link3" file="visual_link3.stl" scale="1 1 1" />
+    <mesh name="collision_link3" file="collision_link3.stl" scale="1 1 1" />
+    <mesh name="visual_link4" file="visual_link4.stl" scale="1 1 1" />
+    <mesh name="collision_link4" file="collision_link4.stl" scale="1 1 1" />
+    <mesh name="visual_link5" file="visual_link5.stl" scale="1 1 1" />
+    <mesh name="collision_link5" file="collision_link5.stl" scale="1 1 1" />
+    <mesh name="visual_link6" file="visual_link6.stl" scale="1 1 1" />
+    <mesh name="collision_link6" file="collision_link6.stl" scale="1 1 1" />
+    <mesh name="visual_gripper_base" file="visual_gripper_base.stl" scale="1 1 1" />
+    <mesh name="collision_gripper_base" file="collision_gripper_base.stl" scale="1 1 1" />
+    <mesh name="visual_gripper_link1" file="visual_gripper_link1.stl" scale="1 1 1" />
+    <mesh name="collision_gripper_link1" file="collision_gripper_link1.stl" scale="1 1 1" />
+    <mesh name="visual_gripper_link2" file="visual_gripper_link2.stl" scale="1 1 1" />
+    <mesh name="collision_gripper_link2" file="collision_gripper_link2.stl" scale="1 1 1" />
+    <mesh name="visual_gripper_link_finger" file="visual_gripper_link_finger.stl" scale="1 1 1" />
+    <mesh name="collision_gripper_link_finger" file="collision_gripper_link_finger.stl" scale="1 1 1" />
+  </asset>
+  <worldbody>
+    <body name="base_link" gravcomp="1">
+      <geom type="mesh" mesh="visual_base_link" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+      <geom type="mesh" mesh="collision_base_link" group="3" rgba="0.48 0.59 0.70 0.25" mass="0" />
+      <body name="link_1" pos="0.0 0.0 0.21583" quat="1.0 0.0 0.0 0.0" gravcomp="1">
+        <joint name="joint_1" axis="0 0 1" range="-12.57 12.57" damping="0.3" armature="0.05" />
+        <inertial pos="0.0 -0.011 -0.015" mass="2.147" fullinertia="0.0082391363 0.0076087775 0.0032573589 0.0 0.0 0.00032383729" />
+        <geom type="mesh" mesh="visual_link1" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+        <geom type="mesh" mesh="collision_link1" group="3" rgba="0.48 0.59 0.70 0.25" mass="0" />
+        <body name="link_2" pos="0.0 0.0 0.0" quat="0.7071067811140325 0.7071067812590626 0.0 0.0" gravcomp="1">
+          <joint name="joint_2" axis="0 0 1" range="-4.71 1.57" damping="0.3" armature="0.05" />
+          <inertial pos="-0.134 0.0 0.094" mass="1.972" fullinertia="0.0017128976 0.033612233 0.03384798 0.0 7.3751933e-05 0.0" />
+          <geom type="mesh" mesh="visual_link2" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+          <geom type="mesh" mesh="collision_link2" group="3" rgba="0.48 0.59 0.70 0.25" mass="0" />
+          <body name="link_3" pos="-0.28 0 0" quat="1.0 0.0 0.0 0.0" gravcomp="1">
+            <joint name="joint_3" axis="0 0 1" range="-3.14 3.14" damping="0.3" armature="0.05" />
+            <inertial pos="-0.102 0.0 0.019" mass="1.668" fullinertia="0.0017092842 0.022563964 0.022383877 0.0 -0.002750573 0.0" />
+            <geom type="mesh" mesh="visual_link3" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+            <geom type="mesh" mesh="collision_link3" group="3" rgba="0.48 0.59 0.70 0.25" mass="0" />
+            <body name="link_4" pos="-0.26 0.0 0.12063" quat="1.0 0.0 0.0 0.0" gravcomp="1">
+              <joint name="joint_4" axis="0 0 1" range="-12.57 12.57" damping="0.3" armature="0.05" />
+              <inertial pos="0.0 0.011 -0.039" mass="0.969" fullinertia="0.0018744072 0.0017809517 0.00079617326 0.0 0.0 -0.00040039676" />
+              <geom type="mesh" mesh="visual_link4" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+              <geom type="mesh" mesh="collision_link4" group="3" rgba="0.48 0.59 0.70 0.25" mass="0" />
+              <body name="link_5" pos="0 -0.09833 0" quat="0.7071067811140325 0.7071067812590626 0.0 0.0" gravcomp="1">
+                <joint name="joint_5" axis="0 0 1" range="-12.57 12.57" damping="0.3" armature="0.05" />
+                <inertial pos="0.0 -0.011 -0.039" mass="0.969" fullinertia="0.0018744072 0.0017809517 0.00079617326 0.0 0.0 0.00040039676" />
+                <geom type="mesh" mesh="visual_link5" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+                <geom type="mesh" mesh="collision_link5" group="3" rgba="0.48 0.59 0.70 0.25" mass="0" />
+                <body name="link_6" pos="0  0.08343 0" quat="0.7071067811140325 -0.7071067812590626 0.0 0.0" gravcomp="1">
+                  <joint name="joint_6" axis="0 0 1" range="-12.57 12.57" damping="0.3" armature="0.05" />
+                  <inertial pos="0 0 -0.049" mass="0.584" fullinertia="0.00050434988 0.0005155908 0.0004119313 0.0 0.0 0.0" />
+                  <geom type="mesh" mesh="visual_link6" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+                  <geom type="mesh" mesh="collision_link6" group="3" rgba="0.48 0.59 0.70 0.25" mass="0" />
+                  <body name="tool0" pos="0 0 0" quat="1.0 0.0 0.0 0.0" gravcomp="1">
+                    <site name="tool0" size=".003" />
+                    <body name="gripper_base_link" gravcomp="1">
+                      <geom type="mesh" mesh="visual_gripper_base" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+                      <geom type="mesh" mesh="collision_gripper_base" group="3" rgba="0.48 0.59 0.70 0.25" density="1100" />
+                      <body name="gripper_r_link1" pos="0.025 0.0 0.0856" quat="4.32978028073344e-17 4.329780281621493e-17 0.7071067812590626 0.7071067811140325" gravcomp="1">
+                        <geom type="mesh" mesh="visual_gripper_link1" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+                        <geom type="mesh" mesh="collision_gripper_link1" group="3" rgba="0.48 0.59 0.70 0.25" density="1100" />
+                        <body name="gripper_r_link1_end_connection" pos="0.0 0.053 0.0" quat="1.0 0.0 0.0 0.0" gravcomp="1" />
+                      </body>
+                      <body name="gripper_r_link2" pos="0.0115 0.0 0.1056" quat="0.7071067811140325 0.7071067812590626 0.0 0.0" gravcomp="1">
+                        <geom type="mesh" mesh="visual_gripper_link2" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+                        <geom type="mesh" mesh="collision_gripper_link2" group="3" rgba="0.48 0.59 0.70 0.25" density="1100" />
+                        <body name="gripper_r_link_finger" pos="0.0 0.053 0.0" quat="3.749399456654644e-33 6.123233995736766e-17 1.0 6.123233995736766e-17" gravcomp="1">
+                          <geom type="mesh" mesh="visual_gripper_link_finger" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+                          <geom type="mesh" mesh="collision_gripper_link_finger" group="3" rgba="0.48 0.59 0.70 0.25" density="1100" />
+                          <body name="gripper_r_link_finger_end_connection" pos="-0.0135 -0.02 0.0" quat="1.0 0.0 0.0 0.0" gravcomp="1" />
+                        </body>
+                      </body>
+                      <body name="gripper_l_link1" pos="-0.025 0.0 0.0856" quat="0.7071067811140325 0.7071067812590626 0.0 0.0" gravcomp="1">
+                        <geom type="mesh" mesh="visual_gripper_link1" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+                        <geom type="mesh" mesh="collision_gripper_link1" group="3" rgba="0.48 0.59 0.70 0.25" density="1100" />
+                        <body name="gripper_l_link1_end_connection" pos="0.0 0.053 0.0" quat="1.0 0.0 0.0 0.0" gravcomp="1" />
+                      </body>
+                      <body name="gripper_l_link2" pos="-0.0115 0.0 0.1056" quat="4.32978028073344e-17 4.329780281621493e-17 0.7071067812590626 0.7071067811140325" gravcomp="1">
+                        <geom type="mesh" mesh="visual_gripper_link2" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+                        <geom type="mesh" mesh="collision_gripper_link2" group="3" rgba="0.48 0.59 0.70 0.25" density="1100" />
+                        <body name="gripper_l_link_finger" pos="0.0 0.053 0.0" quat="3.749399456654644e-33 6.123233995736766e-17 1.0 6.123233995736766e-17" gravcomp="1">
+                          <geom type="mesh" mesh="visual_gripper_link_finger" group="1" contype="0" conaffinity="0" mass="0" rgba="0.86 0.85 0.81 1.0" />
+                          <geom type="mesh" mesh="collision_gripper_link_finger" group="3" rgba="0.48 0.59 0.70 0.25" density="1100" />
+                          <body name="gripper_l_link_finger_end_connection" pos="-0.0135 -0.02 0.0" quat="1.0 0.0 0.0 0.0" gravcomp="1" />
+                        </body>
+                      </body>
+                      <body name="gripper_tip_midpoint_arm" pos="0.0 0.0 0.1056" quat="1.0 0.0 0.0 0.0" gravcomp="1">
+                        <body name="gripper_tip_midpoint_counterarm" pos="0.0 0.0 0.0265" quat="1.0 0.0 0.0 0.0" gravcomp="1">
+                          <body name="gripper_tip" pos="0.0 0.0 0.0265" quat="1.0 0.0 0.0 0.0" gravcomp="1">
+                            <site name="gripper_tip" size=".003" />
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="base" pos="0.0 0.0 0.0" quat="1.0 0.0 0.0 0.0" gravcomp="1" />
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="joint_1" joint="joint_1" kp="300" kv="12" forcerange="-100.0 100.0" />
+    <position name="joint_2" joint="joint_2" kp="300" kv="12" forcerange="-100.0 100.0" />
+    <position name="joint_3" joint="joint_3" kp="300" kv="12" forcerange="-100.0 100.0" />
+    <position name="joint_4" joint="joint_4" kp="300" kv="12" forcerange="-100.0 100.0" />
+    <position name="joint_5" joint="joint_5" kp="300" kv="12" forcerange="-5.5 5.5" />
+    <position name="joint_6" joint="joint_6" kp="300" kv="12" forcerange="-4.6 4.6" />
+  </actuator>
+  <contact>
+    <exclude body1="base_link" body2="link_1" />
+    <exclude body1="base_link" body2="link_2" />
+    <exclude body1="link_1" body2="link_2" />
+    <exclude body1="link_1" body2="link_5" />
+    <exclude body1="link_2" body2="link_3" />
+    <exclude body1="link_3" body2="link_4" />
+    <exclude body1="link_3" body2="link_5" />
+    <exclude body1="link_4" body2="link_5" />
+    <exclude body1="link_4" body2="link_6" />
+    <exclude body1="link_5" body2="link_6" />
+    <exclude body1="link_6" body2="tool0" />
+    <exclude body1="gripper_base_link" body2="tool0" />
+    <exclude body1="gripper_base_link" body2="link_6" />
+    <exclude body1="gripper_base_link" body2="gripper_l_link1" />
+    <exclude body1="gripper_base_link" body2="gripper_l_link2" />
+    <exclude body1="gripper_base_link" body2="gripper_l_link_finger" />
+    <exclude body1="gripper_base_link" body2="gripper_r_link1" />
+    <exclude body1="gripper_base_link" body2="gripper_r_link2" />
+    <exclude body1="gripper_base_link" body2="gripper_r_link_finger" />
+    <exclude body1="gripper_l_link1" body2="gripper_l_link2" />
+    <exclude body1="gripper_l_link1" body2="gripper_l_link_finger" />
+    <exclude body1="gripper_l_link1" body2="gripper_r_link1" />
+    <exclude body1="gripper_l_link1" body2="gripper_r_link2" />
+    <exclude body1="gripper_l_link1" body2="gripper_r_link_finger" />
+    <exclude body1="gripper_l_link2" body2="gripper_l_link_finger" />
+    <exclude body1="gripper_l_link2" body2="gripper_r_link1" />
+    <exclude body1="gripper_l_link2" body2="gripper_r_link2" />
+    <exclude body1="gripper_l_link2" body2="gripper_r_link_finger" />
+    <exclude body1="gripper_l_link_finger" body2="gripper_r_link1" />
+    <exclude body1="gripper_l_link_finger" body2="gripper_r_link2" />
+    <exclude body1="gripper_l_link_finger" body2="gripper_r_link_finger" />
+    <exclude body1="gripper_r_link1" body2="gripper_r_link2" />
+    <exclude body1="gripper_r_link1" body2="gripper_r_link_finger" />
+    <exclude body1="gripper_r_link2" body2="gripper_r_link_finger" />
+  </contact>
+</mujoco>

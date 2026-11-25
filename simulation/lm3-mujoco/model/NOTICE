@@ -1,0 +1,12 @@
+Lebai LM3 with gripper model
+
+Source: https://github.com/lebai-robotics/lebai-ros-sdk
+Revision: f1f13b6849f34f61dce0483e09f531816d292b63 (ROS 2 Jazzy)
+Upstream license: Apache License, Version 2.0 (see LICENSE).
+
+Derived materials in this directory were modified for the VR4Arm experiments.
+The Xacro was expanded into URDF, gripper meshes were converted from COLLADA
+to STL, and a large collision STL was also converted to OBJ. The physical model
+was converted into MJCF with a fixed gripper, six position actuators, inertia
+and collision configuration, damping, armature and gravity. The compensated
+variant additionally sets each body's gravity compensation to one.

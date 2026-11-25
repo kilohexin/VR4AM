@@ -1,0 +1,5 @@
+# Preserve the published checksums across platforms.
+* -text whitespace=cr-at-eol
+model/assets/*.stl -diff
+model/assets/*.obj whitespace=cr-at-eol,-blank-at-eof
+site/model-view.bundle.js whitespace=cr-at-eol,-blank-at-eol

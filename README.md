@@ -1,5 +1,7 @@
 # VR4Arm Milestone 1
 
+**LM3 MuJoCo 归档** · [模型、网格和复现工具](simulation/lm3-mujoco/) · [8 秒绕箱实验回放](https://kilohexin.github.io/VR4AM/)
+
 > **仅限仿真（SIMULATOR）**
 >
 > Milestone 1 不安装、导入或调用 `lebai_sdk` / `lebai_sdk_asyncio`，不配置或连接 LM3 的 IP/网络，也不会驱动真实机械臂。仓库中的真实适配器只是硬禁用占位实现；任何非 `simulator` 后端配置都会在启动时被拒绝。
