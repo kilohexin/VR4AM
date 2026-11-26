@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>LM3 抓放工作台</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/ui/style.css">
+  <script type="importmap">{"imports":{"three":"/vendor/three.module.js"}}</script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">VR4Arm / LM3</p><h1>抓放工作台</h1></div>
+      <p id="connection" class="connection" role="status">正在连接本地仿真</p>
+    </header>
+    <div class="workspace">
+      <section class="view" aria-label="LM3 三维仿真">
+        <div id="viewport" aria-label="可拖动杯子、托盘和障碍物的三维场景"></div>
+        <div class="view-footer">
+          <p id="gripper" hidden></p>
+          <p>拖动物体沿桌面移动。拖动空白处旋转视角，滚轮缩放。</p>
+          <button id="camera" type="button">俯视桌面</button>
+        </div>
+      </section>
+      <aside>
+        <section class="panel">
+          <h2>抓放任务</h2>
+          <label>抓取物体<select id="item"><option value="">请选择</option><option value="cup">杯子</option></select></label>
+          <label>放置位置<select id="destination"><option value="">请选择</option><option value="tray">托盘</option></select></label>
+          <div class="actions">
+            <button id="start" class="primary" type="button" disabled>开始抓放</button>
+            <button id="reset" type="button" disabled>重置场景</button>
+          </div>
+          <p id="error" role="alert" hidden></p>
+        </section>
+        <section class="panel" aria-label="任务进度">
+          <div class="status-header"><h2 id="stage">等待开始</h2><span id="replans">重规划 0 次</span></div>
+          <p id="detail" role="status">选择杯子和托盘后开始</p>
+          <ol id="events" aria-label="最近任务事件"></ol>
+        </section>
+        <section class="panel">
+          <h2>场景物体</h2>
+          <div class="objects">
+            <button type="button" data-object="cup"><i></i>杯子</button>
+            <button type="button" data-object="tray"><i></i>托盘</button>
+            <button type="button" data-object="block"><i></i>障碍物</button>
+          </div>
+          <p id="selection">选中物体后也可用方向键移动。</p>
+          <p class="hint">搬运时可把障碍物拖到绿色路径上，观察停车和重规划。</p>
+        </section>
+      </aside>
+    </div>
+  </main>
+  <script type="module" src="/ui/workbench.js"></script>
+</body>
+</html>

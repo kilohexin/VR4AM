@@ -1,0 +1,55 @@
+:root {
+  color-scheme: dark;
+  color: #e8f1f5;
+  background: #10191f;
+  font: 15px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+  --line: #2b414e;
+  --muted: #9fb4bf;
+  --accent: #7ae6c2;
+}
+* {box-sizing: border-box;}
+body {margin: 0;}
+main {max-width: 1440px; margin: auto; padding: 30px clamp(14px, 4vw, 54px);}
+header {display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 22px;}
+h1, h2, p {margin: 0;}
+.eyebrow {color: var(--accent); font-size: 12px; letter-spacing: .07em;}
+h1 {font-size: clamp(31px, 4vw, 46px); font-weight: 650; line-height: 1.2; margin-top: 4px;}
+h2 {font-size: 16px; font-weight: 650;}
+.connection {color: var(--muted); font-size: 13px; padding-bottom: 4px;}
+.workspace {display: grid; grid-template-columns: minmax(0, 1fr) minmax(255px, 300px); align-items: start; gap: 14px;}
+.view, .panel {border: 1px solid var(--line); background: #16242d; border-radius: 10px;}
+.view {overflow: hidden;}
+#viewport {height: clamp(370px, 68vh, 690px); background: #14232d; position: relative;}
+#viewport canvas {width: 100%; height: 100%; display: block; touch-action: none; cursor: grab;}
+#viewport canvas.dragging {cursor: grabbing;}
+.view-footer {display: flex; align-items: center; gap: 12px; justify-content: space-between; padding: 10px 14px; flex-wrap: wrap; border-top: 1px solid var(--line);}
+.view-footer p, .panel p, #events {color: var(--muted); font-size: 13px;}
+aside {display: grid; gap: 12px;}
+.panel {padding: 15px;}
+.panel label {display: grid; gap: 5px; margin-top: 12px; color: var(--muted); font-size: 13px;}
+select, button {font: inherit; color: inherit; background: #1d303b; border: 1px solid #3a5665; border-radius: 6px; padding: 8px 10px;}
+button {font-size: 13px; cursor: pointer; white-space: nowrap;}
+button:hover:enabled {border-color: var(--accent);}
+button:disabled {opacity: .46; cursor: default;}
+.primary {background: var(--accent); color: #102721; font-weight: 700; border-color: var(--accent);}
+.actions, .objects {display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px;}
+.primary {flex: 1;}
+.status-header {display: flex; align-items: center; justify-content: space-between; gap: 5px; margin-bottom: 7px;}
+#replans {font-size: 12px; color: var(--accent); white-space: nowrap;}
+#events {margin: 10px 0 0; padding-left: 20px;}
+#events:empty {display: none;}
+#events li + li {margin-top: 4px;}
+.objects {margin: 10px 0 8px;}
+.objects button[aria-pressed="true"] {border-color: var(--accent);}
+.objects i {display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 50%; background: #70c5f1;}
+[data-object="tray"] i {background: #74d0ac;}
+[data-object="block"] i {background: #eea36b;}
+.hint {margin-top: 9px;}
+#error {color: #ffb49b; margin-top: 9px;}
+@media (max-width: 760px) {
+  main {padding-top: 18px;}
+  header {align-items: start;}
+  .workspace {grid-template-columns: 1fr;}
+  #viewport {height: clamp(300px, 53vh, 530px);}
+  .connection {text-align: right; max-width: 115px;}
+}

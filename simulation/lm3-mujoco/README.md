@@ -7,6 +7,7 @@
 | 路径 | 内容 |
 | --- | --- |
 | `model/` | 带固定夹爪的原始和重力补偿 MJCF、展开 URDF、SRDF、23 个网格，以及乐白模型的来源和许可证 |
+| [`grasp-workbench/`](grasp-workbench/) | 本地 MoveIt 2 抓放工作台、可动 LMG‑90、纯摩擦接触验证和真机标定方案 |
 | `experiments/` | 保存的 MoveIt 规划、碰撞场景、六轴位置/速度/加速度参考和运行摘要 |
 | `experiments/site-detour-eight-full/` | 公开实验使用的 201 个轨迹点，参考时长 8 秒、间隔 40 ms |
 | `tools/` | 模型重建、纯 MuJoCo 复现、公开实验数据导出 |
@@ -14,6 +15,8 @@
 | `SHA256SUMS` | 模型、参考和展示文件校验值 |
 
 重力补偿 MJCF 是本轮展示实际使用的版本。积分步长为 1 ms，位置和速度控制增益为 300 和 12。六段连杆质量和惯量来自乐白 ROS 模型，夹爪惯量按碰撞网格估算。每个实验可从 `summary.json` 查到工具偏移、场景与参考哈希。预览中的 GLB 是 VR4AM 既有的浏览器视觉资源，物理仿真使用 MJCF 和 STL/OBJ 网格。
+
+抓放工作台在加载时用 URDF 给同一套模型加入夹爪关节，其入口为 [`grasp-workbench/physics.py`](grasp-workbench/physics.py) 的 `create_model()`。这套入口用于夹持接触和抓放训练，8 秒轨迹的离线复现仍使用归档 MJCF。
 
 ## 离线复现
 

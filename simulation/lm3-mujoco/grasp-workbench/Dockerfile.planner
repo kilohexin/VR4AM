@@ -1,0 +1,18 @@
+ARG UBUNTU_BASE=ubuntu:24.04
+FROM ${UBUNTU_BASE}
+ARG DEBIAN_FRONTEND=noninteractive
+RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.tuna.tsinghua.edu.cn/ubuntu/|' \
+    -e 's|http://security.ubuntu.com/ubuntu/|http://mirrors.tuna.tsinghua.edu.cn/ubuntu/|' \
+    -e 's/^Components:.*/Components: main universe/' /etc/apt/sources.list.d/ubuntu.sources \
+    && printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' > /etc/apt/apt.conf.d/90-demo \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
+# Keep signed package downloads across interrupted builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    curl --fail --silent --show-error --location --max-time 30 https://raw.githubusercontent.com/ros/rosdistro/master/ros.key --output /usr/share/keyrings/ros-demo.gpg \
+    && sed -i 's|http://mirrors.tuna.tsinghua.edu.cn|https://mirrors.nju.edu.cn|' /etc/apt/sources.list.d/ubuntu.sources \
+    && printf '%s\n' 'deb [signed-by=/usr/share/keyrings/ros-demo.gpg] https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu noble main' > /etc/apt/sources.list.d/ros-demo.list \
+    && apt-get -o Acquire::Retries=4 update \
+    && apt-get -o Acquire::Retries=4 install -y --no-install-recommends python3-yaml ros-jazzy-rclpy ros-jazzy-ros2run ros-jazzy-rmw-fastrtps-cpp ros-jazzy-moveit-ros-move-group ros-jazzy-moveit-planners-ompl \
+    && rm -rf /var/lib/apt/lists/*
+ENV ROS_DISTRO=jazzy
+ENTRYPOINT ["/bin/bash","-c","source /opt/ros/jazzy/setup.bash && exec \"$@\"", "--"]

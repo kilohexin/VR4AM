@@ -1,6 +1,6 @@
 # VR4Arm Milestone 1
 
-**LM3 MuJoCo 归档** · [模型、网格和复现工具](simulation/lm3-mujoco/) · [8 秒绕箱实验回放](https://kilohexin.github.io/VR4AM/)
+**LM3 MuJoCo 归档** · [模型、网格和复现工具](simulation/lm3-mujoco/) · [LMG‑90 抓放工作台](simulation/lm3-mujoco/grasp-workbench/) · [8 秒绕箱实验回放](https://kilohexin.github.io/VR4AM/)
 
 > **仅限仿真（SIMULATOR）**
 >
